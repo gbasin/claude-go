@@ -106,16 +106,22 @@ func RunWithStore(l *agent.Loop, store Store) {
 	// unregister, MCP close, SessionEnd all run via the quit path).
 	endSession := func() { wantQuit.Store(true) }
 	_ = endSession
+	if l.SessionEndReason == "" {
+		l.SessionEndReason = "other"
+	}
 	l.ToolCtx.SetPermMode = func(mode string) { l.PermMode = mode }
 	l.ToolCtx.OnCwdChanged = func(nc string) {
 		hooks.Run(l.Hooks, hooks.CwdChanged, map[string]any{
-			"session_id": l.Client.SessionID, "cwd": nc, "transcript_path": l.Transcript,
+			"session_id": l.Client.SessionID, "old_cwd": l.ToolCtx.CWD, "new_cwd": nc,
+			"transcript_path": l.Transcript, "hook_event_name": "CwdChanged",
+			"permission_mode": l.PermMode,
 		}, nc)
 	}
 	l.ToolCtx.OnFileChanged = func(p, kind string) {
 		hooks.Run(l.Hooks, hooks.FileChanged, map[string]any{
-			"session_id": l.Client.SessionID, "file_path": p, "kind": kind,
-			"transcript_path": l.Transcript,
+			"session_id": l.Client.SessionID, "file_path": p, "event": kind,
+			"transcript_path": l.Transcript, "hook_event_name": "FileChanged",
+			"permission_mode": l.PermMode,
 		}, l.ToolCtx.CWD)
 	}
 	l.ToolCtx.EndSession = endSession
@@ -147,7 +153,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			return false
 		default:
 			reason, cfg := askReason(l, name, input)
-			ok, feedback := pr.askEx(l, ks, name, summary, reason, cfg)
+			ok, feedback := pr.askEx(l, ks, name, summary, reason, cfg, input)
 			if !ok && feedback != "" {
 				queuePermFeedback(feedback)
 			}
@@ -195,6 +201,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 		tools.UserActive.Store(true)
 		res := ed.readLine(ks)
 		if res.quit || wantQuit.Load() {
+			l.SessionEndReason = "prompt_input_exit"
 			fmt.Println()
 			fireSessionEndHook(l)
 			return
@@ -407,7 +414,7 @@ type promptUI struct {
 // full permission dialog with reason line, auto-deny and deny-with-feedback
 // is askEx in dialogs.go.
 func (p *promptUI) ask(l *agent.Loop, ks *keySource, name, summary string) bool {
-	ok, _ := p.askEx(l, ks, name, summary, "", "")
+	ok, _ := p.askEx(l, ks, name, summary, "", "", nil)
 	return ok
 }
 
@@ -511,6 +518,31 @@ func runPipe(l *agent.Loop) {
 	}
 }
 
+var stopHookActive atomic.Bool
+
+// lastAssistantText returns the most recent assistant text for the Stop payload.
+func lastAssistantText(l *agent.Loop) string {
+	for i := len(l.Messages) - 1; i >= 0; i-- {
+		if l.Messages[i].Role != "assistant" {
+			continue
+		}
+		var m struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if json.Unmarshal(l.Messages[i].Content, &m) == nil {
+			for _, blk := range m.Content {
+				if blk.Type == "text" && blk.Text != "" {
+					return blk.Text
+				}
+			}
+		}
+	}
+	return ""
+}
+
 func fireStopHook(l *agent.Loop) {
 	if l.Hooks == nil {
 		return
@@ -519,9 +551,18 @@ func fireStopHook(l *agent.Loop) {
 		"session_id":      l.Client.SessionID,
 		"transcript_path": l.Transcript,
 		"cwd":             l.ToolCtx.CWD,
+		"hook_event_name": "Stop", "permission_mode": l.PermMode,
+		"stop_hook_active":       stopHookActive.Load(),
+		"last_assistant_message": lastAssistantText(l),
 	}, l.ToolCtx.CWD)
 	if res.SystemMessage != "" {
 		fmt.Printf("  %s%s%s\n", dim, res.SystemMessage, reset)
+	}
+	if res.Block && res.Reason != "" && !stopHookActive.Swap(true) {
+		// continue:false / decision:block → the model sees the reason and
+		// the turn continues (real preventContinuation). One-shot guard
+		// prevents infinite stop-hook recursion.
+		tools.QueuePrompt(res.Reason)
 	}
 }
 
@@ -643,6 +684,9 @@ func fireSessionEndHook(l *agent.Loop) {
 	}
 	hooks.Run(l.Hooks, hooks.SessionEnd, map[string]any{
 		"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+		"hook_event_name": "SessionEnd", "permission_mode": l.PermMode,
+		"reason":          l.SessionEndReason,
+		"transcript_path": l.Transcript,
 	}, l.ToolCtx.CWD)
 }
 

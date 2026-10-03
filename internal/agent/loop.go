@@ -168,6 +168,14 @@ func withEphemeralBreakpoint(msgs []api.Message) []api.Message {
 func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 	if h := l.runHook(hooks.UserPromptSubmit, map[string]any{"prompt": prompt}); h.Block {
 		return nil, fmt.Errorf("prompt blocked by hook: %s", h.Reason)
+	} else {
+		// plain-text hook stdout becomes additional context (real behavior)
+		if h.PlainText != "" {
+			prompt += "\n\n" + strings.TrimSpace(h.PlainText)
+		}
+		if h.AdditionalContext != "" {
+			prompt += "\n\n" + h.AdditionalContext
+		}
 	}
 	var msg api.Message
 	if !l.started {
@@ -223,14 +231,26 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 			results = append(results, toolResultBlock(b.ID, r))
 			continue
 		}
+		// PreToolUse: block / updatedInput rewrite / permissionDecision
+		pre := l.runHook(hooks.PreToolUse, map[string]any{
+			"tool_name": b.Name, "tool_input": json.RawMessage(b.Input),
+			"tool_use_id": b.ID,
+		})
+		if len(pre.UpdatedInput) > 0 {
+			b.Input = pre.UpdatedInput // hooks can rewrite tool_input
+		}
 		if b.Name == "advisor" {
 			// the advisor tool forwards the whole conversation to a second
 			// model call and returns its advice — real client behavior
 			r = l.runAdvisor(ctx)
-		} else if pre := l.runHook(hooks.PreToolUse, map[string]any{
-			"tool_name": b.Name, "tool_input": json.RawMessage(b.Input),
-		}); pre.Block {
-			r = tools.Result{Content: "Tool call blocked by hook: " + pre.Reason, IsError: true}
+		} else if pre.Block || pre.Permission == "deny" {
+			reason := pre.Reason
+			if reason == "" {
+				reason = "blocked by hook"
+			}
+			r = tools.Result{Content: "Tool call blocked by hook: " + reason, IsError: true}
+		} else if pre.Permission == "allow" {
+			r = tools.Dispatch(l.ToolCtx, b.Name, b.Input) // hook approved — skip the prompt
 		} else if l.ToolCtx.Permission != nil &&
 			!l.ToolCtx.Permission(b.Name, b.Input, toolSummary(b.Name, b.Input)) {
 			if l.PermMode == "dontAsk" {
@@ -247,11 +267,22 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		} else {
 			r = tools.Dispatch(l.ToolCtx, b.Name, b.Input)
 		}
-		if post := l.runHook(hooks.PostToolUse, map[string]any{
+		post := l.runHook(hooks.PostToolUse, map[string]any{
 			"tool_name": b.Name, "tool_input": json.RawMessage(b.Input),
-			"tool_response": r.Content,
-		}); post.AdditionalContext != "" {
+			"tool_use_id": b.ID, "tool_response": r.Content,
+		})
+		if r.IsError {
+			l.runHook(hooks.PostToolUseFailure, map[string]any{
+				"tool_name": b.Name, "tool_input": json.RawMessage(b.Input),
+				"tool_use_id": b.ID, "error": r.Content,
+			})
+		}
+		if post.AdditionalContext != "" {
 			r.Content += "\n\nHook feedback: " + post.AdditionalContext
+		}
+		// exit-2 / decision:block from PostToolUse feeds stderr to the model
+		if post.Block && post.Reason != "" {
+			r.Content += "\n\n" + post.Reason
 		}
 		if l.Events.OnToolResult != nil {
 			l.Events.OnToolResult(b.Name, r)
@@ -349,7 +380,11 @@ func (l *Loop) runHook(ev hooks.Event, extra map[string]any) hooks.Result {
 	for k, v := range extra {
 		payload[k] = v
 	}
-	return hooks.Run(l.Hooks, ev, payload, l.ToolCtx.CWD)
+	res := hooks.Run(l.Hooks, ev, payload, l.ToolCtx.CWD)
+	if res.NonBlockErr != "" {
+		fmt.Fprintf(os.Stderr, "  hook error (%s): %s\n", ev, strings.TrimSpace(res.NonBlockErr))
+	}
+	return res
 }
 
 func toolSummary(name string, input json.RawMessage) string {

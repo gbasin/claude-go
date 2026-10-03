@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -55,21 +56,26 @@ const (
 	MessageDisplay      Event = "MessageDisplay"
 )
 
-// matcherField maps an event to the payload field its matcher regex applies to.
+// matcherField maps an event to the payload field its matcher applies to
+// (real matcherMetadata.fieldToMatch). Events NOT listed ignore matchers
+// entirely — a configured matcher must not prevent them from running.
 var matcherField = map[Event]string{
 	PreToolUse: "tool_name", PostToolUse: "tool_name",
-	PostToolUseFailure: "tool_name", PostToolBatch: "tool_name",
-	PermissionDenied: "tool_name", PermissionRequest: "tool_name",
-	UserPromptSubmit: "command_name", UserPromptExpansion: "command_name",
-	SessionStart: "source", SessionEnd: "reason",
+	PostToolUseFailure: "tool_name",
+	PermissionDenied:   "tool_name", PermissionRequest: "tool_name",
+	UserPromptExpansion: "command_name",
+	SessionStart:        "source", SessionEnd: "reason",
 	PreCompact: "trigger", PostCompact: "trigger",
 	PreModelSwitch: "to_model", PostModelSwitch: "to_model",
 	Notification: "notification_type", StopFailure: "error",
 	SubagentStart: "agent_type", SubagentStop: "agent_type",
-	Setup: "trigger", TaskCreated: "task_type", TaskCompleted: "task_type",
+	Setup:        "trigger",
 	ConfigChange: "source", InstructionsLoaded: "load_reason",
-	FileChanged: "file_path", CwdChanged: "cwd",
-	DirectoryAdded: "source", Elicitation: "tool_name",
+	DirectoryAdded: "source",
+	Elicitation:    "mcp_server_name", ElicitationResult: "mcp_server_name",
+	// no matcher: UserPromptSubmit, Stop, PostToolBatch, TeammateIdle,
+	// TaskCreated, TaskCompleted, WorktreeCreate/Remove, CwdChanged,
+	// MessageDisplay. FileChanged matcher = filename watch pattern.
 }
 
 type Command struct {
@@ -116,17 +122,32 @@ func Load(cwd string) Config {
 	return out
 }
 
-// Output is a hook's parsed JSON stdout.
+// Output is a hook's parsed JSON stdout (real a4() surface).
 type Output struct {
-	Continue           string `json:"continue"` // "true"/"false" or absent
-	Decision           string `json:"decision"` // "block" | "approve" | "allow"
-	Reason             string `json:"reason"`
-	SystemMessage      string `json:"systemMessage"`
+	Continue           json.RawMessage `json:"continue"` // bool or "false"
+	Decision           string          `json:"decision"` // "block" | "approve"
+	Reason             string          `json:"reason"`
+	SystemMessage      string          `json:"systemMessage"`
+	StopReason         string          `json:"stopReason"`
+	SuppressOutput     bool            `json:"suppressOutput"`
+	UpdatedInput       json.RawMessage `json:"updatedInput"`
 	HookSpecificOutput *struct {
-		HookEventName      string `json:"hookEventName"`
-		PermissionDecision string `json:"permissionDecision"` // allow|deny|ask
-		AdditionalContext  string `json:"additionalContext"`
+		HookEventName            string          `json:"hookEventName"`
+		PermissionDecision       string          `json:"permissionDecision"` // allow|deny|ask|defer
+		PermissionDecisionReason string          `json:"permissionDecisionReason"`
+		AdditionalContext        string          `json:"additionalContext"`
+		UpdatedInput             json.RawMessage `json:"updatedInput"`
 	} `json:"hookSpecificOutput"`
+}
+
+// continueFalse reports whether `continue` was explicitly set false
+// (bool false or string "false" both appear in the wild).
+func (o *Output) continueFalse() bool {
+	if len(o.Continue) == 0 {
+		return false
+	}
+	s := strings.TrimSpace(string(o.Continue))
+	return s == "false" || s == `"false"`
 }
 
 type Result struct {
@@ -134,7 +155,10 @@ type Result struct {
 	Reason            string
 	AdditionalContext string
 	SystemMessage     string
-	Permission        string // allow|deny|ask|""
+	Permission        string          // allow|deny|ask|""
+	UpdatedInput      json.RawMessage // PreToolUse can rewrite tool_input
+	PlainText         string          // non-JSON stdout → context for some events
+	NonBlockErr       string          // hook failed non-blocking — shown to user
 }
 
 // Run executes all matching hooks for an event. Input is the JSON payload
@@ -146,20 +170,18 @@ func Run(c Config, ev Event, payload map[string]any, cwd string) Result {
 		return res
 	}
 	field := matcherField[ev]
-	if field == "" {
-		field = "tool_name"
+	var matchVal string
+	if field != "" {
+		matchVal, _ = payload[field].(string)
 	}
-	matchVal, _ := payload[field].(string)
 	stdin, _ := json.Marshal(payload)
 	for _, m := range matchers {
 		if m.Matcher != "" && m.Matcher != "*" {
-			// a matcher that doesn't bind to this event's field must not run
-			// (matchVal "" means the field wasn't in the payload — never match)
-			if matchVal == "" {
-				continue
-			}
-			ok, err := regexp.MatchString("^("+m.Matcher+")$", matchVal)
-			if err != nil || !ok {
+			if field == "" {
+				// event has no matcher field — real ignores matchers, runs anyway
+			} else if matchVal == "" {
+				continue // field absent from payload: never match
+			} else if !matcherMatch(m.Matcher, matchVal) {
 				continue
 			}
 		}
@@ -168,58 +190,107 @@ func Run(c Config, ev Event, payload map[string]any, cwd string) Result {
 				payloadStr := string(stdin)
 				allow, reason := Judge(h.Prompt+"\n\nContext:\n"+payloadStr, "")
 				if !allow {
-					res.Block = true
-					res.Reason = reason
+					if !res.Block {
+						res.Block = true
+						res.Reason = reason
+					}
 				}
 				continue
 			}
 			if h.Type == "http" && h.URL != "" {
 				if o := runHTTPHook(h, stdin); o != nil {
-					if o.Decision == "block" || o.Continue == "false" {
-						res.Block = true
-						res.Reason = firstNonEmpty(o.Reason, o.SystemMessage)
-					}
-					if o.HookSpecificOutput != nil {
-						res.Permission = o.HookSpecificOutput.PermissionDecision
-						res.AdditionalContext += o.HookSpecificOutput.AdditionalContext
-					}
+					applyOutput(&res, o)
 				}
 				continue
 			}
 			if h.Type != "command" {
 				continue
 			}
-			out, code := runCmd(h, stdin, cwd)
+			stdout, stderr, code := runCmd(h, stdin, cwd, ev)
 			var o Output
-			if json.Unmarshal(bytes.TrimSpace(out), &o) == nil {
-				if o.Decision == "block" || o.Continue == "false" {
-					res.Block = true
-					res.Reason = firstNonEmpty(o.Reason, o.SystemMessage)
-				}
-				if o.HookSpecificOutput != nil {
-					res.Permission = o.HookSpecificOutput.PermissionDecision
-					res.AdditionalContext += o.HookSpecificOutput.AdditionalContext
-				}
-				if o.SystemMessage != "" {
-					res.SystemMessage += o.SystemMessage
-				}
+			if json.Unmarshal(bytes.TrimSpace(stdout), &o) == nil && (len(o.Continue) > 0 || o.Decision != "" || o.Reason != "" || o.SystemMessage != "" || o.StopReason != "" || o.HookSpecificOutput != nil || len(o.UpdatedInput) > 0) {
+				applyOutput(&res, &o)
 			} else if code == 2 {
-				// exit 2 = block; stderr (here merged) becomes the reason
-				res.Block = true
-				res.Reason = string(bytes.TrimSpace(out))
+				// exit 2 = block; stderr (separate stream) is the reason
+				if !res.Block {
+					res.Block = true
+				}
+				res.Reason = firstNonEmpty(string(bytes.TrimSpace(stderr)), res.Reason)
+			} else if len(bytes.TrimSpace(stdout)) > 0 {
+				// plain-text stdout → context payload (UserPromptSubmit/
+				// SessionStart show it to Claude; PreCompact = instructions)
+				res.PlainText += string(bytes.TrimSpace(stdout)) + "\n"
 			}
-			// other non-zero exits: stderr to user only, execution continues
+			if code != 0 && code != 2 && code != -1 && len(bytes.TrimSpace(stderr)) > 0 {
+				res.NonBlockErr += string(bytes.TrimSpace(stderr)) + "\n"
+			}
 		}
 	}
 	return res
 }
 
-func runCmd(h Command, stdin []byte, cwd string) ([]byte, int) {
+// matcherMatch: real semantics — a string of only [A-Za-z0-9_ ,|-] is an
+// exact match or a "|"/","-separated exact list; anything else is an
+// UNANCHORED regex test.
+func matcherMatch(matcher, val string) bool {
+	if regexp.MustCompile(`^[A-Za-z0-9_ ,|\\-]+$`).MatchString(matcher) {
+		for _, part := range strings.FieldsFunc(matcher, func(r rune) bool { return r == '|' || r == ',' }) {
+			if strings.TrimSpace(part) == val {
+				return true
+			}
+		}
+		return false
+	}
+	re, err := regexp.Compile(matcher)
+	if err != nil {
+		return false
+	}
+	return re.MatchString(val) // unanchored, like JS test()
+}
+
+// applyOutput folds one parsed hook Output into the aggregate Result.
+// First blocked wins for the reported reason; fields accumulate.
+func applyOutput(res *Result, o *Output) {
+	if o.Decision == "block" || o.continueFalse() {
+		if !res.Block {
+			res.Block = true
+			res.Reason = firstNonEmpty(o.Reason, o.SystemMessage, o.StopReason)
+		}
+	}
+	// decision:"approve" maps to permissionDecision allow
+	if o.Decision == "approve" && res.Permission == "" {
+		res.Permission = "allow"
+	}
+	if o.HookSpecificOutput != nil {
+		if o.HookSpecificOutput.PermissionDecision != "" {
+			res.Permission = o.HookSpecificOutput.PermissionDecision
+		}
+		res.AdditionalContext += o.HookSpecificOutput.AdditionalContext
+		if len(o.HookSpecificOutput.UpdatedInput) > 0 {
+			res.UpdatedInput = o.HookSpecificOutput.UpdatedInput
+		}
+	}
+	if len(o.UpdatedInput) > 0 {
+		res.UpdatedInput = o.UpdatedInput
+	}
+	if o.SystemMessage != "" {
+		res.SystemMessage += o.SystemMessage
+	}
+	if o.StopReason != "" && res.Reason == "" {
+		res.Reason = o.StopReason
+	}
+}
+
+// runCmd executes a command hook with real semantics: separate stdout/stderr
+// (64KB caps each), per-event default timeout +5s grace, CLAUDE_PROJECT_DIR
+// env, dangerous env vars stripped, whole process group killed on timeout.
+func runCmd(h Command, stdin []byte, cwd string, ev Event) (stdout, stderr []byte, code int) {
 	to := h.Timeout
 	if to <= 0 {
-		to = 60
+		to = defaultTimeout(ev)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(to)*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(),
+		time.Duration(to)*time.Second+5*time.Second)
 	defer cancel()
 	shell := os.Getenv("SHELL")
 	if shell == "" {
@@ -228,11 +299,36 @@ func runCmd(h Command, stdin []byte, cwd string) ([]byte, int) {
 	cmd := exec.CommandContext(ctx, shell, "-c", h.Command)
 	cmd.Dir = cwd
 	cmd.Stdin = bytes.NewReader(stdin)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	err := cmd.Run()
-	code := 0
+	var ob, eb cappedBuf
+	ob.cap, eb.cap = 64*1024, 64*1024
+	cmd.Stdout = &ob
+	cmd.Stderr = &eb
+	env := os.Environ()
+	var kept []string
+	for _, kv := range env {
+		k := kv
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			k = kv[:i]
+		}
+		if hookEnvDeny(k) {
+			continue
+		}
+		kept = append(kept, kv)
+	}
+	cmd.Env = append(kept, "CLAUDE_PROJECT_DIR="+cwd)
+	cmd.SysProcAttr = sysProcAttrDetached()
+	err := cmd.Start()
+	if err != nil {
+		return nil, []byte(err.Error()), -1
+	}
+	wait := make(chan error, 1)
+	go func() { wait <- cmd.Wait() }()
+	select {
+	case err = <-wait:
+	case <-ctx.Done():
+		killProcessGroup(cmd.Process.Pid) // detached: kill the whole group
+		err = <-wait
+	}
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			code = ee.ExitCode()
@@ -240,7 +336,46 @@ func runCmd(h Command, stdin []byte, cwd string) ([]byte, int) {
 			code = -1
 		}
 	}
-	return out.Bytes(), code
+	return ob.Bytes(), eb.Bytes(), code
+}
+
+// cappedBuf drops output past cap (real hooks cap stdout/stderr at 64KB).
+type cappedBuf struct {
+	bytes.Buffer
+	cap int
+}
+
+func (b *cappedBuf) Write(p []byte) (int, error) {
+	if b.Len()+len(p) > b.cap {
+		p = p[:max(0, b.cap-b.Len())]
+	}
+	return b.Buffer.Write(p)
+}
+
+// hookEnvDeny mirrors real's dangerous-env scrub for hook children.
+func hookEnvDeny(k string) bool {
+	for _, pre := range []string{"LD_", "DYLD_", "PYTHON", "BASH_FUNC_", "GIT_CONFIG"} {
+		if strings.HasPrefix(k, pre) {
+			return true
+		}
+	}
+	switch k {
+	case "GCONV_PATH", "NLSPATH", "DEVELOPER_DIR", "BASH_ENV", "ENV", "SUDO_ASKPASS":
+		return true
+	}
+	return false
+}
+
+// per-event default timeouts (seconds), real table rOn.
+func defaultTimeout(ev Event) int {
+	switch ev {
+	case Stop, StopFailure, SubagentStop:
+		return 120
+	case UserPromptSubmit, UserPromptExpansion:
+		return 30
+	default:
+		return 15
+	}
 }
 
 func firstNonEmpty(s ...string) string {
