@@ -36,7 +36,8 @@ func TestSimpleTurn(t *testing.T) {
 		t.Error("no text streamed")
 	}
 
-	if len(l.Messages) != 2 { // user + assistant
+	// user + system(env) + assistant
+	if len(l.Messages) != 3 {
 		t.Errorf("messages = %d", len(l.Messages))
 	}
 }

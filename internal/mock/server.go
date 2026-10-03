@@ -237,14 +237,16 @@ func lastUserInfo(req *api.Request) (text string, hasToolResult bool) {
 			return "", false
 		}
 		var sb strings.Builder
+		lastText := ""
 		for _, b := range blocks {
 			if b.Type == "tool_result" {
 				hasToolResult = true
 			}
 			if b.Type == "text" {
-				sb.WriteString(b.Text)
+				lastText = b.Text
 			}
 		}
+		sb.WriteString(lastText)
 		return sb.String(), hasToolResult
 	}
 	return "", false
