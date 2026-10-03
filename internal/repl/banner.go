@@ -147,8 +147,10 @@ func isLightBannerTheme(theme string) bool {
 func welcomeBanner(version string, rows int, theme string, appleTerm bool) {
 	resolved, p := resolveBannerTheme(theme)
 	var lines []string
+	// real also forces the text fallback in screen-reader mode
+	// (CLAUDE_AX_SCREEN_READER or CLAUDE_CODE_ACCESSIBILITY — Xe()/Is)
 	switch {
-	case rows < bannerMinRows:
+	case rows < bannerMinRows || screenReaderMode():
 		lines = []string{bannerHeaderShort(defaultWelcomeMessage, version, p)}
 	case appleTerm:
 		lines = bannerRowsApple(resolved, defaultWelcomeMessage, version, p)
@@ -287,4 +289,11 @@ func bannerRowsApple(theme, welcomeMessage, version string, p bannerPalette) []s
 		"       " + p.bg(p.bodyBg, strings.Repeat(" ", 9)) + "      *                                   ",
 		legs + "..........................................",
 	}
+}
+
+// screenReaderMode mirrors Xe(): CLAUDE_AX_SCREEN_READER or
+// CLAUDE_CODE_ACCESSIBILITY forces text-only output.
+func screenReaderMode() bool {
+	return os.Getenv("CLAUDE_AX_SCREEN_READER") != "" ||
+		os.Getenv("CLAUDE_CODE_ACCESSIBILITY") != ""
 }

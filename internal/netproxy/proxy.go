@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -149,15 +152,33 @@ func stripHopHeaders(h http.Header) {
 	}
 }
 
-// Proxy is the session egress proxy: an HTTP proxy on an ephemeral loopback
-// port. Plain requests are forwarded after a host check; CONNECT tunnels are
-// either MITM'd (Intercept + CA) or spliced through blindly.
+// Proxy is the session egress proxy: an HTTP proxy plus a SOCKS5 listener,
+// each on an ephemeral loopback port (real runs both). Plain requests are
+// forwarded after a host check; CONNECT tunnels are either MITM'd
+// (Intercept + CA) or spliced through blindly.
 type Proxy struct {
 	CA *CA
 	// Intercept controls CONNECT MITM. Defaults to true when a CA is present.
 	// With interception off the proxy is still an allowlist gate on the
 	// CONNECT authority, but cannot see per-request Host headers inside TLS.
 	Intercept bool
+
+	// AuthToken is the per-session proxy password (real's proxyAuthToken).
+	// Generated in New; when empty the listeners skip auth. Env() embeds it
+	// in the proxy URLs and every HTTP request/CONNECT must carry a matching
+	// Proxy-Authorization: Basic credential (SOCKS5 uses RFC1929 user/pass).
+	AuthToken string
+
+	// promptAllow, when non-nil, upgrades a "not on the allow list" verdict
+	// into an interactive decision: return true to add the host to the
+	// session allowlist and let the connection through. Wired by the Bash
+	// tool via SetPromptAllow when sandbox.network.interactiveHostApproval
+	// is set and an AskStructured prompt is available.
+	promptAllowFn func(host string, port int) bool
+
+	// Logf receives deny/audit lines. When nil, lines go to stderr only
+	// under SRT_DEBUG=1 (same gate as real's bt()).
+	Logf func(format string, args ...any)
 
 	// Injectable hooks (tests; production uses real dialing):
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -169,17 +190,27 @@ type Proxy struct {
 	// Transport overrides the upstream RoundTripper entirely when non-nil.
 	Transport *http.Transport
 
-	mu    sync.RWMutex
-	rules compiledRules
-	ln    net.Listener
-	srv   *http.Server
-	tr    *http.Transport
+	mu           sync.RWMutex
+	rules        compiledRules
+	sessionAllow map[string]bool // hosts approved interactively / via /sandbox allow
+	promptMu     sync.Mutex      // serializes interactive prompts
+
+	ln      net.Listener
+	socksLn net.Listener
+	srv     *http.Server
+	tr      *http.Transport
 }
 
 // New builds a proxy. ca may be nil: the proxy then runs in passthrough mode
-// (CONNECT filtering only).
+// (CONNECT filtering only). A fresh session AuthToken is minted — like real,
+// which always configures proxyAuthToken.
 func New(ca *CA) *Proxy {
-	p := &Proxy{CA: ca, Intercept: ca != nil}
+	p := &Proxy{
+		CA:           ca,
+		Intercept:    ca != nil,
+		AuthToken:    NewAuthToken(),
+		sessionAllow: map[string]bool{},
+	}
 	p.srv = &http.Server{Handler: p, ReadHeaderTimeout: 30 * time.Second}
 	return p
 }
@@ -199,14 +230,22 @@ func (p *Proxy) rulesSnapshot() compiledRules {
 	return p.rules
 }
 
-// Start binds 127.0.0.1:0 and serves in the background.
+// Start binds the HTTP and SOCKS5 listeners on 127.0.0.1:0 and serves both
+// in the background (real's SRT proxy also runs the pair).
 func (p *Proxy) Start() error {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return err
 	}
 	p.ln = ln
+	sln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		ln.Close()
+		return err
+	}
+	p.socksLn = sln
 	go p.srv.Serve(ln)
+	go p.serveSocks(sln)
 	return nil
 }
 
@@ -225,24 +264,60 @@ func (p *Proxy) Addr() string {
 	return p.ln.Addr().String()
 }
 
-// Close shuts the proxy down.
+// SocksPort is the SOCKS5 listener's port (0 before Start).
+func (p *Proxy) SocksPort() int {
+	if p.socksLn == nil {
+		return 0
+	}
+	return p.socksLn.Addr().(*net.TCPAddr).Port
+}
+
+// Close shuts both listeners down.
 func (p *Proxy) Close() error {
+	if p.socksLn != nil {
+		p.socksLn.Close()
+	}
 	if p.srv == nil {
 		return nil
 	}
 	return p.srv.Close()
 }
 
+// AllowHost adds host to the session allowlist — the backing store of
+// `/sandbox allow <host>` and interactive host approval. Host entries grant
+// every port, like an unqualified allowedDomains entry.
+func (p *Proxy) AllowHost(host string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sessionAllow[normalizeHost(host)] = true
+}
+
+// logf writes a debug/audit line — real's bt(): stderr only under
+// SRT_DEBUG=1 unless a Logf sink is installed.
+func (p *Proxy) logf(format string, args ...any) {
+	if p.Logf != nil {
+		p.Logf(format, args...)
+		return
+	}
+	if os.Getenv("SRT_DEBUG") == "" {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[SandboxDebug] "+format+"\n", args...)
+}
+
 // Env returns the sandboxed-command environment — real's CBt() wiring:
 // SANDBOX_RUNTIME, HTTP(S)_PROXY (both cases), ALL_PROXY/GRPC_PROXY pointing
-// at this proxy, NO_PROXY covering local ranges, and every CA-bundle env var
-// a common toolchain honors pointed at the CA cert.
-func (p *Proxy) Env() []string {
+// at this proxy, NO_PROXY covering local ranges, every CA-bundle env var a
+// common toolchain honors pointed at the CA cert, plus the SOCKS-side
+// variables (GIT_SSH_COMMAND, FTP_PROXY, RSYNC_PROXY, DOCKER_*_PROXY,
+// CLOUDSDK_*). command becomes the base64 tag inside the auth username so
+// egress can be attributed to the command that made it.
+func (p *Proxy) Env(command string) []string {
 	caPath := ""
 	if p.CA != nil {
 		caPath = p.CA.CertPath
 	}
-	return ProxyEnv(p.Port(), caPath)
+	return ProxyEnv(p.Port(), p.SocksPort(), caPath, p.AuthToken, command)
 }
 
 // caBundleEnvKeys is real's `oe` list — every CA-file env var exported into
@@ -254,21 +329,93 @@ var caBundleEnvKeys = []string{
 	"NIX_SSL_CERT_FILE",
 }
 
-// ProxyEnv builds the env list for a proxy on the given port.
-func ProxyEnv(port int, caCertPath string) []string {
-	u := fmt.Sprintf("http://localhost:%d", port)
+// ProxyEnv builds the env list — a faithful port of real's CBt(e,t,r,n,o,i):
+// e=httpPort, t=socksPort, r=caCertPath, n=authToken, i=command (tagged via
+// Soe). Real's TMPDIR push (o) is skipped: our seatbelt profile always
+// grants /tmp and /var/folders, so no redirect is needed.
+func ProxyEnv(httpPort, socksPort int, caCertPath, authToken, command string) []string {
+	user := authUser(commandTag(command))
+	// userinfo prefix "<user>:<token>@", present only when auth is on; the
+	// username is percent-encoded, the token goes in raw (base64url-safe).
+	auth := ""
+	if authToken != "" {
+		auth = encodeURIComponent(user) + ":" + authToken + "@"
+	}
 	env := []string{"SANDBOX_RUNTIME=1"}
-	np := "localhost,127.0.0.1,::1,169.254.0.0/16,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
-	env = append(env,
-		"NO_PROXY="+np, "no_proxy="+np,
-		"HTTP_PROXY="+u, "HTTPS_PROXY="+u,
-		"http_proxy="+u, "https_proxy="+u,
-		"ALL_PROXY="+u, "all_proxy="+u,
-		"GRPC_PROXY="+u, "grpc_proxy="+u,
-	)
 	if caCertPath != "" {
 		for _, k := range caBundleEnvKeys {
 			env = append(env, k+"="+caCertPath)
+		}
+	}
+	if httpPort == 0 && socksPort == 0 {
+		return env // real returns early: no proxy vars at all
+	}
+	np := "localhost,127.0.0.1,::1,169.254.0.0/16,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+	env = append(env, "NO_PROXY="+np, "no_proxy="+np)
+	if httpPort > 0 {
+		u := fmt.Sprintf("http://%slocalhost:%d", auth, httpPort)
+		env = append(env,
+			"HTTP_PROXY="+u, "HTTPS_PROXY="+u,
+			"http_proxy="+u, "https_proxy="+u)
+		if authToken != "" {
+			// real adds the literal single quotes — git config values
+			// are parsed, so the quotes are part of the syntax.
+			env = append(env, "GIT_CONFIG_PARAMETERS='http.proxyAuthMethod=basic'")
+		}
+	}
+	all := ""
+	if httpPort > 0 {
+		all = fmt.Sprintf("http://%slocalhost:%d", auth, httpPort)
+	} else if socksPort > 0 {
+		all = fmt.Sprintf("socks5h://%slocalhost:%d", auth, socksPort)
+	}
+	if all != "" {
+		env = append(env,
+			"ALL_PROXY="+all, "all_proxy="+all,
+			"GRPC_PROXY="+all, "grpc_proxy="+all)
+	}
+	if socksPort > 0 {
+		switch runtime.GOOS {
+		case "darwin":
+			env = append(env, fmt.Sprintf(
+				"GIT_SSH_COMMAND=ssh -o ControlMaster=no -o ControlPath=none -o ProxyCommand='nc -X 5 -x localhost:%d %%h %%p'",
+				socksPort))
+		case "linux":
+			if httpPort > 0 {
+				pa := ""
+				if authToken != "" {
+					pa = fmt.Sprintf(",proxyauth=%s:%s", user, authToken)
+				}
+				env = append(env, fmt.Sprintf(
+					"GIT_SSH_COMMAND=ssh -o ControlMaster=no -o ControlPath=none -o ProxyCommand='socat - PROXY:localhost:%%h:%%p,proxyport=%d%s'",
+					httpPort, pa))
+			}
+		}
+		env = append(env,
+			fmt.Sprintf("FTP_PROXY=socks5h://%slocalhost:%d", auth, socksPort),
+			fmt.Sprintf("ftp_proxy=socks5h://%slocalhost:%d", auth, socksPort),
+			fmt.Sprintf("RSYNC_PROXY=localhost:%d", socksPort),
+		)
+		dockerPort := httpPort
+		if dockerPort == 0 {
+			dockerPort = socksPort
+		}
+		env = append(env,
+			fmt.Sprintf("DOCKER_HTTP_PROXY=http://%slocalhost:%d", auth, dockerPort),
+			fmt.Sprintf("DOCKER_HTTPS_PROXY=http://%slocalhost:%d", auth, dockerPort),
+		)
+		if httpPort > 0 {
+			env = append(env,
+				"CLOUDSDK_PROXY_TYPE=http",
+				"CLOUDSDK_PROXY_ADDRESS=localhost",
+				fmt.Sprintf("CLOUDSDK_PROXY_PORT=%d", httpPort),
+			)
+			if authToken != "" {
+				env = append(env,
+					"CLOUDSDK_PROXY_USERNAME="+user,
+					"CLOUDSDK_PROXY_PASSWORD="+authToken,
+				)
+			}
 		}
 	}
 	return env
@@ -312,10 +459,14 @@ func isLocalAddr(ip netip.Addr) bool {
 	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
 }
 
+// reasonNotAllowed is the unmatched-host verdict — the only deny class the
+// interactive approval path may upgrade (real only asks for hosts that are
+// absent from the allowlist, never for explicit denies).
+const reasonNotAllowed = "host is not on the allow list"
+
 // decide applies the real SRT order (mod_0222.js): denied host rules, denied
-// addresses (literal + resolved), allowed host rules, allowed addresses,
-// allowAllLocal — unmatched is denied (our proxy has no interactive prompt,
-// so it behaves like real's strictAllowlist).
+// addresses (literal + resolved), allowed host rules (+ the session
+// allowlist), allowed addresses, allowAllLocal — unmatched is denied.
 func (p *Proxy) decide(ctx context.Context, host string, port int) (bool, string) {
 	host = normalizeHost(host)
 	if host == "" || len(host) > 255 || strings.Contains(host, "%") {
@@ -342,6 +493,12 @@ func (p *Proxy) decide(ctx context.Context, host string, port int) (bool, string
 			return true, ""
 		}
 	}
+	p.mu.RLock()
+	sessionOK := p.sessionAllow[host]
+	p.mu.RUnlock()
+	if sessionOK {
+		return true, ""
+	}
 	if len(r.allowNet) > 0 && anyInNets(ips, r.allowNet) {
 		return true, ""
 	}
@@ -362,17 +519,71 @@ func (p *Proxy) decide(ctx context.Context, host string, port int) (bool, string
 			}
 		}
 	}
-	return false, "host is not on the allow list"
+	return false, reasonNotAllowed
+}
+
+// SetPromptAllow installs (or clears, nil) the interactive-approval
+// callback — safe to call while the proxy serves.
+func (p *Proxy) SetPromptAllow(f func(host string, port int) bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.promptAllowFn = f
+}
+
+// gate is the verdict used by every listener: decide, then — for the
+// unmatched-host deny class only — the interactive-approval upgrade
+// (real's non-strictAllowlist ask callback), then an audit line on denies
+// carrying the auth tag so egress is attributable to a command.
+func (p *Proxy) gate(ctx context.Context, host string, port int, tag string) (bool, string) {
+	ok, reason := p.decide(ctx, host, port)
+	p.mu.RLock()
+	prompt := p.promptAllowFn
+	p.mu.RUnlock()
+	if !ok && reason == reasonNotAllowed && prompt != nil {
+		if p.promptAllow(normalizeHost(host), port, prompt) {
+			return true, ""
+		}
+	}
+	if !ok {
+		if cmd := decodeTagCommand(tag); cmd != "" {
+			p.logf("denied %s:%d: %s (command: %q)", host, port, reason, cmd)
+		} else {
+			p.logf("denied %s:%d: %s", host, port, reason)
+		}
+	}
+	return ok, reason
+}
+
+// promptAllow serializes interactive prompts and re-checks the verdict
+// inside the lock — a concurrent prompt may already have allowed the host.
+func (p *Proxy) promptAllow(host string, port int, prompt func(string, int) bool) bool {
+	p.promptMu.Lock()
+	defer p.promptMu.Unlock()
+	if ok, _ := p.decide(context.Background(), host, port); ok {
+		return true
+	}
+	if !prompt(host, port) {
+		return false
+	}
+	p.AllowHost(host)
+	return true
 }
 
 // ---------- http server ----------
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodConnect {
-		p.handleConnect(w, r)
+	ok, tag := p.checkAuth(r)
+	if !ok {
+		// real's 407: Proxy-Authenticate: Basic realm="srt"
+		w.Header().Set("Proxy-Authenticate", `Basic realm="srt"`)
+		w.WriteHeader(http.StatusProxyAuthRequired)
 		return
 	}
-	p.handleHTTP(w, r)
+	if r.Method == http.MethodConnect {
+		p.handleConnect(w, r, tag)
+		return
+	}
+	p.handleHTTP(w, r, tag)
 }
 
 func denyBody(host, reason string) string {
@@ -381,18 +592,20 @@ func denyBody(host, reason string) string {
 
 func denyHTTP(w http.ResponseWriter, host, reason string) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	// real stamps every policy deny with this header
+	w.Header().Set("X-Proxy-Error", "blocked-by-allowlist")
 	w.WriteHeader(http.StatusForbidden)
 	io.WriteString(w, denyBody(host, reason))
 }
 
 // handleHTTP forwards a plain-HTTP proxy request (absolute-form URI).
-func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
+func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tag string) {
 	authority := r.URL.Host
 	if authority == "" {
 		authority = r.Host
 	}
 	host, port := splitAuthority(authority, 80)
-	if ok, reason := p.decide(r.Context(), host, port); !ok {
+	if ok, reason := p.gate(r.Context(), host, port, tag); !ok {
 		denyHTTP(w, authority, reason)
 		return
 	}
@@ -407,6 +620,11 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	stripHopHeaders(out.Header)
 	resp, err := p.upstream().RoundTrip(out)
 	if err != nil {
+		var pe *policyError
+		if errors.As(err, &pe) {
+			denyHTTP(w, host, pe.reason)
+			return
+		}
 		http.Error(w, "Bad Gateway: "+err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -423,7 +641,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 // handleConnect implements CONNECT: deny → 403; passthrough → splice;
 // intercept → 200, TLS with a minted cert, then per-request host checks.
-func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
+func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request, tag string) {
 	host, port := splitAuthority(r.Host, 443)
 	if host == "" {
 		http.Error(w, "Bad Request: missing CONNECT authority", http.StatusBadRequest)
@@ -433,7 +651,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Bad Request: invalid CONNECT port", http.StatusBadRequest)
 		return
 	}
-	if ok, reason := p.decide(r.Context(), host, port); !ok {
+	if ok, reason := p.gate(r.Context(), host, port, tag); !ok {
 		denyHTTP(w, host, reason)
 		return
 	}
@@ -446,7 +664,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		p.tunnel(w, hj, host, port)
 		return
 	}
-	p.mitm(w, hj, host, port)
+	p.mitm(w, hj, host, port, tag)
 }
 
 // readConn lets a hijacked connection serve its already-buffered bytes first.
@@ -477,8 +695,13 @@ func hijackSource(hj http.Hijacker) (net.Conn, io.Reader, error) {
 
 // tunnel is plain CONNECT passthrough: dial upstream, splice both ways.
 func (p *Proxy) tunnel(w http.ResponseWriter, hj http.Hijacker, host string, port int) {
-	upstream, err := p.dial(context.Background(), "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	upstream, err := p.dialChecked(context.Background(), "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
+		var pe *policyError
+		if errors.As(err, &pe) {
+			denyHTTP(w, host, pe.reason)
+			return
+		}
 		http.Error(w, "Bad Gateway: "+err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -501,13 +724,37 @@ func (p *Proxy) tunnel(w http.ResponseWriter, hj http.Hijacker, host string, por
 // for the client's SNI (falling back to the CONNECT host), then serves HTTP
 // inside, re-checking each request's Host header (real checks the CONNECT
 // host AND the per-request host).
-func (p *Proxy) mitm(w http.ResponseWriter, hj http.Hijacker, host string, port int) {
+//
+// ALPN: we probe the upstream first. When it speaks h2 we offer
+// ["h2","http/1.1"] to the client and, if the client picks h2, splice the
+// decrypted byte streams verbatim — real doesn't decode h2 frames either,
+// so inspection only happens on the http/1.1 path. An upstream without h2
+// gets a plain http/1.1 offer end-to-end.
+func (p *Proxy) mitm(w http.ResponseWriter, hj http.Hijacker, host string, port int, tag string) {
+	up, upH2, perr := p.probeUpstreamTLS(host, port)
+	if perr != nil {
+		// post-dial verification refused the upstream before we hijack —
+		// the CONNECT can still get a proper deny status.
+		var pe *policyError
+		if errors.As(perr, &pe) {
+			denyHTTP(w, host, pe.reason)
+			return
+		}
+	}
 	client, src, err := hijackSource(hj)
 	if err != nil {
+		if up != nil {
+			up.Close()
+		}
 		return
+	}
+	nextProtos := []string{"http/1.1"}
+	if upH2 {
+		nextProtos = []string{"h2", "http/1.1"}
 	}
 	cfg := &tls.Config{
 		MinVersion: tls.VersionTLS12,
+		NextProtos: nextProtos,
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			name := hello.ServerName
 			if name == "" {
@@ -520,14 +767,72 @@ func (p *Proxy) mitm(w http.ResponseWriter, hj http.Hijacker, host string, port 
 	tc.SetDeadline(time.Now().Add(30 * time.Second))
 	if err := tc.Handshake(); err != nil {
 		tc.Close()
+		if up != nil {
+			up.Close()
+		}
 		return
 	}
 	tc.SetDeadline(time.Time{})
-	p.serveTLSConn(tc)
+	if tc.ConnectionState().NegotiatedProtocol == "h2" && up != nil {
+		// h2 passthrough: decrypted client frames are re-encrypted to the
+		// upstream (and back) without interpretation.
+		p.splice(tc, up)
+		return
+	}
+	if up != nil {
+		up.Close()
+	}
+	p.serveTLSConn(tc, tag)
+}
+
+// splice relays bytes both ways and closes both ends when either side
+// finishes.
+func (p *Proxy) splice(a, b net.Conn) {
+	go func() {
+		io.Copy(a, b)
+		a.Close()
+		b.Close()
+	}()
+	go func() {
+		io.Copy(b, a)
+		a.Close()
+		b.Close()
+	}()
+}
+
+// probeUpstreamTLS dials the CONNECT target and runs a TLS handshake
+// advertising ["h2","http/1.1"] to learn the upstream's ALPN capability.
+// The dialed conn (post-dial verified) is reused as the h2 splice target
+// when it negotiates h2. A nil conn + nil error means the probe failed
+// non-fatally — the MITM then offers http/1.1 only and upstream errors
+// surface per-request as before.
+func (p *Proxy) probeUpstreamTLS(host string, port int) (*tls.Conn, bool, error) {
+	raw, err := p.dialChecked(context.Background(), "tcp",
+		net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		return nil, false, err
+	}
+	cfg := &tls.Config{}
+	if p.UpstreamTLS != nil {
+		cfg = p.UpstreamTLS.Clone()
+	}
+	// crypto/tls omits IP literals from the SNI extension itself but still
+	// uses ServerName for IP-SAN verification, so this is safe for both.
+	cfg.ServerName = host
+	cfg.NextProtos = []string{"h2", "http/1.1"}
+	tc := tls.Client(raw, cfg)
+	tc.SetDeadline(time.Now().Add(15 * time.Second))
+	err = tc.Handshake()
+	tc.SetDeadline(time.Time{})
+	if err != nil {
+		raw.Close()
+		return nil, false, nil
+	}
+	return tc, tc.ConnectionState().NegotiatedProtocol == "h2", nil
 }
 
 // serveTLSConn reads inner requests off the MITM'd conn and relays them.
-func (p *Proxy) serveTLSConn(tc *tls.Conn) {
+func (p *Proxy) serveTLSConn(tc *tls.Conn, tag string) {
 	defer tc.Close()
 	br := bufio.NewReader(tc)
 	for {
@@ -541,9 +846,11 @@ func (p *Proxy) serveTLSConn(tc *tls.Conn) {
 			authority = req.Host
 		}
 		host, port := splitAuthority(authority, 443)
-		ok, reason := p.decide(req.Context(), host, port)
+		ok, reason := p.gate(req.Context(), host, port, tag)
 		if !ok {
-			writeRawResponse(tc, http.StatusForbidden, denyBody(host, reason), req.Close)
+			// inner-tunnel denies carry real's other X-Proxy-Error value
+			writeRawResponse(tc, http.StatusForbidden, denyBody(host, reason),
+				"blocked-by-sandbox-runtime", req.Close)
 			if req.Close {
 				return
 			}
@@ -555,7 +862,14 @@ func (p *Proxy) serveTLSConn(tc *tls.Conn) {
 		stripHopHeaders(req.Header)
 		resp, err := p.upstream().RoundTrip(req)
 		if err != nil {
-			writeRawResponse(tc, http.StatusBadGateway, "Bad Gateway: "+err.Error()+"\n", req.Close)
+			var pe *policyError
+			if errors.As(err, &pe) {
+				writeRawResponse(tc, http.StatusForbidden, denyBody(host, pe.reason),
+					"blocked-by-sandbox-runtime", req.Close)
+			} else {
+				writeRawResponse(tc, http.StatusBadGateway, "Bad Gateway: "+err.Error()+"\n",
+					"", req.Close)
+			}
 			if req.Close {
 				return
 			}
@@ -569,16 +883,29 @@ func (p *Proxy) serveTLSConn(tc *tls.Conn) {
 	}
 }
 
-func writeRawResponse(w io.Writer, code int, body string, close bool) {
+func writeRawResponse(w io.Writer, code int, body, proxyErr string, close bool) {
 	conn := "keep-alive"
 	if close {
 		conn = "close"
 	}
-	fmt.Fprintf(w, "HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\nConnection: %s\r\n\r\n%s",
-		code, http.StatusText(code), len(body), conn, body)
+	xerr := ""
+	if proxyErr != "" {
+		xerr = "X-Proxy-Error: " + proxyErr + "\r\n"
+	}
+	fmt.Fprintf(w, "HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\n%sContent-Length: %d\r\nConnection: %s\r\n\r\n%s",
+		code, http.StatusText(code), xerr, len(body), conn, body)
 }
 
 // ---------- upstream ----------
+
+// policyError is a post-dial policy refusal (real's N0): the connected
+// socket's remote IP fell under the address rules. Handlers map it to
+// 403 / CONNECTION_NOT_ALLOWED instead of a generic 502.
+type policyError struct {
+	reason string
+}
+
+func (e *policyError) Error() string { return e.reason }
 
 func (p *Proxy) dial(ctx context.Context, network, addr string) (net.Conn, error) {
 	if p.DialContext != nil {
@@ -586,6 +913,50 @@ func (p *Proxy) dial(ctx context.Context, network, addr string) (net.Conn, error
 	}
 	d := &net.Dialer{Timeout: 30 * time.Second}
 	return d.DialContext(ctx, network, addr)
+}
+
+// dialChecked dials, then re-verifies the connected remote IP against the
+// CIDR/local address rules — real closes the same DNS-rebinding window by
+// filtering resolved addresses before dial; the post-dial check covers the
+// TOCTOU gap between decide()'s resolution and the dialer's own.
+func (p *Proxy) dialChecked(ctx context.Context, network, addr string) (net.Conn, error) {
+	c, err := p.dial(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.verifyRemote(c); err != nil {
+		c.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
+// verifyRemote applies the address rules to a connected socket's remote IP:
+// deny CIDRs deny; an allow CIDR match passes; with allowAllLocal the remote
+// must be loopback/private/link-local. Non-IP remote addresses can't be
+// verified and pass.
+func (p *Proxy) verifyRemote(c net.Conn) error {
+	var ip netip.Addr
+	if ta, ok := c.RemoteAddr().(*net.TCPAddr); ok {
+		ip, _ = netip.AddrFromSlice(ta.IP)
+	} else if h, _, err := net.SplitHostPort(c.RemoteAddr().String()); err == nil {
+		ip, _ = netip.ParseAddr(h)
+	}
+	if !ip.IsValid() {
+		return nil
+	}
+	ip = ip.Unmap()
+	r := p.rulesSnapshot()
+	if len(r.denyNet) > 0 && anyInNets([]netip.Addr{ip}, r.denyNet) {
+		return &policyError{"upstream address is on the deny list"}
+	}
+	if len(r.allowNet) > 0 && anyInNets([]netip.Addr{ip}, r.allowNet) {
+		return nil
+	}
+	if r.allowAllLocal && !isLocalAddr(ip) {
+		return &policyError{"upstream address is not a local address"}
+	}
+	return nil
 }
 
 // upstream returns the RoundTripper for upstream requests: the injected
@@ -599,7 +970,7 @@ func (p *Proxy) upstream() *http.Transport {
 	}
 	if p.tr == nil {
 		p.tr = &http.Transport{
-			DialContext:           p.dial,
+			DialContext:           p.dialChecked,
 			TLSClientConfig:       p.UpstreamTLS,
 			TLSHandshakeTimeout:   15 * time.Second,
 			ResponseHeaderTimeout: 60 * time.Second,

@@ -65,6 +65,8 @@ type editor struct {
 	pendingChord   []string          // matched chord-prefix strokes
 	imgDir         string            // scratchpad dir for pasted images
 	imgN           int               // pasted-image counter
+	zoneEdit       bool              // input box lives in the compositor live zone
+	boxAll         []string          // last-rendered full box (for the scrollback echo)
 }
 
 func newEditor() *editor {
@@ -74,8 +76,56 @@ func newEditor() *editor {
 	return e
 }
 
-// redraw reprints the whole input area (multiline-safe).
+// boxFrame renders the prompt box (╭─╮ / │ > … / ╰─╯) as compositor zone
+// rows plus the cursor's position within them (row 0 = top border). The
+// full unwindowed box is kept in e.boxAll for the scrollback echo.
+func (e *editor) boxFrame() (box []string, curRow, curCol int) {
+	if e.histSearch {
+		ln := "  " + dim + "(search prompts `" + string(e.searchBuf) + "`): " + reset + e.searchMatch()
+		e.boxAll = []string{"╭─╮", ln, "╰─╯"}
+		return e.boxAll, 1, visWidth(ln)
+	}
+	lines := strings.Split(string(e.buf), "\n")
+	pw := visWidth(e.prompt)
+	all := make([]string, 0, len(lines)+2)
+	all = append(all, "╭─╮")
+	for i, ln := range lines {
+		if i == 0 {
+			all = append(all, "│"+e.prompt+ln)
+		} else {
+			all = append(all, "│"+strings.Repeat(" ", pw)+ln)
+		}
+	}
+	all = append(all, "╰─╯")
+	e.boxAll = all
+	// which buffer line holds the cursor
+	before := string(e.buf[:e.pos])
+	curLine := strings.Count(before, "\n")
+	// window into at most compAvailRows input lines, keeping curLine visible
+	start := 0
+	if avail := compAvailRows(); len(lines) > avail {
+		start = curLine - avail + 1
+		if start < 0 {
+			start = 0
+		}
+		if start > len(lines)-avail {
+			start = len(lines) - avail
+		}
+	}
+	box = append([]string{all[0]}, all[1+start:]...)
+	// cursor col: border (1) + prompt-width indent + cells before cursor
+	col := 1 + pw + visWidth(before[strings.LastIndex(before, "\n")+1:])
+	return box, 1 + curLine - start, col
+}
+
+// redraw reprints the whole input area — into the compositor live zone
+// while editing there (the Ink model), else inline (multiline-safe).
 func (e *editor) redraw() {
+	if e.zoneEdit {
+		box, r, c := e.boxFrame()
+		compEditor(box, r, c)
+		return
+	}
 	var b strings.Builder
 	b.WriteString("\r\x1b[J") // col0, clear to screen bottom
 	b.WriteString("│" + e.prompt + string(e.buf))
@@ -164,9 +214,18 @@ type readResult struct {
 
 // readLine consumes keys until submit. Vim-normal mode supported.
 func (e *editor) readLine(ks *keySource) readResult {
-	os.Stdout.WriteString("╭─╮\n│" + e.prompt)
-	startRowDone := false
-	_ = startRowDone
+	if e.zoneEdit = compInputActive(); e.zoneEdit {
+		// Ink model: the box lives in the compositor live zone. On return
+		// (any readResult) the zone shrinks back to spinner+status and the
+		// box is echoed into the scroll region.
+		e.redraw()
+		defer func() {
+			e.zoneEdit = false
+			compExitEdit(e.boxAll)
+		}()
+	} else {
+		os.Stdout.WriteString("╭─╮\n│" + e.prompt)
+	}
 	for k := range ks.ch {
 		if e.vim && e.mode == "normal" {
 			if r := e.vimKey(k); r != nil {
@@ -343,7 +402,7 @@ func (e *editor) vimKey(k key) *readResult {
 		return nil
 	}
 	if c == '\r' {
-		os.Stdout.WriteString("\n╰─╯\n")
+		e.closeBox()
 		return &readResult{line: e.submitLine(), ok: true}
 	}
 	if e.mode == "visual" {
@@ -718,6 +777,15 @@ func (e *editor) wordBack() int {
 	return p
 }
 
+// closeBox draws the box's bottom border inline — legacy path only. In
+// zone mode the readLine defer echoes the whole box into the scroll
+// region when the zone collapses.
+func (e *editor) closeBox() {
+	if !e.zoneEdit {
+		os.Stdout.WriteString("\n╰─╯\n")
+	}
+}
+
 // complete runs slash-command completion when buffer starts with /.
 func (e *editor) complete() {
 	if e.completer == nil || len(e.buf) == 0 || e.buf[0] != '/' {
@@ -745,10 +813,12 @@ func (e *editor) complete() {
 		e.buf = []rune("/" + lcp)
 		e.pos = len(e.buf)
 	}
-	os.Stdout.WriteString("\r\n")
+	var out strings.Builder
+	out.WriteString("\r\n")
 	for _, m := range matches {
-		fmt.Printf("  /%s\r\n", m)
+		fmt.Fprintf(&out, "  /%s\r\n", m)
 	}
+	compInline(out.String()) // into the scroll region above the zone box
 	e.redraw()
 }
 
@@ -828,11 +898,11 @@ func (e *editor) interruptKey() *readResult {
 		e.pos = 0
 		e.redraw()
 	} else if time.Since(e.lastCtrlC) < 2*time.Second {
-		os.Stdout.WriteString("\n╰─╯\n")
+		e.closeBox()
 		return &readResult{quit: true}
 	} else {
 		e.lastCtrlC = time.Now()
-		os.Stdout.WriteString("\r\n  (ctrl-C again to exit)\r\n")
+		compInline("\r\n  (ctrl-C again to exit)\r\n")
 		e.redraw()
 	}
 	return nil
@@ -841,7 +911,7 @@ func (e *editor) interruptKey() *readResult {
 // exitKey is ctrl-D / app:exit: quit on empty buffer, else delete forward.
 func (e *editor) exitKey() *readResult {
 	if len(e.buf) == 0 {
-		os.Stdout.WriteString("\n╰─╯\n")
+		e.closeBox()
 		return &readResult{quit: true}
 	}
 	e.del(false)
@@ -877,7 +947,7 @@ func (e *editor) submitKey() *readResult {
 		e.insert('\n')
 		return nil
 	}
-	os.Stdout.WriteString("\n╰─╯\n")
+	e.closeBox()
 	return &readResult{line: e.submitLine(), ok: true}
 }
 
@@ -1066,7 +1136,9 @@ func (e *editor) searchKey(k key) *readResult {
 	case c == 3 || (c == 0x1b && k.seq == ""): // esc/ctrl-c exits search
 		e.histSearch = false
 		e.searchBuf = e.searchBuf[:0]
-		os.Stdout.WriteString("\r\x1b[2K" + e.prompt)
+		if !e.zoneEdit {
+			os.Stdout.WriteString("\r\x1b[2K" + e.prompt)
+		}
 		e.redraw()
 	case c == '\r':
 		e.histSearch = false
@@ -1113,6 +1185,10 @@ func subseq(q, s string) bool {
 }
 
 func (e *editor) redrawSearch() {
+	if e.zoneEdit {
+		e.redraw() // the search prompt renders inside the zone box
+		return
+	}
 	m := e.searchMatch()
 	os.Stdout.WriteString("\r\x1b[2K  " + dim + "(search prompts `" + string(e.searchBuf) + "`): " + reset + m)
 }
@@ -1516,12 +1592,14 @@ func (e *editor) stashLine() {
 	e.pushUndo()
 	e.buf = nil
 	e.pos = 0
-	fmt.Fprintf(os.Stderr, "%s  stashed draft (ctrl+y to yank)%s\n", dim, reset)
+	compInline(fmt.Sprintf("\r\n%s  stashed draft (ctrl+y to yank)%s\r\n", dim, reset))
+	e.redraw()
 }
 
 // showShortcuts prints the keyboard-shortcut overlay ('?' on empty input).
 func (e *editor) showShortcuts() {
-	fmt.Print("\r\x1b[K\x1b[2m")
+	var b strings.Builder
+	b.WriteString("\r\n\x1b[2m")
 	rows := [][2]string{
 		{"enter", "submit"}, {"shift+tab", "cycle permission mode"},
 		{"ctrl+c", "interrupt · twice to exit"}, {"ctrl+d", "exit"},
@@ -1534,8 +1612,9 @@ func (e *editor) showShortcuts() {
 		{"<any> while running", "queue the message"},
 	}
 	for _, r := range rows {
-		fmt.Printf("  %-22s %s\n", r[0], r[1])
+		fmt.Fprintf(&b, "  %-22s %s\r\n", r[0], r[1])
 	}
-	fmt.Print("\x1b[0m")
+	b.WriteString("\x1b[0m")
+	compInline(b.String()) // scroll-region print — works in both box modes
 	e.redraw()
 }

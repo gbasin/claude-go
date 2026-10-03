@@ -22,8 +22,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 func init() {
@@ -870,6 +868,11 @@ func FireIdleNotifications(sessionID string) {
 	for _, s := range subs {
 		_ = NotifyOnIdle(s.subscriber, s.text)
 	}
+	// prompt boundary: this session is no longer mid-turn — held peer
+	// messages release into the queue with "delivered" receipts
+	// (real's held→delivered on approval / boundary)
+	peerSessionBusy.Store(false)
+	FlushHeldPeerMessages()
 	firePeerIdleNotices(sessionID, "idle")
 }
 
@@ -1044,8 +1047,16 @@ func execSendMessage(c *Context, raw json.RawMessage) Result {
 		}
 		note := ""
 		if in.NotifyWhenIdle {
-			SubscribeIdle(e.SessionID, sender,
-				fmt.Sprintf("session %q (%s) went idle.", e.Name, e.SessionID))
+			// real pushes a notify_when_idle control frame at the peer's
+			// inbox and records the outbound sub so its peer_idle_notice
+			// correlates; mailbox subscription is the offline fallback
+			if e.MessagingSocketPath == "" || !func() bool {
+				_, ok := sendNotifyWhenIdle(e.MessagingSocketPath)
+				return ok
+			}() {
+				SubscribeIdle(e.SessionID, sender,
+					fmt.Sprintf("session %q (%s) went idle.", e.Name, e.SessionID))
+			}
 			note = " Subscribed — one idle notice will arrive when it next goes idle."
 		}
 		if in.Message == "" {
@@ -1155,10 +1166,10 @@ func authRequired() bool { return runtime.GOOS == "windows" }
 
 // peerFeatures is real's UL(): ["notify_idle", "reply_across_default_dirs"?,
 // "artifact_yield"] — the middle entry requires working peer-pid creds
-// (Bun.ant.getPeerPid), which we implement on darwin via LOCAL_PEERPID.
+// (Bun.ant.getPeerPid), which we implement via peercred_*.go.
 func peerFeatures() []string {
 	feats := []string{"notify_idle"}
-	if runtime.GOOS == "darwin" {
+	if peerCredOSSupport {
 		feats = append(feats, "reply_across_default_dirs")
 	}
 	return append(feats, "artifact_yield")
@@ -1168,7 +1179,7 @@ func peerFeatures() []string {
 // "/tmp", "cc-socks", "<pid>.sock") — falling back to the per-uid dir
 // /tmp/cc-socks-<uid> ($PREFIX/tmp on Termux) when that path exceeds the
 // 103-byte sun_path cap or the shared dir can't be vetted (owned by another
-// user etc.).
+// user etc.). Returns "" when every candidate is refused — messaging off.
 func socketDir() string {
 	base := os.Getenv("XDG_RUNTIME_DIR")
 	if base == "" {
@@ -1178,10 +1189,19 @@ func socketDir() string {
 		base = "/tmp"
 	}
 	d := filepath.Join(base, "cc-socks")
-	if len(filepath.Join(d, fmt.Sprint(os.Getpid())+".sock")) <= peerSockPathMax && vetSocketDir(d) {
-		return d
+	if len(filepath.Join(d, fmt.Sprint(os.Getpid())+".sock")) <= peerSockPathMax {
+		if err := vetSocketDir(d); err == nil {
+			return d
+		} else {
+			peerLogf("sockets dir %s refused (%v) — falling back to the per-uid dir", d, err)
+		}
 	}
-	return peerFallbackSocketDir()
+	fb := peerFallbackSocketDir()
+	if err := vetSocketDir(fb); err != nil {
+		peerLogf("fallback sockets dir %s refused (%v) — cross-session messaging OFF", fb, err)
+		return ""
+	}
+	return fb
 }
 
 func peerFallbackSocketDir() string {
@@ -1194,27 +1214,239 @@ func peerFallbackSocketDir() string {
 	return filepath.Join(tmp, fmt.Sprintf("cc-socks-%d", os.Getuid()))
 }
 
-// vetSocketDir is a subset of real's Re(): the shared cc-socks dir is usable
-// when we can create it and it is a directory owned by us (or we just made
-// it). Real also walks ancestors for symlink/ownership/mode checks — we only
-// check the leaf.
-func vetSocketDir(d string) bool {
-	if err := os.MkdirAll(d, 0o700); err != nil {
-		return false
+// vetSocketDir is real's Re(): the dir must be absolute; every existing
+// component must be a directory owned by us or root that is not
+// group/other-writable without the sticky bit (mid-path symlinks must be
+// owned by us or root and resolve inside a chain passing the same rules);
+// the leaf must exist or be creatable as a REAL directory we own and is
+// normalized to mode 0700. Missing tail components are created 0700.
+func vetSocketDir(d string) error {
+	if !filepath.IsAbs(d) {
+		return errors.New("sockets directory must be absolute")
 	}
-	fi, err := os.Lstat(d)
-	if err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
-		return false
-	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
-		return false
-	}
-	os.Chmod(d, 0o700) // real normalizes the leaf to 0700
-	return true
+	return vetSocketDirChain(d, 0)
 }
 
+// vetSocketDirChain validates/creates the chain rooted at an absolute dir.
+// depth bounds symlink recursion (real bails at >16).
+func vetSocketDirChain(d string, depth int) error {
+	if depth > 16 {
+		return errors.New("too many levels of symlinks in sockets path")
+	}
+	uid := os.Getuid()
+	// find the deepest existing component; collect the missing tail
+	var missing []string
+	probe := d
+	for {
+		if _, err := os.Lstat(probe); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		next := filepath.Dir(probe)
+		if next == probe {
+			break
+		}
+		missing = append(missing, probe)
+		probe = next
+	}
+	// every existing component root→probe obeys the directory_rule
+	if err := vetExistingChain(probe, depth); err != nil {
+		return err
+	}
+	// create the missing tail outermost-first at 0700 (real: te(R,{mode:448}))
+	for i := len(missing) - 1; i >= 0; i-- {
+		p := missing[i]
+		if err := os.Mkdir(p, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		fi, err := os.Lstat(p)
+		if err != nil {
+			return err
+		}
+		if !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("sockets-path component %s appeared but is not our directory", p)
+		}
+		if u, ok := statUID(fi); ok && u != uid {
+			return fmt.Errorf("sockets-path component %s appeared owned by another user", p)
+		}
+	}
+	// leaf rules (real's i()): a real directory we own, normalized to 0700
+	fi, err := os.Lstat(d)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("sockets directory %s is a symlink — refusing to use it", d)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("sockets directory %s exists but is not a directory", d)
+	}
+	if u, ok := statUID(fi); ok && u != uid {
+		return fmt.Errorf("sockets directory %s is owned by another user (uid %d)", d, u)
+	}
+	if fi.Mode().Perm() != 0o700 {
+		if err := os.Chmod(d, 0o700); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// vetExistingChain applies real's directory_rule to every existing
+// component of absolute path p, root→p: each must be a directory owned by
+// us or root that is not group/other-writable without the sticky bit;
+// symlinks must be owned by us or root and resolve into a chain that
+// passes the same rules.
+func vetExistingChain(p string, depth int) error {
+	if depth > 16 {
+		return errors.New("too many levels of symlinks in sockets path")
+	}
+	uid := os.Getuid()
+	var comps []string
+	for x := p; ; x = filepath.Dir(x) {
+		comps = append([]string{x}, comps...)
+		if filepath.Dir(x) == x {
+			break
+		}
+	}
+	for _, c := range comps {
+		fi, err := os.Lstat(c)
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			if u, ok := statUID(fi); ok && u != uid && u != 0 {
+				return fmt.Errorf("sockets-path symlink %s is owned by another user (uid %d)", c, u)
+			}
+			tgt, err := filepath.EvalSymlinks(c)
+			if err != nil {
+				return fmt.Errorf("sockets-path symlink %s does not resolve", c)
+			}
+			// the resolved chain's own ancestors were never walked — vet them
+			if err := vetExistingChain(tgt, depth+1); err != nil {
+				return err
+			}
+			continue
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("sockets-path component %s is not a directory", c)
+		}
+		if u, ok := statUID(fi); ok && u != uid && u != 0 {
+			return fmt.Errorf("sockets-path directory %s is owned by another user (uid %d)", c, u)
+		}
+		if m := fi.Mode(); m&os.ModeSticky == 0 && m.Perm()&0o022 != 0 {
+			return fmt.Errorf("sockets-path directory %s is group/other-writable without the sticky bit", c)
+		}
+	}
+	return nil
+}
+
+// vetExplicitSocketPath validates a --messaging-socket-path value (real's
+// Bns): absolute, no '..' segments, names a socket file inside a directory,
+// fits sun_path, and the parent must exist (or be creatable 0700 under an
+// ancestor owned by us or root) as a real directory we own at mode 0700.
+func vetExplicitSocketPath(p string) error {
+	if !filepath.IsAbs(p) {
+		return errors.New("must be an absolute path")
+	}
+	segs := strings.Split(p, "/")
+	for _, seg := range segs {
+		if seg == ".." {
+			return errors.New("must not contain '..' segments")
+		}
+	}
+	if last := segs[len(segs)-1]; last == "" || last == "." {
+		return errors.New("must name a socket file inside a directory")
+	}
+	if len(p) > peerSockPathMax {
+		return fmt.Errorf("too long for a unix socket (%d bytes, max %d)", len(p), peerSockPathMax)
+	}
+	d := filepath.Dir(p)
+	fi, err := os.Lstat(d)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return createPrivateDirChain(d)
+	}
+	return checkExplicitSockDir(d, fi)
+}
+
+// checkExplicitSockDir applies real's h(): a real directory (no symlink),
+// owned by us, mode 0700 (no group/other bits at all).
+func checkExplicitSockDir(d string, fi os.FileInfo) error {
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("directory %s is a symlink — must be a real directory", d)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("parent %s is not a directory", d)
+	}
+	if u, ok := statUID(fi); ok && u != os.Getuid() {
+		return fmt.Errorf("directory %s is not owned by you (uid %d)", d, u)
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("directory %s is not private (mode %04o) — the socket directory must be 0700", d, fi.Mode().Perm())
+	}
+	return nil
+}
+
+// createPrivateDirChain creates a missing explicit socket dir: the nearest
+// existing ancestor must be owned by us or root; each missing component is
+// made 0700 and must come up ours (real's loop in Bns).
+func createPrivateDirChain(d string) error {
+	var missing []string
+	probe := d
+	for {
+		fi, err := os.Lstat(probe)
+		if err == nil {
+			if u, ok := statUID(fi); ok && u != os.Getuid() && u != 0 {
+				return fmt.Errorf("%s is owned by another user — refusing to create the sockets directory inside it", probe)
+			}
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		next := filepath.Dir(probe)
+		if next == probe {
+			break
+		}
+		missing = append(missing, probe)
+		probe = next
+	}
+	for i := len(missing) - 1; i >= 0; i-- {
+		p := missing[i]
+		if err := os.Mkdir(p, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		fi, err := os.Lstat(p)
+		if err != nil {
+			return err
+		}
+		if err := checkExplicitSockDir(p, fi); err != nil {
+			return fmt.Errorf("%s appeared while being created and is unusable: %w", p, err)
+		}
+	}
+	return nil
+}
+
+// explicitSocketPath is the --messaging-socket-path value, when given.
+func explicitSocketPath() string {
+	return os.Getenv("CLAUDE_GO_MESSAGING_SOCKET_PATH")
+}
+
+// socketPath is the bound inbox path: the explicit --messaging-socket-path
+// when given, else <socketDir>/<pid>.sock. "" means messaging is off.
 func socketPath() string {
-	return filepath.Join(socketDir(), fmt.Sprint(os.Getpid())+".sock")
+	if p := explicitSocketPath(); p != "" {
+		return p
+	}
+	d := socketDir()
+	if d == "" {
+		return ""
+	}
+	return filepath.Join(d, fmt.Sprint(os.Getpid())+".sock")
 }
 
 // activeSock records the bound inbox path (real's u().activeSocketPath) —
@@ -1225,7 +1457,21 @@ var activeSock atomic.Value // string
 // at sessions/<pid>.<sha256(sock)>.key and accept the same frames real
 // sessions speak, so real CC peers can deliver into us.
 func StartMessenger(sessionID string) (cleanup func()) {
-	p := socketPath() // socketDir already vetted/chooses the dir
+	var p string
+	if explicit := explicitSocketPath(); explicit != "" {
+		// real's Bns: a bad explicit path refuses startup — messaging off
+		if err := vetExplicitSocketPath(explicit); err != nil {
+			peerLogf("explicit messaging socket path %s refused: %v — messaging OFF", explicit, err)
+			return func() {}
+		}
+		p = explicit
+	} else {
+		p = socketPath() // socketDir already vetted/chooses the dir
+		if p == "" {
+			peerLogf("no usable sockets directory — cross-session messaging OFF")
+			return func() {}
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return func() {}
 	}
@@ -1366,9 +1612,28 @@ func servePeer(c net.Conn, sessionID string) {
 		parsed    int // parsed-line count; auth is honored only on line 1
 		authCls   string
 		peerPid   int
+		peerUid   = -1
 		credsDone bool
 		gotLine   bool
 	)
+	// creds lazily resolves kernel peer credentials once (real reads
+	// Bun.ant.getPeerPid/getPeerUid per conn). Returns ok=false when the
+	// peer's uid is known to differ from ours — a same-host foreign process
+	// is not our session and the conn is dropped (real's getPeerUid check).
+	creds := func() bool {
+		if !credsDone {
+			credsDone = true
+			p, u, _, ok := peerCredsOf(c)
+			if ok {
+				peerPid, peerUid = p, u
+			}
+		}
+		if peerUid >= 0 && peerUid != os.Getuid() {
+			peerLogf("dropping connection from foreign uid %d (pid %d)", peerUid, peerPid)
+			return false
+		}
+		return true
+	}
 	// handle returns false to drop the connection (real's f()/destroy()).
 	handle := func(line []byte) bool {
 		if len(bytes.TrimSpace(line)) == 0 {
@@ -1395,9 +1660,8 @@ func servePeer(c net.Conn, sessionID string) {
 		if messengerAuthRequired && authCls == "" {
 			return false // non-auth line before authenticating
 		}
-		if !credsDone {
-			credsDone = true
-			peerPid = peerPIDOf(c)
+		if !creds() {
+			return false
 		}
 		dispatchPeerFrame(f, sessionID, peerPid, authCls)
 		return true
@@ -1434,7 +1698,7 @@ func servePeer(c net.Conn, sessionID string) {
 					var f peerFrame
 					if json.Unmarshal(line, &f) == nil {
 						parsed++
-						if f.Type != "auth" && !(messengerAuthRequired && authCls == "") {
+						if f.Type != "auth" && !(messengerAuthRequired && authCls == "") && creds() {
 							dispatchPeerFrame(f, sessionID, peerPid, authCls)
 						}
 					}
@@ -1446,30 +1710,26 @@ func servePeer(c net.Conn, sessionID string) {
 }
 
 // peerPIDOf returns the connecting peer's pid — real's Jgn() via
-// getsockopt(LOCAL_PEERPID) on darwin. Other platforms have no single-file
-// equivalent (SO_PEERCRED on linux returns a ucred struct, which needs a
-// build-tagged file); peers from those platforms are verified only by their
-// sessions/<pid>.json claim — pid-reuse can then go undetected.
+// getsockopt(LOCAL_PEERPID) on darwin / SO_PEERCRED ucred on linux
+// (build-tagged peercred_*.go). Other platforms return 0; their peers are
+// verified only by their sessions/<pid>.json claim — pid-reuse can then go
+// undetected.
 func peerPIDOf(c net.Conn) int {
-	if runtime.GOOS != "darwin" {
+	pid, _, _, ok := peerCredsOf(c)
+	if !ok || pid <= 0 {
 		return 0
 	}
-	uc, ok := c.(*net.UnixConn)
-	if !ok {
-		return 0
-	}
-	raw, err := uc.SyscallConn()
-	if err != nil {
-		return 0
-	}
-	pid := 0
-	// SOL_LOCAL=0x0, LOCAL_PEERPID=0x2 — literals so this compiles everywhere.
-	raw.Control(func(fd uintptr) {
-		if p, err := unix.GetsockoptInt(int(fd), 0x0, 0x2); err == nil && p > 0 {
-			pid = p
-		}
-	})
 	return pid
+}
+
+// peerUIDOf returns the connecting peer's uid — real's Bun.ant.getPeerUid —
+// or -1 when the platform cannot report one.
+func peerUIDOf(c net.Conn) int {
+	_, uid, _, ok := peerCredsOf(c)
+	if !ok {
+		return -1
+	}
+	return uid
 }
 
 // peerSessionOK is real's Ie(): a session_id, when present, must be ours.
@@ -1478,8 +1738,16 @@ func peerSessionOK(f peerFrame, sessionID string) bool {
 }
 
 // dispatchPeerFrame is real's be()/ze(): user frames route to the prompt
-// queue; control frames dispatch on action.
+// queue; control frames dispatch on action. Ingress dedup (real's Vjr)
+// drops a second delivery of the same msg_id inside a 5-minute window.
 func dispatchPeerFrame(f peerFrame, sessionID string, peerPid int, authCls string) {
+	if f.MsgID != "" && peerMsgIDSeen(f.MsgID) {
+		peerLogf("dropping re-delivered msg_id %s", f.MsgID)
+		if f.Type == "user" {
+			sendPeerStatusReply(f.From, peerPid, "dropped", f.MsgID, "duplicate")
+		}
+		return
+	}
 	switch f.Type {
 	case "user":
 		var msg struct {
@@ -1491,6 +1759,12 @@ func dispatchPeerFrame(f peerFrame, sessionID string, peerPid int, authCls strin
 			return
 		}
 		if !peerSessionOK(f, sessionID) {
+			return
+		}
+		// real's Hpt gate can hold a peer message for recipient approval;
+		// we hold while mid-turn or when the peer is kernel-unverifiable.
+		if shouldHoldPeerMsg(peerPid, authCls) {
+			holdPeerMsg(f, msg.Content, peerPid)
 			return
 		}
 		// real validates priority via z4e (now|next|later) — all land in the
@@ -1511,6 +1785,10 @@ func dispatchPeerFrame(f peerFrame, sessionID string, peerPid int, authCls strin
 			handleNotifyWhenIdle(f, peerPid, authCls)
 		case "peer_idle_notice":
 			handlePeerIdleNotice(f)
+		case "release_held":
+			// claude-go extension: force-flush held peer messages early
+			// (real releases on user approval / prompt boundary only)
+			FlushHeldPeerMessages()
 		case "yield_artifact_replies", "unyield_artifact_replies", "artifact_replies_yielded":
 			// artifact live-subscribe protocol — accept-and-log only
 			peerLogf("control %s accepted (artifact yield protocol unimplemented)", f.Action)
@@ -1616,6 +1894,146 @@ func resolveReceipt(msgID string, r peerReceipt) {
 		}
 	} else {
 		peerLogf("peer_message_status dropped: no outstanding send matches orig_msg_id=%q", msgID)
+	}
+}
+
+// sendPeerStatusReply replies to a peer frame's sender with a
+// peer_message_status receipt — real answers on a fresh connection to the
+// frame's `from` address, never on the inbound conn. dropReason is only
+// meaningful for status "dropped".
+func sendPeerStatusReply(fromRaw string, peerPid int, status, origMsgID, dropReason string) {
+	if !isUUID(origMsgID) {
+		return // nothing for the sender to correlate against
+	}
+	target, ok := shapePeerReplyTarget(fromRaw, peerPid)
+	if !ok {
+		peerLogf("peer_message_status %s not sent: unshapable reply target %q", status, fromRaw)
+		return
+	}
+	socketWriteFrame(target, peerFrame{
+		Type: "control", MsgV: 1, MsgID: newUUID(),
+		Action: "peer_message_status", Status: status,
+		OrigMsgID: origMsgID, DropReason: dropReason,
+		From: udsAddr(socketPath()),
+	})
+}
+
+// ---------- ingress dedup (real's Vjr) ----------
+// Re-delivered frames carrying the same msg_id inside a 5-minute window are
+// dropped; the map is capped so a hostile peer can't grow it unboundedly.
+
+const (
+	peerDedupWindow = 5 * time.Minute
+	peerDedupCap    = 1024
+)
+
+var peerSeenIDs = struct {
+	mu sync.Mutex
+	m  map[string]time.Time
+}{m: map[string]time.Time{}}
+
+// peerMsgIDSeen records id and reports whether it was already delivered
+// within the dedup window.
+func peerMsgIDSeen(id string) bool {
+	now := time.Now()
+	peerSeenIDs.mu.Lock()
+	defer peerSeenIDs.mu.Unlock()
+	if t, ok := peerSeenIDs.m[id]; ok && now.Sub(t) < peerDedupWindow {
+		return true
+	}
+	if len(peerSeenIDs.m) >= peerDedupCap {
+		for k, t := range peerSeenIDs.m { // evict expired first
+			if now.Sub(t) >= peerDedupWindow {
+				delete(peerSeenIDs.m, k)
+			}
+		}
+		if len(peerSeenIDs.m) >= peerDedupCap {
+			for k := range peerSeenIDs.m { // still full — evict one
+				delete(peerSeenIDs.m, k)
+				break
+			}
+		}
+	}
+	peerSeenIDs.m[id] = now
+	return false
+}
+
+// ---------- held-message queue ----------
+// Real's peer_message_status "held": a peer user message that needs
+// recipient approval (its Hpt permission gate) waits instead of landing in
+// the prompt queue; the sender gets a "held" receipt and a "delivered" one
+// when it is released. We hold while the session is mid-turn or the peer is
+// kernel-unverifiable on a creds platform, and flush at the prompt boundary
+// (FireIdleNotifications) or on a control release.
+
+var peerSessionBusy atomic.Bool
+
+// SetPeerSessionBusy marks whether this session is mid-turn — wired by the
+// REPL at turn start/end so inbound peer messages hold for the boundary.
+func SetPeerSessionBusy(b bool) { peerSessionBusy.Store(b) }
+
+// shouldHoldPeerMsg decides whether an inbound user frame waits for the
+// prompt boundary instead of queueing immediately.
+func shouldHoldPeerMsg(peerPid int, authCls string) bool {
+	if peerSessionBusy.Load() {
+		return true
+	}
+	// unverified: on a platform where kernel creds exist, a peer with no
+	// verified pid AND no valid auth token is held for approval
+	if peerCredOSSupport && peerPid <= 0 && authCls == "" {
+		return true
+	}
+	return false
+}
+
+type heldPeerMsg struct {
+	content   string
+	fromRaw   string // original `from` (for logging / future re-shape)
+	replyTo   string // shaped sock path for receipts ("" = unreachable)
+	origMsgID string
+	heldAt    time.Time
+}
+
+const peerHeldCap = 32
+
+var heldPeerMsgs = struct {
+	mu sync.Mutex
+	q  []heldPeerMsg
+}{}
+
+func holdPeerMsg(f peerFrame, content string, peerPid int) {
+	replyTo, _ := shapePeerReplyTarget(f.From, peerPid)
+	heldPeerMsgs.mu.Lock()
+	if len(heldPeerMsgs.q) >= peerHeldCap {
+		heldPeerMsgs.mu.Unlock()
+		sendPeerStatusReply(f.From, peerPid, "dropped", f.MsgID, "queue-full")
+		return
+	}
+	heldPeerMsgs.q = append(heldPeerMsgs.q, heldPeerMsg{
+		content: content, fromRaw: f.From, replyTo: replyTo,
+		origMsgID: f.MsgID, heldAt: time.Now(),
+	})
+	heldPeerMsgs.mu.Unlock()
+	sendPeerStatusReply(f.From, peerPid, "held", f.MsgID, "")
+}
+
+// FlushHeldPeerMessages releases every held peer message at a prompt
+// boundary — each is queued and its sender gets a "delivered" receipt.
+func FlushHeldPeerMessages() {
+	heldPeerMsgs.mu.Lock()
+	q := heldPeerMsgs.q
+	heldPeerMsgs.q = nil
+	heldPeerMsgs.mu.Unlock()
+	for _, h := range q {
+		QueuePrompt(h.content)
+		if h.replyTo != "" && isUUID(h.origMsgID) {
+			socketWriteFrame(h.replyTo, peerFrame{
+				Type: "control", MsgV: 1, MsgID: newUUID(),
+				Action: "peer_message_status", Status: "delivered",
+				OrigMsgID: h.origMsgID,
+				From:      udsAddr(socketPath()),
+			})
+		}
 	}
 }
 
@@ -1759,10 +2177,119 @@ func firePeerIdleNotices(sessionID, state string) {
 	}
 }
 
+// ---------- outbound idle subscriptions (real's d.outstanding / Syr) ----------
+// When WE send a notify_when_idle to a peer, its msg_id lands here; an
+// inbound peer_idle_notice is admitted only while correlated to an
+// outstanding subscription (gRt) and consumes it one-shot (byr).
+
+type outboundIdleSub struct {
+	msgID       string
+	target      string // canonical sock path the sub was sent to
+	requestedAt int64
+}
+
+var outboundIdleSubs = struct {
+	mu   sync.Mutex
+	subs []outboundIdleSub
+}{}
+
+// recordOutboundIdleSub registers a sent notify_when_idle (real's Syr):
+// TTL peerSubTTL, table cap peerSubCap.
+func recordOutboundIdleSub(msgID, target string) bool {
+	outboundIdleSubs.mu.Lock()
+	defer outboundIdleSubs.mu.Unlock()
+	now := time.Now().UnixMilli()
+	keep := outboundIdleSubs.subs[:0]
+	for _, s := range outboundIdleSubs.subs {
+		if now-s.requestedAt < int64(peerSubTTL/time.Millisecond) {
+			keep = append(keep, s)
+		}
+	}
+	outboundIdleSubs.subs = keep
+	if len(outboundIdleSubs.subs) >= peerSubCap {
+		return false
+	}
+	outboundIdleSubs.subs = append(outboundIdleSubs.subs, outboundIdleSub{
+		msgID: msgID, target: canonSock(target), requestedAt: now,
+	})
+	return true
+}
+
+// outboundIdleOutstanding is real's gRt: is this orig_msg_id one of our
+// outstanding subscriptions?
+func outboundIdleOutstanding(msgID string) bool {
+	outboundIdleSubs.mu.Lock()
+	defer outboundIdleSubs.mu.Unlock()
+	for _, s := range outboundIdleSubs.subs {
+		if s.msgID == msgID {
+			return true
+		}
+	}
+	return false
+}
+
+// consumeOutboundIdleSub is real's byr: remove the named subscription; a
+// terminal notice (idle|exited) also clears other subs to the same target.
+func consumeOutboundIdleSub(msgID, state string) bool {
+	outboundIdleSubs.mu.Lock()
+	defer outboundIdleSubs.mu.Unlock()
+	idx := -1
+	for i, s := range outboundIdleSubs.subs {
+		if s.msgID == msgID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return false
+	}
+	target := outboundIdleSubs.subs[idx].target
+	outboundIdleSubs.subs = append(outboundIdleSubs.subs[:idx], outboundIdleSubs.subs[idx+1:]...)
+	if state == "idle" || state == "exited" {
+		keep := outboundIdleSubs.subs[:0]
+		for _, s := range outboundIdleSubs.subs {
+			if s.target != target {
+				keep = append(keep, s)
+			}
+		}
+		outboundIdleSubs.subs = keep
+	}
+	return true
+}
+
+// sendNotifyWhenIdle pushes a notify_when_idle control frame at a peer
+// inbox and records the outbound subscription so its reply correlates.
+func sendNotifyWhenIdle(sockPath string) (string, bool) {
+	msgID := newUUID()
+	if !recordOutboundIdleSub(msgID, sockPath) {
+		return "", false
+	}
+	ok := socketWriteFrame(sockPath, peerFrame{
+		Type: "control", MsgV: 1, MsgID: msgID,
+		Action: "notify_when_idle",
+		From:   udsAddr(socketPath()),
+	})
+	if !ok {
+		consumeOutboundIdleSub(msgID, "")
+		return "", false
+	}
+	return msgID, true
+}
+
 // handlePeerIdleNotice renders an inbound idle notice like real's
-// Cyr/oe(): an automated harness notice queued as a meta prompt.
+// Cyr/oe(): an automated harness notice queued as a meta prompt. Notices
+// uncorrelated to an outstanding notify_when_idle we sent are dropped
+// (real's gRt) — a peer cannot inject idle prompts unprompted.
 func handlePeerIdleNotice(f peerFrame) {
 	if f.OrigMsgID == "" {
+		return
+	}
+	if !outboundIdleOutstanding(f.OrigMsgID) {
+		peerLogf("peer_idle_notice: dropped (uncorrelated / already delivered / expired)")
+		return
+	}
+	if !consumeOutboundIdleSub(f.OrigMsgID, f.State) {
+		peerLogf("peer_idle_notice not admitted: subscription for orig_msg_id=%q was already consumed", f.OrigMsgID)
 		return
 	}
 	label := f.From

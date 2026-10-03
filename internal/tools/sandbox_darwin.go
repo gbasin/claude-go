@@ -90,9 +90,11 @@ func sbRule(b *strings.Builder, op string, paths []string) {
 // it via SSL_CERT_FILE & friends.
 func buildSeatbeltProfile(s *SandboxSettings, cwd string, px *netproxy.Proxy) string {
 	proxyPort := 0
+	socksPort := 0
 	caPath := ""
 	if px != nil {
 		proxyPort = px.Port()
+		socksPort = px.SocksPort()
 		if px.CA != nil {
 			caPath = px.CA.CertPath
 		}
@@ -217,6 +219,10 @@ func buildSeatbeltProfile(s *SandboxSettings, cwd string, px *netproxy.Proxy) st
 		b.WriteString("(deny network*)\n")
 		fmt.Fprintf(&b, "(allow network-outbound (remote ip %s))\n",
 			sbQuote(fmt.Sprintf("localhost:%d", proxyPort)))
+		if socksPort > 0 {
+			fmt.Fprintf(&b, "(allow network-outbound (remote ip %s))\n",
+				sbQuote(fmt.Sprintf("localhost:%d", socksPort)))
+		}
 		if s.Network != nil && s.Network.AllowAllLocal {
 			// real's allowLocalBinding rules
 			b.WriteString("(allow network-bind (local ip \"*:*\"))\n")

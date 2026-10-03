@@ -2,6 +2,7 @@ package repl
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -27,8 +28,9 @@ func newFakeTerm(t *testing.T, w, h int) *fakeTerm {
 	t.Cleanup(func() {
 		compClose() // stops the SIGWINCH watcher, resets state
 		compOut, compIsTTY, compGetSize = oldOut, oldTTY, oldSize
-		compSusp, compFits = 0, false
+		compSusp, compFits, compZoneH = 0, false, 0
 		compDyn, compStatus = "", ""
+		compEdit, compCur, compBox, compPainted = false, false, nil, nil
 	})
 	return f
 }
@@ -43,8 +45,8 @@ func TestCompInitPinsRegion(t *testing.T) {
 	if !strings.Contains(out, "\x1b[1;38r") {
 		t.Fatalf("expected DECSTBM 1;38r, got %q", out)
 	}
-	if !strings.HasPrefix(out, "\x1b7") || !strings.HasSuffix(out, "\x1b8") {
-		t.Fatalf("install frame not cursor-saved/restored: %q", out)
+	if !strings.HasPrefix(out, compBSU+"\x1b7") || !strings.HasSuffix(out, "\x1b8"+compESU) {
+		t.Fatalf("install frame not BSU-wrapped + cursor-saved/restored: %q", out)
 	}
 }
 
@@ -132,8 +134,18 @@ func TestCompSetStatusKeepsDynamic(t *testing.T) {
 	f.buf.Reset()
 	compSetStatus("new-status")
 	out := f.buf.String()
-	if !strings.Contains(out, "spin") || !strings.Contains(out, "new-status") {
-		t.Fatalf("status update must preserve the dynamic row: %q", out)
+	if !strings.Contains(out, "new-status") {
+		t.Fatalf("status row not repainted: %q", out)
+	}
+	// differential repaint: the unchanged dynamic row is not re-emitted
+	if strings.Contains(out, "spin") {
+		t.Fatalf("unchanged dynamic row re-emitted: %q", out)
+	}
+	// a forced repaint (external erase) brings it back
+	f.buf.Reset()
+	compRepaint()
+	if !strings.Contains(f.buf.String(), "spin") {
+		t.Fatalf("dynamic row lost after forced repaint: %q", f.buf.String())
 	}
 }
 
@@ -204,7 +216,7 @@ func TestCompResizeTooSmall(t *testing.T) {
 	f := newFakeTerm(t, 80, 40)
 	compInit()
 	f.buf.Reset()
-	f.h = 4 // below compRows+4 — zone can't fit
+	f.h = 4 // below compMinScroll+zone rows — zone can't fit
 	compResize()
 	if out := f.buf.String(); !strings.Contains(out, "\x1b[r") {
 		t.Fatalf("shrink did not release the region: %q", out)
@@ -232,9 +244,35 @@ func TestCompClampANSI(t *testing.T) {
 	if got := compClamp("short", 10); got != "short" {
 		t.Fatalf("compClamp passthrough: got %q", got)
 	}
-	// wide runes count as one column each (approximation, noted vs wcwidth)
-	if got := compClamp(strings.Repeat("界", 12), 10); got != strings.Repeat("界", 10)+"\x1b[0m" {
+	// CJK runes are double-width (TR11 W/F): 10 cells hold 5
+	if got := compClamp(strings.Repeat("界", 12), 10); got != strings.Repeat("界", 5)+"\x1b[0m" {
 		t.Fatalf("compClamp utf8: got %q", got)
+	}
+}
+
+func TestCompClampWcwidth(t *testing.T) {
+	// a wide rune that doesn't fit whole ends the clamp early
+	if got := compClamp("ab界cd", 3); got != "ab\x1b[0m" {
+		t.Fatalf("wide rune split: got %q", got)
+	}
+	if got := compClamp("ab界cd", 4); got != "ab界\x1b[0m" {
+		t.Fatalf("wide rune at exact boundary: got %q", got)
+	}
+	// combining marks are zero-width and stay attached to their base
+	if got := compClamp("e\u0301x", 2); got != "e\u0301x" {
+		t.Fatalf("combining fit: got %q", got)
+	}
+	if got := compClamp("e\u0301x", 1); got != "e\u0301\x1b[0m" {
+		t.Fatalf("combining kept with base: got %q", got)
+	}
+	if w := runeWidth('界'); w != 2 {
+		t.Fatalf("CJK width = %d, want 2", w)
+	}
+	if w := runeWidth('\u0301'); w != 0 {
+		t.Fatalf("combining width = %d, want 0", w)
+	}
+	if w := visWidth("a界\u0301b"); w != 4 {
+		t.Fatalf("visWidth = %d, want 4", w)
 	}
 }
 
@@ -257,4 +295,152 @@ func TestCompCloseRestores(t *testing.T) {
 	}
 	// idempotent
 	compClose()
+}
+
+func TestCompDiffRepaint(t *testing.T) {
+	f := newFakeTerm(t, 80, 40)
+	compInit()
+	compSetFooter([]string{"spin", "status"})
+	f.buf.Reset()
+	compFooter("spin2") // only the dynamic row changed
+	out := f.buf.String()
+	if !strings.Contains(out, "\x1b[39;1H\x1b[2Kspin2") {
+		t.Fatalf("changed row not repainted: %q", out)
+	}
+	if strings.Contains(out, "\x1b[40;1H") {
+		t.Fatalf("unchanged status row re-emitted: %q", out)
+	}
+	// BSU/ESU wraps every frame
+	if !strings.Contains(out, compBSU) || !strings.Contains(out, compESU) {
+		t.Fatalf("frame missing synchronized-output wrap: %q", out)
+	}
+	// save/restore still brackets the frame
+	if !strings.Contains(out, "\x1b7") || !strings.Contains(out, "\x1b8") {
+		t.Fatalf("frame missing DECSC/DECRC: %q", out)
+	}
+}
+
+func TestCompEditorZone(t *testing.T) {
+	f := newFakeTerm(t, 80, 40)
+	compInit()
+	t.Setenv("CLAUDE_GO_NO_COMPOSITOR_INPUT", "")
+	if !compInputActive() {
+		t.Fatal("compInputActive false on a healthy fake term")
+	}
+	compSetStatus("st")
+	f.buf.Reset()
+	box := []string{"╭─╮", "│ > hi", "╰─╯"}
+	compEditor(box, 1, 5)
+	out := f.buf.String()
+	// zone grew to 4 rows: DECSTBM covers 1..36
+	if !strings.Contains(out, "\x1b[1;36r") {
+		t.Fatalf("zone did not grow to 4 rows: %q", out)
+	}
+	if !strings.Contains(out, "│ > hi") || !strings.Contains(out, "╭─╮") {
+		t.Fatalf("box not painted in zone: %q", out)
+	}
+	if compZoneH != 4 {
+		t.Fatalf("compZoneH = %d, want 4", compZoneH)
+	}
+	// cursor left inside the zone on the input row (row 40-4+1+1 = 38)
+	if !strings.Contains(out, "\x1b[38;6H") {
+		t.Fatalf("cursor not placed in the box: %q", out)
+	}
+
+	// a second frame with identical rows only moves the cursor
+	f.buf.Reset()
+	compEditor(box, 1, 7)
+	out = f.buf.String()
+	if strings.Contains(out, "│ > hi") {
+		t.Fatalf("unchanged box rows re-emitted: %q", out)
+	}
+	if !strings.Contains(out, "\x1b[38;8H") {
+		t.Fatalf("cursor not updated: %q", out)
+	}
+}
+
+func TestCompExitEditEchoesBox(t *testing.T) {
+	f := newFakeTerm(t, 80, 40)
+	compInit()
+	compEditor([]string{"╭─╮", "│ > hi", "╰─╯"}, 1, 5)
+	f.buf.Reset()
+	compExitEdit([]string{"╭─╮", "│ > hi", "╰─╯"})
+	out := f.buf.String()
+	// region shrank back to 2 zone rows
+	if !strings.Contains(out, "\x1b[1;38r") {
+		t.Fatalf("zone did not shrink back: %q", out)
+	}
+	if compZoneH != 2 {
+		t.Fatalf("compZoneH = %d, want 2", compZoneH)
+	}
+	// the submitted box is echoed into the scroll region
+	if !strings.Contains(out, "│ > hi\r\n") || !strings.Contains(out, "╰─╯\r\n") {
+		t.Fatalf("box not echoed to scrollback: %q", out)
+	}
+	// the released box rows were cleared (row 37 = old zone top)
+	if !strings.Contains(out, "\x1b[37;1H\x1b[2K") {
+		t.Fatalf("released zone rows not cleared: %q", out)
+	}
+}
+
+func TestCompEditorSuspendKeepsBox(t *testing.T) {
+	f := newFakeTerm(t, 80, 40)
+	compInit()
+	compEditor([]string{"╭─╮", "│ > x", "╰─╯"}, 1, 5)
+	f.buf.Reset()
+	compSuspend()
+	out := f.buf.String()
+	// all 4 zone rows cleared (37-40), region released
+	for r := 37; r <= 40; r++ {
+		seq := fmt.Sprintf("\x1b[%d;1H\x1b[2K", r)
+		if !strings.Contains(out, seq) {
+			t.Fatalf("suspend did not clear zone row %d: %q", r, out)
+		}
+	}
+	if !strings.Contains(out, "\x1b[r") {
+		t.Fatalf("suspend did not release the region: %q", out)
+	}
+	// edits while suspended are remembered, not emitted
+	f.buf.Reset()
+	compEditor([]string{"╭─╮", "│ > xy", "╰─╯"}, 1, 6)
+	if f.buf.Len() != 0 {
+		t.Fatalf("suspended compEditor wrote %q", f.buf.String())
+	}
+	compResume()
+	out = f.buf.String()
+	if !strings.Contains(out, "│ > xy") {
+		t.Fatalf("resume did not repaint the box: %q", out)
+	}
+	if !strings.Contains(out, "\x1b[1;36r") {
+		t.Fatalf("resume did not re-pin the 4-row zone: %q", out)
+	}
+	if compZoneH != 4 {
+		t.Fatalf("compZoneH = %d after resume, want 4", compZoneH)
+	}
+}
+
+func TestCompInline(t *testing.T) {
+	f := newFakeTerm(t, 80, 40)
+	compInit()
+	compEditor([]string{"╭─╮", "│ > hi", "╰─╯"}, 1, 5)
+	f.buf.Reset()
+	compInline("a note\r\n")
+	out := f.buf.String()
+	// printed at the scroll-region bottom (row 40-4 = 36)
+	if !strings.Contains(out, "\x1b[36;1H"+"a note") {
+		t.Fatalf("note not printed at region bottom: %q", out)
+	}
+	// cursor restored into the box
+	if !strings.Contains(out, "\x1b[38;6H") {
+		t.Fatalf("cursor not restored into the zone: %q", out)
+	}
+}
+
+func TestCompInputFlag(t *testing.T) {
+	newFakeTerm(t, 80, 40)
+	compInit()
+	t.Setenv("CLAUDE_GO_NO_COMPOSITOR_INPUT", "1")
+	if compInputActive() {
+		t.Fatal("CLAUDE_GO_NO_COMPOSITOR_INPUT must disable zone input")
+	}
 }

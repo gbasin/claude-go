@@ -63,6 +63,10 @@ type SandboxNetwork struct {
 	AllowUnixSockets    []string // macOS only
 	AllowAllUnixSockets bool
 	AllowAllLocal       bool // claude-go extension: like real's allowLocalBinding
+	// InteractiveHostApproval upgrades "not on the allow list" denials into
+	// an interactive prompt (real's non-strictAllowlist ask callback). Hosts
+	// approved this way land on the proxy's session allowlist.
+	InteractiveHostApproval bool
 }
 
 // SandboxCredentials mirrors sandbox.credentials (mod_1164.js U, files only).
@@ -94,12 +98,13 @@ type sandboxFSJSON struct {
 }
 
 type sandboxNetJSON struct {
-	AllowedDomains      []string `json:"allowedDomains"`
-	DeniedDomains       []string `json:"deniedDomains"`
-	AllowedCidrs        []string `json:"allowedCidrs"`
-	AllowUnixSockets    []string `json:"allowUnixSockets"`
-	AllowAllUnixSockets *bool    `json:"allowAllUnixSockets"`
-	AllowAllLocal       *bool    `json:"allowAllLocal"`
+	AllowedDomains          []string `json:"allowedDomains"`
+	DeniedDomains           []string `json:"deniedDomains"`
+	AllowedCidrs            []string `json:"allowedCidrs"`
+	AllowUnixSockets        []string `json:"allowUnixSockets"`
+	AllowAllUnixSockets     *bool    `json:"allowAllUnixSockets"`
+	AllowAllLocal           *bool    `json:"allowAllLocal"`
+	InteractiveHostApproval *bool    `json:"interactiveHostApproval"`
 }
 
 type sandboxCredJSON struct {
@@ -157,6 +162,7 @@ func (s *SandboxSettings) apply(f *sandboxFileJSON, policy bool) {
 		s.Network.AllowUnixSockets = append(s.Network.AllowUnixSockets, n.AllowUnixSockets...)
 		set("network.allowAllUnixSockets", n.AllowAllUnixSockets, &s.Network.AllowAllUnixSockets)
 		set("network.allowAllLocal", n.AllowAllLocal, &s.Network.AllowAllLocal)
+		set("network.interactiveHostApproval", n.InteractiveHostApproval, &s.Network.InteractiveHostApproval)
 	}
 	if c := f.Credentials; c != nil {
 		s.Credentials.Files = append(s.Credentials.Files, c.Files...)
@@ -460,7 +466,20 @@ func (c *Context) sandboxedScript(command, script string, s *SandboxSettings, wa
 			warn = addNote(warn, fmt.Sprintf("sandbox network proxy failed: %v; denying all egress", err))
 		} else {
 			px = p2
-			env = px.Env()
+			env = px.Env(command)
+			// interactive host approval: unmatched-host denials become a
+			// prompt when the tool context can ask (real's ask callback);
+			// approved hosts join the session allowlist.
+			if s.Network.InteractiveHostApproval && c.AskStructured != nil {
+				px.SetPromptAllow(func(host string, port int) bool {
+					sel, err := c.AskStructured("Blocked host",
+						fmt.Sprintf("The sandboxed command tried to reach %s:%d, which is not in sandbox.network.allowedDomains.", host, port),
+						[]string{"Allow for this session", "Deny"}, false)
+					return err == nil && len(sel) > 0 && strings.HasPrefix(sel[0], "Allow")
+				})
+			} else {
+				px.SetPromptAllow(nil)
+			}
 			if note != "" {
 				warn = addNote(warn, note)
 			}

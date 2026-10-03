@@ -54,6 +54,19 @@ func sharedNetProxy(n *SandboxNetwork) (*netproxy.Proxy, string, error) {
 	return sessionProxy.px, sessionProxy.caNote, nil
 }
 
+// SandboxAllowHost backs `/sandbox allow <host>`: adds the host to the
+// session proxy's allowlist so later sandboxed commands may reach it for
+// the rest of the session.
+func SandboxAllowHost(host string) string {
+	sessionProxy.mu.Lock()
+	defer sessionProxy.mu.Unlock()
+	if sessionProxy.px == nil {
+		return "no sandbox network proxy is running yet (it starts with the first networked sandboxed command)"
+	}
+	sessionProxy.px.AllowHost(host)
+	return fmt.Sprintf("allowed %s for this session", host)
+}
+
 // resetNetProxyForTest tears the singleton down between tests.
 func resetNetProxyForTest() {
 	sessionProxy.mu.Lock()
