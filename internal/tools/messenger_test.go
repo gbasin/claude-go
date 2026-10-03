@@ -81,6 +81,13 @@ func setupMessengerHome(t *testing.T) (string, string, func()) {
 		drain()
 		firstLineDeadlineMs, messengerAuthRequired = oldDeadline, oldAuth
 		SetSessionRenamer(nil)
+		SetPeerSessionBusy(false)
+		heldPeerMsgs.mu.Lock()
+		heldPeerMsgs.q = nil
+		heldPeerMsgs.mu.Unlock()
+		outboundIdleSubs.mu.Lock()
+		outboundIdleSubs.subs = nil
+		outboundIdleSubs.mu.Unlock()
 	}
 }
 
@@ -397,5 +404,317 @@ func TestUDSNotifyWhenIdle(t *testing.T) {
 	peerIdleSubs.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("malformed notify_when_idle recorded (subs=%d)", n)
+	}
+}
+
+// ---------- remainder: creds, held→delivered, dedup, notice correlation, dir vet ----------
+
+// peerInbox is a fake peer-session inbox that captures frames written to it
+// (status replies real sends back to our `from` address).
+func peerInbox(t *testing.T, name string) (string, chan peerFrame, func()) {
+	t.Helper()
+	sock := filepath.Join(socketDir(), name)
+	os.Remove(sock)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames := make(chan peerFrame, 16)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 64<<10)
+				var pending []byte
+				for {
+					n, err := c.Read(buf)
+					pending = append(pending, buf[:n]...)
+					for {
+						i := bytes.IndexByte(pending, '\n')
+						if i < 0 {
+							break
+						}
+						var f peerFrame
+						if json.Unmarshal(pending[:i], &f) == nil {
+							frames <- f
+						}
+						pending = pending[i+1:]
+					}
+					if err != nil {
+						return
+					}
+				}
+			}(c)
+		}
+	}()
+	return sock, frames, func() { ln.Close(); os.Remove(sock) }
+}
+
+// waitStatus returns the first peer_message_status frame matching want on
+// the fake inbox, skipping any other frames.
+func waitStatus(t *testing.T, frames chan peerFrame, want, origID string) peerFrame {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case f := <-frames:
+			if f.Action == "peer_message_status" && f.Status == want &&
+				(origID == "" || f.OrigMsgID == origID) {
+				return f
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("no %q receipt for %s", want, origID)
+		}
+	}
+	t.Fatalf("no %q receipt for %s", want, origID)
+	return peerFrame{}
+}
+
+// Kernel peer creds: pid and uid must resolve for a same-proc peer on
+// creds platforms (darwin LOCAL_PEERPID/PEERCRED, linux SO_PEERCRED).
+func TestPeerCredsNonNegative(t *testing.T) {
+	if !peerCredOSSupport {
+		t.Skip("no kernel peer credentials on this platform")
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "x.sock")
+	ln, err := net.Listen("unix", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			accepted <- c
+		}
+	}()
+	c, err := net.Dial("unix", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ac := <-accepted
+	defer ac.Close()
+
+	pid, uid, gid, ok := peerCredsOf(c)
+	if !ok {
+		t.Fatal("peerCredsOf unsupported on a creds platform")
+	}
+	if pid <= 0 {
+		t.Fatalf("peer pid = %d, want >0", pid)
+	}
+	if uid != os.Getuid() {
+		t.Fatalf("peer uid = %d, want %d (non-negative path)", uid, os.Getuid())
+	}
+	_ = gid // darwin fills it via xucred only; don't assert
+
+	// and the wrappers see the same values
+	if peerPIDOf(c) != pid {
+		t.Fatalf("peerPIDOf = %d, want %d", peerPIDOf(c), pid)
+	}
+	if peerUIDOf(c) != uid {
+		t.Fatalf("peerUIDOf = %d, want %d", peerUIDOf(c), uid)
+	}
+}
+
+// Held flow: while the session is mid-turn an inbound user frame is held;
+// the sender gets a "held" receipt at its `from` address, nothing queues,
+// and FlushHeldPeerMessages releases it with a "delivered" receipt.
+func TestPeerHeldDelivered(t *testing.T) {
+	_, done := setupMessenger(t)
+	defer done()
+
+	sock, frames, inboxDone := peerInbox(t, "99998.sock")
+	defer inboxDone()
+
+	SetPeerSessionBusy(true)
+	defer SetPeerSessionBusy(false)
+
+	msgID := newUUID()
+	c, err := net.Dial("unix", socketPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	writeLine(t, c, peerFrame{
+		Type: "user", MsgID: msgID, From: udsAddr(sock),
+		Message: mustJSON(map[string]any{"role": "user", "content": "hold me"}),
+	})
+
+	f := waitStatus(t, frames, "held", msgID)
+	if f.From == "" {
+		t.Fatal("held receipt carries no from address")
+	}
+	// nothing reached the prompt queue yet
+	if drainUntil(t, "hold me", 200*time.Millisecond) {
+		t.Fatal("held message queued before release")
+	}
+
+	// prompt boundary: flush → queued + "delivered" receipt
+	FlushHeldPeerMessages()
+	if !drainUntil(t, "hold me", 2*time.Second) {
+		t.Fatal("held message never released into the queue")
+	}
+	waitStatus(t, frames, "delivered", msgID)
+}
+
+// Dedup: a re-delivery of the same msg_id inside the window is dropped and
+// the sender gets a dropped/duplicate receipt.
+func TestPeerDedup(t *testing.T) {
+	_, done := setupMessenger(t)
+	defer done()
+
+	sock, frames, inboxDone := peerInbox(t, "99997.sock")
+	defer inboxDone()
+
+	msgID := newUUID()
+	c, err := net.Dial("unix", socketPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	writeLine(t, c, peerFrame{
+		Type: "user", MsgID: msgID, From: udsAddr(sock),
+		Message: mustJSON(map[string]any{"role": "user", "content": "first copy"}),
+	})
+	if !drainUntil(t, "first copy", 2*time.Second) {
+		t.Fatal("first delivery never queued")
+	}
+	writeLine(t, c, peerFrame{
+		Type: "user", MsgID: msgID, From: udsAddr(sock),
+		Message: mustJSON(map[string]any{"role": "user", "content": "second copy"}),
+	})
+	f := waitStatus(t, frames, "dropped", msgID)
+	if f.DropReason != "duplicate" {
+		t.Fatalf("drop_reason = %q, want duplicate", f.DropReason)
+	}
+	if drainUntil(t, "second copy", 300*time.Millisecond) {
+		t.Fatal("re-delivered msg_id was queued")
+	}
+}
+
+// Uncorrelated peer_idle_notice is dropped (real's gRt); a notice
+// correlated to an outbound notify_when_idle delivers once, then the
+// subscription is consumed.
+func TestUDSIdleNoticeCorrelation(t *testing.T) {
+	_, done := setupMessenger(t)
+	defer done()
+
+	c, err := net.Dial("unix", socketPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	// uncorrelated: orig_msg_id names no subscription we sent → dropped
+	writeLine(t, c, peerFrame{
+		Type: "control", Action: "peer_idle_notice",
+		OrigMsgID: newUUID(), State: "idle", From: "uds:/tmp/x.sock",
+	})
+	if drainUntil(t, "idle notice", 300*time.Millisecond) {
+		t.Fatal("uncorrelated peer_idle_notice was delivered")
+	}
+
+	// correlated: record the outbound sub we would have sent, then the
+	// notice for its msg_id is admitted
+	mid := newUUID()
+	if !recordOutboundIdleSub(mid, "/tmp/x.sock") {
+		t.Fatal("outbound sub not recorded")
+	}
+	writeLine(t, c, peerFrame{
+		Type: "control", Action: "peer_idle_notice",
+		OrigMsgID: mid, State: "idle", From: "uds:/tmp/x.sock",
+	})
+	if !drainUntil(t, "idle notice", 2*time.Second) {
+		t.Fatal("correlated peer_idle_notice was dropped")
+	}
+	if outboundIdleOutstanding(mid) {
+		t.Fatal("subscription was not consumed by its notice")
+	}
+
+	// a second notice for the consumed sub is dropped again
+	writeLine(t, c, peerFrame{
+		Type: "control", Action: "peer_idle_notice",
+		OrigMsgID: mid, State: "idle", From: "uds:/tmp/x.sock",
+	})
+	if drainUntil(t, "idle notice", 300*time.Millisecond) {
+		t.Fatal("replayed peer_idle_notice was delivered")
+	}
+}
+
+// Corrupted sockets dir (a regular file in the leaf position) is refused
+// and we fall back to the per-uid dir (real's Re → Lfo path).
+func TestSocketDirCorruptFallback(t *testing.T) {
+	t.Setenv("CLAUDE_GO_MESSAGING_SOCKET_PATH", "")
+	xdg := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", xdg)
+	t.Setenv("CLAUDE_CODE_TMPDIR", "")
+	if err := os.WriteFile(filepath.Join(xdg, "cc-socks"), []byte("not a dir"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := socketDir()
+	want := peerFallbackSocketDir()
+	if got != want {
+		t.Fatalf("socketDir = %q, want fallback %q", got, want)
+	}
+	fi, err := os.Stat(got)
+	if err != nil || !fi.IsDir() {
+		t.Fatalf("fallback dir not created: %v", err)
+	}
+	if fi.Mode().Perm() != 0o700 {
+		t.Fatalf("fallback dir mode = %04o, want 0700", fi.Mode().Perm())
+	}
+
+	// a group-writable non-sticky ANCESTOR (real's directory_rule) is also
+	// refused — the leaf itself would just be chmod'd to 0700
+	xdg2 := t.TempDir()
+	shared := filepath.Join(xdg2, "shared")
+	if err := os.Mkdir(shared, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(shared, 0o770); err != nil { // beat umask
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", shared)
+	if got := socketDir(); got != want {
+		t.Fatalf("socketDir through a group-writable ancestor = %q, want %q", got, want)
+	}
+	// and nothing was created inside the refused dir
+	if _, err := os.Lstat(filepath.Join(shared, "cc-socks")); !os.IsNotExist(err) {
+		t.Fatal("cc-socks was created inside a refused directory")
+	}
+}
+
+// Explicit --messaging-socket-path vetting (real's Bns).
+func TestExplicitSocketPathVet(t *testing.T) {
+	if err := vetExplicitSocketPath("relative/sock.sock"); err == nil {
+		t.Fatal("relative path accepted")
+	}
+	if err := vetExplicitSocketPath("/tmp/../etc/x.sock"); err == nil {
+		t.Fatal("'..' segment accepted")
+	}
+	if err := vetExplicitSocketPath("/" + strings.Repeat("a", peerSockPathMax) + ".sock"); err == nil {
+		t.Fatal("overlong path accepted")
+	}
+	// good: a missing dir under our temp root is created 0700
+	good := filepath.Join(t.TempDir(), "priv", "x.sock")
+	if err := vetExplicitSocketPath(good); err != nil {
+		t.Fatalf("valid explicit path refused: %v", err)
+	}
+	fi, _ := os.Stat(filepath.Dir(good))
+	if fi == nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("explicit dir not created 0700")
+	}
+	// a group/other-readable dir is refused
+	lax := t.TempDir()
+	os.Chmod(lax, 0o755)
+	if err := vetExplicitSocketPath(filepath.Join(lax, "x.sock")); err == nil {
+		t.Fatal("non-private explicit dir accepted")
 	}
 }

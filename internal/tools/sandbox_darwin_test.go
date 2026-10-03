@@ -79,6 +79,7 @@ func TestSeatbeltProfileProxy(t *testing.T) {
 	for _, want := range []string{
 		"(deny network*)",
 		fmt.Sprintf(`(allow network-outbound (remote ip "localhost:%d"))`, px.Port()),
+		fmt.Sprintf(`(allow network-outbound (remote ip "localhost:%d"))`, px.SocksPort()),
 		`(literal "` + ca.CertPath + `")`, // CA readable inside the deny-read $HOME
 	} {
 		if !strings.Contains(p, want) {

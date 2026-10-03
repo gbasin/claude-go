@@ -68,7 +68,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			}
 		}
 		l.PermMode = order[(idx+1)%len(order)]
-		fmt.Printf("\n%s⏵⏵ %s mode%s\n", yellow, l.PermMode, reset)
+		compInline(fmt.Sprintf("\r\n%s⏵⏵ %s mode%s\r\n", yellow, l.PermMode, reset))
 	}
 	var wantQuit atomic.Bool
 	pr := &promptUI{}
@@ -87,21 +87,29 @@ func RunWithStore(l *agent.Loop, store Store) {
 			return nil
 		}
 		ed.onKillAgents = func() {
-			fmt.Println("\r\x1b[2K  killing background tasks…")
+			compInline("\r\x1b[2K  killing background tasks…\r\n")
 			n := l.ToolCtx.BgTasks.KillAll()
-			fmt.Printf("  %d background tasks stopped\n", n)
+			compInline(fmt.Sprintf("  %d background tasks stopped\r\n", n))
 		}
 		ed.onToggleExpand = func() {
 			// ctrl+o: full transcript view; second ctrl+o (or esc/q) returns
+			if ed.zoneEdit {
+				// the box lives in the zone — hand the screen to the
+				// transcript dump; compResume reinstalls box+status
+				compSuspend()
+				showTranscript(l, ks)
+				compResume()
+				return
+			}
 			showTranscript(l, ks)
 			os.Stdout.WriteString("╭─╮\n")
 			ed.redraw()
 		}
 		ed.onToggleTodos = func() {
 			if s := tools.TodosText(); s != "" {
-				fmt.Println("\r\x1b[2K" + dim + s + reset)
+				compInline("\r\x1b[2K" + dim + s + reset + "\r\n")
 			} else {
-				fmt.Println("\r\x1b[2K  (no todos)")
+				compInline("\r\x1b[2K  (no todos)\r\n")
 			}
 		}
 	}
@@ -279,6 +287,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			thinkingSeen = false
 			spin := newSpinner()
 			*spinRef = *spin
+			tools.SetPeerSessionBusy(true) // held-queue peer messages mid-turn
 			ctx, cancel := context.WithCancel(context.Background())
 			start := time.Now()
 			respDone := make(chan struct{})
@@ -326,6 +335,8 @@ func RunWithStore(l *agent.Loop, store Store) {
 			}()
 			_, err := l.Ask(ctx, expandMentions(l, line))
 			spin.stop()
+			tools.SetPeerSessionBusy(false)
+			tools.FlushHeldPeerMessages() // release held peer msgs at the boundary
 			compClearFooter()
 			fmt.Fprint(os.Stderr, "\r\x1b[K")
 			fireStopHook(l)

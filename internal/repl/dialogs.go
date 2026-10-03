@@ -33,7 +33,7 @@ func toggleBrief() {
 	if on {
 		state = "on — tool output collapses to 1 line"
 	}
-	fmt.Printf("\r\x1b[2K  %sbrief mode %s%s\r\n", dim, state, reset)
+	compInline(fmt.Sprintf("\r\x1b[2K  %sbrief mode %s%s\r\n", dim, state, reset))
 }
 
 // askEx is the full permission prompt (mod_1477): an optional
