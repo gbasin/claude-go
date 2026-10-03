@@ -69,7 +69,9 @@ func platformSandboxAvailable(s *SandboxSettings) error {
 // Mount order matters: later binds shadow earlier ones, so the writable set
 // goes on, then denyWrite read-only re-binds, then denyRead masks, then
 // allowRead unmasks (ro-bind sources resolve against the host fs).
-func platformSandboxWrap(script string, s *SandboxSettings, cwd string, px *netproxy.Proxy) (string, error) {
+// cred carries the credential-mask plan: deny paths get masked, mask files
+// get a --ro-bind of their sentinel content (real's maskedFileBinds).
+func platformSandboxWrap(script string, s *SandboxSettings, cwd string, px *netproxy.Proxy, cred *credPlan) (string, error) {
 	bwrap, err := bwrapBin(s)
 	if err != nil {
 		return "", fmt.Errorf("bwrap not found: %w", err)
@@ -80,7 +82,8 @@ func platformSandboxWrap(script string, s *SandboxSettings, cwd string, px *netp
 		"--dev", "/dev",
 		"--proc", "/proc",
 		"--tmpfs", "/tmp",
-		"--setenv", "TMPDIR", "/tmp",
+		"--dir", "/tmp/claude", // real's TMPDIR target exists inside the tmpfs
+		"--setenv", "TMPDIR", "/tmp/claude",
 	}
 
 	bindIf := func(flag string, p string) {
@@ -110,8 +113,15 @@ func platformSandboxWrap(script string, s *SandboxSettings, cwd string, px *netp
 		for _, p := range expandSandboxPaths(s.Filesystem.DenyWrite, cwd) {
 			bindIf("--ro-bind", p)
 		}
-		for _, p := range expandSandboxPaths(s.Credentials.Files, cwd) {
-			bindIf("--ro-bind", p)
+		if cred != nil {
+			// credential mode:"deny" + degraded paths are unreadable…
+			for _, p := range cred.denyRead {
+				maskRead(p)
+			}
+			// …while mode:"mask" files bind their sentinel content in place
+			for _, b := range cred.binds {
+				args = append(args, "--ro-bind", b[1], b[0])
+			}
 		}
 		// denyRead masked, then allowRead re-exposed
 		for _, p := range expandSandboxPaths(s.Filesystem.DenyRead, cwd) {

@@ -139,3 +139,35 @@ func TestBgTaskKill(t *testing.T) {
 		t.Error("task not stopped")
 	}
 }
+
+// sessions/<pid>.json gains bridgeSessionId when Remote Control adopts a
+// session (mod_2173.js teleport gate reads this field), and clears cleanly.
+func TestBridgeSessionIDField(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	if err := RegisterSession("sess-local", t.TempDir(), "n"); err != nil {
+		t.Fatal(err)
+	}
+	defer UnregisterSession("sess-local")
+	read := func() map[string]any {
+		b, err := os.ReadFile(sessionFile(os.Getpid()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if json.Unmarshal(b, &m) != nil {
+			t.Fatal("bad session file json")
+		}
+		return m
+	}
+	if _, ok := read()["bridgeSessionId"]; ok {
+		t.Fatal("bridgeSessionId present before connect")
+	}
+	SetBridgeSessionID("cse_remote1")
+	if got := read()["bridgeSessionId"]; got != "cse_remote1" {
+		t.Fatalf("bridgeSessionId=%v", got)
+	}
+	SetBridgeSessionID("")
+	if _, ok := read()["bridgeSessionId"]; ok {
+		t.Fatal("bridgeSessionId not cleared")
+	}
+}

@@ -22,7 +22,7 @@ func TestSeatbeltProfile(t *testing.T) {
 		},
 		Network: &SandboxNetwork{DeniedDomains: []string{"*"}},
 	}
-	p := buildSeatbeltProfile(s, cwd, nil)
+	p := buildSeatbeltProfile(s, cwd, nil, nil)
 	for _, want := range []string{
 		"(version 1)", "(allow default)",
 		`(subpath "/etc")`,        // deny-read list
@@ -53,7 +53,7 @@ func TestSeatbeltProfileFilesystemDisabled(t *testing.T) {
 		Filesystem: SandboxFilesystem{Disabled: true},
 		Network:    &SandboxNetwork{DeniedDomains: []string{"*"}},
 	}
-	p := buildSeatbeltProfile(s, t.TempDir(), nil)
+	p := buildSeatbeltProfile(s, t.TempDir(), nil, nil)
 	if strings.Contains(p, "file-read") || strings.Contains(p, "file-write") {
 		t.Error("filesystem.disabled should skip all fs rules")
 	}
@@ -75,7 +75,7 @@ func TestSeatbeltProfileProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer px.Close()
-	p := buildSeatbeltProfile(s, t.TempDir(), px)
+	p := buildSeatbeltProfile(s, t.TempDir(), px, nil)
 	for _, want := range []string{
 		"(deny network*)",
 		fmt.Sprintf(`(allow network-outbound (remote ip "localhost:%d"))`, px.Port()),
@@ -87,13 +87,13 @@ func TestSeatbeltProfileProxy(t *testing.T) {
 		}
 	}
 	// missing proxy on an allow-list config must still deny egress
-	p = buildSeatbeltProfile(s, t.TempDir(), nil)
+	p = buildSeatbeltProfile(s, t.TempDir(), nil, nil)
 	if !strings.Contains(p, "(deny network*)") || strings.Contains(p, "localhost:") {
 		t.Error("failed proxy should fall back to blunt deny-all")
 	}
 	// allowAllLocal opens loopback + binds like real's allowLocalBinding
 	s.Network.AllowAllLocal = true
-	p = buildSeatbeltProfile(s, t.TempDir(), px)
+	p = buildSeatbeltProfile(s, t.TempDir(), px, nil)
 	for _, want := range []string{
 		`(allow network-bind (local ip "*:*"))`,
 		`(allow network-outbound (remote ip "localhost:*"))`,
@@ -127,7 +127,7 @@ func TestSandboxWrapProxyEnv(t *testing.T) {
 		t.Log("warn:", warn)
 	}
 	var httpProxy, sslCert string
-	for _, e := range env {
+	for _, e := range env.Set {
 		if strings.HasPrefix(e, "HTTP_PROXY=") {
 			httpProxy = e
 		}
@@ -136,7 +136,7 @@ func TestSandboxWrapProxyEnv(t *testing.T) {
 		}
 	}
 	if httpProxy == "" || sslCert == "" {
-		t.Fatalf("expected proxy env vars, got %v", env)
+		t.Fatalf("expected proxy env vars, got %v", env.Set)
 	}
 	if !strings.Contains(got, "sandbox-exec") {
 		t.Fatalf("expected sandbox-exec wrap, got %q", got)
@@ -152,7 +152,7 @@ func TestSeatbeltProfileManagedReadOnly(t *testing.T) {
 			AllowRead:                 []string{"/user-allow"},
 		},
 	}
-	p := buildSeatbeltProfile(s, t.TempDir(), nil)
+	p := buildSeatbeltProfile(s, t.TempDir(), nil, nil)
 	if strings.Contains(p, "/user-allow") {
 		t.Error("allowManagedReadPathsOnly should drop non-policy allowRead")
 	}

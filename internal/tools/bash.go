@@ -201,8 +201,9 @@ func (c *Context) shellCmd(ctx context.Context, command string, disableSandbox b
 	}
 	cmd := exec.CommandContext(ctx, shell, "-c", wrapped)
 	cmd.Dir = c.CWD
-	// env vars appended last win over duplicates in os.Environ()
-	cmd.Env = append(os.Environ(), env...)
+	// Set vars appended last win over duplicates; Unset vars drop out of
+	// the inherited env (credential mode:"deny" entries).
+	cmd.Env = env.applyTo(os.Environ())
 	return cmd, warn, nil
 }
 
@@ -218,6 +219,11 @@ func (c *Context) runForeground(command string, timeoutMs int, disableSandbox bo
 	cmd.Stderr = &out
 	err = cmd.Run()
 	res := c.finishBash(&out, command, err, ctx.Err() == context.DeadlineExceeded, timeoutMs)
+	// proxy-recorded network denies tagged to this command (real appends
+	// the same <sandbox_violations> block to the tool output)
+	if vs := sandboxViolations(command); len(vs) > 0 {
+		res.Content += "\n<sandbox_violations>\n" + strings.Join(vs, "\n") + "\n</sandbox_violations>"
+	}
 	if warn != "" {
 		res.Content = warn + "\n" + res.Content
 	}

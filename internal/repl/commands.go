@@ -414,6 +414,8 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		}
 		l.Model = arg
 		fmt.Println("  model →", l.Model)
+	case "voice":
+		voiceCmd(l, ed, arg)
 	case "effort":
 		effortCmd(l, arg)
 	case "fast":
@@ -569,6 +571,7 @@ var helpTable = map[string]helpEntry{
 	"terminal-setup":   {"Config", "install terminal keybindings", false},
 	"theme":            {"Config", "set theme", false},
 	"vim":              {"Config", "editor mode moved to /config", false},
+	"voice":            {"Config", "[hold|tap|off] toggle voice dictation", false},
 	// Tools (prompt skills + tool-ish builtins)
 	"batch":                    {"Tools", "<instruction> plan a large change; agents open PRs", false},
 	"debug":                    {"Tools", "[issue] investigate problems with debug logging", false},

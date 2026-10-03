@@ -23,6 +23,9 @@ type Settings struct {
 	DisabledMcpjsonServers     []string          `json:"disabledMcpjsonServers"`
 	IncludeCoAuthoredBy        *bool             `json:"includeCoAuthoredBy"`
 	AutoCompactWindow          string            `json:"autoCompactWindow"`
+	// disableRemoteControl gates `claude remote-control` / Remote Control;
+	// true in ANY tier (managed, user, project) disables it (mod_1259.js Xe()).
+	DisableRemoteControl bool `json:"disableRemoteControl"`
 	// policy-tier rules — always evaluated, never overridden
 	ManagedDeny  []string `json:"-"`
 	ManagedAsk   []string `json:"-"`
@@ -50,6 +53,9 @@ func Load(cwd string) *Settings {
 	managed := &Settings{}
 	if b, err := os.ReadFile(managedSettingsPath()); err == nil {
 		json.Unmarshal(b, managed)
+	}
+	if managed.DisableRemoteControl {
+		merged.DisableRemoteControl = true
 	}
 	merged.ManagedDeny = append(merged.ManagedDeny, managedPerms(managed, "deny")...)
 	merged.ManagedAsk = append(merged.ManagedAsk, managedPerms(managed, "ask")...)
@@ -107,6 +113,9 @@ func Load(cwd string) *Settings {
 				merged.EnabledMcpjsonServers = append(merged.EnabledMcpjsonServers, s.EnabledMcpjsonServers...)
 				merged.DisabledMcpjsonServers = append(merged.DisabledMcpjsonServers, s.DisabledMcpjsonServers...)
 				merged.IncludeCoAuthoredBy = s.IncludeCoAuthoredBy
+				if s.DisableRemoteControl {
+					merged.DisableRemoteControl = true
+				}
 			}
 		}
 	}

@@ -14,10 +14,12 @@ import (
 
 	"claude-go/internal/api"
 	"claude-go/internal/auth"
+	"claude-go/internal/bridge"
 	"claude-go/internal/mcp"
 	"claude-go/internal/netproxy"
 	"claude-go/internal/plugins"
 	"claude-go/internal/session"
+	"claude-go/internal/tools"
 )
 
 // mcpSub implements `claude-go mcp list|add|remove`.
@@ -506,6 +508,35 @@ func setupTokenSub() {
 		fatal("setup-token: %v", err)
 	}
 	fmt.Println("stored in", p)
+}
+
+// remoteControlSub: `claude remote-control` / `claude rc` — the Remote
+// Control enable path (real: mod_0690.js enterRemoteControl). The gate and
+// poll-loop skeleton live in internal/bridge; spawning local REPL sessions
+// for incoming work is backend-gated and intentionally not faked.
+func remoteControlSub(args []string) {
+	creds, credErr := auth.Load()
+	hasOAuth := credErr == nil && creds != nil && !creds.IsAPIKey && creds.AccessToken != ""
+	settings := config.Load(mustGetwd())
+	deps := &bridge.Deps{
+		DisableRemoteControl: settings.DisableRemoteControl,
+		HasOAuth:             hasOAuth,
+		Version:              api.Version,
+	}
+	if hasOAuth {
+		deps.Token = func() string {
+			t, err := creds.Token()
+			if err != nil {
+				return ""
+			}
+			return t
+		}
+		deps.Refresh = func() bool { return creds.Refresh() == nil }
+	}
+	deps.OnSessionID = tools.SetBridgeSessionID
+	if code := bridge.RunCLI(args, deps); code != 0 {
+		os.Exit(code)
+	}
 }
 
 // sandboxSub: claude-go sandbox trust — install the local MITM CA into the

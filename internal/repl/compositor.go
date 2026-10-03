@@ -82,7 +82,11 @@ func compRowsLocked() []string {
 		rows = append(rows, compBox...)
 		return append(rows, compStatus)
 	}
-	return []string{compDyn, compStatus}
+	// turn mode: spinner + pinned input box (real keeps the box live —
+	// queue-typing is visible) + status
+	rows := []string{compDyn}
+	rows = append(rows, compBox...)
+	return append(rows, compStatus)
 }
 
 // compInit pins the live zone and starts resize tracking. No-op off-TTY, on
@@ -221,7 +225,8 @@ func compExitEdit(echo []string) {
 		return
 	}
 	compMu.Lock()
-	compEdit, compBox = false, nil
+	compEdit = false
+	compBox = queueBoxRows("") // box stays pinned during turns (real parity)
 	compCur = false
 	if compZoneH > 0 {
 		compFrameLocked(echo)
@@ -444,8 +449,17 @@ func compResizeRowsLocked(b *strings.Builder, rows []string, echo []string) bool
 		fmt.Fprintf(b, "\x1b[%d;1H\x1b[%dS", compH, n-compZoneH)
 		fmt.Fprintf(b, "\x1b[1;%dr", compH-n)
 		compZoneH, compPainted = n, nil
+		// a zone GROW can still carry an echo (edit→turn keeps the box
+		// pinned but the submitted box still belongs in scrollback)
+		if len(echo) > 0 {
+			fmt.Fprintf(b, "\x1b[%d;1H", compH-n) // last scroll-region row
+			for _, ln := range echo {
+				b.WriteString(ln)
+				b.WriteString("\r\n")
+			}
+		}
 		compPaintRowsLocked(b, rows)
-		return false
+		return len(echo) > 0
 	}
 	// shrink: the released rows (old zone top) go back to the transcript —
 	// clear them, re-pin, then print the echo at the region bottom
@@ -659,4 +673,31 @@ func ansiLen(s string, i int) int {
 		return 2
 	}
 	return 1
+}
+
+// queueBoxRows renders the small prompt box for the pinned turn-mode zone.
+func queueBoxRows(draft string) []string {
+	w := compW
+	if w <= 0 {
+		w = 80
+	}
+	mid := "│ > " + draft
+	if visWidth(mid) > w-1 {
+		mid = "│ > …" + draft[max(0, len(draft)-(w-8)):]
+	}
+	return []string{"╭─╮", mid, "╰─╯"}
+}
+
+// compQueueDraft renders queued input into the pinned box while the agent
+// runs — real shows queued text accumulating in the input box.
+func compQueueDraft(draft string) {
+	if !compActive.Load() {
+		return
+	}
+	compMu.Lock()
+	if !compEdit { // only while in turn mode
+		compBox = queueBoxRows(draft)
+		compFrameLocked(nil)
+	}
+	compMu.Unlock()
 }

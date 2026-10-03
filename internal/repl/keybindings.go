@@ -67,6 +67,10 @@ var kbActions = map[string]func(*editor) *readResult{
 	"chat:thinkingToggle": func(e *editor) *readResult { e.toggleThinking(); return nil },
 	"chat:stash":          func(e *editor) *readResult { e.stashLine(); return nil },
 	"app:toggleBrief":     func(e *editor) *readResult { toggleBrief(); return nil },
+	// voice:pushToTalk — real binds space in Chat; the space-press path is
+	// handled in insertKey (printable chars aren't keystrokes). This entry
+	// lets users rebind to a modifier combo via keybindings.json.
+	"voice:pushToTalk": func(e *editor) *readResult { e.voiceToggle(); return nil },
 }
 
 // defaultKeybindings mirrors the relevant rows of the CC binding table.
@@ -100,6 +104,7 @@ var defaultKeybindings = []struct {
 	{"Chat", "ctrl+x enter", "chat:queueSubmit"},
 	{"Chat", "ctrl+x ctrl+s", "chat:sendNow"},
 	{"Chat", "ctrl+enter", "chat:sendNow"},
+	{"Chat", "space", "voice:pushToTalk"}, // real's default (mod_0245)
 }
 
 // keystroke renders a decoded key into canonical stroke form, or "" if the

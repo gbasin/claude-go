@@ -1,7 +1,13 @@
 package tools
 
 import (
+	"claude-go/internal/netproxy"
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -18,7 +24,7 @@ func TestSandboxApplyMerging(t *testing.T) {
 		Enabled:                  boolp(true),
 		AllowUnsandboxedCommands: boolp(false),
 		Network:                  &sandboxNetJSON{AllowedDomains: []string{"a.com"}},
-	}, true)
+	}, tierPolicy)
 	// later user/project/local files cannot relax locked scalars,
 	// but lists still merge
 	s.apply(&sandboxFileJSON{
@@ -27,7 +33,7 @@ func TestSandboxApplyMerging(t *testing.T) {
 		AutoAllowBashIfSandboxed: boolp(false),
 		ExcludedCommands:         []string{"docker *"},
 		Network:                  &sandboxNetJSON{AllowedDomains: []string{"b.com"}},
-	}, false)
+	}, tierUser)
 	if !s.Enabled {
 		t.Error("policy-enabled was overridden by user file")
 	}
@@ -201,4 +207,281 @@ func TestSandboxAutoAllow(t *testing.T) {
 	if SandboxAutoAllow("/x") {
 		t.Error("disabled sandbox should report false")
 	}
+}
+
+// ---------- credentials + tiered network merge ----------
+
+func TestSandboxManagedDomainsOnly(t *testing.T) {
+	s := &SandboxSettings{locked: map[string]bool{}}
+	// policy tier pins allowManagedDomainsOnly + its own allowedDomains
+	s.apply(&sandboxFileJSON{Network: &sandboxNetJSON{
+		AllowedDomains:          []string{"policy.com"},
+		AllowManagedDomainsOnly: boolp(true),
+	}}, tierPolicy)
+	// user + project domains are dropped from the effective allowlist
+	s.apply(&sandboxFileJSON{Network: &sandboxNetJSON{
+		AllowedDomains:          []string{"user.com"},
+		AllowManagedDomainsOnly: boolp(false), // non-policy can't unset
+	}}, tierUser)
+	s.apply(&sandboxFileJSON{Network: &sandboxNetJSON{
+		AllowedDomains: []string{"proj.com"},
+	}}, tierProject)
+	got := s.Network.effectiveAllowed()
+	if len(got) != 1 || got[0] != "policy.com" {
+		t.Fatalf("allowManagedDomainsOnly effective = %v", got)
+	}
+	if !s.Network.AllowManagedDomainsOnly {
+		t.Error("user tier should not clear a policy-managed flag")
+	}
+	// a user-tier allowManagedDomainsOnly:true is ignored (policy only)
+	s2 := &SandboxSettings{locked: map[string]bool{}}
+	s2.apply(&sandboxFileJSON{Network: &sandboxNetJSON{
+		AllowedDomains:          []string{"u.com"},
+		AllowManagedDomainsOnly: boolp(true),
+	}}, tierUser)
+	if s2.Network.AllowManagedDomainsOnly {
+		t.Error("allowManagedDomainsOnly from user settings must be ignored")
+	}
+	if len(s2.Network.effectiveAllowed()) != 1 || s2.Network.effectiveAllowed()[0] != "u.com" {
+		t.Error("without the flag, user domains apply")
+	}
+}
+
+func TestSandboxStrictAllowlistTiers(t *testing.T) {
+	s := &SandboxSettings{locked: map[string]bool{}}
+	// project-tier strictAllowlist is ignored entirely (real semantics)
+	s.apply(&sandboxFileJSON{Network: &sandboxNetJSON{
+		StrictAllowlist: boolp(true),
+		AllowedDomains:  []string{"proj.com"},
+	}}, tierProject)
+	if s.Network.StrictAllowlist {
+		t.Error("project-tier strictAllowlist must be ignored")
+	}
+	// user-tier sets it — and project-tier allowedDomains drop out
+	s2 := &SandboxSettings{locked: map[string]bool{}}
+	s2.apply(&sandboxFileJSON{Network: &sandboxNetJSON{
+		AllowedDomains: []string{"user.com"},
+	}}, tierUser)
+	s2.apply(&sandboxFileJSON{Network: &sandboxNetJSON{
+		StrictAllowlist: boolp(true),
+	}}, tierUser)
+	s2.apply(&sandboxFileJSON{Network: &sandboxNetJSON{
+		AllowedDomains: []string{"proj.com"},
+	}}, tierProject)
+	if !s2.Network.StrictAllowlist {
+		t.Error("user-tier strictAllowlist should apply")
+	}
+	got := s2.Network.effectiveAllowed()
+	if len(got) != 1 || got[0] != "user.com" {
+		t.Fatalf("strict allowlist should drop project domains: %v", got)
+	}
+}
+
+func TestSandboxDeniedDomainReasonsMerge(t *testing.T) {
+	s := &SandboxSettings{locked: map[string]bool{}}
+	s.apply(&sandboxFileJSON{Network: &sandboxNetJSON{
+		DeniedDomains:       []string{"github.com:22"},
+		DeniedDomainReasons: map[string]string{"github.com:22": "ssh blocked"},
+	}}, tierProject)
+	if s.Network.DeniedDomainReasons["github.com:22"] != "ssh blocked" {
+		t.Fatalf("reasons = %v", s.Network.DeniedDomainReasons)
+	}
+	s.apply(&sandboxFileJSON{Network: &sandboxNetJSON{
+		DeniedDomainReasons: map[string]string{"github.com:22": "later wins"},
+	}}, tierLocal)
+	if s.Network.DeniedDomainReasons["github.com:22"] != "later wins" {
+		t.Error("later sources should overwrite per-key")
+	}
+}
+
+func TestSandboxCredentialsSchemaParse(t *testing.T) {
+	s := &SandboxSettings{locked: map[string]bool{}}
+	raw := `{"sandbox": {
+		"enabled": true,
+		"credentials": {
+			"files": [{"path": "~/.aws/credentials", "mode": "mask", "extract": "key=(\\S+)", "injectHosts": ["*.aws.internal"]}],
+			"envVars": [
+				{"name": "MY_TOKEN", "mode": "mask"},
+				{"name": "AWS_SECRET_ACCESS_KEY", "mode": "deny"}
+			],
+			"allowPlaintextInject": true,
+			"awsPairs": [{"accessKeyIdVar": "AK", "secretAccessKeyVar": "SK", "sessionTokenVar": "ST"}],
+			"sigv4": {"streaming": "passthrough"}
+		}
+	}}`
+	var outer struct {
+		Sandbox sandboxFileJSON `json:"sandbox"`
+	}
+	if err := json.Unmarshal([]byte(raw), &outer); err != nil {
+		t.Fatal(err)
+	}
+	s.apply(&outer.Sandbox, tierProject)
+	if len(s.Credentials.Files) != 1 || s.Credentials.Files[0].Mode != "mask" ||
+		s.Credentials.Files[0].Extract != `key=(\S+)` {
+		t.Fatalf("files = %+v", s.Credentials.Files)
+	}
+	if len(s.Credentials.EnvVars) != 2 || s.Credentials.EnvVars[1].Mode != "deny" {
+		t.Fatalf("envVars = %+v", s.Credentials.EnvVars)
+	}
+	if !s.Credentials.AllowPlaintextInject {
+		t.Error("allowPlaintextInject not parsed")
+	}
+	if len(s.Credentials.AWSPairs) != 1 || s.Credentials.AWSPairs[0].SessionTokenVar != "ST" {
+		t.Fatalf("awsPairs = %+v", s.Credentials.AWSPairs)
+	}
+	if s.Credentials.SigV4 == nil || s.Credentials.SigV4.Streaming != "passthrough" {
+		t.Fatalf("sigv4 = %+v", s.Credentials.SigV4)
+	}
+}
+
+// prepareCredentials masks env values into registered sentinels and drops
+// deny-mode vars; the proxy store resolves sentinel→real for allowed hosts.
+func TestPrepareCredentialsEnv(t *testing.T) {
+	t.Setenv("MY_TOKEN", "real-token-abc")
+	t.Setenv("DENIED_KEY", "shhh")
+	px := netproxy.New(nil)
+	s := &SandboxSettings{
+		locked:  map[string]bool{},
+		Network: &SandboxNetwork{AllowedDomains: []string{"api.example.com:443"}},
+		Credentials: SandboxCredentials{
+			EnvVars: []SandboxCredVar{
+				{Name: "MY_TOKEN", Mode: "mask"},
+				{Name: "DENIED_KEY", Mode: "deny"},
+			},
+		},
+	}
+	plan, err := s.prepareCredentials(px, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var masked string
+	for _, e := range plan.setEnv {
+		if strings.HasPrefix(e, "MY_TOKEN=") {
+			masked = strings.TrimPrefix(e, "MY_TOKEN=")
+		}
+	}
+	if masked == "" || masked == "real-token-abc" || !strings.HasPrefix(masked, "fake_value_") {
+		t.Fatalf("masked env = %q", masked)
+	}
+	if !containsStr(plan.unsetEnv, "DENIED_KEY") {
+		t.Fatalf("deny-mode var not unset: %v", plan.unsetEnv)
+	}
+	// the sentinel is registered, injectable at the allowed host
+	// (default injectHosts = allowedDomains host patterns — port stripped)
+	if real, ok := px.Creds.LookupReal(masked); !ok || real != "real-token-abc" {
+		t.Fatalf("sentinel not registered: %v", ok)
+	}
+	if got := px.Creds.SubstituteString("Authorization: Bearer "+masked, "api.example.com"); got != "Authorization: Bearer real-token-abc" {
+		t.Fatalf("substitution at allowed host = %q", got)
+	}
+	if got := px.Creds.SubstituteString(masked, "evil.com"); got != masked {
+		t.Fatal("sentinel substituted at a non-injectable host")
+	}
+}
+
+// extract masks only the captured group inside a larger value; a no-match
+// honors onExtractNoMatch.
+func TestPrepareCredentialsExtract(t *testing.T) {
+	t.Setenv("CONF", "user=bob token:tok_12345 end")
+	px := netproxy.New(nil)
+	s := &SandboxSettings{
+		locked:  map[string]bool{},
+		Network: &SandboxNetwork{AllowedDomains: []string{"*"}},
+		Credentials: SandboxCredentials{EnvVars: []SandboxCredVar{
+			{Name: "CONF", Mode: "mask", Extract: `token:(\S+)`},
+		}},
+	}
+	plan, err := s.prepareCredentials(px, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.setEnv) != 1 {
+		t.Fatalf("setEnv = %v warns=%v", plan.setEnv, plan.warns)
+	}
+	masked := strings.TrimPrefix(plan.setEnv[0], "CONF=")
+	if strings.Contains(masked, "tok_12345") || !strings.Contains(masked, "fake_value_") ||
+		!strings.HasPrefix(masked, "user=bob token:") || !strings.HasSuffix(masked, " end") {
+		t.Fatalf("partial mask wrong: %q", masked)
+	}
+
+	// onExtractNoMatch=error aborts the wrap
+	s.Credentials.EnvVars[0].Extract = `nope:(\S+)`
+	s.Credentials.EnvVars[0].OnExtractNoMatch = "error"
+	if _, err := s.prepareCredentials(px, t.TempDir()); err == nil {
+		t.Error("onExtractNoMatch=error should fail the wrap")
+	}
+	// deny → unset
+	s.Credentials.EnvVars[0].OnExtractNoMatch = "deny"
+	plan, err = s.prepareCredentials(px, t.TempDir())
+	if err != nil || !containsStr(plan.unsetEnv, "CONF") {
+		t.Fatalf("deny degrade: %v %+v", err, plan)
+	}
+	// warn → passes through, warning recorded
+	s.Credentials.EnvVars[0].OnExtractNoMatch = "warn"
+	plan, err = s.prepareCredentials(px, t.TempDir())
+	if err != nil || len(plan.setEnv) != 0 || len(plan.warns) == 0 {
+		t.Fatalf("warn degrade: %v %+v", err, plan)
+	}
+}
+
+// Masked credential files: on darwin they degrade to denyRead (real's
+// documented limitation), on linux they produce bind pairs.
+func TestPrepareCredentialsFile(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "creds.txt")
+	os.WriteFile(fp, []byte("token: file_secret_42"), 0o600)
+	px := netproxy.New(nil)
+	s := &SandboxSettings{
+		locked:  map[string]bool{},
+		Network: &SandboxNetwork{AllowedDomains: []string{"*"}},
+		Credentials: SandboxCredentials{Files: []SandboxCredFile{
+			{Path: fp, Mode: "mask", Extract: `token:\s*(\S+)`},
+			{Path: filepath.Join(dir, "other"), Mode: "deny"},
+		}},
+	}
+	plan, err := s.prepareCredentials(px, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsStr(plan.denyRead, filepath.Join(dir, "other")) {
+		t.Fatalf("deny-mode file not in denyRead: %v", plan.denyRead)
+	}
+	if runtime.GOOS == "darwin" {
+		if !containsStr(plan.denyRead, fp) {
+			t.Fatalf("masked file should degrade to deny on darwin: %v", plan.denyRead)
+		}
+		found := false
+		for _, w := range plan.warns {
+			if strings.Contains(w, "degrades to deny on macOS") {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("expected the macOS degradation warning")
+		}
+	} else {
+		if len(plan.binds) != 1 || plan.binds[0][0] != fp {
+			t.Fatalf("binds = %v", plan.binds)
+		}
+		// the fake file carries the masked content, not the secret
+		b, _ := os.ReadFile(plan.binds[0][1])
+		if strings.Contains(string(b), "file_secret_42") ||
+			!strings.Contains(string(b), "fake_value_") {
+			t.Fatalf("fake file content = %q", b)
+		}
+	}
+	// the sentinel is registered either way
+	subs := px.Creds.SentinelsForHost("anything.test")
+	if len(subs) == 0 {
+		t.Fatal("masked file sentinel not registered")
+	}
+}
+
+func containsStr(ss []string, v string) bool {
+	for _, s := range ss {
+		if s == v {
+			return true
+		}
+	}
+	return false
 }
