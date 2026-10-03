@@ -13,7 +13,6 @@ import (
 	"claude-go/internal/agent"
 	"claude-go/internal/api"
 	"claude-go/internal/perms"
-	"claude-go/internal/session"
 	"claude-go/internal/tools"
 
 	"golang.org/x/term"
@@ -44,6 +43,8 @@ func Run(l *agent.Loop) {
 func RunWithStore(l *agent.Loop, store Store) {
 	l.Entrypoint = "cli"
 	ed := newEditor()
+	ed.vim = vimEnabled()
+	ed.completer = slashCompleter
 	pr := &promptUI{}
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		runPipe(l)
@@ -105,16 +106,16 @@ func RunWithStore(l *agent.Loop, store Store) {
 	fmt.Printf("%smodel: %s · /help for commands · esc to interrupt · ctrl-D to exit%s\n\n", dim, l.Model, reset)
 
 	for {
-		line, ok, intr := ed.readLine(ks)
-		if intr {
-			fmt.Println("^C (press again to exit)")
-			continue
-		}
-		if !ok {
+		printStatus(l)
+		res := ed.readLine(ks)
+		if res.quit {
 			fmt.Println()
 			return
 		}
-		line = strings.TrimSpace(line)
+		if !res.ok {
+			continue
+		}
+		line := strings.TrimSpace(res.line)
 		if line == "" {
 			continue
 		}
@@ -220,75 +221,6 @@ func summarize(name string, input json.RawMessage) string {
 	return "(" + trunc(s, 90) + ")"
 }
 
-func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bool) {
-	fields := strings.Fields(line)
-	cmd := strings.TrimPrefix(fields[0], "/")
-	arg := ""
-	if len(fields) > 1 {
-		arg = strings.Join(fields[1:], " ")
-	}
-	switch cmd {
-	case "exit", "quit":
-		return true
-	case "help":
-		fmt.Println("  /model [name]  show or set model")
-		fmt.Println("  /clear         clear conversation context")
-		fmt.Println("  /compact       compact the conversation (not yet implemented)")
-		fmt.Println("  /cost          session usage (not yet implemented)")
-		fmt.Println("  /exit          quit")
-	case "model":
-		if arg == "" {
-			fmt.Println("  model:", l.Model)
-		} else {
-			l.Model = arg
-			fmt.Println("  model set to", arg)
-		}
-	case "clear":
-		l.Messages = nil
-		fmt.Println("  context cleared")
-	case "compact":
-		fmt.Println("  compacting…")
-		ctx := context.Background()
-		if err := l.Compact(ctx, l.Transcript); err != nil {
-			fmt.Println("  compact failed:", err)
-		} else {
-			fmt.Println("  context compacted")
-		}
-	case "cost", "usage":
-		u := l.UsageTotal
-		fmt.Printf("  input: %d  output: %d  cache-read: %d  cache-write: %d\n",
-			u.InputTokens, u.OutputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens)
-	case "status":
-		fmt.Printf("  version: %s\n  model: %s\n  session: %s\n  cwd: %s\n  permission mode: %s\n",
-			api.Version, l.Model, l.Client.SessionID, l.ToolCtx.CWD, l.PermMode)
-	case "add-dir":
-		fmt.Println("  additional dirs are accepted via --add-dir (grant tracked for this session)")
-	case "memory":
-		fmt.Println("  memory dir:", l.CWD)
-	case "mcp":
-		fmt.Println("  MCP servers are loaded from ~/.claude.json and .mcp.json at startup")
-	case "permissions":
-		fmt.Println("  permission mode:", l.PermMode)
-	case "resume":
-		fmt.Println("  recent sessions:")
-		session.Print(l.ToolCtx.CWD)
-		fmt.Println("  restart with: claude-go -r <session-id>")
-	case "export":
-		if l.Transcript != "" {
-			fmt.Println("  transcript:", l.Transcript)
-		} else {
-			fmt.Println("  no transcript")
-		}
-	case "init":
-		fmt.Println(`  tip: ask claude-go to "analyze this codebase and write CLAUDE.md"`)
-	case "config", "agents", "review", "diff", "login", "logout",
-		"doctor", "bug", "vim", "hooks", "output-style":
-		fmt.Printf("  /%s is not yet implemented in claude-go\n", cmd)
-	default:
-		fmt.Printf("  unknown command: /%s (try /help)\n", cmd)
-	}
-	return false
-}
 
 // promptUI renders the y/n/always permission prompt.
 type promptUI struct {
@@ -302,19 +234,21 @@ func (p *promptUI) ask(l *agent.Loop, ks *keySource, name, summary string) bool 
 	if p.always[name] {
 		return true
 	}
-	fmt.Printf("\n%s!%s %s wants to run:\n  %s%s%s\n", yellow, reset, name, bold, trunc(summary, 200), reset)
-	fmt.Printf("  %s[y]%s yes  %s[n]%s no  %s[a]%s always allow %s  ", bold, reset, bold, reset, bold, reset, name)
+	fmt.Printf("\n%sDo you want to proceed?%s\n  %s%s\n  %s%s%s\n",
+		bold, reset, dim, name, reset, trunc(summary, 200), reset)
+	fmt.Printf("  %s1.%s Yes\n  %s2.%s Yes, and don't ask again for %s in %s\n  %s3.%s No\n  ",
+		bold, reset, bold, reset, name, l.ToolCtx.CWD, bold, reset)
 	for k := range ks.ch {
 		switch k.b {
-		case 'y', 'Y', '\r', '\n':
-			fmt.Println("yes")
+		case '1', 'y', 'Y', '\r':
+			fmt.Println("1")
 			return true
-		case 'a', 'A':
-			fmt.Println("always")
+		case '2', 'a', 'A':
+			fmt.Println("2")
 			p.always[name] = true
 			return true
-		case 'n', 'N', 0x1b, 3:
-			fmt.Println("no")
+		case '3', 'n', 'N', 0x1b, 3:
+			fmt.Println("3")
 			return false
 		}
 	}
@@ -423,4 +357,50 @@ func runPipe(l *agent.Loop) {
 
 func fireStopHook(l *agent.Loop) {
 	// SessionEnd/Stop hooks run through agent.Loop's hook runner when present.
+}
+
+func vimEnabled() bool {
+	home, _ := os.UserHomeDir()
+	b, err := os.ReadFile(filepath.Join(home, ".claude.json"))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(b), `"keybindingMode":"vim"`) ||
+		strings.Contains(string(b), `"editorMode":"vim"`)
+}
+
+func slashCompleter(prefix string) []string {
+	var out []string
+	for _, c := range slashCommands {
+		if strings.HasPrefix(c, prefix) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func printStatus(l *agent.Loop) {
+	w, _ := termWidth()
+	left := "  " + l.ToolCtx.CWD
+	right := l.Model + " │ " + l.PermMode + " │ ? for shortcuts"
+	pad := w - len(left) - len(right)
+	if pad < 1 {
+		pad = 1
+	}
+	fmt.Printf("%s%s%s%s%s\n", dim, left, strings.Repeat(" ", pad), right, reset)
+}
+
+var slashCommands = []string{
+	"add-dir", "agents", "alias", "bug", "clear", "color", "compact",
+	"config", "context", "cost", "diff", "doctor", "export", "exit",
+	"feedback", "files", "help", "hooks", "ide", "import", "init",
+	"keybindings", "login", "logout", "mcp", "memory", "model", "output-style",
+	"permissions", "plugin", "privacy-settings", "quit", "release-notes",
+	"resume", "review", "status", "statusline", "tasks", "terminal-setup",
+	"theme", "todos", "usage", "vim",
+}
+
+func termWidth() (int, error) {
+	w, _, err := term.GetSize(int(os.Stdout.Fd()))
+	return w, err
 }

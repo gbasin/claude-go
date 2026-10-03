@@ -25,6 +25,7 @@ type BgTask struct {
 	Err      error
 	ExitCode int
 	TimedOut bool
+	cancel   context.CancelFunc
 }
 
 type Background struct {
@@ -186,6 +187,7 @@ func (c *Context) runBackground(command string, timeoutMs int) Result {
 	id := fmt.Sprintf("b%d", c.BgTasks.seq.Add(1))
 	t := &BgTask{ID: id, Command: command, Started: time.Now(), Done: make(chan struct{})}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
+	t.cancel = cancel
 	cmd := c.shellCmd(ctx, command)
 	cmd.Stdout = &t.Out
 	cmd.Stderr = &t.Out
@@ -247,5 +249,12 @@ func execTaskStop(c *Context, raw json.RawMessage) Result {
 		return Result{Content: fmt.Sprintf("Task %s already finished", id)}
 	default:
 	}
-	return Result{Content: fmt.Sprintf("Stop requested for task %s", id)}
+	if t.cancel != nil {
+		t.cancel()
+	}
+	select {
+	case <-t.Done:
+	case <-time.After(3 * time.Second):
+	}
+	return Result{Content: fmt.Sprintf("Task %s stopped", id)}
 }

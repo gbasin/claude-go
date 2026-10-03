@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"claude-go/internal/api"
 	"claude-go/internal/tools"
@@ -27,16 +30,22 @@ func (r *Runner) RunAgent(c *tools.Context, description, prompt, subagentType, m
 	if m == "" {
 		m = defaultModel
 	}
+	// resolve agent type -> custom system prompt + tool restriction
+	agentPrompt, allowedTools := resolveAgentType(c.CWD, subagentType)
+	if agentPrompt != "" {
+		prompt = agentPrompt + "\n\n" + prompt
+	}
 	sub := &Loop{
-		Client:     r.Client,
-		Model:      m,
-		MaxTokens:  defaultMaxTokens,
-		Effort:     "medium",
-		Entrypoint: r.Entrypoint,
-		PermMode:   r.PermMode,
-		CWD:        c.CWD,
-		User:       r.User,
-		PermRules:  r.PermRules,
+		AllowedTools: allowedTools,
+		Client:       r.Client,
+		Model:        m,
+		MaxTokens:    defaultMaxTokens,
+		Effort:       "medium",
+		Entrypoint:   r.Entrypoint,
+		PermMode:     r.PermMode,
+		CWD:          c.CWD,
+		User:         r.User,
+		PermRules:    r.PermRules,
 		ToolCtx: &tools.Context{
 			Ctx:        c.Ctx,
 			CWD:        c.CWD,
@@ -105,4 +114,47 @@ func (r *Runner) WebSearch(ctx context.Context, query string, allow, block []str
 		}
 	}
 	return out, nil
+}
+
+// resolveAgentType reads ~/.claude/agents/<name>.md and <cwd>/.claude/agents/<name>.md.
+// Returns (system prompt, allowed tool names or nil for all).
+func resolveAgentType(cwd, name string) (string, []string) {
+	home, _ := os.UserHomeDir()
+	for _, dir := range []string{
+		filepath.Join(home, ".claude", "agents"),
+		filepath.Join(cwd, ".claude", "agents"),
+	} {
+		b, err := os.ReadFile(filepath.Join(dir, name+".md"))
+		if err != nil {
+			continue
+		}
+		fm, body := splitFrontmatter(string(b))
+		var allowed []string
+		if tl := fm["tools"]; tl != "" && tl != "*" {
+			for _, t := range strings.Split(tl, ",") {
+				allowed = append(allowed, strings.TrimSpace(t))
+			}
+		}
+		return body, allowed
+	}
+	return "", nil
+}
+
+func splitFrontmatter(s string) (map[string]string, string) {
+	fm := map[string]string{}
+	if !strings.HasPrefix(s, "---") {
+		return fm, s
+	}
+	rest := s[3:]
+	end := strings.Index(rest, "\n---")
+	if end < 0 {
+		return fm, s
+	}
+	for _, line := range strings.Split(rest[:end], "\n") {
+		k, v, ok := strings.Cut(line, ":")
+		if ok {
+			fm[strings.TrimSpace(k)] = strings.TrimSpace(strings.Trim(v, " \t\"'"))
+		}
+	}
+	return fm, strings.TrimSpace(rest[end+4:])
 }

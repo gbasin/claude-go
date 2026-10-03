@@ -30,27 +30,28 @@ type Events struct {
 
 // Loop runs the query/tool-use cycle.
 type Loop struct {
-	Client      *api.Client
-	Model       string
-	MaxTokens   int
-	Effort      string
-	Entrypoint  string // "cli" or "sdk-cli"
-	PermMode    string
-	CWD         string
-	AppendSysP  string
-	ExtraSystem []string
-	PermRules   map[string][]string
-	AddDirs     []string
-	User        UserConfig
-	Messages    []api.Message
-	ToolCtx     *tools.Context
-	Events      Events
-	MaxTurns    int // 0 = unlimited
-	started     bool
-	UsageTotal  api.Usage
-	Transcript  string // path to JSONL transcript (for compact notes)
-	Hooks       hooks.Config
-	inCompact   bool
+	Client       *api.Client
+	Model        string
+	MaxTokens    int
+	Effort       string
+	Entrypoint   string // "cli" or "sdk-cli"
+	PermMode     string
+	CWD          string
+	AppendSysP   string
+	ExtraSystem  []string
+	PermRules    map[string][]string
+	AddDirs      []string
+	User         UserConfig
+	Messages     []api.Message
+	ToolCtx      *tools.Context
+	Events       Events
+	MaxTurns     int // 0 = unlimited
+	started      bool
+	UsageTotal   api.Usage
+	Transcript   string // path to JSONL transcript (for compact notes)
+	Hooks        hooks.Config
+	inCompact    bool
+	AllowedTools []string // nil = all
 }
 
 func NewLoop(client *api.Client, cwd string) *Loop {
@@ -161,6 +162,11 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 			l.Events.OnToolUse(b.Name, b.Input)
 		}
 		var r tools.Result
+		if len(l.AllowedTools) > 0 && !containsStr(l.AllowedTools, b.Name) {
+			r = tools.Result{Content: fmt.Sprintf("tool %s not allowed for this agent", b.Name), IsError: true}
+			results = append(results, toolResultBlock(b.ID, r))
+			continue
+		}
 		if pre := l.runHook(hooks.PreToolUse, map[string]any{
 			"tool_name": b.Name, "tool_input": json.RawMessage(b.Input),
 		}); pre.Block {
@@ -183,10 +189,7 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		if l.Events.OnToolResult != nil {
 			l.Events.OnToolResult(b.Name, r)
 		}
-		content, _ := json.Marshal(resultBlocks(r))
-		results = append(results, api.ContentBlock{
-			Type: "tool_result", ToolUseID: b.ID, Content: content, IsError: r.IsError,
-		})
+		results = append(results, toolResultBlock(b.ID, r))
 	}
 	if len(results) == 0 {
 		if l.ShouldAutoCompact(resp.Usage) && !l.inCompact {
@@ -226,6 +229,20 @@ func toolSummary(name string, input json.RawMessage) string {
 		}
 	}
 	return name
+}
+
+func toolResultBlock(id string, r tools.Result) api.ContentBlock {
+	content, _ := json.Marshal(resultBlocks(r))
+	return api.ContentBlock{Type: "tool_result", ToolUseID: id, Content: content, IsError: r.IsError}
+}
+
+func containsStr(list []string, s string) bool {
+	for _, v := range list {
+		if v == s || v == "*" {
+			return true
+		}
+	}
+	return false
 }
 
 // resultBlocks builds the tool_result content; converts the internal image

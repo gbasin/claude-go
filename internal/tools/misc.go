@@ -20,10 +20,8 @@ func init() {
 	// Stubs: return a faithful "unavailable in this environment" result
 	// rather than failing, matching how CC degrades without the service.
 	for _, n := range []string{
-		"CronCreate", "CronDelete", "CronList", "DesignSync", "LSP",
-		"ListAgents", "ListMcpResourcesTool", "PushNotification",
-		"ReadMcpResourceDirTool", "ReadMcpResourceTool", "RemoteTrigger",
-		"ReportFindings", "ScheduleWakeup", "SendMessage", "Workflow",
+		"RemoteTrigger", "DesignSync",
+		"RemoteTrigger", "DesignSync",
 	} {
 		n := n
 		Register(&Tool{Def: loadSchema(n), Exec: func(c *Context, raw json.RawMessage) Result {
