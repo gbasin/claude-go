@@ -1,6 +1,7 @@
 package repl
 
 import (
+	"claude-go/internal/config"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -435,11 +436,10 @@ func runBundledPrompt(l *agent.Loop, body, arg string) {
 // foreignAgentConfigExists reports whether a Codex or Gemini CLI config is
 // present — real /init only adds the /import hint in that case.
 func foreignAgentConfigExists() bool {
-	home, _ := os.UserHomeDir()
 	for _, p := range []string{
-		filepath.Join(home, ".codex", "config.toml"),
+		filepath.Join(config.Home(), ".codex", "config.toml"),
 		filepath.Join(".codex"),
-		filepath.Join(home, ".gemini", "settings.json"),
+		filepath.Join(config.Home(), ".gemini", "settings.json"),
 		filepath.Join(".gemini"),
 		"GEMINI.md",
 	} {
@@ -453,8 +453,7 @@ func foreignAgentConfigExists() bool {
 // debugPrompt fills the runtime slots of the bundled debug skill: session
 // debug-log path, the log tail, daemon status, and the issue description.
 func debugPrompt(l *agent.Loop, arg string) string {
-	home, _ := os.UserHomeDir()
-	logPath := filepath.Join(home, ".claude", "debug", l.Client.SessionID+".txt")
+	logPath := filepath.Join(config.ClaudeDir(), "debug", l.Client.SessionID+".txt")
 	tail := "No log file exists yet."
 	if b, err := os.ReadFile(logPath); err == nil {
 		const max = 65536 // real skill reads the last 64KiB
@@ -494,8 +493,7 @@ Figure out how this project runs from its docs and config (package.json scripts,
 // facets through a local pipeline and renders an HTML report; the prompt body
 // below keeps the real response contract.
 func insightsPrompt() string {
-	home, _ := os.UserHomeDir()
-	report := filepath.Join(home, ".claude", "insights", "report.html")
+	report := filepath.Join(config.ClaudeDir(), "insights", "report.html")
 	return `The user just ran /insights to generate a usage report analyzing their Claude Code sessions.
 
 Gather the data first: session transcripts live at ~/.claude/projects/<sanitized-cwd>/*.jsonl, one JSON object per line (user/assistant messages, tool_use entries, timestamps). Scan the most recent sessions across the projects dir (cap ~50 files), and aggregate: total sessions, total messages, approximate active time, git commits, most-used tools and commands, what's working, where things go wrong (friction: permission denials, interruptions, retries), and features worth trying.
@@ -655,8 +653,7 @@ func printHelp() {
 }
 
 func memoryCmd(l *agent.Loop, arg string) {
-	home, _ := os.UserHomeDir()
-	dir := filepath.Join(home, ".claude", "projects",
+	dir := filepath.Join(config.ClaudeDir(), "projects",
 		strings.ReplaceAll(filepath.Clean(l.ToolCtx.CWD), "/", "-"), "memory")
 	ents, err := os.ReadDir(dir)
 	if err != nil || len(ents) == 0 {
@@ -696,8 +693,7 @@ func permissionsCmd(l *agent.Loop, arg string) {
 }
 
 func configCmd(l *agent.Loop, arg string) {
-	home, _ := os.UserHomeDir()
-	p := filepath.Join(home, ".claude", "settings.json")
+	p := filepath.Join(config.ClaudeDir(), "settings.json")
 	if arg == "" {
 		b, err := os.ReadFile(p)
 		if err != nil {
@@ -772,10 +768,9 @@ func doctorCmd(l *agent.Loop) {
 	fmt.Println("  model:", l.Model)
 	fmt.Println("  session:", l.Client.SessionID)
 	fmt.Println("  cwd:", l.ToolCtx.CWD)
-	home, _ := os.UserHomeDir()
 	for _, p := range []string{
-		filepath.Join(home, ".claude.json"),
-		filepath.Join(home, ".claude", "settings.json"),
+		filepath.Join(config.Home(), ".claude.json"),
+		filepath.Join(config.ClaudeDir(), "settings.json"),
 		filepath.Join(l.ToolCtx.CWD, ".claude", "settings.json"),
 		filepath.Join(l.ToolCtx.CWD, "CLAUDE.md"),
 	} {
@@ -803,7 +798,6 @@ var builtinStyles = map[string]string{
 }
 
 func outputStyleCmd(l *agent.Loop, arg string) {
-	home, _ := os.UserHomeDir()
 	if arg == "" {
 		fmt.Println("  usage: /output-style <name|default> — this changes how Claude communicates")
 		fmt.Println("   - default")
@@ -811,7 +805,7 @@ func outputStyleCmd(l *agent.Loop, arg string) {
 			fmt.Println("   -", n)
 		}
 		for _, base := range []string{
-			filepath.Join(home, ".claude", "output-styles"),
+			filepath.Join(config.ClaudeDir(), "output-styles"),
 			filepath.Join(l.CWD, ".claude", "output-styles"),
 		} {
 			ents, _ := os.ReadDir(base)
@@ -837,7 +831,7 @@ func outputStyleCmd(l *agent.Loop, arg string) {
 	var err error
 	for _, base := range []string{
 		filepath.Join(l.CWD, ".claude", "output-styles"),
-		filepath.Join(home, ".claude", "output-styles"),
+		filepath.Join(config.ClaudeDir(), "output-styles"),
 	} {
 		b, err = os.ReadFile(filepath.Join(base, arg+".md"))
 		if err == nil {
@@ -875,8 +869,7 @@ func tasksCmd(l *agent.Loop) {
 }
 
 func aliasCmd(l *agent.Loop, arg string) {
-	home, _ := os.UserHomeDir()
-	p := filepath.Join(home, ".claude", "aliases.json")
+	p := filepath.Join(config.ClaudeDir(), "aliases.json")
 	var m map[string]string
 	b, _ := os.ReadFile(p)
 	json.Unmarshal(b, &m)

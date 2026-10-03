@@ -226,6 +226,11 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 	}
 	var lastErr error
 	maxRetries := 2 // SDK default
+	if v := os.Getenv("CLAUDE_CODE_MAX_RETRIES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			maxRetries = n
+		}
+	}
 	var reqID string
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		c.RetryCount = attempt

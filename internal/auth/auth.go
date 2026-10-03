@@ -4,6 +4,7 @@ package auth
 
 import (
 	"bytes"
+	"claude-go/internal/config"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,6 +48,20 @@ func Load() (*Credentials, error) {
 	if k := os.Getenv("CLAUDE_GO_TOKEN"); k != "" {
 		return &Credentials{AccessToken: k}, nil
 	}
+	// fd-supplied credentials (real reads them this way)
+	for _, ev := range []string{"CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR"} {
+		if fds := os.Getenv(ev); fds != "" {
+			if b, err := os.ReadFile("/dev/fd/" + fds); err == nil && len(bytes.TrimSpace(b)) > 0 {
+				return &Credentials{AccessToken: string(bytes.TrimSpace(b)),
+					IsAPIKey: ev == "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR"}, nil
+			}
+		}
+	}
+	if k := os.Getenv("CCR_OAUTH_TOKEN_FILE"); k != "" {
+		if b, err := os.ReadFile(k); err == nil && len(bytes.TrimSpace(b)) > 0 {
+			return &Credentials{AccessToken: string(bytes.TrimSpace(b))}, nil
+		}
+	}
 	// apiKeyHelper: a user-configured command producing credentials
 	if helper := apiKeyHelper(); helper != "" {
 		return &Credentials{AccessToken: helper}, nil
@@ -56,13 +71,16 @@ func Load() (*Credentials, error) {
 			return c, nil
 		}
 	}
-	home, _ := os.UserHomeDir()
 	for _, p := range []string{
-		filepath.Join(home, ".claude", ".credentials.json"),
+		filepath.Join(config.ClaudeDir(), ".credentials.json"),
 	} {
 		if c, err := fromFile(p); err == nil {
 			return c, nil
 		}
+	}
+	// real also stores claudeAiOauth inside ~/.claude.json (config store)
+	if c, err := fromFile(filepath.Join(config.Home(), ".claude.json")); err == nil {
+		return c, nil
 	}
 	return nil, errors.New("no credentials found: run `claude` once to log in, or set ANTHROPIC_API_KEY")
 }
@@ -165,9 +183,8 @@ func (c *Credentials) Refresh() error {
 }
 
 func apiKeyHelper() string {
-	home, _ := os.UserHomeDir()
 	for _, p := range []string{
-		filepath.Join(home, ".claude", "settings.json"),
+		filepath.Join(config.ClaudeDir(), "settings.json"),
 	} {
 		b, err := os.ReadFile(p)
 		if err != nil {

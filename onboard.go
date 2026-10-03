@@ -4,6 +4,7 @@ package main
 // and the minimal update-check marker read.
 
 import (
+	"claude-go/internal/config"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -16,8 +17,7 @@ import (
 // hasCompletedOnboarding. Interactive runs get a theme pick; the
 // per-directory trust prompt is handled separately by repl.TrustGate.
 func maybeOnboard(interactive bool) {
-	home, _ := os.UserHomeDir()
-	p := filepath.Join(home, ".claude.json")
+	p := filepath.Join(config.Home(), ".claude.json")
 	m, _ := readClaudeJSON(p)
 	if m == nil {
 		m = map[string]any{}
@@ -58,8 +58,7 @@ func maybeOnboard(interactive bool) {
 // migrateClaudeJSON backfills missing schema fields in ~/.claude.json
 // while preserving every existing field.
 func migrateClaudeJSON() {
-	home, _ := os.UserHomeDir()
-	p := filepath.Join(home, ".claude.json")
+	p := filepath.Join(config.Home(), ".claude.json")
 	m, err := readClaudeJSON(p)
 	if err != nil || m == nil {
 		return
@@ -94,8 +93,7 @@ func writeClaudeJSON(p string, m map[string]any) {
 // checkForUpdate reads the ~/.claude/version-check.json marker left by a
 // previous run or external tooling and notes a newer build if flagged.
 func checkForUpdate() {
-	home, _ := os.UserHomeDir()
-	b, err := os.ReadFile(filepath.Join(home, ".claude", "version-check.json"))
+	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "version-check.json"))
 	if err != nil {
 		return
 	}

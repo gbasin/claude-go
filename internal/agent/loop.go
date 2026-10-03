@@ -491,6 +491,11 @@ func (l *Loop) thinkingConfig() json.RawMessage {
 		if budget <= 0 {
 			budget = 10000
 		}
+		if v := os.Getenv("MAX_THINKING_TOKENS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n < budget {
+				budget = n
+			}
+		}
 		return json.RawMessage(`{"type":"enabled","budget_tokens":` + strconv.Itoa(budget) + `}`)
 	}
 	display := l.thinkingDisplay()

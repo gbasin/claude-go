@@ -3,6 +3,7 @@ package repl
 
 import (
 	"bytes"
+	"claude-go/internal/config"
 	"fmt"
 	"io"
 	"os"
@@ -976,8 +977,7 @@ func validPNG(path string) bool {
 // loadHistoryFile seeds the editor history from ~/.claude/history.jsonl so
 // ctrl-r search covers past sessions. Dedupes, newest last.
 func loadHistoryFile() []string {
-	home, _ := os.UserHomeDir()
-	b, err := os.ReadFile(filepath.Join(home, ".claude", "history.jsonl"))
+	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "history.jsonl"))
 	if err != nil {
 		return nil
 	}
@@ -1428,8 +1428,7 @@ func (e *editor) visualKey(k key) *readResult {
 
 // appendHistoryFile persists prompts to ~/.claude/history.jsonl (real file).
 func appendHistoryFile(line string) {
-	home, _ := os.UserHomeDir()
-	dir := filepath.Join(home, ".claude")
+	dir := filepath.Join(config.ClaudeDir())
 	os.MkdirAll(dir, 0o755)
 	f, err := os.OpenFile(filepath.Join(dir, "history.jsonl"),
 		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
@@ -1445,10 +1444,9 @@ func appendHistoryFile(line string) {
 
 // vimInsertRemaps reads vimInsertModeRemaps from settings (["jj","jk"]…).
 func vimInsertRemaps() []string {
-	home, _ := os.UserHomeDir()
 	for _, p := range []string{
-		filepath.Join(home, ".claude", "settings.json"),
-		filepath.Join(home, ".claude.json"),
+		filepath.Join(config.ClaudeDir(), "settings.json"),
+		filepath.Join(config.Home(), ".claude.json"),
 	} {
 		b, err := os.ReadFile(p)
 		if err != nil {

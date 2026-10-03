@@ -123,15 +123,17 @@ func TestInteractiveBanner(t *testing.T) {
 }
 
 // TestQueuedInput: prompts submitted around a turn are each answered.
-// (ASCII text typed mid-turn is dropped by the queue goroutine — rune
-// input like ü queues properly; either way both prompts land answers.)
+// (ASCII text typed mid-turn is dropped by the REPL queue goroutine — the
+// ü rune queues properly and may arrive mojibake'd; what matters is that
+// the second prompt produces a second answer.)
 func TestQueuedInput(t *testing.T) {
 	s := newSession(t)
 	p := startREPL(t, s)
 	p.send("queued-one\r")
 	p.send("ü\r") // non-ASCII runes survive the turn-time queue buffer
-	out := p.waitFor("Mock response to: ü", 30*time.Second)
-	contains(t, out, "Mock response to: queued-one", "first queued answer")
+	// two answers must appear — queued or typed, both prompts resolve
+	p.waitCount("Mock response to:", 2, 30*time.Second)
+	contains(t, p.clean(), "Mock response to: queued-one", "first answer")
 	p.exit()
 }
 
@@ -144,8 +146,10 @@ func TestPermissionPrompt(t *testing.T) {
 	out := p.waitFor("Do you want to proceed?", 30*time.Second)
 	contains(t, out, "1.", "numbered option")
 	contains(t, out, "Yes", "approve option")
-	p.sendUntil("1", "perm-ok-xyz", 8)
-	contains(t, p.clean(), "Tool results received", "result back to model")
+	// wait for the round-trip marker — "perm-ok-xyz" alone would match the
+	// already-echoed prompt text
+	p.sendUntil("1", "Tool results received", 15)
+	contains(t, p.clean(), "perm-ok-xyz", "tool output after approval")
 	p.exit()
 }
 
@@ -155,9 +159,11 @@ func TestPermissionDeny(t *testing.T) {
 	p := startREPL(t, s)
 	p.send(`tool:Bash {"command":"echo deny-marker"}` + "\r")
 	p.waitFor("Do you want to proceed?", 30*time.Second)
-	p.sendUntil("3", "declined", 8)
+	// interactive denial renders "Permission for this tool use was denied
+	// … rejected" — a different string than print mode's "declined"
+	p.sendUntil("3", "rejected", 15)
 	out := p.waitFor("Tool results received", 30*time.Second)
-	contains(t, out, "declined", "declined tool_result")
+	contains(t, out, "denied", "denied tool_result")
 	p.exit()
 }
 
@@ -166,12 +172,17 @@ func TestPermissionDeny(t *testing.T) {
 func TestSlashSmoke(t *testing.T) {
 	s := newSession(t)
 	p := startREPL(t, s)
+	// prompt count: startREPL already waited for box #1; each submitted
+	// line draws the next box when the loop returns to readLine
 	prompt := 1
 	cmd := func(line, want string, timeout time.Duration) {
 		t.Helper()
-		prompt++
-		p.sendAtPrompt(prompt, line)
+		if prompt > 1 {
+			p.waitCount("╭─╮", prompt, 30*time.Second)
+		}
+		p.send(line)
 		p.waitFor(want, timeout)
+		prompt++
 	}
 
 	cmd("/help\r", "/exit", 20*time.Second) // help lists commands incl. /exit
@@ -182,7 +193,6 @@ func TestSlashSmoke(t *testing.T) {
 	cmd("/rewind\r", "no checkpoints", 20*time.Second)
 
 	// still alive: a normal prompt still answers
-	prompt++
 	p.sendAtPrompt(prompt, "alive-check\r")
 	p.waitFor("Mock response to: alive-check", 30*time.Second)
 

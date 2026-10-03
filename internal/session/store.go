@@ -4,6 +4,7 @@ package session
 
 import (
 	"bufio"
+	"claude-go/internal/config"
 	"encoding/json"
 	"errors"
 	"os"
@@ -58,8 +59,7 @@ func Slug(cwd string) string {
 }
 
 func dir(cwd string) string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude", "projects", Slug(cwd))
+	return filepath.Join(config.ClaudeDir(), "projects", Slug(cwd))
 }
 
 // Open creates (or appends to) the transcript for sessionID in cwd.
