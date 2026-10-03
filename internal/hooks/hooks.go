@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,10 +73,12 @@ var matcherField = map[Event]string{
 }
 
 type Command struct {
-	Type    string `json:"type"`    // "command" | "prompt"
-	Command string `json:"command"` // for type=command
-	Prompt  string `json:"prompt"`  // for type=prompt (LLM-judged)
-	Timeout int    `json:"timeout"` // seconds
+	Type    string            `json:"type"`    // "command" | "prompt" | "agent" | "http"
+	Command string            `json:"command"` // for type=command
+	Prompt  string            `json:"prompt"`  // for type=prompt|agent (LLM-judged / subagent)
+	URL     string            `json:"url"`     // for type=http
+	Headers map[string]string `json:"headers,omitempty"`
+	Timeout int               `json:"timeout"` // seconds
 }
 
 // Judge evaluates prompt-type hooks. Set by the agent loop (Answerer).
@@ -160,12 +164,25 @@ func Run(c Config, ev Event, payload map[string]any, cwd string) Result {
 			}
 		}
 		for _, h := range m.Hooks {
-			if h.Type == "prompt" && Judge != nil {
+			if (h.Type == "prompt" || h.Type == "agent") && Judge != nil {
 				payloadStr := string(stdin)
 				allow, reason := Judge(h.Prompt+"\n\nContext:\n"+payloadStr, "")
 				if !allow {
 					res.Block = true
 					res.Reason = reason
+				}
+				continue
+			}
+			if h.Type == "http" && h.URL != "" {
+				if o := runHTTPHook(h, stdin); o != nil {
+					if o.Decision == "block" || o.Continue == "false" {
+						res.Block = true
+						res.Reason = firstNonEmpty(o.Reason, o.SystemMessage)
+					}
+					if o.HookSpecificOutput != nil {
+						res.Permission = o.HookSpecificOutput.PermissionDecision
+						res.AdditionalContext += o.HookSpecificOutput.AdditionalContext
+					}
 				}
 				continue
 			}
@@ -236,3 +253,35 @@ func firstNonEmpty(s ...string) string {
 }
 
 var _ = fmt.Sprint
+
+// runHTTPHook POSTs the hook payload to url and parses the JSON decision.
+func runHTTPHook(h Command, stdin []byte) *Output {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(firstInt(h.Timeout, 30))*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", h.URL, bytes.NewReader(stdin))
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range h.Headers {
+		req.Header.Set(k, os.ExpandEnv(v))
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var o Output
+	if json.Unmarshal(b, &o) != nil {
+		return nil
+	}
+	return &o
+}
+
+func firstInt(v, def int) int {
+	if v > 0 {
+		return v
+	}
+	return def
+}

@@ -179,7 +179,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 		}
 		for i, ln := range lines {
 			if i >= max {
-				fmt.Printf("  %s⎿%s  … +%d lines\n", dim, reset, len(lines)-max)
+				fmt.Printf("  %s⎿%s  … (+%d more lines)\n", dim, reset, len(lines)-max)
 				break
 			}
 			fmt.Printf("  %s⎿%s  %s\n", dim, reset, trunc(ln, 120))
@@ -303,7 +303,11 @@ func RunWithStore(l *agent.Loop, store Store) {
 			// context-low warning like real CC
 			tok := l.UsageTotal.InputTokens + l.UsageTotal.CacheReadInputTokens + l.UsageTotal.CacheCreationInputTokens
 			if tok > l.ContextWarnThreshold() {
-				fmt.Printf("%s  Context limit nearing · /compact or /clear to continue%s\n", yellow, reset)
+				suffix := ""
+				if os.Getenv("DISABLE_COMPACT") != "" {
+					suffix = " · /clear to continue"
+				}
+				fmt.Printf("%s  Context limit reached · /compact or /clear to continue%s%s\n", red, suffix, reset)
 			}
 			if err != nil {
 				if ctx.Err() == context.Canceled {
@@ -820,6 +824,32 @@ func addLocalPermissionRule(cwd, rule string) {
 	allow = append(allow, rule)
 	perms["allow"] = allow
 	b, _ := json.MarshalIndent(st, "", "  ")
+	os.WriteFile(p, b, 0o600)
+	// real also mirrors into ~/.claude.json projects[dir].allowedTools
+	mirrorAllowRule(cwd, rule)
+}
+
+func mirrorAllowRule(cwd, rule string) {
+	p := filepath.Join(config.Home(), ".claude.json")
+	var cfg map[string]any
+	if b, err := os.ReadFile(p); err == nil {
+		json.Unmarshal(b, &cfg)
+	}
+	if cfg == nil {
+		return // don't create the file just for this
+	}
+	projects, _ := cfg["projects"].(map[string]any)
+	if projects == nil {
+		return
+	}
+	proj, _ := projects[cwd].(map[string]any)
+	if proj == nil {
+		return
+	}
+	allowed, _ := proj["allowedTools"].([]any)
+	allowed = append(allowed, rule)
+	proj["allowedTools"] = allowed
+	b, _ := json.MarshalIndent(cfg, "", "  ")
 	os.WriteFile(p, b, 0o600)
 }
 
