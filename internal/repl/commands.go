@@ -353,6 +353,15 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		}
 		fmt.Printf("  branched session → %s (original %s resumable via /resume)\n", n, o)
 	case "sandbox":
+		if strings.HasPrefix(arg, "allow ") {
+			host := strings.TrimSpace(arg[len("allow"):])
+			if host == "" {
+				fmt.Println("  usage: /sandbox allow <host>")
+				break
+			}
+			fmt.Println("  " + tools.SandboxAllowHost(host))
+			break
+		}
 		if os.Getenv("CLAUDE_GO_SANDBOX") == "1" {
 			os.Unsetenv("CLAUDE_GO_SANDBOX")
 			fmt.Println("  sandbox off")
