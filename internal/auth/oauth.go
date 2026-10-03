@@ -1,0 +1,123 @@
+package auth
+
+import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"runtime"
+	"strings"
+	"time"
+)
+
+const (
+	oauthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+	oauthAuthURL  = "https://claude.ai/oauth/authorize"
+	oauthTokenURL = "https://platform.claude.com/v1/oauth/token"
+	oauthRedirect = "https://platform.claude.com/oauth/code/callback"
+	oauthScope    = "user:inference user:profile"
+)
+
+// LoginURL builds the OAuth authorize URL and returns (url, verifier, state).
+func LoginURL() (loginURL, verifier, state string) {
+	v := randText(64)
+	s := randText(32)
+	sum := sha256.Sum256([]byte(v))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	q := url.Values{
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"client_id":             {oauthClientID},
+		"redirect_uri":          {oauthRedirect},
+		"response_type":         {"code"},
+		"state":                 {s},
+		"scope":                 {oauthScope},
+	}
+	return oauthAuthURL + "?" + q.Encode(), v, s
+}
+
+func randText(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return base64.RawURLEncoding.EncodeToString(b)[:n]
+}
+
+// ExchangeCode trades the pasted "code#state" for tokens.
+func ExchangeCode(codeAndState, verifier, expectState string) (*Credentials, error) {
+	code, state, _ := strings.Cut(codeAndState, "#")
+	if expectState != "" && state != expectState {
+		return nil, fmt.Errorf("state mismatch")
+	}
+	body := map[string]any{
+		"grant_type":    "authorization_code",
+		"code":          code,
+		"state":         state,
+		"redirect_uri":  oauthRedirect,
+		"client_id":     oauthClientID,
+		"code_verifier": verifier,
+	}
+	req, _ := http.NewRequest("POST", oauthTokenURL, strings.NewReader(mustJSON(body)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var tr struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+		Scope        string `json:"scope"`
+		Error        string `json:"error"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&tr) != nil || tr.AccessToken == "" {
+		return nil, fmt.Errorf("token exchange failed (status %d)", resp.StatusCode)
+	}
+	expMs := int64(0)
+	if tr.ExpiresIn > 0 {
+		expMs = time.Now().UnixMilli() + tr.ExpiresIn*1000
+	}
+	return &Credentials{
+		AccessToken:      tr.AccessToken,
+		RefreshToken:     tr.RefreshToken,
+		ExpiresAt:        expMs,
+		Scopes:           strings.Split(tr.Scope, " "),
+		SubscriptionType: "oauth",
+	}, nil
+}
+
+// WriteKeychain stores credentials the same way real claude does.
+func WriteKeychain(creds *Credentials) error {
+	inner := map[string]any{"claudeAiOauth": creds}
+	b, _ := json.Marshal(inner)
+	if runtime.GOOS == "darwin" {
+		user := os.Getenv("USER")
+		// delete existing then add
+		exec.Command("security", "delete-generic-password",
+			"-s", "Claude Code-credentials", "-a", user).Run()
+		return exec.Command("security", "add-generic-password",
+			"-s", "Claude Code-credentials", "-a", user,
+			"-w", string(b), "-U").Run()
+	}
+	return fmt.Errorf("keychain only on macOS")
+}
+
+// OpenBrowser opens the login URL.
+func OpenBrowser(url string) {
+	switch runtime.GOOS {
+	case "darwin":
+		exec.Command("open", url).Start()
+	case "linux":
+		exec.Command("xdg-open", url).Start()
+	}
+}
+
+func mustJSON(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}

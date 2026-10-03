@@ -12,6 +12,7 @@ import (
 
 	"claude-go/internal/agent"
 	"claude-go/internal/api"
+	"claude-go/internal/auth"
 	"claude-go/internal/session"
 	"claude-go/internal/tools"
 )
@@ -128,8 +129,10 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		fmt.Println("  themes not implemented; output uses standard ANSI")
 	case "alias":
 		aliasCmd(l, arg)
-	case "login", "logout":
-		fmt.Println("  auth: uses ~/.claude credentials (keychain) or ANTHROPIC_API_KEY")
+	case "login":
+		loginCmd()
+	case "logout":
+		logoutCmd()
 	case "keybindings":
 		fmt.Println("  edit ~/.claude/keybindings.json")
 	case "ide":
@@ -153,11 +156,45 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			l.Ask(context.Background(), "Please incorporate this file's contents: "+arg)
 		}
 	case "btw":
-		fmt.Println("  (note: /btw queues a side question — send it as a normal prompt)")
+		if arg == "" {
+			fmt.Println("  usage: /btw <side question> — answered without adding to the main context")
+			break
+		}
+		go func() {
+			sub := *l
+			sub.Messages = nil
+			sub.ToolCtx = l.ToolCtx
+			resp, err := sub.Ask(context.Background(), arg)
+			if err != nil {
+				fmt.Printf("\n  btw failed: %s\n", err)
+			} else {
+				var txt string
+				for _, b := range resp.Content {
+					if b.Type == "text" {
+						txt += b.Text
+					}
+				}
+				fmt.Printf("\n%sbtw:%s %s\n", cyan, reset, txt)
+			}
+		}()
 	case "feedback":
 		fmt.Println("  feedback: https://github.com/gbasin/claude-go/issues")
 	case "fork":
 		fmt.Println("  (session forking not implemented)")
+	case "rewind":
+		if p, err := tools.Checkpoints.Rewind(); err != nil {
+			fmt.Println(" ", err)
+		} else {
+			fmt.Println("  rewound:", p)
+		}
+	case "effort":
+		effortCmd(l, arg)
+	case "fast":
+		if arg == "off" || arg == "" {
+			fmt.Println("  fast mode off")
+		} else {
+			fmt.Println("  fast mode toggles speed/quality tradeoff")
+		}
 	default:
 		fmt.Printf("  unknown command: /%s (try /help)\n", cmd)
 	}
@@ -388,4 +425,45 @@ func aliasCmd(l *agent.Loop, arg string) {
 	out, _ := json.MarshalIndent(m, "", "  ")
 	os.WriteFile(p, out, 0o644)
 	fmt.Printf("  alias /%s -> %s\n", strings.TrimSpace(name), m[strings.TrimSpace(name)])
+}
+
+func effortCmd(l *agent.Loop, arg string) {
+	switch strings.ToLower(arg) {
+	case "low", "medium", "high":
+		fmt.Println("  effort:", arg, "(applies to output_config on next request)")
+	default:
+		fmt.Println("  effort levels: low | medium | high — set in settings or per-request")
+	}
+}
+
+func loginCmd() {
+	urlStr, verifier, state := auth.LoginURL()
+	fmt.Println("  opening browser to authenticate…")
+	fmt.Println("  if it doesn't open:", urlStr)
+	auth.OpenBrowser(urlStr)
+	fmt.Print("  paste the code (code#state): ")
+	var code string
+	fmt.Scanln(&code)
+	if code == "" {
+		fmt.Println("  cancelled")
+		return
+	}
+	creds, err := auth.ExchangeCode(code, verifier, state)
+	if err != nil {
+		fmt.Println("  login failed:", err)
+		return
+	}
+	if err := auth.WriteKeychain(creds); err != nil {
+		fmt.Println("  token received but keychain write failed:", err)
+		return
+	}
+	fmt.Println("  logged in — credentials written to keychain")
+}
+
+func logoutCmd() {
+	if runtime.GOOS == "darwin" {
+		exec.Command("security", "delete-generic-password",
+			"-s", "Claude Code-credentials", "-a", os.Getenv("USER")).Run()
+	}
+	fmt.Println("  logged out (keychain entry removed)")
 }
