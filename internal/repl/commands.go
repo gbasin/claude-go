@@ -642,3 +642,19 @@ func persistOutputStyle(cwd, style string) {
 	b, _ := json.MarshalIndent(st, "", "  ")
 	os.WriteFile(p, b, 0o600)
 }
+
+func persistTheme(cwd, theme string) {
+	dir := filepath.Join(cwd, ".claude")
+	os.MkdirAll(dir, 0o755)
+	p := filepath.Join(dir, "settings.local.json")
+	var st map[string]any
+	if b, err := os.ReadFile(p); err == nil {
+		json.Unmarshal(b, &st)
+	}
+	if st == nil {
+		st = map[string]any{}
+	}
+	st["theme"] = theme
+	b, _ := json.MarshalIndent(st, "", "  ")
+	os.WriteFile(p, b, 0o600)
+}

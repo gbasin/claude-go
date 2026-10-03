@@ -1,0 +1,41 @@
+// Package telemetry honors Claude Code's telemetry configuration surface
+// without ever sending data anywhere. When CLAUDE_CODE_ENABLE_TELEMETRY=1,
+// tengu_* events are appended to a local JSONL file for inspection — matching
+// the event names real CC emits — instead of OTLP. This preserves config
+// compatibility while keeping the replica network-quiet by design.
+package telemetry
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+var enabled = os.Getenv("CLAUDE_CODE_ENABLE_TELEMETRY") == "1" ||
+	os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != ""
+
+func path() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude-go", "telemetry.jsonl")
+}
+
+// Event appends a tengu_* event record locally (never sent).
+func Event(name string, attrs map[string]any) {
+	if !enabled {
+		return
+	}
+	rec := map[string]any{"event": name, "ts": time.Now().UTC().Format(time.RFC3339Nano)}
+	for k, v := range attrs {
+		rec[k] = v
+	}
+	b, _ := json.Marshal(rec)
+	os.MkdirAll(filepath.Dir(path()), 0o755)
+	f, err := os.OpenFile(path(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintln(f, string(b))
+}
