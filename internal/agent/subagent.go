@@ -514,7 +514,7 @@ func (r *Runner) WebSearch(ctx context.Context, query string, allow, block []str
 		Model:     "claude-haiku-4-5-20251001",
 		MaxTokens: 4096,
 		Messages:  []api.Message{api.TextMessage("user", query)},
-		Tools:     []api.Tool{{Name: "web_search", InputSchema: tb}},
+		Tools:     []api.Tool{{Raw: tb}}, // server tool wire form: {"type":"web_search_20250305",...}
 	}
 	resp, err := r.Client.StreamMessage(ctx, req, func(*api.StreamEvent) error { return nil })
 	if err != nil {

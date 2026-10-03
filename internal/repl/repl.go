@@ -68,6 +68,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 		l.PermMode = order[(idx+1)%len(order)]
 		fmt.Printf("\n%s⏵⏵ %s mode%s\n", yellow, l.PermMode, reset)
 	}
+	var wantQuit atomic.Bool
 	pr := &promptUI{}
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		runPipe(l)
@@ -100,7 +101,10 @@ func RunWithStore(l *agent.Loop, store Store) {
 			}
 		}
 	}
-	endSession := func() { fmt.Println(); os.Exit(0) }
+	// EndConversation mid-turn → flag normal shutdown (raw-mode restore,
+	// unregister, MCP close, SessionEnd all run via the quit path).
+	endSession := func() { wantQuit.Store(true) }
+	_ = endSession
 	l.ToolCtx.SetPermMode = func(mode string) { l.PermMode = mode }
 	l.ToolCtx.OnCwdChanged = func(nc string) {
 		hooks.Run(l.Hooks, hooks.CwdChanged, map[string]any{
@@ -189,7 +193,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 		printStatus(l, ed)
 		tools.UserActive.Store(true)
 		res := ed.readLine(ks)
-		if res.quit {
+		if res.quit || wantQuit.Load() {
 			fmt.Println()
 			fireSessionEndHook(l)
 			return
@@ -229,6 +233,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 
 		var queued []string
 		var draftBack []rune
+		loggedTo := 0
 		runTurn := func(line string) {
 			tools.UserActive.Store(false)
 			defer tools.UserActive.Store(true)
@@ -251,7 +256,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 							return
 						}
 						sawInput.Store(true)
-						if k.b == 0x1b && k.seq == "" {
+						if (k.b == 0x1b || k.b == 3) && k.seq == "" {
 							cancel()
 							// popQueuedIntoDraft: unfinished queued text returns to the editor
 							if len(queueBuf) > 0 {
@@ -277,9 +282,12 @@ func RunWithStore(l *agent.Loop, store Store) {
 			fmt.Fprint(os.Stderr, "\r\x1b[K")
 			fireStopHook(l)
 			if store != nil {
-				for _, m := range l.Messages {
+				// log only NEW messages per turn (was O(n²) re-log + a git
+				// fork per record)
+				for _, m := range l.Messages[loggedTo:] {
 					store.Log(m)
 				}
+				loggedTo = len(l.Messages)
 			}
 			md.Close()
 			close(respDone)
@@ -293,7 +301,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			}
 			// context-low warning like real CC
 			tok := l.UsageTotal.InputTokens + l.UsageTotal.CacheReadInputTokens + l.UsageTotal.CacheCreationInputTokens
-			if tok > 150000 {
+			if tok > l.ContextWarnThreshold() {
 				fmt.Printf("%s  Context limit nearing · /compact or /clear to continue%s\n", yellow, reset)
 			}
 			if err != nil {
@@ -636,7 +644,21 @@ func fireSessionEndHook(l *agent.Loop) {
 
 // statusLineCmd runs the configured statusLine.command (like real CC) —
 // the JSON payload goes on stdin, first stdout line becomes the status.
+var slCache struct {
+	at  time.Time
+	out string
+}
+
 func statusLineCmd(l *agent.Loop) string {
+	if time.Since(slCache.at) < 500*time.Millisecond {
+		return slCache.out
+	}
+	out := statusLineCmdReal(l)
+	slCache.at, slCache.out = time.Now(), out
+	return out
+}
+
+func statusLineCmdReal(l *agent.Loop) string {
 	home, _ := os.UserHomeDir()
 	b, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
 	if err != nil {

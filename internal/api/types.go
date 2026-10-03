@@ -33,13 +33,22 @@ type ContentBlock struct {
 	Thinking  string          `json:"thinking,omitempty"`
 	Signature string          `json:"signature,omitempty"`
 	Source    *ImageSource    `json:"source,omitempty"`
+	// redacted_thinking carries opaque data that MUST round-trip verbatim
+	Data string `json:"data,omitempty"`
+	// citations, encrypted_content etc. round-trip via passthrough
+	Citations        json.RawMessage `json:"citations,omitempty"`
+	EncryptedContent json.RawMessage `json:"encrypted_content,omitempty"`
+	EncryptedIndex   json.RawMessage `json:"encrypted_index,omitempty"`
+	Container        json.RawMessage `json:"container,omitempty"`
+	Display          string          `json:"display,omitempty"`
 	// cache_control on system/tool blocks
 	CacheControl *CacheControl `json:"cache_control,omitempty"`
 }
 
 type CacheControl struct {
-	Type string `json:"type"`
-	TTL  string `json:"ttl,omitempty"`
+	Type  string `json:"type"`
+	TTL   string `json:"ttl,omitempty"`
+	Scope string `json:"scope,omitempty"`
 }
 
 type SystemBlock struct {
@@ -51,7 +60,18 @@ type SystemBlock struct {
 type Tool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
-	InputSchema json.RawMessage `json:"input_schema"`
+	InputSchema json.RawMessage `json:"input_schema,omitempty"`
+	// Raw, when set, is the complete wire object (server-side tools like
+	// web_search_20250305 have no input_schema and carry "type").
+	Raw json.RawMessage `json:"-"`
+}
+
+func (t Tool) MarshalJSON() ([]byte, error) {
+	if len(t.Raw) > 0 {
+		return t.Raw, nil
+	}
+	type plain Tool
+	return json.Marshal(plain(t))
 }
 
 type Request struct {
@@ -101,10 +121,21 @@ type Response struct {
 }
 
 type Usage struct {
-	InputTokens              int `json:"input_tokens"`
-	OutputTokens             int `json:"output_tokens"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	InputTokens              int    `json:"input_tokens"`
+	OutputTokens             int    `json:"output_tokens"`
+	CacheCreationInputTokens int    `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int    `json:"cache_read_input_tokens"`
+	Iterations               int    `json:"iterations,omitempty"`
+	InferenceGeo             string `json:"inference_geo,omitempty"`
+	ServiceTier              string `json:"service_tier,omitempty"`
+	Speed                    string `json:"speed,omitempty"`
+	OutputTokensDetails      *struct {
+		ThinkingTokens int `json:"thinking_tokens,omitempty"`
+	} `json:"output_tokens_details,omitempty"`
+	CacheCreation *struct {
+		Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+		Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+	} `json:"cache_creation,omitempty"`
 }
 
 type APIError struct {
