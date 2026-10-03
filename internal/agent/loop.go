@@ -87,7 +87,7 @@ func (l *Loop) buildRequest() *api.Request {
 		System:            SystemBlocks(l.Entrypoint, l.CWD, l.Model, l.AppendSysP, l.ExtraSystem),
 		Tools:             tools.Defs(),
 		Metadata:          Metadata(l.Client.SessionID, l.User),
-		Thinking:          DefaultThinking(),
+		Thinking:          ThinkingFor(l.Entrypoint),
 		ContextManagement: DefaultContextManagement(),
 		Safeguards:        Safeguards(l.PermMode, l.ToolCtx.CWD, l.PermRules),
 		OutputConfig:      json.RawMessage(fmt.Sprintf(`{"effort":%q}`, effort)),
@@ -104,7 +104,7 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 		msg = FirstUserMessage(prompt, l.CWD, l.User.Email)
 		l.started = true
 		l.Messages = append(l.Messages, msg,
-			api.TextMessage("system", EnvMessage(l.ToolCtx.CWD, l.Model, l.AddDirs, l.PermMode)))
+			api.TextMessage("system", EnvMessage(l.ToolCtx.CWD, l.Model, l.AddDirs, l.PermMode, l.Client.SessionID)))
 	} else {
 		msg = api.TextMessage("user", prompt)
 		l.Messages = append(l.Messages, msg)
@@ -269,4 +269,27 @@ func resultBlocks(r tools.Result) []api.ContentBlock {
 		}
 	}
 	return []api.ContentBlock{{Type: "text", Text: r.Content}}
+}
+
+// thinkingDisplay: interactive sessions show thinking updates.
+func (l *Loop) thinkingDisplay() string {
+	if l.Entrypoint == "cli" {
+		return "updates"
+	}
+	return "omitted"
+}
+
+// appendNotificationBlocks prepends <system-reminder> blocks for queued notes.
+func appendNotificationBlocks(raw json.RawMessage, notes []string) json.RawMessage {
+	var blocks []api.ContentBlock
+	for _, n := range notes {
+		blocks = append(blocks, api.ContentBlock{
+			Type: "text", Text: "<system-reminder>\n" + n + "\n</system-reminder>",
+		})
+	}
+	var orig []api.ContentBlock
+	json.Unmarshal(raw, &orig)
+	blocks = append(blocks, orig...)
+	out, _ := json.Marshal(blocks)
+	return out
 }

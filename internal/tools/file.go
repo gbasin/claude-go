@@ -180,6 +180,8 @@ type writeInput struct {
 }
 
 func execWrite(c *Context, raw json.RawMessage) Result {
+	defer func() {}()
+	Checkpoints.Snapshot(inFilePath(c, raw))
 	var in writeInput
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return Result{Content: "invalid input: " + err.Error(), IsError: true}
@@ -215,6 +217,7 @@ type editInput struct {
 }
 
 func execEdit(c *Context, raw json.RawMessage) Result {
+	Checkpoints.Snapshot(inFilePath(c, raw))
 	var in editInput
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return Result{Content: "invalid input: " + err.Error(), IsError: true}
@@ -329,3 +332,14 @@ func orDefault(s, d string) string {
 }
 
 var _ = bytes.MinRead
+
+func inFilePath(c *Context, raw json.RawMessage) string {
+	var in struct {
+		FilePath string `json:"file_path"`
+	}
+	json.Unmarshal(raw, &in)
+	if !filepath.IsAbs(in.FilePath) {
+		in.FilePath = filepath.Join(c.CWD, in.FilePath)
+	}
+	return in.FilePath
+}

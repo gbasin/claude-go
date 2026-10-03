@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"claude-go/internal/agent"
 	"claude-go/internal/api"
+	"claude-go/internal/hooks"
 	"claude-go/internal/perms"
 	"claude-go/internal/tools"
 
@@ -45,12 +47,32 @@ func RunWithStore(l *agent.Loop, store Store) {
 	ed := newEditor()
 	ed.vim = vimEnabled()
 	ed.completer = slashCompleter
+	ed.cycleMode = func() {
+		switch l.PermMode {
+		case "auto":
+			l.PermMode = "plan"
+		case "plan":
+			l.PermMode = "bypassPermissions"
+		default:
+			l.PermMode = "auto"
+		}
+		fmt.Printf("\n%s⏵⏵ %s mode%s\n", yellow, l.PermMode, reset)
+	}
 	pr := &promptUI{}
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		runPipe(l)
 		return
 	}
 	ks, err := startKeys()
+	endSession := func() { fmt.Println(); os.Exit(0) }
+	l.ToolCtx.SetPermMode = func(mode string) { l.PermMode = mode }
+	l.ToolCtx.EndSession = endSession
+	l.ToolCtx.PlanApprove = func() bool {
+		return pr.ask(l, ks, "ExitPlanMode", "Approve the plan above?")
+	}
+	l.ToolCtx.AskStructured = func(header, question string, options []string, multi bool) ([]string, error) {
+		return pr.askStructured(ks, header, question, options, multi)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "repl: raw mode:", err)
 		return
@@ -110,6 +132,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 		res := ed.readLine(ks)
 		if res.quit {
 			fmt.Println()
+			fireSessionEndHook(l)
 			return
 		}
 		if !res.ok {
@@ -221,10 +244,10 @@ func summarize(name string, input json.RawMessage) string {
 	return "(" + trunc(s, 90) + ")"
 }
 
-
 // promptUI renders the y/n/always permission prompt.
 type promptUI struct {
-	always map[string]bool
+	always     map[string]bool
+	customLine *strings.Builder
 }
 
 func (p *promptUI) ask(l *agent.Loop, ks *keySource, name, summary string) bool {
@@ -233,6 +256,12 @@ func (p *promptUI) ask(l *agent.Loop, ks *keySource, name, summary string) bool 
 	}
 	if p.always[name] {
 		return true
+	}
+	if l.Hooks != nil {
+		hooks.Run(l.Hooks, hooks.Notification, map[string]any{
+			"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+			"message": "Claude needs permission to use " + name,
+		}, l.ToolCtx.CWD)
 	}
 	fmt.Printf("\n%sDo you want to proceed?%s\n  %s%s\n  %s%s%s\n",
 		bold, reset, dim, name, reset, trunc(summary, 200), reset)
@@ -356,7 +385,17 @@ func runPipe(l *agent.Loop) {
 }
 
 func fireStopHook(l *agent.Loop) {
-	// SessionEnd/Stop hooks run through agent.Loop's hook runner when present.
+	if l.Hooks == nil {
+		return
+	}
+	res := hooks.Run(l.Hooks, hooks.Stop, map[string]any{
+		"session_id":      l.Client.SessionID,
+		"transcript_path": l.Transcript,
+		"cwd":             l.ToolCtx.CWD,
+	}, l.ToolCtx.CWD)
+	if res.SystemMessage != "" {
+		fmt.Printf("  %s%s%s\n", dim, res.SystemMessage, reset)
+	}
 }
 
 func vimEnabled() bool {
@@ -380,6 +419,10 @@ func slashCompleter(prefix string) []string {
 }
 
 func printStatus(l *agent.Loop) {
+	if out := statusLineCmd(l); out != "" {
+		fmt.Println(out)
+		return
+	}
 	w, _ := termWidth()
 	left := "  " + l.ToolCtx.CWD
 	right := l.Model + " │ " + l.PermMode + " │ ? for shortcuts"
@@ -403,4 +446,103 @@ var slashCommands = []string{
 func termWidth() (int, error) {
 	w, _, err := term.GetSize(int(os.Stdout.Fd()))
 	return w, err
+}
+
+// askStructured renders a numbered options menu (AskUserQuestion tool).
+func (p *promptUI) askStructured(ks *keySource, header, question string, options []string, multi bool) ([]string, error) {
+	fmt.Printf("\n%s%s%s\n", bold, question, reset)
+	for i, o := range options {
+		fmt.Printf("  %s%d.%s %s\n", bold, i+1, reset, o)
+	}
+	other := fmt.Sprintf("  %s%d.%s Other\n  ", bold, len(options)+1, reset)
+	fmt.Print(other)
+	var picked []string
+	var custom strings.Builder
+	for k := range ks.ch {
+		c := k.b
+		if c >= '1' && c <= '9' {
+			idx := int(c - '1')
+			if idx == len(options) {
+				// Other: collect a line
+				p.customLine = &custom
+				continue
+			}
+			if idx >= 0 && idx < len(options) {
+				fmt.Println(string(c), "·", options[idx])
+				picked = append(picked, options[idx])
+				if !multi {
+					return picked, nil
+				}
+				continue
+			}
+		}
+		if c == '\r' {
+			if p.customLine != nil {
+				picked = append(picked, custom.String())
+				p.customLine = nil
+				if !multi {
+					return picked, nil
+				}
+				continue
+			}
+			if len(picked) > 0 {
+				return picked, nil
+			}
+		}
+		if c == 0x1b || c == 3 {
+			return nil, fmt.Errorf("cancelled")
+		}
+		if p.customLine != nil && c >= 32 {
+			custom.WriteByte(c)
+			os.Stdout.WriteString(string(c))
+		}
+	}
+	return nil, fmt.Errorf("cancelled")
+}
+
+func fireSessionEndHook(l *agent.Loop) {
+	if l.Hooks == nil {
+		return
+	}
+	hooks.Run(l.Hooks, hooks.SessionEnd, map[string]any{
+		"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+	}, l.ToolCtx.CWD)
+}
+
+// statusLineCmd runs the configured statusLine.command (like real CC) —
+// the JSON payload goes on stdin, first stdout line becomes the status.
+func statusLineCmd(l *agent.Loop) string {
+	home, _ := os.UserHomeDir()
+	b, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil {
+		return ""
+	}
+	var st struct {
+		StatusLine struct {
+			Type    string `json:"type"`
+			Command string `json:"command"`
+		} `json:"statusLine"`
+	}
+	if json.Unmarshal(b, &st) != nil || st.StatusLine.Command == "" {
+		return ""
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"session_id":      l.Client.SessionID,
+		"transcript_path": l.Transcript,
+		"cwd":             l.ToolCtx.CWD,
+		"model":           map[string]string{"id": l.Model, "display_name": l.Model},
+		"workspace":       map[string]any{"current_dir": l.ToolCtx.CWD, "project_dir": l.ToolCtx.CWD},
+	})
+	sh := os.Getenv("SHELL")
+	if sh == "" {
+		sh = "/bin/bash"
+	}
+	cmd := exec.Command(sh, "-c", st.StatusLine.Command)
+	cmd.Dir = l.ToolCtx.CWD
+	cmd.Stdin = strings.NewReader(string(payload))
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.SplitN(string(out), "\n", 2)[0]
 }

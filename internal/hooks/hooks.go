@@ -29,10 +29,14 @@ const (
 )
 
 type Command struct {
-	Type    string `json:"type"`
-	Command string `json:"command"`
+	Type    string `json:"type"`    // "command" | "prompt"
+	Command string `json:"command"` // for type=command
+	Prompt  string `json:"prompt"`  // for type=prompt (LLM-judged)
 	Timeout int    `json:"timeout"` // seconds
 }
+
+// Judge evaluates prompt-type hooks. Set by the agent loop (Answerer).
+var Judge func(prompt, contextJSON string) (allow bool, reason string)
 
 type Matcher struct {
 	Matcher string    `json:"matcher"`
@@ -106,6 +110,15 @@ func Run(c Config, ev Event, payload map[string]any, cwd string) Result {
 			}
 		}
 		for _, h := range m.Hooks {
+			if h.Type == "prompt" && Judge != nil {
+				payloadStr := string(stdin)
+				allow, reason := Judge(h.Prompt+"\n\nContext:\n"+payloadStr, "")
+				if !allow {
+					res.Block = true
+					res.Reason = reason
+				}
+				continue
+			}
 			if h.Type != "command" {
 				continue
 			}

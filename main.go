@@ -119,6 +119,9 @@ func main() {
 		case "update":
 			fmt.Println("claude-go is built from source; update via git pull + go build")
 			return
+		case "login":
+			authLoginSub()
+			return
 		case "setup-token":
 			fmt.Println("token: uses ANTHROPIC_API_KEY or Claude Code keychain credentials")
 			return
@@ -349,6 +352,7 @@ func main() {
 		os.Setenv("CLAUDE_GO_DEBUG", "1")
 	}
 	if printMode {
+		tools.Interactive = false
 		if inFormat == "stream-json" {
 			runPrintStreamJSON(loop)
 			return
@@ -362,8 +366,16 @@ func main() {
 		code := runPrint(loop, strings.Join(prompt, " "), outFormat, st2)
 		os.Exit(code)
 	}
-	fireHook(loop, hooks.SessionEnd)
+	tools.Interactive = true
+	loop.Client.Entrypoint = api.EntryCLI
+	tools.Checkpoints.Init(sessionID)
+	if !repl.TrustGate(cwd) {
+		fmt.Println("not trusted — exiting")
+		return
+	}
+	fireHook(loop, hooks.SessionStart)
 	repl.RunWithStore(loop, st2)
+	fireHook(loop, hooks.SessionEnd)
 }
 
 func fireHook(l *agent.Loop, ev hooks.Event) {
@@ -395,6 +407,8 @@ func startMCP(cwd, configFile string, strict bool) (clients []*mcp.Client) {
 	_ = strict
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	httpMCP := map[string]*mcp.HTTPClient{}
+	_ = httpMCP
 	for name, cfg := range cfgs {
 		if cfg.Command == "" {
 			continue
@@ -566,4 +580,21 @@ func runPrintStreamJSON(l *agent.Loop) {
 		}
 		fmt.Printf(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":%q}]}}`+"\n", out.String())
 	}
+}
+
+func authLoginSub() {
+	urlStr, verifier, state := auth.LoginURL()
+	fmt.Println("open in browser:", urlStr)
+	auth.OpenBrowser(urlStr)
+	fmt.Print("paste code (code#state): ")
+	var code string
+	fmt.Scanln(&code)
+	creds, err := auth.ExchangeCode(code, verifier, state)
+	if err != nil {
+		fatal("login failed: %v", err)
+	}
+	if err := auth.WriteKeychain(creds); err != nil {
+		fatal("keychain write failed: %v", err)
+	}
+	fmt.Println("logged in")
 }

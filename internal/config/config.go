@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 type Settings struct {
@@ -26,6 +27,7 @@ func Load(cwd string) *Settings {
 	merged := &Settings{}
 	home, _ := os.UserHomeDir()
 	for _, p := range []string{
+		managedSettingsPath(),
 		filepath.Join(home, ".claude", "settings.json"),
 		filepath.Join(cwd, ".claude", "settings.json"),
 		filepath.Join(cwd, ".claude", "settings.local.json"),
@@ -75,4 +77,12 @@ func Account() (email, accountUUID, deviceID string) {
 		deviceID = v
 	}
 	return email, accountUUID, deviceID
+}
+
+// managedSettingsPath: enterprise-managed settings (CC reads these too).
+func managedSettingsPath() string {
+	if runtime.GOOS == "darwin" {
+		return "/Library/Application Support/ClaudeCode/managed-settings.json"
+	}
+	return "/etc/claude-code/managed-settings.json"
 }

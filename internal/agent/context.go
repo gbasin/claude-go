@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"claude-go/internal/api"
+	"claude-go/internal/mcp"
 )
 
 //go:embed system_main.txt
@@ -43,6 +44,14 @@ func SystemBlocks(entrypoint string, cwd, model, appendPrompt string, extra []st
 	out = append(out, api.SystemBlock{Type: "text", Text: ident, CacheControl: ephemeral1h})
 
 	main := systemMain
+	bang := ""
+	if entrypoint == "cli" {
+		bang = " - If you need the user to run a shell command themselves (e.g., an interactive login like `gcloud auth login`), suggest they type `! <command>` in the prompt — the `!` prefix runs the command in this session so its output lands directly in the conversation.\n"
+	}
+	main = strings.Replace(main, "{{BANG_LINE}}", bang, 1)
+	for _, txt := range mcpInstructions() {
+		main += "\n\n" + txt
+	}
 	// parameterize per-session values baked into the captured prompt
 	home, _ := os.UserHomeDir()
 	memDir := filepath.Join(home, ".claude", "projects", projectSlug(cwd), "memory")
@@ -175,7 +184,16 @@ func version() string { return "2.1.288" }
 
 // DefaultThinking / OutputConfig / ContextManagement mirror the wire defaults.
 func DefaultThinking() json.RawMessage {
-	return json.RawMessage(`{"type":"adaptive","display":"omitted"}`)
+	return ThinkingFor("")
+}
+
+// ThinkingFor returns adaptive thinking config; interactive shows updates.
+func ThinkingFor(entrypoint string) json.RawMessage {
+	display := "omitted"
+	if entrypoint == "cli" {
+		display = "updates"
+	}
+	return json.RawMessage(`{"type":"adaptive","display":"` + display + `"}`)
 }
 
 func DefaultOutputConfig() json.RawMessage {
@@ -184,4 +202,12 @@ func DefaultOutputConfig() json.RawMessage {
 
 func DefaultContextManagement() json.RawMessage {
 	return json.RawMessage(`{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`)
+}
+
+func mcpInstructions() []string {
+	var out []string
+	for _, t := range mcp.Instructions {
+		out = append(out, t)
+	}
+	return out
 }

@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,6 +34,7 @@ type Background struct {
 	mu     sync.Mutex
 	seq    atomic.Int64
 	tasks  map[string]*BgTask
+	notif  []string
 	OnExit func(t *BgTask) // called when a task finishes
 }
 
@@ -120,7 +123,41 @@ func execBash(c *Context, raw json.RawMessage) Result {
 // resulting cwd back via a sentinel so the session can track `cd`.
 const cwdSentinel = "__CLAUDE_GO_CWD_SENTINEL__"
 
+// sandboxProfile restricts writes to cwd+scratchpad and temp; network allowed.
+const sandboxProfile = `(version 1)
+(allow default)
+(deny file-write* (regex #"^/(?!private/tmp|var/folders|Users/[^/]+/Code|Users/[^/]+/claude)"))
+(allow file-write* (subpath "/private/tmp") (subpath "/tmp") (subpath "/var") (subpath (param "CWD")))`
+
+// maybeSandbox wraps a command in macOS sandbox-exec when CLAUDE_GO_SANDBOX=1.
+// Writes a seatbelt profile to the scratchpad and prefixes the command.
+func (c *Context) maybeSandbox(command string) string {
+	if os.Getenv("CLAUDE_GO_SANDBOX") != "1" || runtime.GOOS != "darwin" {
+		return command
+	}
+	if _, err := exec.LookPath("sandbox-exec"); err != nil {
+		return command
+	}
+	dir := filepath.Join(os.TempDir(), "claude-go-sandbox")
+	os.MkdirAll(dir, 0o755)
+	pf := filepath.Join(dir, "profile.sb")
+	profile := fmt.Sprintf(`(version 1)
+(allow default)
+(deny file-write* (regex #"^/(?!private/tmp|var/folders|private/var)"))
+(allow file-write* (subpath "/private/tmp") (subpath "/tmp") (subpath "/var/folders") (subpath %q))
+`, c.CWD)
+	if err := os.WriteFile(pf, []byte(profile), 0o644); err != nil {
+		return command
+	}
+	sh := os.Getenv("SHELL")
+	if sh == "" {
+		sh = "/bin/bash"
+	}
+	return fmt.Sprintf("sandbox-exec -f %q %s -c %q", pf, sh, command)
+}
+
 func (c *Context) shellCmd(ctx context.Context, command string) *exec.Cmd {
+	command = c.maybeSandbox(command)
 	wrapped := command + "\nprintf '" + cwdSentinel + "%s' \"$PWD\""
 	shell := os.Getenv("SHELL")
 	if shell == "" || !strings.HasSuffix(shell, "sh") {
@@ -257,4 +294,13 @@ func execTaskStop(c *Context, raw json.RawMessage) Result {
 	case <-time.After(3 * time.Second):
 	}
 	return Result{Content: fmt.Sprintf("Task %s stopped", id)}
+}
+
+// DrainNotifications returns and clears queued task-exit notes.
+func (b *Background) DrainNotifications() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := b.notif
+	b.notif = nil
+	return out
 }
