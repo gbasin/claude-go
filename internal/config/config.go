@@ -4,9 +4,11 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 )
 
 type Settings struct {
@@ -193,4 +195,35 @@ func (s *Settings) ApplyEnv() {
 // CoAuthoredBy reports whether the trailer should be added (default true).
 func (s *Settings) CoAuthoredBy() bool {
 	return s.IncludeCoAuthoredBy == nil || *s.IncludeCoAuthoredBy
+}
+
+// ReadClaudeJSON parses ~/.claude.json; on parse failure the file is copied
+// to .claude.json.corrupted.<ts> (real CC's auto-repair) and an empty map
+// returned. Returns the path too so callers can write back.
+func ReadClaudeJSON() (map[string]any, string) {
+	p := filepath.Join(Home(), ".claude.json")
+	m := map[string]any{}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return m, p
+	}
+	if json.Unmarshal(b, &m) != nil || m == nil {
+		// preserve the corrupt file instead of silently clobbering it
+		ts := time.Now().Unix()
+		os.WriteFile(p+fmt.Sprintf(".corrupted.%d", ts), b, 0o600)
+		m = map[string]any{}
+	}
+	return m, p
+}
+
+// WriteClaudeJSON writes the map back atomically (tmp + rename).
+func WriteClaudeJSON(p string, m map[string]any) {
+	b, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return
+	}
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err == nil {
+		os.Rename(tmp, p)
+	}
 }

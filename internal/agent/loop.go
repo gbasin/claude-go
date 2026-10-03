@@ -215,7 +215,7 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 	}
 	l.lastTotal = resp.Usage.InputTokens + resp.Usage.CacheReadInputTokens +
 		resp.Usage.CacheCreationInputTokens
-	l.Messages = append(l.Messages, api.BlocksMessage("assistant", resp.Content))
+	l.Messages = append(l.Messages, assistantMessage(resp))
 
 	var results []api.ContentBlock
 	for _, b := range resp.Content {
@@ -542,4 +542,16 @@ func (l *Loop) thinkingConfig() json.RawMessage {
 // ContextWarnThreshold is ~90% of the auto-compact window for the model.
 func (l *Loop) ContextWarnThreshold() int {
 	return (l.contextWindow() - 20000 - 8000 - 4000) * 9 / 10
+}
+
+
+// assistantMessage wraps the response as a full wire message for transcripts.
+func assistantMessage(resp *api.Response) api.Message {
+	b, _ := json.Marshal(resp)
+	return api.Message{Role: "assistant", Content: mustMarshalBlocks(resp.Content), Raw: b}
+}
+
+func mustMarshalBlocks(bs []api.ContentBlock) json.RawMessage {
+	b, _ := json.Marshal(bs)
+	return b
 }

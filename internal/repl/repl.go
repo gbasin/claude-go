@@ -874,12 +874,8 @@ func addLocalPermissionRule(cwd, rule string) {
 }
 
 func mirrorAllowRule(cwd, rule string) {
-	p := filepath.Join(config.Home(), ".claude.json")
-	var cfg map[string]any
-	if b, err := os.ReadFile(p); err == nil {
-		json.Unmarshal(b, &cfg)
-	}
-	if cfg == nil {
+	cfg, p := config.ReadClaudeJSON()
+	if len(cfg) == 0 {
 		return // don't create the file just for this
 	}
 	projects, _ := cfg["projects"].(map[string]any)
@@ -893,8 +889,7 @@ func mirrorAllowRule(cwd, rule string) {
 	allowed, _ := proj["allowedTools"].([]any)
 	allowed = append(allowed, rule)
 	proj["allowedTools"] = allowed
-	b, _ := json.MarshalIndent(cfg, "", "  ")
-	os.WriteFile(p, b, 0o600)
+	config.WriteClaudeJSON(p, cfg)
 }
 
 // runRewindSelector lists past user messages; picking one truncates the

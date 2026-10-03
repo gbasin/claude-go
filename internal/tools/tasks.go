@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"claude-go/internal/config"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -349,7 +350,8 @@ func TodosText() string {
 
 // persistTasks writes the session task list so teammates/subagents share it.
 func persistTasks(c *Context) {
-	dir := filepath.Join(os.TempDir(), "claude-go", c.Session)
+	// real stores session task lists under the config dir
+	dir := filepath.Join(config.ClaudeDir(), "tasks", c.Session)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return
 	}
@@ -359,7 +361,7 @@ func persistTasks(c *Context) {
 
 // LoadTasks restores the session task list (session resume).
 func LoadTasks(c *Context) {
-	p := filepath.Join(os.TempDir(), "claude-go", c.Session, "tasks.json")
+	p := filepath.Join(config.ClaudeDir(), "tasks", c.Session, "tasks.json")
 	b, err := os.ReadFile(p)
 	if err != nil {
 		return

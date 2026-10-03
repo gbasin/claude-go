@@ -36,8 +36,8 @@ type event struct {
 	Version          string          `json:"version"`
 	UserType         string          `json:"userType"`
 	GitBranch        string          `json:"gitBranch,omitempty"`
-	IsSidechain      bool            `json:"isSidechain,omitempty"`
-	IsMeta           bool            `json:"isMeta,omitempty"`
+	IsSidechain      bool            `json:"isSidechain"`
+	IsMeta           bool            `json:"isMeta"`
 	IsCompactSummary bool            `json:"isCompactSummary,omitempty"`
 	ModelOnlyText    string          `json:"modelOnlyText,omitempty"`
 	RequestID        string          `json:"requestId,omitempty"`
@@ -126,12 +126,18 @@ func (s *Store) LogCompactSummary(m api.Message, modelOnlyText string) error {
 func (s *Store) logMessage(m api.Message, compact bool, modelOnlyText string) error {
 	var raw json.RawMessage
 	role := m.Role
-	// re-encode as {role, content}
-	mb, _ := json.Marshal(struct {
-		Role    string          `json:"role"`
-		Content json.RawMessage `json:"content"`
-	}{role, m.Content})
-	raw = mb
+	if role == "assistant" && len(m.Raw) > 0 {
+		// real persists the full API message: {id,type:"message",role,model,
+		// content,stop_reason,stop_sequence,usage}
+		raw = m.Raw
+	}
+	if len(raw) == 0 {
+		mb, _ := json.Marshal(struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		}{role, m.Content})
+		raw = mb
+	}
 	uuid := newUUID()
 	e := event{
 		Type: role, UUID: uuid, ParentUUID: s.lastUUID,
@@ -178,10 +184,17 @@ func (s *Store) LogSummary(summary, leafUUID string) error {
 
 // LogCompactBoundary marks where compaction replaced history.
 func (s *Store) LogCompactBoundary(preTokens, kept int) error {
+	return s.LogCompactBoundaryTrig(preTokens, kept, "auto")
+}
+
+// LogCompactBoundaryTrig is LogCompactBoundary with the real trigger field.
+func (s *Store) LogCompactBoundaryTrig(preTokens, kept int, trigger string) error {
 	return s.LogRecord(map[string]any{
 		"type": "system", "subtype": "compact_boundary",
+		"compactBoundary": true, "isMeta": false,
+		"logicalParentUuid": s.lastUUID,
 		"compactMetadata": map[string]any{
-			"trigger": "auto", "preTokens": preTokens, "messagesKept": kept,
+			"trigger": trigger, "preTokens": preTokens, "messagesKept": kept,
 		},
 	})
 }
