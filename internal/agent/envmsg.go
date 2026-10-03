@@ -53,7 +53,7 @@ var builtinAgents = []agentDef{
 
 // EnvMessage builds the role:"system" message appended after the first user
 // message: environment, model card, agent registry, skill index, mode notes.
-func EnvMessage(cwd, model string, addDirs []string, permMode string) string {
+func EnvMessage(cwd, model string, addDirs []string, permMode string, sessionID string) string {
 	var b strings.Builder
 	b.WriteString("# Environment\nYou have been invoked in the following environment: \n")
 	fmt.Fprintf(&b, " - Primary working directory: %s\n", filepath.Clean(cwd))
@@ -73,7 +73,11 @@ func EnvMessage(cwd, model string, addDirs []string, permMode string) string {
 	if shell == "" {
 		shell = "/bin/sh"
 	}
-	fmt.Fprintf(&b, " - Platform: %s\n - Shell: %s\n - OS Version: %s\n\n", plat, filepath.Base(shell), osVersion())
+	fmt.Fprintf(&b, " - Platform: %s\n - Shell: %s\n - OS Version: %s\n", plat, filepath.Base(shell), osVersion())
+	if scratch := scratchDir(cwd, sessionID); scratch != "" {
+		fmt.Fprintf(&b, " - Scratchpad directory: %s — always use it for temporary files (intermediate results, scripts, outputs that don't belong in the project) instead of `/tmp` or other system temp directories; it is session-specific, isolated from the project, and can generally be used without permission prompts. Only use `/tmp` if the user explicitly asks.\n", scratch)
+	}
+	b.WriteString("\n")
 
 	mi := infoFor(model)
 	fmt.Fprintf(&b, "You are powered by the model named %s. The exact model ID is %s.", mi.Name, mi.APIID)
@@ -169,12 +173,21 @@ func loadSkillIndex(cwd string) string {
 	home, _ := os.UserHomeDir()
 	seen := map[string]bool{}
 	var b strings.Builder
-	for _, dir := range []string{
+	dirs := []string{
 		filepath.Join(home, ".claude", "skills"),
 		filepath.Join(home, ".agents", "skills"),
 		filepath.Join(cwd, ".claude", "skills"),
 		filepath.Join(cwd, ".agents", "skills"),
+	}
+	// installed plugins contribute skills too
+	for _, base := range []string{
+		filepath.Join(home, ".claude", "plugins", "synced"),
+		filepath.Join(home, ".claude", "plugins", "local"),
 	} {
+		machines, _ := filepath.Glob(filepath.Join(base, "*", "*", "skills"))
+		dirs = append(dirs, machines...)
+	}
+	for _, dir := range dirs {
 		ents, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -222,4 +235,19 @@ func parseFrontmatter(s string) map[string]string {
 		out[strings.TrimSpace(k)] = strings.TrimSpace(strings.Trim(v, " \t\"'"))
 	}
 	return out
+}
+
+var scratchOnce = map[string]string{}
+
+func scratchDir(cwd, sessionID string) string {
+	if d, ok := scratchOnce[sessionID]; ok {
+		return d
+	}
+	d := filepath.Join(os.TempDir(), fmt.Sprintf("claude-%d", os.Getuid()),
+		projectSlug(cwd), sessionID, "scratchpad")
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		return ""
+	}
+	scratchOnce[sessionID] = d
+	return d
 }

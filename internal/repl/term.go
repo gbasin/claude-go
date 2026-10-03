@@ -22,6 +22,7 @@ type editor struct {
 	pasteN    int
 	lastCtrlC time.Time
 	completer func(prefix string) []string // slash command completion
+	cycleMode func()                       // shift+tab -> permission mode cycle
 }
 
 func newEditor() *editor {
@@ -219,6 +220,10 @@ func (e *editor) insertKey(k key) *readResult {
 		}
 	case c == '\t':
 		e.complete()
+	case k.seq == "[Z": // shift+tab: cycle permission mode
+		if e.cycleMode != nil {
+			e.cycleMode()
+		}
 	case k.r != 0:
 		e.insert(k.r)
 	case c >= 32 && c < 127:

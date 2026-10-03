@@ -99,7 +99,11 @@ func (c *Client) headers(req *http.Request, tok string) {
 	h.Set("X-Stainless-Runtime", "node")
 	h.Set("X-Stainless-Runtime-Version", "v26.3.0")
 	h.Set("X-Stainless-Timeout", "600")
-	h.Set("anthropic-beta", betaFlags)
+	betas := betaFlags
+	if c.Entrypoint == EntryCLI {
+		betas += ",thinking-display-updates-2026-08-18"
+	}
+	h.Set("anthropic-beta", betas)
 	h.Set("anthropic-dangerous-direct-browser-access", "true")
 	h.Set("anthropic-version", "2023-06-01")
 	h.Set("x-app", "cli")

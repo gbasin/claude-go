@@ -28,17 +28,21 @@ type Tool struct {
 
 // Context carries per-session tool state.
 type Context struct {
-	Ctx        context.Context
-	CWD        string // current working directory (Bash persists this)
-	mu         sync.Mutex
-	readFiles  map[string]readState
-	BgTasks    *Background
-	Agent      AgentRunner // for Agent/SendMessage-style tools
-	AskUser    func(question string, options []string) (string, error)
-	Permission func(toolName string, input json.RawMessage, summary string) bool
-	Notes      []string // queued system notes from background tasks
-	Answerer   Answerer // WebFetch page-answer model
-	Searcher   Searcher // WebSearch backend
+	Ctx           context.Context
+	CWD           string // current working directory (Bash persists this)
+	mu            sync.Mutex
+	readFiles     map[string]readState
+	BgTasks       *Background
+	Agent         AgentRunner // for Agent/SendMessage-style tools
+	AskUser       func(question string, options []string) (string, error)
+	Permission    func(toolName string, input json.RawMessage, summary string) bool
+	Notes         []string // queued system notes from background tasks
+	Answerer      Answerer // WebFetch page-answer model
+	Searcher      Searcher // WebSearch backend
+	AskStructured func(header, question string, options []string, multi bool) ([]string, error)
+	SetPermMode   func(mode string)
+	PlanApprove   func() bool
+	EndSession    func()
 }
 
 type readState struct {
@@ -48,21 +52,35 @@ type readState struct {
 
 var registry = map[string]*Tool{}
 
+// Interactive controls whether interactive-only tools (AskUserQuestion,
+// plan mode, artifacts, feedback) are registered.
+var Interactive bool
+
 func Register(t *Tool) { registry[t.Def.Name] = t }
 
 // All returns every registered tool definition in a stable order.
 func All() []*Tool {
 	order := []string{
-		"Agent", "Bash", "CronCreate", "CronDelete", "CronList", "DesignSync",
-		"Edit", "EnterWorktree", "ExitWorktree", "ListAgents",
+		"Agent", "Artifact", "ArtifactComments", "ArtifactData",
+		"AskUserQuestion", "Bash", "CronCreate", "CronDelete", "CronList",
+		"DesignSync", "Edit", "EndConversation", "EnterPlanMode",
+		"EnterWorktree", "ExitPlanMode", "ExitWorktree", "ListAgents",
 		"ListMcpResourcesTool", "LSP", "Monitor", "NotebookEdit",
 		"PushNotification", "Read", "ReadMcpResourceDirTool",
 		"ReadMcpResourceTool", "RemoteTrigger", "ReportFindings",
-		"ScheduleWakeup", "SendMessage", "Skill", "TaskStop", "WebFetch",
-		"WebSearch", "Workflow", "Write",
+		"ScheduleWakeup", "SendFeedback", "SendMessage", "Skill",
+		"TaskStop", "WebFetch", "WebSearch", "Workflow", "Write",
+	}
+	interactiveOnly := map[string]bool{
+		"Artifact": true, "ArtifactComments": true, "ArtifactData": true,
+		"AskUserQuestion": true, "EndConversation": true,
+		"EnterPlanMode": true, "ExitPlanMode": true, "SendFeedback": true,
 	}
 	out := make([]*Tool, 0, len(order))
 	for _, n := range order {
+		if interactiveOnly[n] && !Interactive {
+			continue
+		}
 		if t, ok := registry[n]; ok {
 			out = append(out, t)
 		}

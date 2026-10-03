@@ -4,10 +4,12 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -280,3 +282,173 @@ func (c *Client) ReadResource(ctx context.Context, uri string) (string, error) {
 	}
 	return b.String(), nil
 }
+
+// HTTPClient is an MCP client using the streamable-http transport.
+type HTTPClient struct {
+	URL          string
+	Headers      map[string]string
+	Name         string
+	Tools        []Tool
+	Instructions string
+	client       *http.Client
+	seq          atomic.Int64
+	sessID       string
+}
+
+// ConnectHTTP initializes an HTTP-transport MCP server.
+func ConnectHTTP(name, url string, headers map[string]string) (*HTTPClient, error) {
+	c := &HTTPClient{URL: url, Headers: headers, Name: name,
+		client: &http.Client{Timeout: 30 * time.Second}}
+	params, _ := json.Marshal(map[string]any{
+		"protocolVersion": "2025-03-26",
+		"capabilities":    map[string]any{},
+		"clientInfo":      map[string]string{"name": "claude-go", "version": "2.1.288"},
+	})
+	var res struct {
+		ServerInfo struct {
+			Name, Version string
+		} `json:"serverInfo"`
+		Instructions string `json:"instructions"`
+	}
+	if err := c.rpc(context.Background(), "initialize", params, &res); err != nil {
+		return nil, err
+	}
+	c.Instructions = res.Instructions
+	c.notifyInit()
+	var toolsRes struct {
+		Tools []Tool `json:"tools"`
+	}
+	if err := c.rpc(context.Background(), "tools/list", nil, &toolsRes); err == nil {
+		c.Tools = toolsRes.Tools
+	}
+	return c, nil
+}
+
+func (c *HTTPClient) rpc(ctx context.Context, method string, params json.RawMessage, out any) error {
+	id := c.seq.Add(1)
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": id, "method": method, "params": json.RawMessage(params),
+	})
+	req, err := http.NewRequestWithContext(ctx, "POST", c.URL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	for k, v := range c.Headers {
+		req.Header.Set(k, v)
+	}
+	if c.sessID != "" {
+		req.Header.Set("Mcp-Session-Id", c.sessID)
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
+		c.sessID = sid
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	// streamable-http may return SSE or plain JSON
+	var m map[string]json.RawMessage
+	if bytes.Contains(data, []byte("data:")) {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "data:") {
+				json.Unmarshal([]byte(strings.TrimSpace(line[5:])), &m)
+			}
+		}
+	} else {
+		json.Unmarshal(data, &m)
+	}
+	if e, ok := m["error"]; ok && len(e) > 0 {
+		return fmt.Errorf("mcp error: %s", e)
+	}
+	if out != nil {
+		return json.Unmarshal(m["result"], out)
+	}
+	return nil
+}
+
+func (c *HTTPClient) notifyInit() {
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "method": "notifications/initialized",
+	})
+	req, _ := http.NewRequest("POST", c.URL, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range c.Headers {
+		req.Header.Set(k, v)
+	}
+	if c.sessID != "" {
+		req.Header.Set("Mcp-Session-Id", c.sessID)
+	}
+	if r, err := c.client.Do(req); err == nil {
+		r.Body.Close()
+	}
+}
+
+func (c *HTTPClient) call(ctx context.Context, method string, params any, out any) error {
+	b, _ := json.Marshal(params)
+	return c.rpc(ctx, method, b, out)
+}
+
+// CallTool implements the MCPCaller interface for http servers.
+func (c *HTTPClient) CallTool(ctx context.Context, name string, args json.RawMessage) (string, error) {
+	var res struct {
+		Content []struct {
+			Type, Text string
+		} `json:"content"`
+		IsError bool `json:"isError"`
+	}
+	err := c.call(ctx, "tools/call", map[string]any{
+		"name": name, "arguments": json.RawMessage(args),
+	}, &res)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for _, ct := range res.Content {
+		if ct.Text != "" {
+			b.WriteString(ct.Text)
+		}
+	}
+	return b.String(), nil
+}
+
+// ListResources for HTTP transport.
+func (c *HTTPClient) ListResources(ctx context.Context) (string, error) {
+	var res struct {
+		Resources []struct {
+			URI, Name, Description string
+		} `json:"resources"`
+	}
+	if err := c.call(ctx, "resources/list", nil, &res); err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for _, r := range res.Resources {
+		fmt.Fprintf(&b, "%s  %s  %s\n", r.URI, r.Name, r.Description)
+	}
+	return b.String(), nil
+}
+
+// ReadResource for HTTP transport.
+func (c *HTTPClient) ReadResource(ctx context.Context, uri string) (string, error) {
+	var res struct {
+		Contents []struct{ URI, MimeType, Text, Blob string } `json:"contents"`
+	}
+	if err := c.call(ctx, "resources/read", map[string]any{"uri": uri}, &res); err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for _, ct := range res.Contents {
+		b.WriteString(ct.Text)
+	}
+	return b.String(), nil
+}// Instructions captured from initialize (injected into system prompt).
+var Instructions = map[string]string{}
+
+
