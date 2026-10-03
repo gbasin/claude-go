@@ -4,6 +4,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"golang.org/x/term"
 )
@@ -13,6 +14,10 @@ type keySource struct {
 	ch    chan key
 	old   *term.State
 	kitty bool // kitty keyboard protocol was enabled
+	// dialog, when non-nil, gets every key forwarded — the permission dialog
+	// owns stdin while open so the turn's busy-queue goroutine can't eat
+	// the user's answer.
+	dialog atomic.Pointer[chan key]
 }
 
 // modifier bits carried on a key (kitty/CSI-u encoding: param-1).
@@ -206,4 +211,13 @@ func utf8Len(b byte) int {
 		return 2
 	}
 	return 1
+}
+
+// forward returns the channel keys should go to while a modal dialog is open.
+func (ks *keySource) forward(k key) bool {
+	if ch := ks.dialog.Load(); ch != nil {
+		*ch <- k
+		return true
+	}
+	return false
 }

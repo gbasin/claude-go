@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -208,5 +209,32 @@ func TestErrAPITypeMapping(t *testing.T) {
 	e = &ErrAPI{E: &APIError{Type: "custom", Message: "x"}, StatusCode: 400}
 	if e.Type() != "custom" {
 		t.Fatalf("type %q", e.Type())
+	}
+}
+
+func TestSigV4Shape(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY")
+	t.Setenv("AWS_SESSION_TOKEN", "")
+	t.Setenv("AWS_REGION", "us-west-2")
+	t.Setenv("AWS_PROFILE", "")
+	t.Setenv("AWS_DEFAULT_PROFILE", "")
+	t.Setenv("HOME", t.TempDir()) // no credentials file
+	req, _ := http.NewRequest("POST",
+		"https://bedrock-runtime.us-west-2.amazonaws.com/model/m/invoke",
+		strings.NewReader(`{"x":1}`))
+	if err := sigv4Sign(req, []byte(`{"x":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	auth := req.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/") {
+		t.Fatalf("bad auth header: %s", auth)
+	}
+	if !strings.Contains(auth, "us-west-2/bedrock/aws4_request") ||
+		!strings.Contains(auth, "Signature=") {
+		t.Fatalf("scope/signature missing: %s", auth)
+	}
+	if req.Header.Get("X-Amz-Date") == "" || req.Header.Get("X-Amz-Content-Sha256") == "" {
+		t.Fatal("amz headers missing")
 	}
 }
