@@ -1,0 +1,9 @@
+# build
+claude-go
+claude-go-new
+*.test
+# captures & extracted source stay local (contains Anthropic IP / personal data)
+capture/
+reference/
+../claude-extracted/
+claude-extracted/
