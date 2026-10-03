@@ -347,6 +347,19 @@ func main() {
 			perms.AdditionalDirs = append(perms.AdditionalDirs, d)
 		}
 	}
+	// persisted per-project allow rules from ~/.claude.json
+	if b, err := os.ReadFile(filepath.Join(config.Home(), ".claude.json")); err == nil {
+		var cfg struct {
+			Projects map[string]struct {
+				AllowedTools []string `json:"allowedTools"`
+			} `json:"projects"`
+		}
+		if json.Unmarshal(b, &cfg) == nil {
+			if proj, ok := cfg.Projects[cwd]; ok {
+				rules["allow"] = append(rules["allow"], proj.AllowedTools...)
+			}
+		}
+	}
 	if o.allowTools != "" {
 		rules["allow"] = append(rules["allow"], strings.Split(o.allowTools, ",")...)
 	}

@@ -28,6 +28,16 @@ var themePalettes = map[string]palette{
 
 // applyTheme remaps the package color vars. Called once at REPL start.
 func applyTheme(name string, cwd string) {
+	// NO_COLOR disables color entirely unless FORCE_COLOR is set (real CC honors both)
+	if os.Getenv("NO_COLOR") != "" && os.Getenv("FORCE_COLOR") == "" {
+		name = "none"
+	}
+	if fc := os.Getenv("FORCE_COLOR"); fc != "" && fc != "0" && fc != "false" {
+		// FORCE_COLOR forces color on (level 1-3 all enable color)
+		if name == "" || name == "none" || name == "no-color" {
+			name = "dark"
+		}
+	}
 	if name == "" || name == "auto" {
 		name = autoTheme()
 	}
