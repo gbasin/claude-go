@@ -231,9 +231,16 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 			r = tools.Result{Content: "Tool call blocked by hook: " + pre.Reason, IsError: true}
 		} else if l.ToolCtx.Permission != nil &&
 			!l.ToolCtx.Permission(b.Name, b.Input, toolSummary(b.Name, b.Input)) {
-			r = tools.Result{
-				Content: "The user declined to run this tool. Do not retry the same call; adjust or ask what they'd prefer.",
-				IsError: true,
+			if l.PermMode == "dontAsk" {
+				r = tools.Result{
+					Content: "Permission to use " + b.Name + " has been denied because Claude Code is running in don't ask mode. Only use tools that are allowed in this mode via the permission settings.",
+					IsError: true,
+				}
+			} else {
+				r = tools.Result{
+					Content: "Permission for this tool use was denied. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). Try a different approach or report the limitation to complete your task.",
+					IsError: true,
+				}
 			}
 		} else {
 			r = tools.Dispatch(l.ToolCtx, b.Name, b.Input)
@@ -356,6 +363,14 @@ func toolSummary(name string, input json.RawMessage) string {
 
 func toolResultBlock(id string, r tools.Result) api.ContentBlock {
 	content, _ := json.Marshal(resultBlocks(r))
+	if r.IsError && !strings.Contains(r.Content, "<tool_use_error>") {
+		// real wraps every error result in <tool_use_error> tags
+		wrapped, _ := json.Marshal([]api.ContentBlock{{
+			Type: "text",
+			Text: "<tool_use_error>" + strings.TrimSpace(r.Content) + "</tool_use_error>",
+		}})
+		content = wrapped
+	}
 	return api.ContentBlock{Type: "tool_result", ToolUseID: id, Content: content, IsError: r.IsError}
 }
 

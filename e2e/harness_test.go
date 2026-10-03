@@ -59,10 +59,10 @@ func TestMain(m *testing.M) {
 
 // sess is one isolated claude-go invocation context: fresh HOME + cwd.
 type sess struct {
-	t   *testing.T
-	cwd string // project dir (symlink-resolved)
+	t    *testing.T
+	cwd  string // project dir (symlink-resolved)
 	home string
-	env []string
+	env  []string
 }
 
 // newSession creates the sandbox. ~/.claude.json is pre-seeded with
@@ -102,6 +102,11 @@ func newSession(t *testing.T) *sess {
 	b, _ := json.Marshal(claudeJSON)
 	if err := os.WriteFile(filepath.Join(home, ".claude.json"), b, 0o644); err != nil {
 		t.Fatalf("seed .claude.json: %v", err)
+	}
+	// ~/.claude must exist for `config set` (it doesn't MkdirAll) and is
+	// where transcripts/plugins land anyway
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatalf("mkdir ~/.claude: %v", err)
 	}
 	return s
 }

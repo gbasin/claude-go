@@ -66,7 +66,7 @@ type readInput struct {
 func execRead(c *Context, raw json.RawMessage) Result {
 	var in readInput
 	if err := json.Unmarshal(raw, &in); err != nil {
-		return Result{Content: "invalid input: " + err.Error(), IsError: true}
+		return Result{Content: invalidInputErr("Read", raw, err), IsError: true}
 	}
 	if !filepath.IsAbs(in.FilePath) {
 		return Result{Content: "file_path must be an absolute path", IsError: true}
@@ -83,7 +83,7 @@ func execRead(c *Context, raw json.RawMessage) Result {
 	// read returns a compact marker instead of re-emitting the full content.
 	if in.Offset == 0 && in.Limit == 0 && in.Pages == "" {
 		if _, ok := c.WasRead(in.FilePath); ok && wasEmitted(in.FilePath) && !c.Stale(in.FilePath) {
-			return Result{Content: "File unchanged since last read"}
+			return Result{Content: "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading."}
 		}
 	}
 
@@ -102,6 +102,13 @@ func execRead(c *Context, raw json.RawMessage) Result {
 		return Result{Content: "Error: " + err.Error(), IsError: true}
 	}
 	defer f.Close()
+	// binary detection — sniff the first 8KB for NULs
+	head := make([]byte, 8192)
+	hn, _ := f.Read(head)
+	f.Seek(0, 0)
+	if bytes.Contains(head[:hn], []byte{0}) {
+		return Result{Content: "Error: Cannot read binary file " + in.FilePath, IsError: true}
+	}
 
 	limit := in.Limit
 	if limit <= 0 {
@@ -117,17 +124,21 @@ func execRead(c *Context, raw json.RawMessage) Result {
 	var b strings.Builder
 	lineNo := 0
 	emitted := 0
+	total := 0
+	truncatedLines := 0
 	for sc.Scan() {
 		lineNo++
+		total = lineNo
 		if lineNo < offset {
 			continue
 		}
 		if emitted >= limit {
-			break
+			continue // count the rest for the truncated marker
 		}
 		line := sc.Text()
 		if len(line) > readMaxLineLen {
 			line = line[:readMaxLineLen] + "…"
+			truncatedLines++
 		}
 		fmt.Fprintf(&b, "%6d\t%s\n", lineNo, line)
 		emitted++
@@ -139,14 +150,28 @@ func execRead(c *Context, raw json.RawMessage) Result {
 		if lineNo == 0 {
 			return Result{Content: "File is empty: " + in.FilePath}
 		}
-		return Result{Content: fmt.Sprintf("Offset %d is beyond end of file (%d lines)", offset, lineNo), IsError: true}
+		return Result{Content: fmt.Sprintf("Offset %d is beyond end of file (%d lines)", offset, total), IsError: true}
+	}
+	out := strings.TrimRight(b.String(), "\n")
+	// real marks partial views so the model knows more remains
+	first := offset
+	if first < 1 {
+		first = 1
+	}
+	lastEmitted := first + emitted - 1
+	if total > lastEmitted {
+		out += fmt.Sprintf("\n\n[Truncated: PARTIAL view — showing lines %d–%d of %d. Use offset=%d to continue.]",
+			first, lastEmitted, total, lastEmitted+1)
+	}
+	if truncatedLines > 0 {
+		out += fmt.Sprintf("\n[%d line(s) truncated to %d chars]", truncatedLines, readMaxLineLen)
 	}
 	st, _ := f.Stat()
 	if st != nil {
 		c.MarkRead(in.FilePath, st.ModTime().UnixNano(), st.Size())
 	}
 	markEmitted(in.FilePath)
-	return Result{Content: strings.TrimRight(b.String(), "\n")}
+	return Result{Content: out}
 }
 
 const (
@@ -429,14 +454,18 @@ func execWrite(c *Context, raw json.RawMessage) Result {
 	Checkpoints.Snapshot(inFilePath(c, raw))
 	var in writeInput
 	if err := json.Unmarshal(raw, &in); err != nil {
-		return Result{Content: "invalid input: " + err.Error(), IsError: true}
+		return Result{Content: invalidInputErr("Write", raw, err), IsError: true}
 	}
 	if !filepath.IsAbs(in.FilePath) {
 		return Result{Content: "file_path must be an absolute path", IsError: true}
 	}
 	if _, err := os.Stat(in.FilePath); err == nil {
 		if _, ok := c.WasRead(in.FilePath); !ok {
-			return Result{Content: "Error: file exists and has not been Read in this conversation. Read it first.", IsError: true}
+			return Result{Content: "Error: File has not been read yet. Read it first before writing to it.", IsError: true}
+		}
+		if c.Stale(in.FilePath) {
+			// real REFUSES the write on staleness
+			return Result{Content: "Error: File has been modified since read, either by the user or by a linter. Read it again before attempting to write it.", IsError: true}
 		}
 	}
 	if dir := filepath.Dir(in.FilePath); dir != "" {
@@ -453,7 +482,7 @@ func execWrite(c *Context, raw json.RawMessage) Result {
 		c.MarkRead(in.FilePath, st.ModTime().UnixNano(), st.Size())
 	}
 	clearEmitted(in.FilePath)
-	return Result{Content: "File written successfully"}
+	return Result{Content: "The file " + in.FilePath + " has been updated successfully."}
 }
 
 // ---------- Edit ----------
@@ -467,19 +496,38 @@ type editInput struct {
 
 func execEdit(c *Context, raw json.RawMessage) Result {
 	Checkpoints.Snapshot(inFilePath(c, raw))
+	// real coerces common aliases: path, old_str/new_str, replace_name
+	raw = coerceEditAliases(raw)
 	var in editInput
 	if err := json.Unmarshal(raw, &in); err != nil {
-		return Result{Content: "invalid input: " + err.Error(), IsError: true}
+		return Result{Content: invalidInputErr("Edit", raw, err), IsError: true}
 	}
 	if !filepath.IsAbs(in.FilePath) {
 		return Result{Content: "file_path must be an absolute path", IsError: true}
 	}
+	// old_string == "" creates the file with new_string (real create-file path)
+	if in.OldString == "" {
+		if _, err := os.Stat(in.FilePath); err == nil {
+			return Result{Content: "Error: File already exists. To overwrite it, empty old_string is not allowed — use Write instead.", IsError: true}
+		}
+		os.MkdirAll(filepath.Dir(in.FilePath), 0o755)
+		if err := os.WriteFile(in.FilePath, []byte(in.NewString), 0o644); err != nil {
+			return Result{Content: "Error: " + err.Error(), IsError: true}
+		}
+		if c.OnFileChanged != nil {
+			c.OnFileChanged(in.FilePath, "add")
+		}
+		if st, err := os.Stat(in.FilePath); err == nil {
+			c.MarkRead(in.FilePath, st.ModTime().UnixNano(), st.Size())
+		}
+		return Result{Content: "The file " + in.FilePath + " has been updated successfully."}
+	}
 	if _, ok := c.WasRead(in.FilePath); !ok {
-		return Result{Content: "Error: file has not been Read in this conversation. Read it first.", IsError: true}
+		return Result{Content: "Error: File has not been read yet. Read it first before writing to it.", IsError: true}
 	}
 	stale := c.Stale(in.FilePath)
 	if in.OldString == in.NewString {
-		return Result{Content: "Error: new_string must be different from old_string", IsError: true}
+		return Result{Content: "Error: Original and edited file match exactly. Failed to apply edit.", IsError: true}
 	}
 	b, err := os.ReadFile(in.FilePath)
 	if err != nil {
@@ -488,10 +536,14 @@ func execEdit(c *Context, raw json.RawMessage) Result {
 	content := string(b)
 	n := strings.Count(content, in.OldString)
 	if n == 0 {
-		return Result{Content: "Error: old_string not found in file", IsError: true}
+		preview := in.OldString
+		if len(preview) > 200 {
+			preview = preview[:200] + "…"
+		}
+		return Result{Content: "String to replace not found in file.\nString: " + preview, IsError: true}
 	}
 	if n > 1 && !in.ReplaceAll {
-		return Result{Content: fmt.Sprintf("Error: old_string occurs %d times; use replace_all or add context for uniqueness", n), IsError: true}
+		return Result{Content: fmt.Sprintf("Found %d matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identify the instance.", n), IsError: true}
 	}
 	if in.ReplaceAll {
 		content = strings.ReplaceAll(content, in.OldString, in.NewString)
@@ -511,12 +563,43 @@ func execEdit(c *Context, raw json.RawMessage) Result {
 	}
 	msg := "The file " + in.FilePath + " has been updated successfully."
 	if stale {
-		msg += " (note: the file had been modified on disk since you last read it — the edit applied cleanly, but the file contains other changes not in your context. You may want to Read it again.)"
+		msg += " (note: the file had been modified on disk since you last read it — the edit applied cleanly, but the file contains other changes not in your context. Read it before edits that depend on surrounding content.)"
 	}
 	if in.ReplaceAll {
-		return Result{Content: "All occurrences were successfully replaced." + staleSuffix(stale)}
+		return Result{Content: "The file " + in.FilePath + " has been updated. All occurrences were successfully replaced." + staleSuffix(stale)}
 	}
 	return Result{Content: msg}
+}
+
+// coerceEditAliases maps the real client's accepted aliases onto canonical keys.
+func coerceEditAliases(raw json.RawMessage) json.RawMessage {
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return raw
+	}
+	for k, v := range map[string]string{
+		"path": "file_path", "old_str": "old_string", "new_str": "new_string",
+		"replace_name": "replace_all",
+	} {
+		if _, have := m[v]; !have {
+			if val, ok := m[k]; ok {
+				m[v] = val
+				delete(m, k)
+			}
+		}
+	}
+	out, _ := json.Marshal(m)
+	return out
+}
+
+// invalidInputErr is the real three-line InputValidationError shape for bad JSON.
+func invalidInputErr(tool string, raw json.RawMessage, err error) string {
+	preview := string(raw)
+	if len(preview) > 200 {
+		preview = preview[:200]
+	}
+	return fmt.Sprintf("InputValidationError: %s was called with input that could not be parsed as JSON.\nYou sent (first %d of %d bytes): %s\nCommon causes: unescaped backslashes in file paths (use / or \\\\), unescaped control characters, or truncated output. Retry with valid JSON.",
+		tool, len(preview), len(raw), preview)
 }
 
 func staleSuffix(stale bool) string {

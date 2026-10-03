@@ -469,7 +469,13 @@ func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, m
 	}
 	res := runAgentTurn(sub, prompt)
 	rec.Finish(res.Content)
-	return res
+	// real wraps results with usage stats
+	out := res.Content
+	if sub.UsageTotal.OutputTokens > 0 || sub.UsageTotal.InputTokens > 0 {
+		out = fmt.Sprintf("%s\n\n<usage><subagent_tokens>%d</subagent_tokens></usage>",
+			out, sub.UsageTotal.InputTokens+sub.UsageTotal.OutputTokens)
+	}
+	return tools.Result{Content: out, IsError: res.IsError}
 }
 
 func firstLine(s string) string {
@@ -484,7 +490,11 @@ func firstLine(s string) string {
 }
 
 func runAgentTurn(sub *Loop, prompt string) tools.Result {
-	resp, err := sub.Ask(context.Background(), prompt)
+	ctx := context.Background()
+	if sub.ToolCtx != nil && sub.ToolCtx.Ctx != nil {
+		ctx = sub.ToolCtx.Ctx // cancellation propagates from the parent turn
+	}
+	resp, err := sub.Ask(ctx, prompt)
 	if err != nil {
 		return tools.Result{Content: "agent error: " + err.Error(), IsError: true}
 	}
