@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -234,4 +235,48 @@ func (c *Client) Close() {
 		c.cmd.Process.Kill()
 		c.cmd.Wait()
 	}
+}
+
+// ListResources calls resources/list and returns a text listing.
+func (c *Client) ListResources(ctx context.Context) (string, error) {
+	var res struct {
+		Resources []struct {
+			URI         string `json:"uri"`
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			MimeType    string `json:"mimeType"`
+		} `json:"resources"`
+	}
+	if err := c.call(ctx, "resources/list", nil, &res); err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for _, r := range res.Resources {
+		fmt.Fprintf(&b, "%s  %s  %s\n", r.URI, r.Name, r.Description)
+	}
+	return b.String(), nil
+}
+
+// ReadResource calls resources/read.
+func (c *Client) ReadResource(ctx context.Context, uri string) (string, error) {
+	var res struct {
+		Contents []struct {
+			URI      string `json:"uri"`
+			MimeType string `json:"mimeType"`
+			Text     string `json:"text"`
+			Blob     string `json:"blob"`
+		} `json:"contents"`
+	}
+	if err := c.call(ctx, "resources/read", map[string]any{"uri": uri}, &res); err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for _, ct := range res.Contents {
+		if ct.Text != "" {
+			b.WriteString(ct.Text)
+		} else if ct.Blob != "" {
+			b.WriteString("[base64 blob " + ct.MimeType + "]")
+		}
+	}
+	return b.String(), nil
 }
