@@ -95,6 +95,7 @@ func (e *editor) redraw() {
 		fmt.Fprintf(&b, "\x1b[%dC", col)
 	}
 	os.Stdout.WriteString(b.String())
+	compRepaint() // \x1b[J erased to screen bottom — restore the pinned zone
 }
 
 func (e *editor) insert(rs ...rune) {
@@ -1034,6 +1035,8 @@ func (e *editor) externalEditor() *readResult {
 	dir, _ := os.MkdirTemp("", "claude-go-edit-")
 	path := filepath.Join(dir, "prompt.md")
 	os.WriteFile(path, []byte(string(e.buf)), 0o600)
+	compSuspend() // the spawned editor owns the whole screen
+	defer compResume()
 	os.Stdout.WriteString("\r\x1b[2K  ($EDITOR: " + ed + ")\r\n")
 	if e.keys != nil {
 		term.Restore(int(os.Stdin.Fd()), e.keys.old)

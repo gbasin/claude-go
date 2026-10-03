@@ -3,6 +3,7 @@
 package tools
 
 import (
+	"claude-go/internal/netproxy"
 	"crypto/sha256"
 	"fmt"
 	"os"
@@ -82,8 +83,20 @@ func sbRule(b *strings.Builder, op string, paths []string) {
 
 // buildSeatbeltProfile renders the .sb profile. Rule order matters: SBPL is
 // last-match-wins, so denies are emitted before the allows that carve
-// exceptions out of them.
-func buildSeatbeltProfile(s *SandboxSettings, cwd string) string {
+// exceptions out of them. px non-nil means the netproxy MITM proxy is live
+// on loopback: all egress is denied except traffic to that port (real's
+// seatbelt rules emit exactly this pair), and the CA cert gets a read grant
+// — it lives under the deny-read $HOME but sandboxed TLS clients must read
+// it via SSL_CERT_FILE & friends.
+func buildSeatbeltProfile(s *SandboxSettings, cwd string, px *netproxy.Proxy) string {
+	proxyPort := 0
+	caPath := ""
+	if px != nil {
+		proxyPort = px.Port()
+		if px.CA != nil {
+			caPath = px.CA.CertPath
+		}
+	}
 	var b strings.Builder
 	b.WriteString("(version 1)\n(allow default)\n")
 
@@ -135,6 +148,9 @@ func buildSeatbeltProfile(s *SandboxSettings, cwd string) string {
 		allowRead := append([]string{}, seatbeltAllowRead...)
 		allowRead = append(allowRead, writable...)
 		allowRead = append(allowRead, expandSandboxPaths(s.allowRead(), cwd)...)
+		if caPath != "" {
+			allowRead = append(allowRead, caPath) // MITM CA readable for SSL_CERT_FILE
+		}
 
 		// Traversal grant: a file-read* deny on a dir also denies
 		// file-read-metadata on it, which blocks reaching any allowed leaf
@@ -194,30 +210,57 @@ func buildSeatbeltProfile(s *SandboxSettings, cwd string) string {
 		b.WriteString(")\n")
 	}
 
-	// network: seatbelt can't filter per-domain (that needs the SRT proxy);
-	// only full deny is expressible.
-	if s.networkDenied() {
+	// network: proxy → deny all egress except loopback-to-proxy (real's
+	// httpProxyPort rules); otherwise only full deny is expressible.
+	switch {
+	case proxyPort > 0:
 		b.WriteString("(deny network*)\n")
-		// allowUnixSockets: SBPL has no per-path AF_UNIX grant distinct from
-		// network*, so explicit unix-socket allows can't be expressed once
-		// network* is denied; allowAllUnixSockets likewise implies no deny.
-		if s.Network != nil && s.Network.AllowAllUnixSockets {
-			b.WriteString("(allow network* (subpath \"/var\"))\n")
+		fmt.Fprintf(&b, "(allow network-outbound (remote ip %s))\n",
+			sbQuote(fmt.Sprintf("localhost:%d", proxyPort)))
+		if s.Network != nil && s.Network.AllowAllLocal {
+			// real's allowLocalBinding rules
+			b.WriteString("(allow network-bind (local ip \"*:*\"))\n")
+			b.WriteString("(allow network-inbound (local ip \"*:*\"))\n")
+			b.WriteString("(allow network-outbound (remote ip \"localhost:*\"))\n")
 		}
+		emitUnixSocketRules(&b, s.Network)
+	case s.networkDenied() || s.needsNetworkProxy():
+		// needsNetworkProxy with proxyPort==0 means the proxy failed to
+		// start — fall back to a blunt deny rather than open egress.
+		b.WriteString("(deny network*)\n")
+		emitUnixSocketRules(&b, s.Network)
 	}
 	return b.String()
+}
+
+// emitUnixSocketRules mirrors real's AF_UNIX grants under a denied network:
+// allowAllUnixSockets allows every path (path-regex #"^/"); otherwise each
+// allowUnixSockets entry gets bind+outbound rules.
+func emitUnixSocketRules(b *strings.Builder, n *SandboxNetwork) {
+	if n == nil {
+		return
+	}
+	if n.AllowAllUnixSockets {
+		b.WriteString("(allow network-bind (local unix-socket (path-regex #\"^/\")))\n")
+		b.WriteString("(allow network-outbound (remote unix-socket (path-regex #\"^/\")))\n")
+		return
+	}
+	for _, p := range n.AllowUnixSockets {
+		fmt.Fprintf(b, "(allow network-bind (local unix-socket (subpath %s)))\n", sbQuote(p))
+		fmt.Fprintf(b, "(allow network-outbound (remote unix-socket (subpath %s)))\n", sbQuote(p))
+	}
 }
 
 // platformSandboxWrap writes the seatbelt profile to a stable path under the
 // OS temp dir and returns the sandbox-exec command line. The whole script
 // (command + cwd sentinel) runs inside the sandboxed shell so `cd` tracking
 // still works.
-func platformSandboxWrap(script string, s *SandboxSettings, cwd string) (string, error) {
+func platformSandboxWrap(script string, s *SandboxSettings, cwd string, px *netproxy.Proxy) (string, error) {
 	se, err := seatbeltPath()
 	if err != nil {
 		return "", fmt.Errorf("sandbox-exec not found")
 	}
-	profile := buildSeatbeltProfile(s, cwd)
+	profile := buildSeatbeltProfile(s, cwd, px)
 	dir := filepath.Join(os.TempDir(), "claude-go-sandbox")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err

@@ -1,9 +1,12 @@
 package tools
 
 import (
-	"bufio"
+	"bytes"
 	"claude-go/internal/config"
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,6 +22,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func init() {
@@ -499,17 +504,26 @@ type sessionEntry struct {
 	PID                 int       `json:"pid"`
 	TS                  time.Time `json:"ts"`
 	MessagingSocketPath string    `json:"messagingSocketPath,omitempty"`
-	Kind                string    `json:"kind,omitempty"`       // interactive|bg
-	Entrypoint          string    `json:"entrypoint,omitempty"` // cli
+	Kind                string    `json:"kind,omitempty"`       // interactive|bg|daemon|daemon-worker
+	Entrypoint          string    `json:"entrypoint,omitempty"` // CLAUDE_CODE_ENTRYPOINT
 	StartedAt           int64     `json:"startedAt,omitempty"`  // unix ms, real field
 	UpdatedAt           int64     `json:"updatedAt,omitempty"`
 	Version             string    `json:"version,omitempty"`
-	PeerProtocol        int       `json:"peerProtocol,omitempty"` // real gates on >=1
+	PeerProtocol        int       `json:"peerProtocol,omitempty"` // real gates on >=1 (Onr)
 	PeerFeatures        []string  `json:"peerFeatures,omitempty"`
 	PidDomain           string    `json:"pidDomain,omitempty"`
-	ProcStart           int64     `json:"procStart,omitempty"`
-	HostSessionID       string    `json:"hostSessionId,omitempty"`
-	NameSource          string    `json:"nameSource,omitempty"` // user|derived
+	// ProcStart is the platform start-token real computes via
+	// `ps -o lstart= -p <pid>` (string) on posix / a filetime on windows —
+	// used by peers to detect pid reuse. any: type varies by platform.
+	ProcStart     any    `json:"procStart,omitempty"`
+	HostSessionID string `json:"hostSessionId,omitempty"`
+	NameSource    string `json:"nameSource,omitempty"` // user|derived|collision|auto|hook|peer
+	NameSince     int64  `json:"nameSince,omitempty"`
+	LogPath       string `json:"logPath,omitempty"`
+	Agent         string `json:"agent,omitempty"`
+	JobID         string `json:"jobId,omitempty"`
+	Tmux          string `json:"tmux,omitempty"`
+	Spare         bool   `json:"spare,omitempty"`
 }
 
 // Real CC keeps the live-session registry at ~/.claude/sessions/<pid>.json and
@@ -568,37 +582,144 @@ func sessionFile(pid int) string {
 func writeRegistry(_ []sessionEntry) error { return nil } // per-file writes now
 
 // RegisterSession publishes this session so other local claude-go sessions
-// can SendMessage to it. Call once at startup (wired elsewhere).
+// (and real CC peers, which read the same fields) can SendMessage to it.
+// Call once at startup (wired elsewhere).
 func RegisterSession(sessionID, cwd, name string) error {
+	os.MkdirAll(registryPath(), 0o700) // real creates sessions/ mode 0700
+	nameSource := "user"
 	if name == "" {
-		name = filepath.Base(cwd)
+		// real derived name: Aa(cwd, sessionId) = <basename>-<rand-suffix>
+		name = derivedSessionName(cwd, sessionID)
+		nameSource = "derived"
 	}
-	os.MkdirAll(registryPath(), 0o755)
+	// real kind: "interactive" | "bg" (CLAUDE_JOB_DIR marks a bg job session)
+	kind, jobID := "interactive", ""
+	if jd := os.Getenv("CLAUDE_JOB_DIR"); jd != "" {
+		kind, jobID = "bg", filepath.Base(jd)
+	}
+	now := time.Now().UnixMilli()
 	e := sessionEntry{
 		SessionID: sessionID, CWD: cwd, Name: name,
 		PID: os.Getpid(), TS: time.Now(),
-		Kind: "interactive", Entrypoint: "cli",
-		StartedAt:           time.Now().UnixMilli(),
-		UpdatedAt:           time.Now().UnixMilli(),
+		Kind:                kind,
+		Entrypoint:          os.Getenv("CLAUDE_CODE_ENTRYPOINT"),
+		StartedAt:           now,
+		UpdatedAt:           now,
 		Version:             "2.1.288",
-		PeerProtocol:        1, // real peer-protocol version gate
-		PeerFeatures:        []string{},
+		PeerProtocol:        peerProtoVersion, // Onr — real peer-protocol version gate
+		PeerFeatures:        peerFeatures(),
 		PidDomain:           pidDomain(),
 		ProcStart:           procStart(),
-		HostSessionID:       sessionID,
-		NameSource:          "derived",
+		HostSessionID:       os.Getenv("CLAUDE_CODE_HOST_SESSION_ID"),
+		NameSource:          nameSource,
+		NameSince:           now,
+		LogPath:             os.Getenv("CLAUDE_CODE_SESSION_LOG"),
+		Agent:               os.Getenv("CLAUDE_CODE_AGENT"),
+		JobID:               jobID,
+		Tmux:                tmuxLabel(),
 		MessagingSocketPath: socketPath(), // peers can push instantly
 	}
 	b, err := json.MarshalIndent(e, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(sessionFile(e.PID), b, 0o644)
+	if err := os.WriteFile(sessionFile(e.PID), b, 0o644); err != nil {
+		return err
+	}
+	startSessionHeartbeat()
+	return nil
+}
+
+// derivedSessionName mirrors real Aa(): sanitized cwd basename + "-" +
+// a short random suffix (real: 1 byte hex, or a sha256 pin when the
+// session-pinned flag is on).
+func derivedSessionName(cwd, sessionID string) string {
+	base := filepath.Base(cwd)
+	if base == "" || base == "." || base == "/" {
+		base = "claude"
+	}
+	var b [1]byte
+	rand.Read(b[:])
+	return fmt.Sprintf("%s-%x", base, b[0])
+}
+
+// tmuxLabel is real's qL(): when inside tmux, "session:window.pane".
+func tmuxLabel() string {
+	pane := os.Getenv("TMUX_PANE")
+	if os.Getenv("TMUX") == "" || pane == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t",
+		pane, "#{session_name}:#{window_id}.#{pane_id}").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// Real refreshes the pid file via updatePidFile (fn()) on every mutation and
+// stamps updatedAt; we additionally tick updatedAt on a 30s heartbeat so
+// peers see a live "last active" signal.
+var heartbeat struct {
+	once sync.Once
+	stop chan struct{}
+}
+
+func startSessionHeartbeat() {
+	heartbeat.once.Do(func() {
+		heartbeat.stop = make(chan struct{})
+		go func() {
+			t := time.NewTicker(30 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-t.C:
+					updateSessionFile(map[string]any{"updatedAt": time.Now().UnixMilli()})
+				case <-heartbeat.stop:
+					return
+				}
+			}
+		}()
+	})
+}
+
+func stopSessionHeartbeat() {
+	if heartbeat.stop != nil {
+		close(heartbeat.stop)
+		heartbeat.stop = nil
+	}
+}
+
+// updateSessionFile merges patch into sessions/<pid>.json — real's fn().
+func updateSessionFile(patch map[string]any) {
+	p := sessionFile(os.Getpid())
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return
+	}
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil {
+		return
+	}
+	for k, v := range patch {
+		if v == nil {
+			delete(m, k)
+		} else {
+			m[k] = v
+		}
+	}
+	if b, err = json.MarshalIndent(m, "", "  "); err == nil {
+		os.WriteFile(p, b, 0o644)
+	}
 }
 
 // UnregisterSession removes this session from the registry (call at exit).
 func UnregisterSession(sessionID string) {
+	stopSessionHeartbeat()
 	os.Remove(sessionFile(os.Getpid()))
+	removePeerKey()
 }
 
 // liveSessions returns registry entries whose process is still alive,
@@ -739,7 +860,8 @@ func SubscribeIdle(target, subscriber, text string) {
 
 // FireIdleNotifications delivers all one-shot subscriptions for a session
 // that just went idle (or exited). Called by the session's turn boundary
-// (wired elsewhere).
+// (wired elsewhere). Also fires peer_idle_notice frames to socket
+// subscribers (real's jDn("idle")).
 func FireIdleNotifications(sessionID string) {
 	idleSubs.mu.Lock()
 	subs := idleSubs.m[sessionID]
@@ -748,6 +870,7 @@ func FireIdleNotifications(sessionID string) {
 	for _, s := range subs {
 		_ = NotifyOnIdle(s.subscriber, s.text)
 	}
+	firePeerIdleNotices(sessionID, "idle")
 }
 
 // ---------- legacy channel bus (fallback for unmatched names) ----------
@@ -906,10 +1029,13 @@ func execSendMessage(c *Context, raw json.RawMessage) Result {
 	}
 	if len(matches) == 1 {
 		e := matches[0]
+		statusNote := ""
 		if in.Message != "" {
 			m := mailMsg{From: sender, To: e.SessionID, Kind: "message",
 				Message: in.Message, Summary: in.Summary}
-			if !socketDeliver(e, m) {
+			ok, note := socketDeliver(e, m)
+			statusNote = note
+			if !ok {
 				// peer offline — persist to the mailbox for its next turn
 				if err := mailboxAppend(e.SessionID, m); err != nil {
 					return Result{Content: "send failed: " + err.Error(), IsError: true}
@@ -925,9 +1051,12 @@ func execSendMessage(c *Context, raw json.RawMessage) Result {
 		if in.Message == "" {
 			return Result{Content: fmt.Sprintf("Subscribed to %s [%s].%s", e.Name, shortRef(e.SessionID), note)}
 		}
+		if statusNote != "" {
+			statusNote = " " + statusNote + "."
+		}
 		return Result{Content: fmt.Sprintf(
-			"Message sent to %s [%s] (local-session) — it drains its inbox at its next tool round.%s",
-			e.Name, shortRef(e.SessionID), note)}
+			"Message sent to %s [%s] (local-session) — it drains its inbox at its next tool round.%s%s",
+			e.Name, shortRef(e.SessionID), note, statusNote)}
 	}
 
 	// 4. unresolved — queue on the legacy channel bus so the message is not
@@ -996,39 +1125,120 @@ func execListAgents(c *Context, raw json.RawMessage) Result {
 }
 
 // ---------- unix-socket peer messaging ----------
-// Each session listens on $TMPDIR/cc-socks/<pid>.sock and records the path in
-// its sessions/<pid>.json entry (real field name: messagingSocketPath).
-// mailboxAppend still persists; a live socket delivers instantly.
+// Real wire protocol (mod_1488 / mod_0120): line-delimited JSON on
+// <XDG_RUNTIME_DIR|CLAUDE_CODE_TMPDIR|/tmp>/cc-socks/<pid>.sock — an optional
+// {"type":"auth","token"} first line, then {"type":"user"} / {"type":"control"}
+// frames. Auth tokens publish at sessions/<pid>.<sha256(canonSock)>.key.
 
-// Real layout: $XDG_RUNTIME_DIR/cc-socks/<pid>.sock, falling back to
-// /tmp/cc-socks-<uid>/<pid>.sock when XDG_RUNTIME_DIR is unset (macOS).
-func socketDir() string {
-	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
-		return filepath.Join(d, "cc-socks")
+// Wire constants lifted from the real implementation.
+const (
+	peerLineCap       = 1 << 20                // fUt: pending-buffer char cap → drop conn
+	peerSockPathMax   = 103                    // Y: unix sun_path byte cap
+	peerSubCap        = 32                     // lst: idle-subscription table cap
+	peerSendTimeout   = 5 * time.Second        // real's per-connect write timeout
+	peerStatusWait    = 750 * time.Millisecond // brief listen for peer_message_status
+	peerProtoVersion  = 1                      // Onr
+	peerMaxDroppedIDs = 256                    // qjr
+	firstLineDeadline = 30 * time.Second       // UMn = 30000: silent-conn deadline
+	peerSubTTL        = 12 * time.Hour         // T = 43200000
+)
+
+// firstLineDeadlineMs is real's configurable state field (i.firstLineDeadlineMs
+// ?? UMn); tests may shrink it.
+var firstLineDeadlineMs = firstLineDeadline
+
+// messengerAuthRequired mirrors real's u().authRequired = requireAuth ?? OAn()
+// — OAn() is "windows" only; single-user posix accepts unauthenticated conns.
+var messengerAuthRequired = authRequired()
+
+func authRequired() bool { return runtime.GOOS == "windows" }
+
+// peerFeatures is real's UL(): ["notify_idle", "reply_across_default_dirs"?,
+// "artifact_yield"] — the middle entry requires working peer-pid creds
+// (Bun.ant.getPeerPid), which we implement on darwin via LOCAL_PEERPID.
+func peerFeatures() []string {
+	feats := []string{"notify_idle"}
+	if runtime.GOOS == "darwin" {
+		feats = append(feats, "reply_across_default_dirs")
 	}
-	return filepath.Join(os.TempDir(), fmt.Sprintf("cc-socks-%d", os.Getuid()))
+	return append(feats, "artifact_yield")
+}
+
+// Real socket layout (Uns/Lfo): join(XDG_RUNTIME_DIR || CLAUDE_CODE_TMPDIR ||
+// "/tmp", "cc-socks", "<pid>.sock") — falling back to the per-uid dir
+// /tmp/cc-socks-<uid> ($PREFIX/tmp on Termux) when that path exceeds the
+// 103-byte sun_path cap or the shared dir can't be vetted (owned by another
+// user etc.).
+func socketDir() string {
+	base := os.Getenv("XDG_RUNTIME_DIR")
+	if base == "" {
+		base = os.Getenv("CLAUDE_CODE_TMPDIR")
+	}
+	if base == "" {
+		base = "/tmp"
+	}
+	d := filepath.Join(base, "cc-socks")
+	if len(filepath.Join(d, fmt.Sprint(os.Getpid())+".sock")) <= peerSockPathMax && vetSocketDir(d) {
+		return d
+	}
+	return peerFallbackSocketDir()
+}
+
+func peerFallbackSocketDir() string {
+	tmp := "/tmp"
+	if os.Getenv("TERMUX_VERSION") != "" {
+		if p := os.Getenv("PREFIX"); p != "" {
+			tmp = filepath.Join(p, "tmp")
+		}
+	}
+	return filepath.Join(tmp, fmt.Sprintf("cc-socks-%d", os.Getuid()))
+}
+
+// vetSocketDir is a subset of real's Re(): the shared cc-socks dir is usable
+// when we can create it and it is a directory owned by us (or we just made
+// it). Real also walks ancestors for symlink/ownership/mode checks — we only
+// check the leaf.
+func vetSocketDir(d string) bool {
+	if err := os.MkdirAll(d, 0o700); err != nil {
+		return false
+	}
+	fi, err := os.Lstat(d)
+	if err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+		return false
+	}
+	os.Chmod(d, 0o700) // real normalizes the leaf to 0700
+	return true
 }
 
 func socketPath() string {
 	return filepath.Join(socketDir(), fmt.Sprint(os.Getpid())+".sock")
 }
 
-// StartMessenger binds the real-protocol unix inbox: line-delimited JSON on
-// $XDG_RUNTIME_DIR/cc-socks/<pid>.sock (fallback /tmp/cc-socks-<uid>/), an
-// optional {"type":"auth","token"} first line, then {"type":"user"} /
-// {"type":"control"} frames — the same wire real CC sessions speak, so real
-// peers can deliver into us. We publish <pid>.<rand>.key with our peerToken.
+// activeSock records the bound inbox path (real's u().activeSocketPath) —
+// reply-target vetting ($Mn/uXr) compares against its directory.
+var activeSock atomic.Value // string
+
+// StartMessenger binds the real-protocol unix inbox. We publish our auth key
+// at sessions/<pid>.<sha256(sock)>.key and accept the same frames real
+// sessions speak, so real CC peers can deliver into us.
 func StartMessenger(sessionID string) (cleanup func()) {
-	if err := os.MkdirAll(socketDir(), 0o700); err != nil {
+	p := socketPath() // socketDir already vetted/chooses the dir
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return func() {}
 	}
-	p := socketPath()
 	os.Remove(p)
 	ln, err := net.Listen("unix", p)
 	if err != nil {
 		return func() {}
 	}
+	activeSock.Store(p)
 	keyPath := publishPeerKey(p)
+	// real exports these so spawned children can reach + authenticate
+	os.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", p)
+	os.Setenv("CLAUDE_CODE_MESSAGING_TOKEN", peerTokens.child)
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -1039,89 +1249,555 @@ func StartMessenger(sessionID string) (cleanup func()) {
 		}
 	}()
 	return func() {
+		firePeerIdleNotices(sessionID, "exited") // real's jDn("exited")
 		ln.Close()
 		os.Remove(p)
 		os.Remove(keyPath)
+		activeSock.Store("")
+		os.Unsetenv("CLAUDE_CODE_MESSAGING_SOCKET")
+		os.Unsetenv("CLAUDE_CODE_MESSAGING_TOKEN")
 	}
 }
 
-var peerToken = func() string {
-	b := make([]byte, 24)
+// peerTokens is real's _Xo(): a peerToken peers authenticate with and a
+// childToken exported to spawned children. 16 random bytes → 32 hex
+// (real validates /^[0-9a-f]{32}$/).
+var peerTokens = struct{ peer, child string }{
+	peer:  randHex(16),
+	child: randHex(16),
+}
+
+func randHex(n int) string {
+	b := make([]byte, n)
 	rand.Read(b)
 	return hex.EncodeToString(b)
-}()
+}
 
-// publishPeerKey writes <pid>.<rand>.key next to the socket — real publishes
-// {peerToken, pidDomain, ...} mode 0600 so peers can authenticate.
+// peerTokenClass is real's CXo(): constant-time classify against the active
+// tokens → "peer" | "child" | "".
+func peerTokenClass(tok string) string {
+	if subtle.ConstantTimeCompare([]byte(tok), []byte(peerTokens.peer)) == 1 {
+		return "peer"
+	}
+	if subtle.ConstantTimeCompare([]byte(tok), []byte(peerTokens.child)) == 1 {
+		return "child"
+	}
+	return ""
+}
+
+// peerKeyName is real's V(): "<pid>.<sha256(canonical sock path)>.key" —
+// the hash pins the key to the socket it vouches for.
+func peerKeyName(pid int, sock string) string {
+	canon, err := filepath.EvalSymlinks(sock)
+	if err != nil || canon == "" {
+		canon, _ = filepath.Abs(sock)
+	}
+	sum := sha256.Sum256([]byte(canon))
+	return fmt.Sprintf("%d.%x.key", pid, sum)
+}
+
+// publishPeerKey is real's SXo(): writes sessions/<pid>.<hash>.key containing
+// {peerToken, procStart, pidDomain} mode 0600.
 func publishPeerKey(sock string) string {
-	dir := filepath.Dir(sock)
-	name := fmt.Sprintf("%d.%s.key", os.Getpid(), peerToken[:8])
-	p := filepath.Join(dir, name)
+	if err := os.MkdirAll(registryPath(), 0o700); err != nil {
+		return ""
+	}
+	p := filepath.Join(registryPath(), peerKeyName(os.Getpid(), sock))
 	b, _ := json.Marshal(map[string]any{
-		"peerToken": peerToken, "pidDomain": pidDomain(),
-		"pid": os.Getpid(), "procStart": procStart(),
+		"peerToken": peerTokens.peer,
+		"procStart": procStart(),
+		"pidDomain": pidDomain(),
 	})
 	if err := os.WriteFile(p, b, 0o600); err != nil {
 		return ""
 	}
+	activeKeyFile.Store(p)
 	return p
+}
+
+var activeKeyFile atomic.Value // string
+
+func removePeerKey() {
+	if p, ok := activeKeyFile.Load().(string); ok && p != "" {
+		os.Remove(p)
+	}
 }
 
 // peerFrame is the real wire envelope (line-delimited JSON over the socket).
 type peerFrame struct {
 	Type      string          `json:"type"`                 // auth|user|control
 	Token     string          `json:"token,omitempty"`      // auth
-	SessionID string          `json:"session_id,omitempty"` // must match recipient
-	From      string          `json:"from,omitempty"`       // sender socket path
-	MsgID     string          `json:"msg_id,omitempty"`
-	Priority  string          `json:"priority,omitempty"`
-	Action    string          `json:"action,omitempty"`  // control: rename|peer_message_status|notify_when_idle|peer_idle_notice
-	Name      string          `json:"name,omitempty"`    // rename
-	Message   json.RawMessage `json:"message,omitempty"` // user: {role:"user",content:"..."}
+	SessionID string          `json:"session_id,omitempty"` // if present must match recipient
+	From      string          `json:"from,omitempty"`       // "uds:<encoded sock path>"
+	MsgV      int             `json:"msgV,omitempty"`       // jG(): always 1 on sends
+	MsgID     string          `json:"msg_id,omitempty"`     // uuid
+	UUID      string          `json:"uuid,omitempty"`
+	Priority  string          `json:"priority,omitempty"` // now|next|later (z4e)
+	Action    string          `json:"action,omitempty"`   // control action
+	Name      string          `json:"name,omitempty"`     // rename
+	Message   json.RawMessage `json:"message,omitempty"`  // user: {role:"user",content:"..."}
+	// peer_message_status
+	Status        string   `json:"status,omitempty"`        // held|denied|expired|delivered|refused|dropped
+	StatusDetail  string   `json:"status_detail,omitempty"` // e.g. "refused" under "expired"
+	OrigMsgID     string   `json:"orig_msg_id,omitempty"`
+	Reason        string   `json:"reason,omitempty"`
+	DropReason    string   `json:"drop_reason,omitempty"` // rate-limited|duplicate|hop-loop|hop-runaway|queue-full
+	DroppedMsgIDs []string `json:"dropped_msg_ids,omitempty"`
+	// peer_idle_notice
+	FinishedAt int64  `json:"finished_at,omitempty"`
+	State      string `json:"state,omitempty"` // idle|exited|unavailable
+	Detail     string `json:"detail,omitempty"`
+	FromMode   string `json:"from_mode,omitempty"`
+	// user extras we accept but don't materialize
+	FileAttachments json.RawMessage `json:"file_attachments,omitempty"`
 }
 
-// servePeer reads line-delimited frames; an auth line (if present) must carry
-// our peerToken. Like real, we accept unauthenticated connections on
-// single-user platforms but always accept a valid auth line.
+// servePeer is real's en()/S() connection handler: a first-line deadline,
+// a cumulative line-size cap, an optional auth first line, then dispatch.
+// On platforms where auth is optional (all but windows) unauthenticated
+// connections proceed like real's.
 func servePeer(c net.Conn, sessionID string) {
 	defer c.Close()
-	c.SetDeadline(time.Now().Add(10 * time.Second)) // firstLineDeadline
-	sc := bufio.NewScanner(c)
-	sc.Buffer(make([]byte, 0, 1<<20), 2<<20) // real caps lines too
-	authed := false
-	for sc.Scan() {
+	// firstLineDeadlineMs: a conn that sends no complete line in time is
+	// closed (real logs cross_session_inbox_auth/silent_connection_deadline).
+	c.SetReadDeadline(time.Now().Add(firstLineDeadlineMs))
+	var (
+		buf       []byte
+		parsed    int // parsed-line count; auth is honored only on line 1
+		authCls   string
+		peerPid   int
+		credsDone bool
+		gotLine   bool
+	)
+	// handle returns false to drop the connection (real's f()/destroy()).
+	handle := func(line []byte) bool {
+		if len(bytes.TrimSpace(line)) == 0 {
+			// a blank line before auth when auth is required → drop
+			return !(messengerAuthRequired && authCls == "")
+		}
 		var f peerFrame
-		if json.Unmarshal(sc.Bytes(), &f) != nil {
-			continue // real drops unparseable lines
+		if json.Unmarshal(line, &f) != nil {
+			if messengerAuthRequired && authCls == "" {
+				return false // unparseable line before auth
+			}
+			return true
 		}
+		parsed++
 		if f.Type == "auth" {
-			authed = f.Token == peerToken
-			continue
-		}
-		_ = authed // optional auth on this platform; the session-id check below gates delivery
-		if f.SessionID != "" && f.SessionID != sessionID {
-			continue // real drops session_id mismatches
-		}
-		switch f.Type {
-		case "user":
-			var msg struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			}
-			if json.Unmarshal(f.Message, &msg) == nil && msg.Content != "" {
-				QueuePrompt(msg.Content) // real routes to the prompt queue
-			}
-		case "control":
-			switch f.Action {
-			case "rename":
-				if f.Name != "" && sessionRename != nil {
-					sessionRename(f.Name)
+			if parsed == 1 {
+				authCls = peerTokenClass(f.Token)
+				if authCls == "" && messengerAuthRequired {
+					return false // bad auth frame when auth is required
 				}
-			case "peer_message_status", "notify_when_idle", "peer_idle_notice":
-				// status/idle frames — currently informational only
+			}
+			return true // later auth lines are ignored (real: only first line)
+		}
+		if messengerAuthRequired && authCls == "" {
+			return false // non-auth line before authenticating
+		}
+		if !credsDone {
+			credsDone = true
+			peerPid = peerPIDOf(c)
+		}
+		dispatchPeerFrame(f, sessionID, peerPid, authCls)
+		return true
+	}
+
+	chunk := make([]byte, 64<<10)
+	for {
+		n, err := c.Read(chunk)
+		if n > 0 {
+			buf = append(buf, chunk[:n]...)
+			if len(buf) > peerLineCap {
+				return // real: "Line exceeded 1048576 chars; dropping connection"
+			}
+			for {
+				i := bytes.IndexByte(buf, '\n')
+				if i < 0 {
+					break
+				}
+				line := buf[:i]
+				buf = buf[i+1:]
+				if !gotLine {
+					gotLine = true
+					c.SetReadDeadline(time.Time{}) // deadline cleared on first complete line
+				}
+				if !handle(line) {
+					return
+				}
+			}
+		}
+		if err != nil {
+			// EOF/timeout — real's 'end': parse a non-empty final fragment.
+			if len(bytes.TrimSpace(buf)) > 0 && len(buf) <= peerLineCap {
+				if line := bytes.TrimSpace(buf); len(line) > 0 {
+					var f peerFrame
+					if json.Unmarshal(line, &f) == nil {
+						parsed++
+						if f.Type != "auth" && !(messengerAuthRequired && authCls == "") {
+							dispatchPeerFrame(f, sessionID, peerPid, authCls)
+						}
+					}
+				}
+			}
+			return
+		}
+	}
+}
+
+// peerPIDOf returns the connecting peer's pid — real's Jgn() via
+// getsockopt(LOCAL_PEERPID) on darwin. Other platforms have no single-file
+// equivalent (SO_PEERCRED on linux returns a ucred struct, which needs a
+// build-tagged file); peers from those platforms are verified only by their
+// sessions/<pid>.json claim — pid-reuse can then go undetected.
+func peerPIDOf(c net.Conn) int {
+	if runtime.GOOS != "darwin" {
+		return 0
+	}
+	uc, ok := c.(*net.UnixConn)
+	if !ok {
+		return 0
+	}
+	raw, err := uc.SyscallConn()
+	if err != nil {
+		return 0
+	}
+	pid := 0
+	// SOL_LOCAL=0x0, LOCAL_PEERPID=0x2 — literals so this compiles everywhere.
+	raw.Control(func(fd uintptr) {
+		if p, err := unix.GetsockoptInt(int(fd), 0x0, 0x2); err == nil && p > 0 {
+			pid = p
+		}
+	})
+	return pid
+}
+
+// peerSessionOK is real's Ie(): a session_id, when present, must be ours.
+func peerSessionOK(f peerFrame, sessionID string) bool {
+	return f.SessionID == "" || f.SessionID == sessionID
+}
+
+// dispatchPeerFrame is real's be()/ze(): user frames route to the prompt
+// queue; control frames dispatch on action.
+func dispatchPeerFrame(f peerFrame, sessionID string, peerPid int, authCls string) {
+	switch f.Type {
+	case "user":
+		var msg struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		}
+		// real: missing/non-string content → ignore (before the session gate)
+		if json.Unmarshal(f.Message, &msg) != nil || msg.Content == "" {
+			return
+		}
+		if !peerSessionOK(f, sessionID) {
+			return
+		}
+		// real validates priority via z4e (now|next|later) — all land in the
+		// same queue here.
+		QueuePrompt(msg.Content)
+	case "control":
+		if !peerSessionOK(f, sessionID) {
+			return
+		}
+		switch f.Action {
+		case "rename":
+			if sessionRename != nil {
+				sessionRename(f.Name)
+			}
+		case "peer_message_status":
+			handlePeerMessageStatus(f)
+		case "notify_when_idle":
+			handleNotifyWhenIdle(f, peerPid, authCls)
+		case "peer_idle_notice":
+			handlePeerIdleNotice(f)
+		case "yield_artifact_replies", "unyield_artifact_replies", "artifact_replies_yielded":
+			// artifact live-subscribe protocol — accept-and-log only
+			peerLogf("control %s accepted (artifact yield protocol unimplemented)", f.Action)
+		default:
+			peerLogf("unhandled control action: %s", f.Action)
+		}
+	default:
+		peerLogf("unhandled message type: %q", f.Type)
+	}
+}
+
+var peerDebugLog = os.Getenv("CLAUDE_GO_PEER_DEBUG") != ""
+
+func peerLogf(format string, args ...any) {
+	if peerDebugLog {
+		fmt.Fprintf(os.Stderr, "[uds-messaging] "+format+"\n", args...)
+	}
+}
+
+// ---------- peer_message_status receipts ----------
+// Real correlates status frames to outstanding sends (Zjr) keyed by msg_id
+// and moves "held" sends to an awaiting-terminal list. Ours resolves a
+// per-send waiter so socketDeliver can surface the disposition.
+
+type peerReceipt struct {
+	status       string
+	statusDetail string
+	reason       string
+	dropReason   string
+}
+
+var msgReceipts = struct {
+	mu sync.Mutex
+	m  map[string]chan peerReceipt
+}{m: map[string]chan peerReceipt{}}
+
+func trackSend(msgID string) chan peerReceipt {
+	ch := make(chan peerReceipt, 4)
+	msgReceipts.mu.Lock()
+	msgReceipts.m[msgID] = ch
+	msgReceipts.mu.Unlock()
+	return ch
+}
+
+func untrackSend(msgID string) {
+	msgReceipts.mu.Lock()
+	delete(msgReceipts.m, msgID)
+	msgReceipts.mu.Unlock()
+}
+
+// validPeerStatuses: real's held|denied|expired|delivered|refused|dropped.
+var validPeerStatuses = map[string]bool{
+	"held": true, "denied": true, "expired": true,
+	"delivered": true, "refused": true, "dropped": true,
+}
+
+// validDropReasons: real's Re set (Qjo).
+var validDropReasons = map[string]bool{
+	"rate-limited": true, "duplicate": true, "hop-loop": true,
+	"hop-runaway": true, "queue-full": true,
+}
+
+func handlePeerMessageStatus(f peerFrame) {
+	status := f.Status
+	if !validPeerStatuses[status] {
+		return
+	}
+	// real: expired + status_detail "refused" is reported as "refused"
+	if status == "expired" && f.StatusDetail == "refused" {
+		status = "refused"
+	}
+	if status == "dropped" && !validDropReasons[f.DropReason] {
+		f.DropReason = "" // real: Qjo() → undefined for unknown reasons
+	}
+	r := peerReceipt{status: status, statusDetail: f.StatusDetail,
+		reason: f.Reason, dropReason: f.DropReason}
+	resolveReceipt(f.OrigMsgID, r)
+	// real: dropped frames may name additional victims in dropped_msg_ids
+	// (capped at qjr=256)
+	if status == "dropped" {
+		for i, id := range f.DroppedMsgIDs {
+			if i >= peerMaxDroppedIDs {
+				break
+			}
+			if len(id) > 0 {
+				resolveReceipt(id, r)
 			}
 		}
 	}
+}
+
+func resolveReceipt(msgID string, r peerReceipt) {
+	msgReceipts.mu.Lock()
+	ch, ok := msgReceipts.m[msgID]
+	if ok {
+		delete(msgReceipts.m, msgID)
+	}
+	msgReceipts.mu.Unlock()
+	if ok {
+		select {
+		case ch <- r:
+		default:
+		}
+	} else {
+		peerLogf("peer_message_status dropped: no outstanding send matches orig_msg_id=%q", msgID)
+	}
+}
+
+// ---------- notify_when_idle / peer_idle_notice ----------
+// Real's idle-subscription table (_yr): a peer sends control
+// notify_when_idle {from:"uds:...", msg_id:<uuid>}; when we next go idle (or
+// exit) it gets one peer_idle_notice {orig_msg_id, state, finished_at?} at
+// its reply address. Cap lst=32, TTL 12h.
+
+type peerIdleSub struct {
+	replyAddress    string // decoded sock path to dial
+	replyAddressRaw string // original uds:... address (log)
+	origMsgID       string
+	peerPid         int
+	authed          bool
+	requestedAt     int64
+}
+
+var peerIdleSubs = struct {
+	mu   sync.Mutex
+	subs []peerIdleSub
+}{}
+
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, c := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// shapePeerReplyTarget is real's $Mn(): the uds: address must decode to a
+// .sock path inside our own socket directory (uXr) — cross-namespace or
+// non-uds reply targets are dropped. The verifiedPeerPid+ownerUids escape
+// hatch (reply_across_default_dirs) is approximated: a verified peer pid
+// lets any .sock path under our uid's dirs through.
+func shapePeerReplyTarget(addr string, peerPid int) (string, bool) {
+	target, ok := decodeUDSAddr(addr)
+	if !ok {
+		return "", false
+	}
+	own, _ := activeSock.Load().(string)
+	if own == "" {
+		return "", false // own inbox not bound
+	}
+	if filepath.Dir(target) == filepath.Dir(own) && strings.HasSuffix(target, ".sock") {
+		return target, true
+	}
+	if peerPid > 0 && strings.HasSuffix(target, ".sock") {
+		if d := filepath.Dir(target); d == filepath.Dir(own) ||
+			d == filepath.Join("/tmp", fmt.Sprintf("cc-socks-%d", os.Getuid())) {
+			return target, true
+		}
+	}
+	return "", false
+}
+
+func handleNotifyWhenIdle(f peerFrame, peerPid int, authCls string) {
+	if !isUUID(f.MsgID) {
+		peerLogf("notify_when_idle dropped: malformed frame (bad msg_id)")
+		return
+	}
+	target, ok := shapePeerReplyTarget(f.From, peerPid)
+	if !ok {
+		peerLogf("notify_when_idle dropped: reply address unshaped or outside our socket namespace")
+		return
+	}
+	if own, _ := activeSock.Load().(string); canonSock(target) == canonSock(own) {
+		peerLogf("notify_when_idle dropped: reply target is this session (self-target)")
+		return
+	}
+	res := recordIdleSub(peerIdleSub{
+		replyAddress: target, replyAddressRaw: f.From,
+		origMsgID: f.MsgID, peerPid: peerPid,
+		authed: authCls != "", requestedAt: time.Now().UnixMilli(),
+	})
+	if res == "full" {
+		// real's gJt(): tell the requester its subscription was refused
+		sendPeerIdleNotice(target, f.MsgID, "unavailable", 0, "")
+	}
+}
+
+func canonSock(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	abs, _ := filepath.Abs(p)
+	return abs
+}
+
+// recordIdleSub returns "recorded" | "refreshed" | "full" (real's _yr).
+func recordIdleSub(s peerIdleSub) string {
+	peerIdleSubs.mu.Lock()
+	defer peerIdleSubs.mu.Unlock()
+	now := time.Now().UnixMilli()
+	// TTL prune (real: subscriptions older than T=12h expire)
+	keep := peerIdleSubs.subs[:0]
+	for _, x := range peerIdleSubs.subs {
+		if now-x.requestedAt < int64(peerSubTTL/time.Millisecond) {
+			keep = append(keep, x)
+		}
+	}
+	peerIdleSubs.subs = keep
+	for i, x := range peerIdleSubs.subs {
+		if x.replyAddress == s.replyAddress && x.peerPid == s.peerPid {
+			peerIdleSubs.subs[i] = s // refresh (real splices + repushes)
+			return "refreshed"
+		}
+	}
+	if len(peerIdleSubs.subs) >= peerSubCap {
+		return "full"
+	}
+	peerIdleSubs.subs = append(peerIdleSubs.subs, s)
+	return "recorded"
+}
+
+// firePeerIdleNotices sends each recorded subscriber one peer_idle_notice —
+// real's jDn("idle"|"exited").
+func firePeerIdleNotices(sessionID, state string) {
+	peerIdleSubs.mu.Lock()
+	subs := peerIdleSubs.subs
+	peerIdleSubs.subs = nil
+	peerIdleSubs.mu.Unlock()
+	var finishedAt int64
+	if state == "idle" {
+		finishedAt = time.Now().UnixMilli()
+	}
+	for _, s := range subs {
+		sendPeerIdleNotice(s.replyAddress, s.origMsgID, state, finishedAt, "")
+	}
+}
+
+// handlePeerIdleNotice renders an inbound idle notice like real's
+// Cyr/oe(): an automated harness notice queued as a meta prompt.
+func handlePeerIdleNotice(f peerFrame) {
+	if f.OrigMsgID == "" {
+		return
+	}
+	label := f.From
+	if label == "" {
+		label = "(peer session)"
+	}
+	var text string
+	switch f.State {
+	case "idle":
+		text = fmt.Sprintf("[Cross-session idle notice] %q is idle now — it finished a turn.", label)
+		if f.Detail != "" {
+			text += fmt.Sprintf(" Its harness reports: «%s».", f.Detail)
+		}
+	case "exited":
+		text = fmt.Sprintf("[Cross-session idle notice] %q exited before going idle; it will not process further messages at that address.", label)
+	case "unavailable":
+		text = fmt.Sprintf("[Cross-session idle notice] %q is not holding your idle subscription — no idle notice will arrive from it.", label)
+	default:
+		peerLogf("peer_idle_notice dropped: unrecognized state %q", f.State)
+		return
+	}
+	QueuePrompt(text)
+}
+
+// sendPeerIdleNotice writes a control frame to a peer inbox (real's zDn
+// sender → aoe): {type:"control", msgV:1, msg_id:<uuid>, action:
+// "peer_idle_notice", orig_msg_id, state, finished_at?, detail?, from}.
+func sendPeerIdleNotice(sockPath, origMsgID, state string, finishedAt int64, detail string) {
+	f := peerFrame{
+		Type: "control", MsgV: 1, MsgID: newUUID(),
+		Action: "peer_idle_notice", OrigMsgID: origMsgID,
+		State: state, FinishedAt: finishedAt, Detail: detail,
+		From: udsAddr(socketPath()),
+	}
+	socketWriteFrame(sockPath, f)
 }
 
 // sessionRename is wired by the REPL so a peer "rename" control frame works.
@@ -1130,42 +1806,240 @@ var sessionRename func(string)
 // SetSessionRenamer registers the rename callback.
 func SetSessionRenamer(fn func(string)) { sessionRename = fn }
 
-// socketDeliver pushes a peerFrame to a live session's socket, using its
-// published key file for auth when present. Falls back to no-auth (peers may
-// accept). Returns false when the peer has no socket.
-func socketDeliver(e sessionEntry, m mailMsg) bool {
-	if e.MessagingSocketPath == "" {
-		return false
+// newUUID: real's crypto.randomUUID — msg_id must match /^[0-9a-f]{8}-
+// [0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i to correlate receipts.
+func newUUID() string {
+	var b [16]byte
+	rand.Read(b[:])
+	b[6] = b[6]&0x0f | 0x40 // version 4
+	b[8] = b[8]&0x3f | 0x80 // variant 10
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// udsAddr is real's _W(): "uds:" + percent-encoding that leaves
+// [A-Za-z0-9:_/.\\-] unescaped (everything else → %XX, uppercase).
+func udsAddr(path string) string {
+	const keep = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789:_/.\\-"
+	var b strings.Builder
+	b.WriteString("uds:")
+	for i := 0; i < len(path); i++ {
+		c := path[i]
+		if strings.IndexByte(keep, c) >= 0 {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
 	}
-	c, err := net.DialTimeout("unix", e.MessagingSocketPath, 2*time.Second)
+	return b.String()
+}
+
+// decodeUDSAddr parses a "uds:" address back to a socket path.
+func decodeUDSAddr(addr string) (string, bool) {
+	if !strings.HasPrefix(addr, "uds:") {
+		return "", false
+	}
+	s := addr[4:]
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '%' && i+2 < len(s) {
+			if v, err := hex.DecodeString(s[i+1 : i+3]); err == nil {
+				b.WriteByte(v[0])
+				i += 2
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	out := b.String()
+	if !strings.HasSuffix(out, ".sock") {
+		return "", false
+	}
+	return out, true
+}
+
+// socketWriteFrame performs real's we(): connect (5s cap), prepend the auth
+// line when the peer's key file yields a token, write auth+frame in a single
+// buffer, close.
+func socketWriteFrame(sockPath string, f peerFrame) bool {
+	c, err := net.DialTimeout("unix", sockPath, peerSendTimeout)
 	if err != nil {
 		return false
 	}
 	defer c.Close()
-	// auth line: peer's key file is <pid>.<rand>.key beside the socket
-	if tok := peerTokenFor(e); tok != "" {
-		b, _ := json.Marshal(peerFrame{Type: "auth", Token: tok})
-		c.Write(append(b, '\n'))
+	c.SetDeadline(time.Now().Add(peerSendTimeout))
+	line, _ := json.Marshal(f)
+	payload := append(authLineFor(sockPath), append(line, '\n')...)
+	_, err = c.Write(payload)
+	return err == nil
+}
+
+// authLineFor is real's wXo+nXr: {"type":"auth","token":<peerToken>}\n or "".
+func authLineFor(sockPath string) []byte {
+	tok := peerTokenForSock(sockPath, 0)
+	if tok == "" {
+		return nil
 	}
+	b, _ := json.Marshal(peerFrame{Type: "auth", Token: tok})
+	return append(b, '\n')
+}
+
+// socketDeliver pushes a user frame to a live session's socket, using its
+// published key file for auth when present — real's hUt/we. After writing we
+// briefly listen for a peer_message_status receipt arriving on our own inbox
+// and report it; a real peer replies via a fresh connection to our `from`
+// address (it never answers on the same conn).
+func socketDeliver(e sessionEntry, m mailMsg) (bool, string) {
+	if e.MessagingSocketPath == "" {
+		return false, ""
+	}
+	c, err := net.DialTimeout("unix", e.MessagingSocketPath, peerSendTimeout)
+	if err != nil {
+		return false, ""
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(peerSendTimeout))
+
+	// real verifies the connected endpoint's pid (expectPeerPid) via
+	// LOCAL_PEERPID before writing — a mismatched pid means a recycled or
+	// forged socket and the send is refused.
+	if pid := peerPIDOf(c); pid > 0 && e.PID > 0 && pid != e.PID {
+		return false, fmt.Sprintf("connected endpoint is pid %d, expected %d — refusing to write", pid, e.PID)
+	}
+
 	content := m.Message
 	if m.Summary != "" {
 		content = m.Summary + ": " + m.Message
 	}
+	msgID := newUUID()
 	frame := peerFrame{
-		Type: "user", SessionID: e.SessionID, From: socketPath(),
-		MsgID:   fmt.Sprintf("m%d", time.Now().UnixNano()),
-		Message: mustJSON(map[string]any{"role": "user", "content": content}),
+		Type: "user", MsgV: 1, MsgID: msgID,
+		From:     udsAddr(socketPath()),
+		Priority: "next", // real's default priority in hUt
+		Message:  mustJSON(map[string]any{"role": "user", "content": content}),
 	}
-	b, _ := json.Marshal(frame)
-	_, err = c.Write(append(b, '\n'))
-	return err == nil
+	line, _ := json.Marshal(frame)
+	payload := append(authLineFor(e.MessagingSocketPath), append(line, '\n')...)
+	waiter := trackSend(msgID)
+	defer untrackSend(msgID)
+	if _, err := c.Write(payload); err != nil {
+		return false, ""
+	}
+	select {
+	case r := <-waiter:
+		return true, peerReceiptText(r)
+	case <-time.After(peerStatusWait):
+		return true, ""
+	}
 }
 
-// peerTokenFor reads the peer's <pid>.*.key beside its socket.
+// peerReceiptText renders a status like real's mn() reason strings.
+func peerReceiptText(r peerReceipt) string {
+	if r.status == "dropped" && r.dropReason != "" {
+		return fmt.Sprintf("peer reported the message %s (drop_reason=%s)", r.status, r.dropReason)
+	}
+	switch r.status {
+	case "held":
+		return "peer is holding the message for its user's approval"
+	case "denied":
+		return "the peer's user declined the message"
+	case "expired":
+		return "the held message expired without approval"
+	case "delivered":
+		return "a previously-held message was approved and delivered"
+	case "refused":
+		return "the peer refused the message (policy or feature off)"
+	case "dropped":
+		return "the peer dropped the message at its inbox"
+	}
+	return ""
+}
+
+// peerTokenFor reads the peer's sessions/<pid>.<sha256(sock)>.key — real's
+// wXo. Multiple same-hash keys rank by live-owner/procStart verification.
 func peerTokenFor(e sessionEntry) string {
-	dir := filepath.Dir(e.MessagingSocketPath)
-	matches, _ := filepath.Glob(filepath.Join(dir, fmt.Sprintf("%d.*.key", e.PID)))
-	for _, p := range matches {
+	return peerTokenForSock(e.MessagingSocketPath, e.PID)
+}
+
+func peerTokenForSock(sockPath string, pidHint int) string {
+	if sockPath == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(canonSock(sockPath)))
+	suffix := fmt.Sprintf(".%x.key", sum)
+	ents, err := os.ReadDir(registryPath())
+	if err != nil {
+		return peerTokenLegacy(sockPath, pidHint)
+	}
+	type cand struct {
+		path string
+		pid  int
+		tok  string
+		rank int
+	}
+	var best *cand
+	for _, ent := range ents {
+		name := ent.Name()
+		if !strings.HasSuffix(name, suffix) {
+			continue
+		}
+		var pid int
+		if n, _ := fmt.Sscanf(name, "%d.", &pid); n != 1 {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(registryPath(), name))
+		if err != nil || len(b) > 4096 { // real reads at most x=4096 bytes
+			continue
+		}
+		var k struct {
+			PeerToken string `json:"peerToken"`
+			ProcStart any    `json:"procStart"`
+		}
+		if json.Unmarshal(b, &k) != nil || k.PeerToken == "" {
+			continue
+		}
+		c := &cand{path: name, pid: pid, tok: k.PeerToken}
+		switch {
+		case !pidAlive(pid):
+			c.rank = 0 // dead owner — real's dead-owner, last resort
+		case procStartMatches(pid, k.ProcStart):
+			c.rank = 2 // live owner with a matching start token
+		default:
+			c.rank = 1
+		}
+		if best == nil || c.rank > best.rank {
+			best = c
+		}
+	}
+	if best != nil {
+		return best.tok
+	}
+	return peerTokenLegacy(sockPath, pidHint)
+}
+
+// procStartMatches compares a key file's procStart claim with the live
+// start-token for pid (real's zS/gWe). Unknown token → not a match.
+func procStartMatches(pid int, claim any) bool {
+	cur := procStartTokenOf(pid)
+	if cur == "" {
+		return false
+	}
+	switch v := claim.(type) {
+	case string:
+		return v == cur
+	default:
+		return false
+	}
+}
+
+// peerTokenLegacy reads our older <pid>.<rand>.key beside the socket — kept
+// so older claude-go peers still resolve; real never writes there.
+func peerTokenLegacy(sockPath string, pidHint int) string {
+	dir := filepath.Dir(sockPath)
+	pat := fmt.Sprintf("%d.*.key", pidHint)
+	if pidHint <= 0 {
+		pat = "*.key"
+	}
+	for _, p := range globOrNil(filepath.Join(dir, pat)) {
 		b, err := os.ReadFile(p)
 		if err != nil {
 			continue
@@ -1180,21 +2054,56 @@ func peerTokenFor(e sessionEntry) string {
 	return ""
 }
 
+func globOrNil(pat string) []string {
+	m, _ := filepath.Glob(pat)
+	return m
+}
+
 func mustJSON(v any) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return b
 }
 
-// pidDomain distinguishes pid namespaces (real uses sysctl/boot-uuid style
-// values; hostname is a reasonable equivalent).
-func pidDomain() string {
-	h, _ := os.Hostname()
-	return h
+// pidDomain is real's dC()/BXo(): "darwin" on macOS, "darwin:<machine-id>:
+// <pidns>" on linux, "darwin:<hostname>" on windows (the prefix is a legacy
+// name — real literally emits "darwin:..." everywhere).
+var pidDomainOnce = sync.OnceValue(func() string {
+	switch runtime.GOOS {
+	case "windows":
+		h, _ := os.Hostname()
+		return "darwin:" + strings.ToLower(h)
+	case "linux":
+		id, _ := os.ReadFile("/etc/machine-id")
+		ns, _ := os.Readlink("/proc/self/ns/pid")
+		return fmt.Sprintf("darwin:%s:%s", strings.TrimSpace(string(id)), ns)
+	default:
+		return "darwin"
+	}
+})
+
+func pidDomain() string { return pidDomainOnce() }
+
+// procStart is real's Tl()/O_(): the process start-token used to detect pid
+// reuse. On posix real runs `ps -o lstart= -p <pid>` (LC_ALL=C TZ=UTC) and
+// stores the STRING; on windows a kernel32 filetime. We shell out exactly
+// like real on posix — no cgo needed.
+var procStartOnce = sync.OnceValue(func() any {
+	return procStartTokenOf(os.Getpid())
+})
+
+func procStart() any { return procStartOnce() }
+
+// procStartTokenOf returns the live start-token for pid, "" if unreadable.
+func procStartTokenOf(pid int) string {
+	if runtime.GOOS == "windows" {
+		return "" // real uses kernel32 GetProcessTimes — not replicated
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "-o", "lstart=", "-p",
+		fmt.Sprint(pid)).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
-
-// procStart is the process start time in ms — real uses it to verify a peer's
-// pid isn't reused. From the Go runtime we approximate with the binary's own
-// process start (can't query cleanly without cgo on darwin).
-var procStartAt = time.Now().UnixMilli()
-
-func procStart() int64 { return procStartAt }

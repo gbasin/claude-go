@@ -3,6 +3,7 @@
 package tools
 
 import (
+	"claude-go/internal/netproxy"
 	"fmt"
 	"os"
 	"os/exec"
@@ -68,7 +69,7 @@ func platformSandboxAvailable(s *SandboxSettings) error {
 // Mount order matters: later binds shadow earlier ones, so the writable set
 // goes on, then denyWrite read-only re-binds, then denyRead masks, then
 // allowRead unmasks (ro-bind sources resolve against the host fs).
-func platformSandboxWrap(script string, s *SandboxSettings, cwd string) (string, error) {
+func platformSandboxWrap(script string, s *SandboxSettings, cwd string, px *netproxy.Proxy) (string, error) {
 	bwrap, err := bwrapBin(s)
 	if err != nil {
 		return "", fmt.Errorf("bwrap not found: %w", err)
@@ -123,7 +124,11 @@ func platformSandboxWrap(script string, s *SandboxSettings, cwd string) (string,
 		bindIf("--bind", cwd)
 	}
 
-	if s.networkDenied() {
+	// With the proxy live we keep the shared netns so the sandboxed command
+	// can reach it on loopback (real enforces egress via seccomp-bpf — not
+	// implemented, so direct egress is possible here). Without it, deny-all
+	// (or a failed proxy) collapses to an isolated netns.
+	if px == nil && (s.networkDenied() || s.needsNetworkProxy()) {
 		args = append(args, "--unshare-net")
 	}
 	args = append(args, "--chdir", cwd, "/bin/sh", "-c", script)
