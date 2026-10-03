@@ -46,6 +46,18 @@ try {
 // determinism guards (real runtime stubs these out too)
 Math.random = () => { throw new Error("Math.random() is not allowed in workflows — non-deterministic"); };
 Date.now = () => { throw new Error("Date.now() is not allowed in workflows — non-deterministic"); };
+// real ShimDate: bare Date()/new Date() also throw (journalled determinism)
+const __RealDate = Date;
+class ShimDate extends __RealDate {
+  constructor(...a) {
+    if (a.length === 0) { throw new Error("Date() is not allowed in workflows — non-deterministic"); }
+    super(...a);
+  }
+}
+ShimDate.now = Date.now;
+ShimDate.parse = __RealDate.parse;
+ShimDate.UTC = __RealDate.UTC;
+globalThis.Date = ShimDate;
 
 async function agent(prompt, opts = {}) {
   const key = JSON.stringify([prompt, opts]);
@@ -134,7 +146,7 @@ func execWorkflow(c *Context, raw json.RawMessage) Result {
 		return Result{Content: "workflow script must begin with `export const meta = {…}`", IsError: true}
 	}
 
-	runID := "wf_" + randID(8)
+	runID := "wf_" + randID(8) + "-" + randID(3)
 	if in.ResumeFromRunID != "" {
 		if !regexp.MustCompile(`^wf_[a-z0-9-]{6,}$`).MatchString(in.ResumeFromRunID) {
 			return Result{Content: "invalid resumeFromRunId", IsError: true}

@@ -41,6 +41,19 @@ func openPTY(t *testing.T) (master, slave *os.File) {
 		master.Close()
 		t.Skipf("ioctl TIOCPTYGNAME: %v", errno)
 	}
+	// grantpt: macOS creates the slave root-owned until the master grants
+	// access — without this the slave open fails EPERM
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, master.Fd(),
+		uintptr(unix.TIOCPTYGRANT), 0); errno != 0 {
+		master.Close()
+		t.Skipf("ioctl TIOCPTYGRANT: %v", errno)
+	}
+	// unlockpt: slave opens EAGAIN until unlocked
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, master.Fd(),
+		uintptr(unix.TIOCPTYUNLK), 0); errno != 0 {
+		master.Close()
+		t.Skipf("ioctl TIOCPTYUNLK: %v", errno)
+	}
 	name := string(buf[:bytes.IndexByte(buf[:], 0)])
 	slave, err = os.OpenFile(name, os.O_RDWR, 0)
 	if err != nil {
@@ -114,9 +127,15 @@ func (p *ptyProc) close() {
 // send writes keystrokes to the pty (e.g. "hi\r").
 func (p *ptyProc) send(s string) {
 	p.t.Helper()
-	if _, err := p.master.WriteString(s); err != nil {
+	if err := p.sendQuiet(s); err != nil {
 		p.t.Fatalf("pty write %q: %v", s, err)
 	}
+}
+
+// sendQuiet is send that tolerates a dead child (EIO after exit).
+func (p *ptyProc) sendQuiet(s string) error {
+	_, err := p.master.WriteString(s)
+	return err
 }
 
 // output returns everything captured so far (raw, ANSI escapes included).
