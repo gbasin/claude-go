@@ -3,6 +3,7 @@ package agent
 import (
 	"claude-go/internal/config"
 	"claude-go/internal/hooks"
+	"claude-go/internal/session"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -365,6 +366,7 @@ type Runner struct {
 	PermRules  map[string][]string
 	Entrypoint string
 	Hooks      hooks.Config
+	Transcript string // parent's transcript path — subagent logs nest under it
 	// Parent, when set, is the spawning loop — fork subagents inherit its
 	// messages. Wired by the caller that owns the parent Loop.
 	Parent *Loop
@@ -504,7 +506,20 @@ func (r *Runner) runAgentTurn(sub *Loop, prompt string, c *tools.Context, rec *t
 	if sub.ToolCtx != nil && sub.ToolCtx.Ctx != nil {
 		ctx = sub.ToolCtx.Ctx // cancellation propagates from the parent turn
 	}
+	// real persists subagent turns under <sid>/subagents/<agentID>.jsonl
+	var subStore *session.Store
+	if r.Transcript != "" {
+		if st, err := session.OpenSubagent(r.Transcript, rec.AgentID, c.CWD); err == nil {
+			subStore = st
+		}
+	}
 	resp, err := sub.Ask(ctx, prompt)
+	if subStore != nil {
+		for _, m := range sub.Messages {
+			subStore.Log(m)
+		}
+		subStore.Close()
+	}
 	if len(r.Hooks) > 0 {
 		hooks.Run(r.Hooks, hooks.SubagentStop, map[string]any{
 			"session_id": r.Client.SessionID, "cwd": c.CWD,

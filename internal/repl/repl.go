@@ -137,6 +137,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 	}
 	defer ks.stop()
 	var printedDot bool
+	var thinkingSeen bool
 	md := newMDRenderer()
 
 	l.ToolCtx.Permission = func(name string, input json.RawMessage, summary string) bool {
@@ -170,7 +171,13 @@ func RunWithStore(l *agent.Loop, store Store) {
 		md.Write(t)
 	}
 	l.Events.OnThinking = func(t string) {
-		// thinking display: dim italic
+		if thinkingHidden.Load() {
+			return // meta+t collapsed (real hides thinking by default display)
+		}
+		if !thinkingSeen {
+			fmt.Printf("%s✻ Thinking…%s\n", dim, reset)
+			thinkingSeen = true
+		}
 		fmt.Print(dim + t + reset)
 	}
 	l.Events.OnToolUse = func(name string, input json.RawMessage) {
@@ -185,13 +192,15 @@ func RunWithStore(l *agent.Loop, store Store) {
 		}
 		for i, ln := range lines {
 			if i >= max {
-				fmt.Printf("  %s⎿%s  … (+%d more lines)\n", dim, reset, len(lines)-max)
+				fmt.Printf("  %s⎿%s  … +%d lines (ctrl+o to expand)\n", dim, reset, len(lines)-max)
 				break
 			}
 			fmt.Printf("  %s⎿%s  %s\n", dim, reset, trunc(ln, 120))
 		}
 	}
-	l.Events.OnUsage = func(u api.Usage) {}
+	l.Events.OnUsage = func(u api.Usage) {
+		spinTokens.Store(int64(u.OutputTokens)) // spinner's ↓ token counter
+	}
 
 	fmt.Printf("%sclaude-go%s %s — %s\n", bold, reset, api.Version, l.CWD)
 	fmt.Printf("%smodel: %s · /help for commands · esc to interrupt · ctrl-D to exit%s\n\n", dim, l.Model, reset)
@@ -208,6 +217,10 @@ func RunWithStore(l *agent.Loop, store Store) {
 		}
 		if res.rewind {
 			runRewindSelector(l, ks, ed)
+			continue
+		}
+		if res.modelPicker {
+			handleSlash(l, "/model", ed, ks)
 			continue
 		}
 		if !res.ok {
@@ -246,6 +259,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			tools.UserActive.Store(false)
 			defer tools.UserActive.Store(true)
 			printedDot = false
+			thinkingSeen = false
 			spin := newSpinner()
 			*spinRef = *spin
 			ctx, cancel := context.WithCancel(context.Background())
@@ -270,9 +284,14 @@ func RunWithStore(l *agent.Loop, store Store) {
 							if len(queueBuf) > 0 {
 								draftBack = append(draftBack, queueBuf...)
 							}
-						} else if k.b == '\r' || k.b == '\n' {
+						} else if k.b == '\r' || k.b == '\n' || ed.kb[keystroke(k)] == "chat:sendNow" {
 							if len(queueBuf) > 0 {
-								queued = append(queued, string(queueBuf))
+								if ed.kb[keystroke(k)] == "chat:sendNow" {
+									// sendNow jumps ahead of queued messages
+									queued = append([]string{string(queueBuf)}, queued...)
+								} else {
+									queued = append(queued, string(queueBuf))
+								}
 								queuedPending.Add(1)
 								queueBuf = nil
 								fmt.Fprintf(os.Stderr, "\n  %s➤ queued%s\n", dim, reset)
@@ -322,8 +341,15 @@ func RunWithStore(l *agent.Loop, store Store) {
 				} else {
 					fmt.Printf("%sError: %v%s\n", red, err, reset)
 				}
+			} else if d := time.Since(start); d >= time.Second {
+				// real prints "✻ Churned for 2m 9s" (past-tense verb)
+				v, _ := spinVerb.v.Load().(string)
+				if v == "" {
+					v = "Working"
+				}
+				fmt.Printf("%s✻ %s for %s%s\n\n", dim, pastTense(v), fmtDur(d), reset)
 			} else {
-				fmt.Printf("%s· %s%s\n\n", dim, time.Since(start).Round(time.Millisecond), reset)
+				fmt.Println()
 			}
 		}
 		for {
@@ -418,30 +444,123 @@ func (p *promptUI) ask(l *agent.Loop, ks *keySource, name, summary string) bool 
 	return ok
 }
 
-// spinner shows "⠋ working… (esc to interrupt · Ns)" on stderr.
+// spinner: real CC's `<glyph> <Verb>… (Ns · ↓ Nk tokens)` — bounce frames
+// ·✢✳✶✻✽ at 150ms, claude-orange verb, whimsical gerund pool.
 type spinner struct {
 	done chan struct{}
+	verb string
 }
 
+// spinVerb exposes the active verb for the past-tense footer.
+var spinVerb struct{ v atomic.Value }
+
+// pastTense converts a spinner gerund ("Churning") to past ("Churned") —
+// mirrors real's completion verb forms loosely.
+func pastTense(g string) string {
+	w := strings.TrimSuffix(g, "ing")
+	if w == "" || w == g {
+		return "Worked"
+	}
+	// double consonant where needed ("Skedaddl"+"ed" is fine; "Spin"+"ned")
+	if strings.HasSuffix(g, "ning") || strings.HasSuffix(g, "ming") {
+		return w + "ned"
+	}
+	if strings.HasSuffix(w, "'") { // "Beboppin'" → "Bebopped"
+		return strings.TrimSuffix(w, "'") + "ed"
+	}
+	return w + "ed"
+}
+
+// bounce order up-then-down, like real's [...at, ...at.toReversed()]
+var spinnerFrames = []string{"·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"}
+
+var spinnerVerbs = []string{
+	"Accomplishing", "Actioning", "Actualizing", "Architecting", "Baking",
+	"Beaming", "Beboppin'", "Befuddling", "Billowing", "Blanching",
+	"Bloviating", "Boogieing", "Boondoggling", "Booping", "Bootstrapping",
+	"Brewing", "Bunning", "Burrowing", "Calculating", "Canoodling",
+	"Caramelizing", "Cascading", "Catapulting", "Cerebrating", "Channeling",
+	"Choreographing", "Churning", "Clauding", "Coalescing", "Cogitating",
+	"Combobulating", "Composing", "Computing", "Concocting", "Considering",
+	"Contemplating", "Cooking", "Crafting", "Creating", "Crunching",
+	"Crystallizing", "Cultivating", "Deciphering", "Deliberating",
+	"Determining", "Dilly-dallying", "Discombobulating", "Doing", "Doodling",
+	"Drizzling", "Ebbing", "Effecting", "Elucidating", "Embellishing",
+	"Enchanting", "Envisioning", "Fermenting", "Fiddle-faddling", "Finagling",
+	"Flambéing", "Flibbertigibbeting", "Flowing", "Flummoxing", "Fluttering",
+	"Forging", "Forming", "Frolicking", "Frosting", "Gallivanting",
+	"Galloping", "Garnishing", "Generating", "Gesticulating", "Germinating",
+	"Gitifying", "Grooving", "Gusting", "Harmonizing", "Hashing", "Hatching",
+	"Herding", "Honking", "Hullaballooing", "Hyperspacing", "Ideating",
+	"Imagining", "Improvising", "Incubating", "Inferring", "Infusing",
+	"Ionizing", "Jitterbugging", "Julienning", "Kneading", "Leavening",
+	"Levitating", "Lollygagging", "Manifesting", "Marinating", "Meandering",
+	"Metamorphosing", "Misting", "Moonwalking", "Moseying", "Mulling",
+	"Mustering", "Musing", "Nebulizing", "Nesting", "Newspapering",
+	"Noodling", "Nucleating", "Orbiting", "Orchestrating", "Osmosing",
+	"Perambulating", "Percolating", "Perusing", "Philosophising",
+	"Photosynthesizing", "Pollinating", "Pondering", "Pontificating",
+	"Pouncing", "Precipitating", "Prestidigitating", "Processing",
+	"Proofing", "Propagating", "Puttering", "Puzzling", "Quantumizing",
+	"Razzle-dazzling", "Razzmatazzing", "Recombobulating", "Reticulating",
+	"Roosting", "Ruminating", "Sautéing", "Scampering", "Schlepping",
+	"Scurrying", "Seasoning", "Shenaniganing", "Shimmying", "Simmering",
+	"Skedaddling", "Sketching", "Slithering", "Smooshing", "Sock-hopping",
+	"Spelunking", "Spinning", "Sprouting", "Stewing", "Sublimating",
+	"Swirling", "Swooping", "Symbioting", "Synthesizing", "Transmuting",
+	"Unfurling", "Vibrating", "Whisking", "Wobbling", "Wrangling",
+	"Zigzagging",
+}
+
+// claudeOrange is the brand accent (real `claude` token = rgb(215,119,87)).
+const claudeOrange = "[38;2;215;119;87m"
+
 func newSpinner() *spinner {
-	s := &spinner{done: make(chan struct{})}
+	s := &spinner{done: make(chan struct{}),
+		verb: spinnerVerbs[time.Now().UnixNano()%int64(len(spinnerVerbs))]}
+	spinVerb.v.Store(s.verb)
+	spinTokens.Store(0)
 	go s.run()
 	return s
 }
 
+func fmtDur(d time.Duration) string {
+	s := int(d.Seconds())
+	if s < 60 {
+		return fmt.Sprintf("%ds", s)
+	}
+	if s < 3600 {
+		return fmt.Sprintf("%dm %ds", s/60, s%60)
+	}
+	return fmt.Sprintf("%dh %dm %ds", s/3600, s/60%60, s%60)
+}
+
+func compactTokens(n int) string {
+	if n >= 1000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return fmt.Sprint(n)
+}
+
+var spinTokens atomic.Int64 // ↓ tokens counter fed by OnUsage
+
 func (s *spinner) run() {
-	frames := []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 	i := 0
 	start := time.Now()
-	t := time.NewTicker(80 * time.Millisecond)
+	t := time.NewTicker(150 * time.Millisecond)
 	defer t.Stop()
 	for {
 		select {
 		case <-s.done:
 			return
 		case <-t.C:
-			el := time.Since(start).Round(time.Second)
-			fmt.Fprintf(os.Stderr, "\r\x1b[K%s%c%s working… (esc to interrupt · %s)", dim, frames[i%len(frames)], reset, el)
+			el := fmtDur(time.Since(start))
+			toks := ""
+			if n := spinTokens.Load(); n > 0 {
+				toks = " · ↓ " + compactTokens(int(n)) + " tokens"
+			}
+			fmt.Fprintf(os.Stderr, "\r\x1b[K%s%s %s%s…%s%s (esc to interrupt · %s%s)",
+				claudeOrange, spinnerFrames[i%len(spinnerFrames)], s.verb, reset, claudeOrange, reset, el, toks)
 			i++
 		}
 	}
@@ -590,12 +709,28 @@ func slashCompleter(prefix string) []string {
 	return out
 }
 
+// sessionGitBranch shells out once per status draw — real shows the branch.
+func sessionGitBranch(cwd string) string {
+	out, err := exec.Command("git", "-C", cwd, "branch", "--show-current").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func printStatus(l *agent.Loop, ed *editor) {
 	if out := statusLineCmd(l); out != "" {
 		fmt.Println(out)
 	} else {
 		w, _ := termWidth()
-		left := "  " + l.ToolCtx.CWD
+		cwdDisp := l.ToolCtx.CWD
+		if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(cwdDisp, home) {
+			cwdDisp = "~" + cwdDisp[len(home):] // real abbreviates $HOME
+		}
+		left := "  " + cwdDisp
+		if b := sessionGitBranch(l.ToolCtx.CWD); b != "" {
+			left += "  " + b // real shows the branch as text
+		}
 		right := l.Model + " │ " + l.PermMode + " │ ? for shortcuts"
 		pad := w - len(left) - len(right)
 		if pad < 1 {

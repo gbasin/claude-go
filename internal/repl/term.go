@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"encoding/json"
@@ -23,6 +24,7 @@ type editor struct {
 	hIdx           int
 	buf            []rune
 	pos            int
+	stashed        [][]rune // ctrl+s draft stash
 	prompt         string
 	saved          []rune
 	vim            bool
@@ -149,11 +151,14 @@ func (e *editor) expandPaste(pasted string) string {
 }
 
 type readResult struct {
-	line   string
-	ok     bool // got a line
-	intr   bool // ctrl-C pressed with empty buffer (double-tap = exit)
-	quit   bool // double ctrl-C / ctrl-D -> exit repl
-	rewind bool // esc-esc: open the rewind/message selector
+	line        string
+	ok          bool // got a line
+	intr        bool // ctrl-C pressed with empty buffer (double-tap = exit)
+	quit        bool // double ctrl-C / ctrl-D -> exit repl
+	rewind      bool // esc-esc: open the rewind/message selector
+	sendNow     bool // ctrl+enter / ctrl+x ctrl+s — deliver even while busy
+	queued      bool // ctrl+x enter — force queue
+	modelPicker bool // meta+p — open the /model picker
 }
 
 // readLine consumes keys until submit. Vim-normal mode supported.
@@ -272,6 +277,9 @@ func (e *editor) insertKey(k key) *readResult {
 		if e.cycleMode != nil {
 			e.cycleMode()
 		}
+	case k.r == '?' && len(e.buf) == 0 && k.seq == "":
+		e.showShortcuts() // real: '?' on empty input opens the shortcuts overlay
+		return nil
 	case k.r != 0 && k.mod&^modShift == 0: // shift alone still inserts text
 		// vimInsertModeRemaps: 2-char sequence mapped to <Esc>
 		if e.vim && len(e.insertRemaps) > 0 && e.lastIns != 0 {
@@ -1462,4 +1470,63 @@ func vimInsertRemaps() []string {
 		}
 	}
 	return nil
+}
+
+var fastModeFlag atomic.Bool   // meta+o toggle
+var thinkingHidden atomic.Bool // meta+t toggle
+
+// sendNow submits immediately even while the agent runs (flushes the queue
+// ahead of queued lines) — real chat:sendNow.
+func (e *editor) sendNow() *readResult {
+	line := e.submitLine()
+	return &readResult{line: line, sendNow: true}
+}
+
+// queueSubmitKey explicitly queues the line when the agent is running.
+func (e *editor) queueSubmitKey() *readResult {
+	line := e.submitLine()
+	return &readResult{line: line, queued: true}
+}
+
+// modelPickerKey opens /model from the keymap (meta+p in real).
+func (e *editor) modelPickerKey() *readResult {
+	return &readResult{line: "/model", modelPicker: true}
+}
+
+func (e *editor) toggleFastMode() { fastModeFlag.Store(!fastModeFlag.Load()) }
+
+func (e *editor) toggleThinking() { thinkingHidden.Store(!thinkingHidden.Load()) }
+
+// stashLine saves the current draft and clears the input (ctrl+s — the
+// editor stash in real CC).
+func (e *editor) stashLine() {
+	if len(e.buf) == 0 {
+		return
+	}
+	e.stashed = append(e.stashed, e.buf)
+	e.pushUndo()
+	e.buf = nil
+	e.pos = 0
+	fmt.Fprintf(os.Stderr, "%s  stashed draft (ctrl+y to yank)%s\n", dim, reset)
+}
+
+// showShortcuts prints the keyboard-shortcut overlay ('?' on empty input).
+func (e *editor) showShortcuts() {
+	fmt.Print("\r\x1b[K\x1b[2m")
+	rows := [][2]string{
+		{"enter", "submit"}, {"shift+tab", "cycle permission mode"},
+		{"ctrl+c", "interrupt · twice to exit"}, {"ctrl+d", "exit"},
+		{"ctrl+l", "clear input"}, {"ctrl+r", "search history"},
+		{"ctrl+o", "transcript view"}, {"ctrl+t", "toggle todos"},
+		{"ctrl+g / ctrl+x ctrl+e", "external editor"},
+		{"ctrl+_ / ctrl+-", "undo"}, {"ctrl+s", "stash draft"},
+		{"meta+p", "model picker"}, {"meta+o", "fast mode"},
+		{"meta+t", "toggle thinking"}, {"esc esc", "rewind"},
+		{"<any> while running", "queue the message"},
+	}
+	for _, r := range rows {
+		fmt.Printf("  %-22s %s\n", r[0], r[1])
+	}
+	fmt.Print("\x1b[0m")
+	e.redraw()
 }

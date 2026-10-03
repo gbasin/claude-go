@@ -17,8 +17,9 @@ type palette struct {
 }
 
 var themePalettes = map[string]palette{
-	"dark":  {"\x1b[2m", "\x1b[1m", "\x1b[34m", "\x1b[36m", "\x1b[33m", "\x1b[31m", "\x1b[32m"},
-	"light": {"\x1b[2m", "\x1b[1m", "\x1b[34m", "\x1b[34m", "\x1b[35m", "\x1b[31m", "\x1b[32m"},
+	// Accent = real `claude` brand token rgb(215,119,87) orange
+	"dark":  {"\x1b[2m", "\x1b[1m", "\x1b[38;2;215;119;87m", "\x1b[36m", "\x1b[33m", "\x1b[31m", "\x1b[32m"},
+	"light": {"\x1b[2m", "\x1b[1m", "\x1b[38;2;174;84;55m", "\x1b[34m", "\x1b[35m", "\x1b[31m", "\x1b[32m"},
 	"daltonian": { // deuteranopia-safe: avoid red/green pairs
 		"\x1b[2m", "\x1b[1m", "\x1b[34m", "\x1b[36m", "\x1b[35m", "\x1b[33m", "\x1b[34m"},
 	"ansi":     {"\x1b[2m", "\x1b[1m", "\x1b[34m", "\x1b[36m", "\x1b[33m", "\x1b[31m", "\x1b[32m"},
