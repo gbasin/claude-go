@@ -52,13 +52,32 @@ func (b *Background) List() []*BgTask {
 	return out
 }
 
+// KillAll cancels every running background task; returns count.
+func (b *Background) KillAll() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := 0
+	for _, t := range b.tasks {
+		select {
+		case <-t.Done:
+			continue
+		default:
+			if t.cancel != nil {
+				t.cancel()
+				n++
+			}
+		}
+	}
+	return n
+}
+
 func (b *Background) Get(id string) *BgTask {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.tasks[id]
 }
 
-var sleepRe = regexp.MustCompile(`^\s*sleep\b`)
+var sleepRe = regexp.MustCompile(`(^|[;&|]\s*)sleep\b`)
 
 // ---------- Bash ----------
 

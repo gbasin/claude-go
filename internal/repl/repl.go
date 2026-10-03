@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,15 +48,17 @@ func RunWithStore(l *agent.Loop, store Store) {
 	ed := newEditor()
 	ed.vim = vimEnabled()
 	ed.completer = slashCompleter
+	loadCustomCommands(l.ToolCtx.CWD)
 	ed.cycleMode = func() {
-		switch l.PermMode {
-		case "auto":
-			l.PermMode = "plan"
-		case "plan":
-			l.PermMode = "bypassPermissions"
-		default:
-			l.PermMode = "auto"
+		order := []string{"default", "acceptEdits", "plan", "auto"}
+		idx := 0
+		for i, m := range order {
+			if l.PermMode == m {
+				idx = i
+				break
+			}
 		}
+		l.PermMode = order[(idx+1)%len(order)]
 		fmt.Printf("\n%s⏵⏵ %s mode%s\n", yellow, l.PermMode, reset)
 	}
 	pr := &promptUI{}
@@ -63,7 +66,27 @@ func RunWithStore(l *agent.Loop, store Store) {
 		runPipe(l)
 		return
 	}
+	toolExpand := false
 	ks, err := startKeys()
+	if err == nil {
+		ed.keys = ks
+		ed.registerDefaultActions()
+		ed.onKillAgents = func() {
+			fmt.Println("\r\x1b[2K  killing background tasks…")
+			n := l.ToolCtx.BgTasks.KillAll()
+			fmt.Printf("  %d background tasks stopped\n", n)
+		}
+		ed.onToggleExpand = func() {
+			toolExpand = !toolExpand
+		}
+		ed.onToggleTodos = func() {
+			if s := tools.TodosText(); s != "" {
+				fmt.Println("\r\x1b[2K" + dim + s + reset)
+			} else {
+				fmt.Println("\r\x1b[2K  (no todos)")
+			}
+		}
+	}
 	endSession := func() { fmt.Println(); os.Exit(0) }
 	l.ToolCtx.SetPermMode = func(mode string) { l.PermMode = mode }
 	l.ToolCtx.EndSession = endSession
@@ -135,6 +158,10 @@ func RunWithStore(l *agent.Loop, store Store) {
 			fireSessionEndHook(l)
 			return
 		}
+		if res.rewind {
+			runRewindSelector(l, ks, ed)
+			continue
+		}
 		if !res.ok {
 			continue
 		}
@@ -142,60 +169,110 @@ func RunWithStore(l *agent.Loop, store Store) {
 		if line == "" {
 			continue
 		}
+		if strings.HasPrefix(line, "#") {
+			quickMemory(l, strings.TrimSpace(line[1:]))
+			continue
+		}
 		if strings.HasPrefix(line, "!") {
 			runBang(l, line[1:])
 			continue
 		}
 		if strings.HasPrefix(line, "/") {
-			if handleSlash(l, line, ed, ks) {
-				return
+			if expanded := expandCustomSlash(line); expanded != "" {
+				line = expanded
+			} else {
+				if handleSlash(l, line, ed, ks) {
+					return
+				}
+				continue
 			}
-			continue
 		}
 
-		printedDot = false
-		spin := newSpinner()
-		*spinRef = *spin
-		ctx, cancel := context.WithCancel(context.Background())
-		start := time.Now()
-		respDone := make(chan struct{})
-		go func() {
-			// while the agent runs, drain keys watching for esc
-			for {
-				select {
-				case <-respDone:
-					return
-				case k, ok := <-ks.ch:
-					if !ok {
+		var queued []string
+		var draftBack []rune
+		runTurn := func(line string) {
+			printedDot = false
+			spin := newSpinner()
+			*spinRef = *spin
+			ctx, cancel := context.WithCancel(context.Background())
+			start := time.Now()
+			respDone := make(chan struct{})
+			var queueBuf []rune
+			go func() {
+				// while the agent runs: esc interrupts, other keys queue a message
+				for {
+					select {
+					case <-respDone:
 						return
-					}
-					if k.b == 0x1b && k.seq == "" {
-						cancel()
+					case k, ok := <-ks.ch:
+						if !ok {
+							return
+						}
+						if k.b == 0x1b && k.seq == "" {
+							cancel()
+							// popQueuedIntoDraft: unfinished queued text returns to the editor
+							if len(queueBuf) > 0 {
+								draftBack = append(draftBack, queueBuf...)
+							}
+						} else if k.b == '\r' || k.b == '\n' {
+							if len(queueBuf) > 0 {
+								queued = append(queued, string(queueBuf))
+								queueBuf = nil
+								fmt.Fprintf(os.Stderr, "\n  %s➤ queued%s\n", dim, reset)
+							}
+						} else if k.r != 0 {
+							queueBuf = append(queueBuf, k.r)
+						} else if k.b == 0x7f && len(queueBuf) > 0 {
+							queueBuf = queueBuf[:len(queueBuf)-1]
+						}
 					}
 				}
+			}()
+			_, err := l.Ask(ctx, expandMentions(l, line))
+			spin.stop()
+			fmt.Fprint(os.Stderr, "\r\x1b[K")
+			fireStopHook(l)
+			if store != nil {
+				for _, m := range l.Messages {
+					store.Log(m)
+				}
 			}
-		}()
-		_, err := l.Ask(ctx, expandMentions(l, line))
-		spin.stop()
-		fmt.Fprint(os.Stderr, "\r\x1b[K")
-		fireStopHook(l)
-		if store != nil {
-			for _, m := range l.Messages {
-				store.Log(m)
+			md.Close()
+			close(respDone)
+			cancel()
+			fmt.Println()
+			if err != nil {
+				if ctx.Err() == context.Canceled {
+					fmt.Printf("%s⏺ Interrupted%s\n", yellow, reset)
+				} else {
+					fmt.Printf("%sError: %v%s\n", red, err, reset)
+				}
+			} else {
+				fmt.Printf("%s· %s%s\n\n", dim, time.Since(start).Round(time.Millisecond), reset)
 			}
 		}
-		md.Close()
-		close(respDone)
-		cancel()
-		fmt.Println()
-		if err != nil {
-			if ctx.Err() == context.Canceled {
-				fmt.Printf("%s⏺ Interrupted%s\n", yellow, reset)
-			} else {
-				fmt.Printf("%sError: %v%s\n", red, err, reset)
+		for {
+			runTurn(line)
+			// drain session-injected prompts (cron, wakeup, monitor events)
+			for {
+				select {
+				case p := <-tools.SessionQueue:
+					queued = append(queued, p)
+				default:
+					goto drained
+				}
 			}
-		} else {
-			fmt.Printf("%s· %s%s\n\n", dim, time.Since(start).Round(time.Millisecond), reset)
+		drained:
+			if len(draftBack) > 0 {
+				ed.buf = draftBack
+				ed.pos = len(ed.buf)
+				draftBack = nil
+			}
+			if len(queued) == 0 {
+				break
+			}
+			line = queued[0]
+			queued = queued[1:]
 		}
 	}
 }
@@ -257,6 +334,7 @@ func (p *promptUI) ask(l *agent.Loop, ks *keySource, name, summary string) bool 
 	if p.always[name] {
 		return true
 	}
+	notifyAttention(l.ToolCtx.CWD)
 	if l.Hooks != nil {
 		hooks.Run(l.Hooks, hooks.Notification, map[string]any{
 			"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
@@ -275,6 +353,11 @@ func (p *promptUI) ask(l *agent.Loop, ks *keySource, name, summary string) bool 
 		case '2', 'a', 'A':
 			fmt.Println("2")
 			p.always[name] = true
+			// real writes a permission rule to .claude/settings.local.json
+			if rule := ruleSuggestion(name, summary); rule != "" {
+				addLocalPermissionRule(l.ToolCtx.CWD, rule)
+				fmt.Printf("  %s%s added to permission allowlist%s\n", dim, rule, reset)
+			}
 			return true
 		case '3', 'n', 'N', 0x1b, 3:
 			fmt.Println("3")
@@ -364,7 +447,7 @@ func runBang(l *agent.Loop, cmd string) {
 	res := tools.Dispatch(l.ToolCtx, "Bash", raw)
 	fmt.Println("  ⎿ ", strings.TrimSpace(res.Content))
 	l.PushUser([]api.ContentBlock{{Type: "text",
-		Text: "<bash-mode>\n" + cmd + "\n</bash-mode>\n\n<bash-output>\n" + res.Content + "\n</bash-output>"}})
+		Text: "<bash-input>\n" + cmd + "\n</bash-input>\n\n<local-command-stdout>\n" + res.Content + "\n</local-command-stdout>"}})
 }
 
 // runPipe handles non-TTY stdin: each line is a prompt (like `claude < in.txt`).
@@ -410,6 +493,11 @@ func vimEnabled() bool {
 
 func slashCompleter(prefix string) []string {
 	var out []string
+	for c := range customCommands {
+		if strings.HasPrefix(c, prefix) {
+			out = append(out, c)
+		}
+	}
 	for _, c := range slashCommands {
 		if strings.HasPrefix(c, prefix) {
 			out = append(out, c)
@@ -526,12 +614,37 @@ func statusLineCmd(l *agent.Loop) string {
 	if json.Unmarshal(b, &st) != nil || st.StatusLine.Command == "" {
 		return ""
 	}
+	u := l.UsageTotal
+	tok := u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+	cwSize := int64(200000)
+	if strings.Contains(l.Model, "[1m]") {
+		cwSize = 1000000
+	}
+	pct := float64(0)
+	if cwSize > 0 {
+		pct = float64(tok) / float64(cwSize) * 100
+	}
 	payload, _ := json.Marshal(map[string]any{
 		"session_id":      l.Client.SessionID,
 		"transcript_path": l.Transcript,
 		"cwd":             l.ToolCtx.CWD,
+		"version":         "2.1.288",
 		"model":           map[string]string{"id": l.Model, "display_name": l.Model},
 		"workspace":       map[string]any{"current_dir": l.ToolCtx.CWD, "project_dir": l.ToolCtx.CWD},
+		"output_style":    map[string]string{"name": outputStyle(l)},
+		"effort":          map[string]string{"level": l.Effort},
+		"thinking":        map[string]bool{"enabled": true},
+		"vim":             map[string]string{"mode": vimMode(l)},
+		"context_window": map[string]any{
+			"total_input_tokens":    u.InputTokens,
+			"total_output_tokens":   u.OutputTokens,
+			"context_window_size":   cwSize,
+			"current_usage":         tok,
+			"used_percentage":       pct,
+			"remaining_percentage":  100 - pct,
+			"cache_creation_tokens": u.CacheCreationInputTokens,
+			"cache_read_tokens":     u.CacheReadInputTokens,
+		},
 	})
 	sh := os.Getenv("SHELL")
 	if sh == "" {
@@ -545,4 +658,247 @@ func statusLineCmd(l *agent.Loop) string {
 		return ""
 	}
 	return strings.SplitN(string(out), "\n", 2)[0]
+}
+
+// expandCustomSlash resolves /name args to a prompt if it's a custom command.
+func expandCustomSlash(line string) string {
+	fields := strings.Fields(line)
+	name := strings.TrimPrefix(fields[0], "/")
+	c, ok := customCommands[name]
+	if !ok {
+		return ""
+	}
+	arg := strings.TrimSpace(strings.TrimPrefix(line, "/"+name))
+	fmt.Printf("  %s/%s%s\n", dim, name, reset)
+	return expandCustomCommand(c, arg)
+}
+
+// quickMemory: "# text" appends to the project memory index (CC's # prefix).
+func quickMemory(l *agent.Loop, text string) {
+	home, _ := os.UserHomeDir()
+	slug := strings.ReplaceAll(filepath.Clean(l.ToolCtx.CWD), "/", "-")
+	dir := filepath.Join(home, ".claude", "projects", slug, "memory")
+	os.MkdirAll(dir, 0o755)
+	p := filepath.Join(dir, "MEMORY.md")
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		fmt.Println("  memory write failed:", err)
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "- %s\n", text)
+	fmt.Println("  saved to memory:", p)
+}
+
+func vimMode(l *agent.Loop) string {
+	if vimEnabled() {
+		return "normal"
+	}
+	return ""
+}
+
+func outputStyle(l *agent.Loop) string {
+	home, _ := os.UserHomeDir()
+	for _, p := range []string{
+		filepath.Join(l.ToolCtx.CWD, ".claude", "settings.local.json"),
+		filepath.Join(home, ".claude", "settings.json"),
+	} {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var st struct {
+			OutputStyle string `json:"outputStyle"`
+		}
+		if json.Unmarshal(b, &st) == nil && st.OutputStyle != "" {
+			return st.OutputStyle
+		}
+	}
+	return "default"
+}
+
+// ruleSuggestion builds the "Tool(spec)" rule real CC persists on
+// "don't ask again" — Bash gets a command prefix, others use their spec.
+func ruleSuggestion(name, summary string) string {
+	s := strings.Trim(summary, "()")
+	s = strings.TrimSpace(strings.TrimSuffix(s, "…"))
+	switch name {
+	case "Bash", "Monitor":
+		fields := strings.Fields(s)
+		if len(fields) == 0 {
+			return name
+		}
+		return fmt.Sprintf("%s(%s:*)", name, fields[0])
+	case "WebFetch":
+		if u, err := url.Parse(s); err == nil && u.Host != "" {
+			return fmt.Sprintf("%s(domain:%s)", name, u.Hostname())
+		}
+		return name
+	case "Read", "Edit", "Write", "NotebookEdit":
+		if s == "" {
+			return name
+		}
+		return fmt.Sprintf("%s(%s)", name, s)
+	}
+	return name
+}
+
+// addLocalPermissionRule appends a rule to .claude/settings.local.json.
+func addLocalPermissionRule(cwd, rule string) {
+	dir := filepath.Join(cwd, ".claude")
+	os.MkdirAll(dir, 0o755)
+	p := filepath.Join(dir, "settings.local.json")
+	var st map[string]any
+	if b, err := os.ReadFile(p); err == nil {
+		json.Unmarshal(b, &st)
+	}
+	if st == nil {
+		st = map[string]any{}
+	}
+	perms, _ := st["permissions"].(map[string]any)
+	if perms == nil {
+		perms = map[string]any{}
+		st["permissions"] = perms
+	}
+	allow, _ := perms["allow"].([]any)
+	allow = append(allow, rule)
+	perms["allow"] = allow
+	b, _ := json.MarshalIndent(st, "", "  ")
+	os.WriteFile(p, b, 0o600)
+}
+
+// runRewindSelector lists past user messages; picking one truncates the
+// conversation to before it (conversation-only rewind — CC's three-mode
+// selector offers "both"/"conversation"/"code"; we do conversation + code
+// since we checkpoint every write).
+func runRewindSelector(l *agent.Loop, ks *keySource, ed *editor) {
+	// collect user messages with their positions
+	type um struct {
+		i    int
+		text string
+	}
+	var list []um
+	for i, m := range l.Messages {
+		if m.Role != "user" {
+			continue
+		}
+		var txt string
+		var blocks []map[string]any
+		if json.Unmarshal(m.Content, &blocks) == nil {
+			for _, b := range blocks {
+				if b["type"] == "text" {
+					txt, _ = b["text"].(string)
+					break
+				}
+			}
+		}
+		if txt == "" {
+			var s string
+			if json.Unmarshal(m.Content, &s) == nil {
+				txt = s
+			}
+		}
+		if txt != "" {
+			list = append(list, um{i, txt})
+		}
+	}
+	if len(list) == 0 {
+		fmt.Println("  (nothing to rewind to)")
+		return
+	}
+	fmt.Println("\n  Rewind to:")
+	for i, m := range list {
+		if i >= 12 {
+			fmt.Printf("    … %d more\n", len(list)-12)
+			break
+		}
+		fmt.Printf("    %d. %s\n", i+1, trunc(strings.ReplaceAll(m.text, "\n", " "), 80))
+	}
+	fmt.Print("  number to restore (esc cancels): ")
+	sel := 0
+	for k := range ks.ch {
+		if k.b == 0x1b {
+			fmt.Println()
+			return
+		}
+		if k.b >= '1' && k.b <= '9' {
+			sel = sel*10 + int(k.b-'0')
+			fmt.Print(string(k.b))
+			continue
+		}
+		if k.b == '\r' {
+			fmt.Println()
+			if sel < 1 || sel > len(list) {
+				fmt.Println("  (invalid)")
+				return
+			}
+			target := list[sel-1]
+			l.Messages = l.Messages[:target.i]
+			p, err := tools.Checkpoints.Rewind()
+			restored := 0
+			if err == nil && p != "" {
+				restored = 1
+			}
+			fmt.Printf("  rewound to before %q (%d files restored)\n", trunc(target.text, 50), restored)
+			return
+		}
+		if k.b == 3 {
+			fmt.Println()
+			return
+		}
+	}
+}
+
+// notifyAttention emits the preferredNotifChannel signal — real channels:
+// iterm2/iterm2_with_bell/terminal_bell/kitty/ghostty/notifications_disabled.
+func notifyAttention(cwd string) {
+	ch := notifChannel(cwd)
+	switch ch {
+	case "notifications_disabled", "none", "":
+		return
+	case "iterm2", "iterm2_with_bell":
+		fmt.Print("\x1b]9;Claude needs your attention\x07")
+		if ch == "iterm2_with_bell" {
+			fmt.Print("\a")
+		}
+	case "kitty":
+		fmt.Print("\x1b]99;i=1:d=0;Claude needs your attention\x1b\\")
+	case "ghostty":
+		fmt.Print("\x1b]777;notify;Claude;needs your attention\x07")
+	default: // terminal_bell / auto
+		fmt.Print("\a")
+	}
+}
+
+func notifChannel(cwd string) string {
+	home, _ := os.UserHomeDir()
+	for _, p := range []string{
+		filepath.Join(cwd, ".claude", "settings.json"),
+		filepath.Join(home, ".claude", "settings.json"),
+	} {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var st struct {
+			PreferredNotifChannel string `json:"preferredNotifChannel"`
+		}
+		if json.Unmarshal(b, &st) == nil && st.PreferredNotifChannel != "" {
+			return st.PreferredNotifChannel
+		}
+	}
+	return "terminal_bell"
+}
+
+// SlashCommandNames lists available slash commands for the init event.
+func SlashCommandNames() []string {
+	out := builtinSlashCommands()
+	for n := range customCommands {
+		out = append(out, n)
+	}
+	return out
+}
+
+func builtinSlashCommands() []string {
+	return []string{"add-dir", "agents", "alias", "branch", "btw", "bug", "clear", "compact", "config", "context", "cost", "diff", "doctor", "effort", "exit", "export", "fast", "feedback", "files", "fork", "goal", "help", "hooks", "ide", "import", "init", "keybindings", "login", "logout", "loop", "low", "mcp", "memory", "model", "output-style", "permissions", "plan", "plugin", "privacy-settings", "release-notes", "resume", "review", "rewind", "sandbox", "skills", "status", "statusline", "subtask", "tasks", "terminal-setup", "theme", "todos", "vim"}
 }

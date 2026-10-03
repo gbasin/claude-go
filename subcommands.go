@@ -6,9 +6,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
 
 	"claude-go/internal/api"
+	"claude-go/internal/auth"
 	"claude-go/internal/mcp"
+	"claude-go/internal/session"
 )
 
 // mcpSub implements `claude-go mcp list|add|remove`.
@@ -27,21 +32,46 @@ func mcpSub(args []string) {
 			fmt.Printf("%s: %s %v\n", name, c.Command, c.Args)
 		}
 	case "add":
-		// claude-go mcp add <name> <command> [args...]
-		if len(args) < 3 {
-			fatal("usage: claude-go mcp add <name> <command> [args...]")
+		// claude-go mcp add [--transport http|sse] <name> <command-or-url> [args...]
+		transport := "stdio"
+		rest := args[1:]
+		for len(rest) > 0 && strings.HasPrefix(rest[0], "--") {
+			if rest[0] == "--transport" && len(rest) > 1 {
+				transport = rest[1]
+				rest = rest[2:]
+			} else {
+				rest = rest[1:]
+			}
+		}
+		if len(rest) < 2 {
+			fatal("usage: claude-go mcp add [--transport http|sse] <name> <command|url> [args...]")
 		}
 		editClaudeJSON(func(m map[string]any) {
 			servers, _ := m["mcpServers"].(map[string]any)
 			if servers == nil {
 				servers = map[string]any{}
 			}
-			servers[args[1]] = map[string]any{
-				"type": "stdio", "command": args[2], "args": args[3:],
+			if transport == "stdio" {
+				servers[rest[0]] = map[string]any{
+					"type": "stdio", "command": rest[1], "args": rest[2:],
+				}
+			} else {
+				servers[rest[0]] = map[string]any{"type": transport, "url": rest[1]}
 			}
 			m["mcpServers"] = servers
 		})
-		fmt.Printf("added %s\n", args[1])
+		fmt.Printf("added %s (%s)\n", rest[0], transport)
+	case "get":
+		if len(args) < 2 {
+			fatal("usage: claude-go mcp get <name>")
+		}
+		cfgs := mcp.LoadConfigs(mustGetwd())
+		c, ok := cfgs[args[1]]
+		if !ok {
+			fatal("no such server: %s", args[1])
+		}
+		b, _ := json.MarshalIndent(c, "", "  ")
+		fmt.Println(string(b))
 	case "remove", "rm":
 		if len(args) < 2 {
 			fatal("usage: claude-go mcp remove <name>")
@@ -147,4 +177,70 @@ func editClaudeJSON(edit func(map[string]any)) {
 func mustGetwd() string {
 	d, _ := os.Getwd()
 	return d
+}
+
+// authSub: claude auth login|status|logout
+func authSub(args []string) {
+	if len(args) == 0 {
+		args = []string{"status"}
+	}
+	switch args[0] {
+	case "login":
+		authLoginSub()
+	case "logout":
+		if runtime.GOOS == "darwin" {
+			exec.Command("security", "delete-generic-password",
+				"-s", "Claude Code-credentials", "-a", os.Getenv("USER")).Run()
+		}
+		fmt.Println("logged out")
+	case "status":
+		creds, err := auth.Load()
+		if err != nil {
+			fmt.Println("not logged in")
+			return
+		}
+		kind := "oauth"
+		if creds.IsAPIKey {
+			kind = "api_key"
+		}
+		fmt.Printf("logged in (%s)", kind)
+		if creds.ExpiresAt > 0 {
+			fmt.Printf(" · expires %s", time.UnixMilli(creds.ExpiresAt).Format("2006-01-02 15:04"))
+		}
+		fmt.Println()
+	default:
+		fatal("unknown auth subcommand: %s (login|status|logout)", args[0])
+	}
+}
+
+// purgeSub: claude purge — delete all local project state.
+func purgeSub(args []string) {
+	dryRun := false
+	all := false
+	for _, a := range args[0:] {
+		switch a {
+		case "--dry-run":
+			dryRun = true
+		case "--all":
+			all = true
+		case "-y":
+		}
+	}
+	cwd, _ := os.Getwd()
+	home, _ := os.UserHomeDir()
+	targets := []string{filepath.Join(home, ".claude", "projects", session.Slug(cwd))}
+	if all {
+		targets = append(targets, filepath.Join(cwd, ".claude"))
+	}
+	for _, t := range targets {
+		if dryRun {
+			fmt.Println("would remove:", t)
+			continue
+		}
+		if err := os.RemoveAll(t); err != nil {
+			fmt.Fprintf(os.Stderr, "purge %s: %v\n", t, err)
+		} else {
+			fmt.Println("removed:", t)
+		}
+	}
 }

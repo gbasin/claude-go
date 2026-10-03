@@ -33,9 +33,7 @@ func TestCronMatch(t *testing.T) {
 }
 
 func TestCronLifecycle(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	c := &Context{Ctx: context.Background(), CWD: home}
+	c := &Context{Ctx: context.Background(), CWD: t.TempDir()}
 
 	create, _ := json.Marshal(map[string]any{"cron": "*/5 * * * *", "prompt": "hi", "recurring": true})
 	r := execCronCreate(c, create)
@@ -46,8 +44,9 @@ func TestCronLifecycle(t *testing.T) {
 	if r.IsError || r.Content == "" {
 		t.Fatal("list empty after create")
 	}
-	// grab job id from file
-	jobs, _ := loadCron()
+	cronMu.Lock()
+	jobs := sessJobs
+	cronMu.Unlock()
 	if len(jobs) != 1 {
 		t.Fatalf("jobs = %d", len(jobs))
 	}
@@ -56,8 +55,9 @@ func TestCronLifecycle(t *testing.T) {
 	if r.IsError {
 		t.Fatalf("delete: %s", r.Content)
 	}
-	jobs, _ = loadCron()
-	if len(jobs) != 0 {
+	cronMu.Lock()
+	defer cronMu.Unlock()
+	if len(sessJobs) != 0 {
 		t.Error("job not deleted")
 	}
 }

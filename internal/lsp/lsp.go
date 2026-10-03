@@ -166,6 +166,15 @@ func (c *Client) readLoop(r io.Reader) {
 	}
 }
 
+// Call issues a raw LSP request and returns the result.
+func (c *Client) Call(method string, params any) (json.RawMessage, error) {
+	var out json.RawMessage
+	if err := c.call(method, params, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *Client) send(v any) error {
 	b, _ := json.Marshal(v)
 	_, err := fmt.Fprintf(c.stdin, "Content-Length: %d\r\n\r\n%s", len(b), b)

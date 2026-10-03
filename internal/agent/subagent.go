@@ -158,3 +158,10 @@ func splitFrontmatter(s string) (map[string]string, string) {
 	}
 	return fm, strings.TrimSpace(rest[end+4:])
 }
+
+// ResolveAgentPrompt returns the system prompt for a named agent type
+// (used by --agent to pick the main-session agent).
+func ResolveAgentPrompt(name, cwd string) string {
+	p, _ := resolveAgentType(cwd, name)
+	return p
+}

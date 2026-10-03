@@ -13,6 +13,10 @@ type Settings struct {
 	Permissions *Permissions      `json:"permissions"`
 	Model       string            `json:"model"`
 	Env         map[string]string `json:"env"`
+	// policy-tier rules — always evaluated, never overridden
+	ManagedDeny []string `json:"-"`
+	ManagedAsk  []string `json:"-"`
+	managedMode string   `json:"-"`
 }
 
 type Permissions struct {
@@ -23,11 +27,23 @@ type Permissions struct {
 }
 
 // Load merges user + project settings (project wins).
+// Load merges settings. policySettings (managed) is highest-precedence:
+// its deny/ask rules can't be overridden by user or project settings, and
+// its defaultMode wins. Track it separately.
 func Load(cwd string) *Settings {
 	merged := &Settings{}
+	managed := &Settings{}
+	if b, err := os.ReadFile(managedSettingsPath()); err == nil {
+		json.Unmarshal(b, managed)
+	}
+	merged.ManagedDeny = append(merged.ManagedDeny, managedPerms(managed, "deny")...)
+	merged.ManagedAsk = append(merged.ManagedAsk, managedPerms(managed, "ask")...)
+	if managed.Permissions != nil && managed.Permissions.DefaultMode != "" {
+		merged.managedMode = managed.Permissions.DefaultMode
+		merged.Permissions = &Permissions{DefaultMode: managed.Permissions.DefaultMode}
+	}
 	home, _ := os.UserHomeDir()
 	for _, p := range []string{
-		managedSettingsPath(),
 		filepath.Join(home, ".claude", "settings.json"),
 		filepath.Join(cwd, ".claude", "settings.json"),
 		filepath.Join(cwd, ".claude", "settings.local.json"),
@@ -39,10 +55,11 @@ func Load(cwd string) *Settings {
 					if merged.Permissions == nil {
 						merged.Permissions = &Permissions{}
 					}
+					_ = s
 					merged.Permissions.Allow = append(merged.Permissions.Allow, s.Permissions.Allow...)
 					merged.Permissions.Deny = append(merged.Permissions.Deny, s.Permissions.Deny...)
 					merged.Permissions.Ask = append(merged.Permissions.Ask, s.Permissions.Ask...)
-					if s.Permissions.DefaultMode != "" {
+					if s.Permissions.DefaultMode != "" && merged.ManagedMode() == "" {
 						merged.Permissions.DefaultMode = s.Permissions.DefaultMode
 					}
 				}
@@ -85,4 +102,22 @@ func managedSettingsPath() string {
 		return "/Library/Application Support/ClaudeCode/managed-settings.json"
 	}
 	return "/etc/claude-code/managed-settings.json"
+}
+
+func managedPerms(s *Settings, kind string) []string {
+	if s.Permissions == nil {
+		return nil
+	}
+	switch kind {
+	case "deny":
+		return s.Permissions.Deny
+	case "ask":
+		return s.Permissions.Ask
+	}
+	return nil
+}
+
+// ManagedMode returns the policy-mandated defaultMode, if any.
+func (s *Settings) ManagedMode() string {
+	return s.managedMode
 }

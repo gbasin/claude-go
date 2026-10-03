@@ -169,17 +169,14 @@ func loadCustomAgents(cwd string) []agentDef {
 
 // loadSkillIndex builds the "- name: description" index from skill dirs:
 // ~/.claude/skills, <cwd>/.claude/skills, <cwd>/.agents/skills, plugin dirs.
-func loadSkillIndex(cwd string) string {
+func skillRoots(cwd string) []string {
 	home, _ := os.UserHomeDir()
-	seen := map[string]bool{}
-	var b strings.Builder
 	dirs := []string{
 		filepath.Join(home, ".claude", "skills"),
 		filepath.Join(home, ".agents", "skills"),
 		filepath.Join(cwd, ".claude", "skills"),
 		filepath.Join(cwd, ".agents", "skills"),
 	}
-	// installed plugins contribute skills too
 	for _, base := range []string{
 		filepath.Join(home, ".claude", "plugins", "synced"),
 		filepath.Join(home, ".claude", "plugins", "local"),
@@ -187,6 +184,13 @@ func loadSkillIndex(cwd string) string {
 		machines, _ := filepath.Glob(filepath.Join(base, "*", "*", "skills"))
 		dirs = append(dirs, machines...)
 	}
+	return dirs
+}
+
+func loadSkillIndex(cwd string) string {
+	seen := map[string]bool{}
+	var b strings.Builder
+	dirs := skillRoots(cwd)
 	for _, dir := range dirs {
 		ents, err := os.ReadDir(dir)
 		if err != nil {
@@ -250,4 +254,27 @@ func scratchDir(cwd, sessionID string) string {
 	}
 	scratchOnce[sessionID] = d
 	return d
+}
+
+// SkillNames returns skill names visible to this session (user/project/plugin).
+func SkillNames(cwd string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, base := range skillRoots(cwd) {
+		ents, err := os.ReadDir(base)
+		if err != nil {
+			continue
+		}
+		for _, ent := range ents {
+			if !ent.IsDir() || seen[ent.Name()] {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(base, ent.Name(), "SKILL.md")); err == nil {
+				seen[ent.Name()] = true
+				out = append(out, ent.Name())
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
