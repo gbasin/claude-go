@@ -277,7 +277,7 @@ func (e *editor) insertKey(k key) *readResult {
 		if e.cycleMode != nil {
 			e.cycleMode()
 		}
-	case k.r == '?' && len(e.buf) == 0 && k.seq == "":
+	case (k.r == '?' || c == '?') && len(e.buf) == 0 && k.seq == "":
 		e.showShortcuts() // real: '?' on empty input opens the shortcuts overlay
 		return nil
 	case k.r != 0 && k.mod&^modShift == 0: // shift alone still inserts text
