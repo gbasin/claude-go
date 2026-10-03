@@ -1,31 +1,39 @@
-// Package mcp implements a minimal MCP (Model Context Protocol) stdio client.
+// Package mcp implements an MCP (Model Context Protocol) client supporting
+// the stdio, streamable-HTTP, and legacy SSE transports.
 // Servers are configured in ~/.claude.json ("mcpServers") or .mcp.json.
 package mcp
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
+// ProtocolVersion is the MCP revision this client speaks.
+const ProtocolVersion = "2025-06-18"
+
+// ServerConfig is one entry of an "mcpServers" map.
 type ServerConfig struct {
-	Type    string            `json:"type"`
+	Type    string            `json:"type"` // "stdio" | "http" | "sse"
 	Command string            `json:"command"`
 	Args    []string          `json:"args"`
 	Env     map[string]string `json:"env"`
-	URL     string            `json:"url"` // http/sse servers unsupported for now
+	URL     string            `json:"url"` // http/sse servers
 	Headers map[string]string `json:"headers"`
+	// Authorization is a convenience field: sets the Authorization request
+	// header (e.g. "Bearer ${MCP_TOKEN}") without listing it in Headers.
+	Authorization string `json:"authorization,omitempty"`
 }
 
 // LoadConfigs merges mcpServers from ~/.claude.json and <cwd>/.mcp.json.
@@ -60,6 +68,28 @@ func LoadConfigs(cwd string) map[string]ServerConfig {
 	return out
 }
 
+// expandConfig interpolates ${VAR} / $VAR environment references in
+// url, headers, authorization, and env values.
+func expandConfig(cfg ServerConfig) ServerConfig {
+	cfg.URL = os.ExpandEnv(cfg.URL)
+	cfg.Authorization = os.ExpandEnv(cfg.Authorization)
+	for k, v := range cfg.Headers {
+		cfg.Headers[k] = os.ExpandEnv(v)
+	}
+	for k, v := range cfg.Env {
+		cfg.Env[k] = os.ExpandEnv(v)
+	}
+	if cfg.Authorization != "" {
+		if cfg.Headers == nil {
+			cfg.Headers = map[string]string{}
+		}
+		if _, ok := cfg.Headers["Authorization"]; !ok {
+			cfg.Headers["Authorization"] = cfg.Authorization
+		}
+	}
+	return cfg
+}
+
 type rpcReq struct {
 	JSONRPC string `json:"jsonrpc"`
 	ID      int64  `json:"id,omitempty"`
@@ -69,7 +99,7 @@ type rpcReq struct {
 
 type rpcResp struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      int64           `json:"id"`
+	ID      json.RawMessage `json:"id"`
 	Result  json.RawMessage `json:"result"`
 	Error   *struct {
 		Code    int    `json:"code"`
@@ -77,15 +107,45 @@ type rpcResp struct {
 	} `json:"error"`
 }
 
-// Client is one stdio MCP server connection.
+// transport is one JSON-RPC message channel to an MCP server.
+// Inbound messages (responses, notifications, server->client requests)
+// are delivered to Client.dispatch.
+type transport interface {
+	// send transmits one marshaled JSON-RPC message. For transports where
+	// the response arrives inline (streamable HTTP POST), send dispatches
+	// inbound messages before returning.
+	send(ctx context.Context, msg []byte) error
+	// close shuts the transport down.
+	close() error
+}
+
+// Client is one MCP server connection (any transport).
 type Client struct {
-	Name    string
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
+	Name  string
+	Tools []Tool
+	// Instructions is the server's initialize-result instructions string
+	// (injected into the agent's system prompt by internal/agent).
+	Instructions string
+	// ServerVersion and ServerName come from initialize result serverInfo.
+	ServerName    string
+	ServerVersion string
+	// Capabilities is the raw server capabilities object from initialize.
+	Capabilities json.RawMessage
+	// Status: "connected", "needs-auth", or "failed".
+	Status string
+	// AuthURL is populated when the server requires interactive OAuth.
+	AuthURL string
+	// OnNotification, if set, receives server->client JSON-RPC
+	// notifications (notifications/progress, notifications/*/list_changed,
+	// notifications/message, ...). Called on a separate goroutine.
+	OnNotification func(method string, params json.RawMessage)
+
+	tr      transport
+	cmd     *exec.Cmd // stdio only
 	seq     atomic.Int64
 	mu      sync.Mutex
-	pending map[int64]chan rpcResp
-	Tools   []Tool
+	pending map[string]chan rpcResp
+	closed  atomic.Bool
 }
 
 type Tool struct {
@@ -94,91 +154,208 @@ type Tool struct {
 	InputSchema json.RawMessage `json:"inputSchema"`
 }
 
-// Connect spawns the server and performs the MCP handshake.
+// Connect opens the configured server and performs the MCP handshake.
+// cfg.Type may be "stdio" (default), "http" (streamable HTTP), or "sse".
 func Connect(name string, cfg ServerConfig) (*Client, error) {
-	if cfg.Type != "" && cfg.Type != "stdio" {
-		return nil, fmt.Errorf("mcp transport %q unsupported", cfg.Type)
+	cfg = expandConfig(cfg)
+	typ := cfg.Type
+	if typ == "" {
+		if cfg.URL != "" {
+			typ = "http"
+		} else {
+			typ = "stdio"
+		}
 	}
-	cmd := exec.Command(cfg.Command, cfg.Args...)
-	env := os.Environ()
-	for k, v := range cfg.Env {
-		env = append(env, k+"="+v)
+	var c *Client
+	var err error
+	switch typ {
+	case "stdio":
+		c, err = connectStdio(name, cfg)
+	case "http":
+		c, err = connectHTTP(name, cfg)
+	case "sse":
+		c, err = connectSSE(name, cfg)
+	default:
+		err = fmt.Errorf("mcp transport %q unsupported", cfg.Type)
 	}
-	cmd.Env = env
-	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		recordStatus(name, "failed", err.Error(), "")
 		return nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
+	if err := c.handshake(); err != nil {
+		var ae *AuthError
+		if asAuthErr(err, &ae) {
+			recordStatus(name, "needs-auth", ae.Error(), ae.AuthURL)
+		} else {
+			recordStatus(name, "failed", err.Error(), "")
+		}
+		c.Close()
 		return nil, err
 	}
-	cmd.Stderr = io.Discard
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	c := &Client{Name: name, cmd: cmd, stdin: stdin, pending: map[int64]chan rpcResp{}}
-	go c.readLoop(stdout)
+	recordStatus(name, "connected", "", "")
+	return c, nil
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+func asAuthErr(err error, out **AuthError) bool {
+	var ae *AuthError
+	if errors.As(err, &ae) {
+		*out = ae
+		return true
+	}
+	return false
+}
+
+// handshake runs initialize + notifications/initialized + tools/list.
+func (c *Client) handshake() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var initRes struct {
 		ServerInfo struct {
 			Name    string `json:"name"`
 			Version string `json:"version"`
 		} `json:"serverInfo"`
+		Capabilities json.RawMessage `json:"capabilities"`
+		Instructions string          `json:"instructions"`
 	}
-	err = c.call(ctx, "initialize", map[string]any{
-		"protocolVersion": "2025-06-18",
+	err := c.call(ctx, "initialize", map[string]any{
+		"protocolVersion": ProtocolVersion,
 		"capabilities":    map[string]any{},
 		"clientInfo":      map[string]string{"name": "claude-go", "version": "2.1.288"},
 	}, &initRes)
 	if err != nil {
-		c.Close()
-		return nil, fmt.Errorf("mcp %s initialize: %w", name, err)
+		return fmt.Errorf("mcp %s initialize: %w", c.Name, err)
+	}
+	c.ServerName = initRes.ServerInfo.Name
+	c.ServerVersion = initRes.ServerInfo.Version
+	c.Capabilities = initRes.Capabilities
+	c.Instructions = initRes.Instructions
+	c.Status = "connected"
+	if initRes.Instructions != "" {
+		instrMu.Lock()
+		Instructions[c.Name] = initRes.Instructions
+		instrMu.Unlock()
 	}
 	c.notify("notifications/initialized", nil)
 
 	var listRes struct {
 		Tools []Tool `json:"tools"`
 	}
-	if err := c.call(ctx, "tools/list", nil, &listRes); err != nil {
-		// server may have no tools; that's ok
-	} else {
+	if err := c.call(ctx, "tools/list", nil, &listRes); err == nil {
 		c.Tools = listRes.Tools
 	}
-	return c, nil
+	// streamable-http servers may expose a GET stream for server-initiated
+	// traffic; open it opportunistically for notifications.
+	if ht, ok := c.tr.(*httpTransport); ok {
+		ht.openGetStream()
+	}
+	return nil
 }
 
-func (c *Client) readLoop(r io.Reader) {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 1<<20), 8<<20)
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var resp rpcResp
-		if json.Unmarshal(line, &resp) != nil {
-			continue
-		}
+// dispatch routes one inbound JSON-RPC message.
+func (c *Client) dispatch(raw []byte) {
+	var m struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
+	}
+	if json.Unmarshal(raw, &m) != nil {
+		return
+	}
+	hasID := len(m.ID) > 0 && string(m.ID) != "null"
+	if hasID && m.Method == "" {
+		// response to a pending request
+		key := string(m.ID)
 		c.mu.Lock()
-		if ch, ok := c.pending[resp.ID]; ok {
-			delete(c.pending, resp.ID)
+		ch := c.pending[key]
+		delete(c.pending, key)
+		c.mu.Unlock()
+		if ch != nil {
+			var resp rpcResp
+			json.Unmarshal(raw, &resp)
 			ch <- resp
 		}
-		c.mu.Unlock()
+		return
 	}
+	if m.Method == "" {
+		return
+	}
+	if hasID {
+		// server->client request
+		c.handleServerRequest(m.ID, m.Method, m.Params)
+		return
+	}
+	c.handleNotification(m.Method, m.Params)
+}
+
+// SetNotificationHandler registers the OnNotification hook under the
+// client lock (safe to call while connected).
+func (c *Client) SetNotificationHandler(fn func(method string, params json.RawMessage)) {
+	c.mu.Lock()
+	c.OnNotification = fn
+	c.mu.Unlock()
+}
+
+// handleNotification invokes the OnNotification hook and performs default
+// bookkeeping (tool list refresh on tools/list_changed).
+func (c *Client) handleNotification(method string, params json.RawMessage) {
+	c.mu.Lock()
+	fn := c.OnNotification
+	c.mu.Unlock()
+	if fn != nil {
+		go fn(method, params)
+	}
+	switch method {
+	case "notifications/tools/list_changed":
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			var res struct {
+				Tools []Tool `json:"tools"`
+			}
+			if err := c.call(ctx, "tools/list", nil, &res); err == nil {
+				c.mu.Lock()
+				c.Tools = res.Tools
+				c.mu.Unlock()
+			}
+		}()
+	}
+}
+
+// handleServerRequest answers server->client JSON-RPC requests. Only ping
+// is understood; everything else gets -32601 (method not found).
+func (c *Client) handleServerRequest(id json.RawMessage, method string, _ json.RawMessage) {
+	var resp map[string]any
+	if method == "ping" {
+		resp = map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "result": map[string]any{}}
+	} else {
+		resp = map[string]any{
+			"jsonrpc": "2.0", "id": json.RawMessage(id),
+			"error": map[string]any{"code": -32601, "message": "method not found: " + method},
+		}
+	}
+	b, err := json.Marshal(resp)
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c.tr.send(ctx, b)
 }
 
 func (c *Client) call(ctx context.Context, method string, params any, out any) error {
 	id := c.seq.Add(1)
+	key := strconv.FormatInt(id, 10)
 	ch := make(chan rpcResp, 1)
 	c.mu.Lock()
-	c.pending[id] = ch
+	c.pending[key] = ch
 	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		delete(c.pending, key)
+		c.mu.Unlock()
+	}()
 	b, _ := json.Marshal(rpcReq{JSONRPC: "2.0", ID: id, Method: method, Params: params})
-	if _, err := c.stdin.Write(append(b, '\n')); err != nil {
+	if err := c.tr.send(ctx, b); err != nil {
 		return err
 	}
 	select {
@@ -199,7 +376,9 @@ func (c *Client) notify(method string, params any) {
 	b, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "method": method, "params": params,
 	})
-	c.stdin.Write(append(b, '\n'))
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	c.tr.send(ctx, b)
 }
 
 type callResult struct {
@@ -232,31 +411,100 @@ func (c *Client) CallTool(ctx context.Context, name string, args json.RawMessage
 	return out, res.IsError, nil
 }
 
+// Ping sends a ping request.
+func (c *Client) Ping(ctx context.Context) error {
+	return c.call(ctx, "ping", nil, nil)
+}
+
 func (c *Client) Close() {
+	if c.closed.Swap(true) {
+		return
+	}
+	if c.tr != nil {
+		c.tr.close()
+	}
 	if c.cmd != nil && c.cmd.Process != nil {
 		c.cmd.Process.Kill()
 		c.cmd.Wait()
+	}
+	// Wake pending callers with an error response. Non-blocking send: the
+	// channel is buffered (cap 1) and may already hold a real response.
+	c.mu.Lock()
+	pend := c.pending
+	c.pending = map[string]chan rpcResp{}
+	c.mu.Unlock()
+	errResp := rpcResp{Error: &struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}{Code: -32000, Message: "mcp connection closed"}}
+	for _, ch := range pend {
+		select {
+		case ch <- errResp:
+		default:
+		}
 	}
 }
 
 // ListResources calls resources/list and returns a text listing.
 func (c *Client) ListResources(ctx context.Context) (string, error) {
-	var res struct {
-		Resources []struct {
-			URI         string `json:"uri"`
-			Name        string `json:"name"`
-			Description string `json:"description"`
-			MimeType    string `json:"mimeType"`
-		} `json:"resources"`
-	}
-	if err := c.call(ctx, "resources/list", nil, &res); err != nil {
+	res, _, err := c.ListResourcesTyped(ctx, "")
+	if err != nil {
 		return "", err
 	}
 	var b strings.Builder
-	for _, r := range res.Resources {
+	for _, r := range res {
 		fmt.Fprintf(&b, "%s  %s  %s\n", r.URI, r.Name, r.Description)
 	}
 	return b.String(), nil
+}
+
+// Resource is one entry of resources/list.
+type Resource struct {
+	URI         string `json:"uri"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	MimeType    string `json:"mimeType"`
+}
+
+// ListResourcesTyped calls resources/list and returns typed resources plus
+// the pagination cursor.
+func (c *Client) ListResourcesTyped(ctx context.Context, cursor string) ([]Resource, string, error) {
+	var params map[string]any
+	if cursor != "" {
+		params = map[string]any{"cursor": cursor}
+	}
+	var res struct {
+		Resources  []Resource `json:"resources"`
+		NextCursor string     `json:"nextCursor"`
+	}
+	if err := c.call(ctx, "resources/list", params, &res); err != nil {
+		return nil, "", err
+	}
+	return res.Resources, res.NextCursor, nil
+}
+
+// ResourceTemplate is one entry of resources/templates/list.
+type ResourceTemplate struct {
+	URITemplate string `json:"uriTemplate"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	MimeType    string `json:"mimeType"`
+}
+
+// ListResourceTemplates calls resources/templates/list.
+func (c *Client) ListResourceTemplates(ctx context.Context, cursor string) ([]ResourceTemplate, string, error) {
+	var params map[string]any
+	if cursor != "" {
+		params = map[string]any{"cursor": cursor}
+	}
+	var res struct {
+		ResourceTemplates []ResourceTemplate `json:"resourceTemplates"`
+		NextCursor        string             `json:"nextCursor"`
+	}
+	if err := c.call(ctx, "resources/templates/list", params, &res); err != nil {
+		return nil, "", err
+	}
+	return res.ResourceTemplates, res.NextCursor, nil
 }
 
 // ReadResource calls resources/read.
@@ -283,172 +531,182 @@ func (c *Client) ReadResource(ctx context.Context, uri string) (string, error) {
 	return b.String(), nil
 }
 
-// HTTPClient is an MCP client using the streamable-http transport.
-type HTTPClient struct {
-	URL          string
-	Headers      map[string]string
-	Name         string
-	Tools        []Tool
-	Instructions string
-	client       *http.Client
-	seq          atomic.Int64
-	sessID       string
+// --- prompts capability ---
+
+// Prompt is one entry of prompts/list.
+type Prompt struct {
+	Name        string           `json:"name"`
+	Description string           `json:"description,omitempty"`
+	Arguments   []PromptArgument `json:"arguments,omitempty"`
 }
 
-// ConnectHTTP initializes an HTTP-transport MCP server.
-func ConnectHTTP(name, url string, headers map[string]string) (*HTTPClient, error) {
-	c := &HTTPClient{URL: url, Headers: headers, Name: name,
-		client: &http.Client{Timeout: 30 * time.Second}}
-	params, _ := json.Marshal(map[string]any{
-		"protocolVersion": "2025-03-26",
-		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]string{"name": "claude-go", "version": "2.1.288"},
-	})
-	var res struct {
-		ServerInfo struct {
-			Name, Version string
-		} `json:"serverInfo"`
-		Instructions string `json:"instructions"`
+// PromptArgument describes one argument slot of a prompt.
+type PromptArgument struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+}
+
+// ListPrompts calls prompts/list; returns prompts and the next cursor.
+func (c *Client) ListPrompts(ctx context.Context, cursor string) ([]Prompt, string, error) {
+	var params map[string]any
+	if cursor != "" {
+		params = map[string]any{"cursor": cursor}
 	}
-	if err := c.rpc(context.Background(), "initialize", params, &res); err != nil {
+	var res struct {
+		Prompts    []Prompt `json:"prompts"`
+		NextCursor string   `json:"nextCursor"`
+	}
+	if err := c.call(ctx, "prompts/list", params, &res); err != nil {
+		return nil, "", err
+	}
+	return res.Prompts, res.NextCursor, nil
+}
+
+// PromptMessage is one message of a prompts/get result.
+type PromptMessage struct {
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
+}
+
+// GetPromptResult is the result of prompts/get.
+type GetPromptResult struct {
+	Description string          `json:"description"`
+	Messages    []PromptMessage `json:"messages"`
+}
+
+// GetPrompt calls prompts/get with optional string arguments.
+func (c *Client) GetPrompt(ctx context.Context, name string, args map[string]string) (*GetPromptResult, error) {
+	var res GetPromptResult
+	err := c.call(ctx, "prompts/get", map[string]any{
+		"name": name, "arguments": args,
+	}, &res)
+	if err != nil {
 		return nil, err
 	}
-	c.Instructions = res.Instructions
-	c.notifyInit()
-	var toolsRes struct {
-		Tools []Tool `json:"tools"`
+	return &res, nil
+}
+
+// --- status registry (for `mcp` status display) ---
+
+// ServerStatus records the last Connect outcome for one server.
+type ServerStatus struct {
+	Name    string
+	Status  string // "connected" | "failed" | "needs-auth"
+	Err     string
+	AuthURL string
+}
+
+var statusReg sync.Map // name -> ServerStatus
+
+func recordStatus(name, status, errStr, authURL string) {
+	statusReg.Store(name, ServerStatus{Name: name, Status: status, Err: errStr, AuthURL: authURL})
+}
+
+// ServerStatuses returns all recorded connection outcomes.
+func ServerStatuses() []ServerStatus {
+	var out []ServerStatus
+	statusReg.Range(func(_, v any) bool {
+		out = append(out, v.(ServerStatus))
+		return true
+	})
+	return out
+}
+
+// Status reports the recorded outcome for one server.
+func Status(name string) (ServerStatus, bool) {
+	v, ok := statusReg.Load(name)
+	if !ok {
+		return ServerStatus{}, false
 	}
-	if err := c.rpc(context.Background(), "tools/list", nil, &toolsRes); err == nil {
-		c.Tools = toolsRes.Tools
+	return v.(ServerStatus), true
+}
+
+// --- stdio transport ---
+
+type stdioTransport struct {
+	stdin io.WriteCloser
+}
+
+func (t *stdioTransport) send(_ context.Context, msg []byte) error {
+	_, err := t.stdin.Write(append(msg, '\n'))
+	return err
+}
+
+func (t *stdioTransport) close() error { return nil }
+
+// connectStdio spawns the server subprocess.
+func connectStdio(name string, cfg ServerConfig) (*Client, error) {
+	cmd := exec.Command(cfg.Command, cfg.Args...)
+	env := os.Environ()
+	for k, v := range cfg.Env {
+		env = append(env, k+"="+v)
 	}
+	cmd.Env = env
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	c := &Client{
+		Name:    name,
+		cmd:     cmd,
+		tr:      &stdioTransport{stdin: stdin},
+		pending: map[string]chan rpcResp{},
+	}
+	go c.readLoop(stdout)
 	return c, nil
 }
 
-func (c *HTTPClient) rpc(ctx context.Context, method string, params json.RawMessage, out any) error {
-	id := c.seq.Add(1)
-	body, _ := json.Marshal(map[string]any{
-		"jsonrpc": "2.0", "id": id, "method": method, "params": json.RawMessage(params),
-	})
-	req, err := http.NewRequestWithContext(ctx, "POST", c.URL, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	for k, v := range c.Headers {
-		req.Header.Set(k, v)
-	}
-	if c.sessID != "" {
-		req.Header.Set("Mcp-Session-Id", c.sessID)
-	}
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
-		c.sessID = sid
-	}
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	// streamable-http may return SSE or plain JSON
-	var m map[string]json.RawMessage
-	if bytes.Contains(data, []byte("data:")) {
-		for _, line := range strings.Split(string(data), "\n") {
-			if strings.HasPrefix(line, "data:") {
-				json.Unmarshal([]byte(strings.TrimSpace(line[5:])), &m)
-			}
+func (c *Client) readLoop(r io.Reader) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 1<<20), 8<<20)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(line) == 0 {
+			continue
 		}
-	} else {
-		json.Unmarshal(data, &m)
-	}
-	if e, ok := m["error"]; ok && len(e) > 0 {
-		return fmt.Errorf("mcp error: %s", e)
-	}
-	if out != nil {
-		return json.Unmarshal(m["result"], out)
-	}
-	return nil
-}
-
-func (c *HTTPClient) notifyInit() {
-	body, _ := json.Marshal(map[string]any{
-		"jsonrpc": "2.0", "method": "notifications/initialized",
-	})
-	req, _ := http.NewRequest("POST", c.URL, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	for k, v := range c.Headers {
-		req.Header.Set(k, v)
-	}
-	if c.sessID != "" {
-		req.Header.Set("Mcp-Session-Id", c.sessID)
-	}
-	if r, err := c.client.Do(req); err == nil {
-		r.Body.Close()
+		cp := make([]byte, len(line))
+		copy(cp, line)
+		c.dispatch(cp)
 	}
 }
 
-func (c *HTTPClient) call(ctx context.Context, method string, params any, out any) error {
-	b, _ := json.Marshal(params)
-	return c.rpc(ctx, method, b, out)
+// Instructions captured from initialize results (injected into system
+// prompt). Keyed by server name. Guarded by instrMu.
+var (
+	Instructions = map[string]string{}
+	instrMu      sync.RWMutex
+)
+
+// Call issues a raw JSON-RPC request and returns the result payload — used by
+// extension callers (e.g. resources/directory/read).
+func (c *Client) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	var out json.RawMessage
+	if err := c.call(ctx, method, params, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
-// CallTool implements the MCPCaller interface for http servers.
-func (c *HTTPClient) CallTool(ctx context.Context, name string, args json.RawMessage) (string, error) {
-	var res struct {
-		Content []struct {
-			Type, Text string
-		} `json:"content"`
-		IsError bool `json:"isError"`
-	}
-	err := c.call(ctx, "tools/call", map[string]any{
-		"name": name, "arguments": json.RawMessage(args),
-	}, &res)
+// ReadResourceDir calls resources/directory/read (non-standard extension used
+// by Claude Code's ReadMcpResourceDirTool).
+func (c *Client) ReadResourceDir(ctx context.Context, uri string) (string, error) {
+	out, err := c.Call(ctx, "resources/directory/read", map[string]any{"uri": uri})
 	if err != nil {
 		return "", err
 	}
-	var b strings.Builder
-	for _, ct := range res.Content {
-		if ct.Text != "" {
-			b.WriteString(ct.Text)
-		}
-	}
-	return b.String(), nil
+	return string(out), nil
 }
 
-// ListResources for HTTP transport.
-func (c *HTTPClient) ListResources(ctx context.Context) (string, error) {
-	var res struct {
-		Resources []struct {
-			URI, Name, Description string
-		} `json:"resources"`
-	}
-	if err := c.call(ctx, "resources/list", nil, &res); err != nil {
-		return "", err
-	}
-	var b strings.Builder
-	for _, r := range res.Resources {
-		fmt.Fprintf(&b, "%s  %s  %s\n", r.URI, r.Name, r.Description)
-	}
-	return b.String(), nil
+// ListResourcesJSON returns resources as raw JSON for structured listing.
+func (c *Client) ListResourcesJSON(ctx context.Context) (json.RawMessage, error) {
+	return c.Call(ctx, "resources/list", map[string]any{})
 }
-
-// ReadResource for HTTP transport.
-func (c *HTTPClient) ReadResource(ctx context.Context, uri string) (string, error) {
-	var res struct {
-		Contents []struct{ URI, MimeType, Text, Blob string } `json:"contents"`
-	}
-	if err := c.call(ctx, "resources/read", map[string]any{"uri": uri}, &res); err != nil {
-		return "", err
-	}
-	var b strings.Builder
-	for _, ct := range res.Contents {
-		b.WriteString(ct.Text)
-	}
-	return b.String(), nil
-}// Instructions captured from initialize (injected into system prompt).
-var Instructions = map[string]string{}
-
-

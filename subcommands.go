@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -339,4 +340,181 @@ func pluginSub(args []string) {
 	default:
 		fatal("unknown plugin subcommand: %s (list|install|remove|marketplace|details)", args[0])
 	}
+}
+
+// agentsSub: claude agents — list agent types (built-in + file-loaded +
+// --agents-cli store) and background tasks. Bg tasks live inside a running
+// session's process, so a fresh invocation can only report none.
+func agentsSub(args []string) {
+	cwd := mustGetwd()
+	fmt.Println("agent types:")
+	for _, n := range []string{
+		"general-purpose", "Explore", "Plan", "claude",
+		"code-simplifier", "code-reviewer", "debugger", "statusline-setup",
+	} {
+		fmt.Printf("  %s (built-in)\n", n)
+	}
+	home, _ := os.UserHomeDir()
+	seen := map[string]bool{}
+	for _, dir := range []string{
+		filepath.Join(home, ".claude", "agents"),
+		filepath.Join(cwd, ".claude", "agents"),
+		filepath.Join(home, ".claude-go", "agents-cli"),
+	} {
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range ents {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+				continue
+			}
+			name := strings.TrimSuffix(e.Name(), ".md")
+			desc := ""
+			if b, err := os.ReadFile(filepath.Join(dir, e.Name())); err == nil {
+				fm := quickFrontmatter(string(b))
+				if fm["name"] != "" {
+					name = fm["name"]
+				}
+				desc = fm["description"]
+			}
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			fmt.Printf("  %s — %s (%s)\n", name, desc, dir)
+		}
+	}
+	fmt.Println("\nbackground tasks: none (tasks live inside a running session)")
+	fmt.Println("local bus agents: none (no messaging socket)")
+}
+
+func quickFrontmatter(s string) map[string]string {
+	out := map[string]string{}
+	if !strings.HasPrefix(s, "---") {
+		return out
+	}
+	rest := s[3:]
+	end := strings.Index(rest, "\n---")
+	if end < 0 {
+		return out
+	}
+	for _, line := range strings.Split(rest[:end], "\n") {
+		if k, v, ok := strings.Cut(line, ":"); ok {
+			out[strings.TrimSpace(k)] = strings.TrimSpace(strings.Trim(v, " \t\"'"))
+		}
+	}
+	return out
+}
+
+// importSub: claude import <file> — bring a transcript into this project's
+// sessions dir. Accepts a .jsonl transcript (copied under a fresh session id)
+// or a JSON array of {role,content} messages.
+func importSub(args []string) {
+	if len(args) < 1 {
+		fatal("usage: claude-go import <transcript.jsonl|messages.json>")
+	}
+	src := args[0]
+	b, err := os.ReadFile(src)
+	if err != nil {
+		fatal("import: %v", err)
+	}
+	cwd := mustGetwd()
+	newID := session.NewID()
+
+	// JSON array of messages?
+	var msgs []api.Message
+	if json.Unmarshal(b, &msgs) == nil && len(msgs) > 0 && msgs[0].Role != "" {
+		st, err := session.Open(cwd, newID)
+		if err != nil {
+			fatal("import: %v", err)
+		}
+		for _, m := range msgs {
+			st.LogMessage(m)
+		}
+		st.Close()
+		fmt.Printf("imported %d messages → %s\n", len(msgs), st.Path)
+		return
+	}
+
+	// JSONL transcript — validate then copy verbatim
+	valid := 0
+	sc := bufio.NewScanner(strings.NewReader(string(b)))
+	sc.Buffer(make([]byte, 1<<20), 8<<20)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var v map[string]any
+		if json.Unmarshal([]byte(line), &v) != nil {
+			fatal("import: line %d is not JSON — not a transcript?", valid+1)
+		}
+		valid++
+	}
+	if valid == 0 {
+		fatal("import: empty or unrecognized file")
+	}
+	st, err := session.Open(cwd, newID)
+	if err != nil {
+		fatal("import: %v", err)
+	}
+	st.Close()
+	// rewrite sessionId fields so the import doesn't collide with the source
+	var out strings.Builder
+	sc = bufio.NewScanner(strings.NewReader(string(b)))
+	sc.Buffer(make([]byte, 1<<20), 8<<20)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var v map[string]any
+		if json.Unmarshal([]byte(line), &v) == nil {
+			v["sessionId"] = newID
+			lb, _ := json.Marshal(v)
+			out.Write(lb)
+			out.WriteByte('\n')
+		}
+	}
+	if err := os.WriteFile(st.Path, []byte(out.String()), 0o644); err != nil {
+		fatal("import: %v", err)
+	}
+	fmt.Printf("imported %d records → %s\n", valid, st.Path)
+}
+
+// setupTokenSub: claude setup-token — store a long-lived token the same
+// place auth.Load looks: macOS Keychain or ~/.claude/.credentials.json.
+func setupTokenSub() {
+	fmt.Println("Set up a long-lived token for claude-go.")
+	fmt.Println("  • API key: create one at https://console.anthropic.com/settings/keys")
+	fmt.Println("  • OAuth token: paste an existing claude setup-token / CLAUDE_CODE_OAUTH_TOKEN value")
+	fmt.Print("\nPaste token: ")
+	var tok string
+	fmt.Scanln(&tok)
+	tok = strings.TrimSpace(tok)
+	if tok == "" {
+		fatal("no token entered")
+	}
+	creds := &auth.Credentials{
+		AccessToken: tok,
+		IsAPIKey:    strings.HasPrefix(tok, "sk-ant-"),
+	}
+	if runtime.GOOS == "darwin" {
+		if err := auth.WriteKeychain(creds); err == nil {
+			fmt.Println("stored in macOS Keychain (Claude Code-credentials)")
+			return
+		}
+		fmt.Fprintln(os.Stderr, "keychain write failed; falling back to credentials file")
+	}
+	home, _ := os.UserHomeDir()
+	p := filepath.Join(home, ".claude", ".credentials.json")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		fatal("setup-token: %v", err)
+	}
+	b, _ := json.Marshal(map[string]any{"claudeAiOauth": creds})
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		fatal("setup-token: %v", err)
+	}
+	fmt.Println("stored in", p)
 }

@@ -6,11 +6,354 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"claude-go/internal/api"
+	"claude-go/internal/plugins"
 	"claude-go/internal/tools"
 )
+
+// ---------- Agent type registry ----------
+
+// AgentDef is a resolved agent-type definition. Sources: built-in types,
+// agent markdown files (~/.claude/agents, <cwd>/.claude/agents, plugin
+// agents dirs), and --agents JSON (CLAUDE_GO_AGENTS_JSON, source "cli").
+type AgentDef struct {
+	Name            string
+	Description     string
+	WhenToUse       string
+	Tools           []string // nil or ["*"] = all tools
+	DisallowedTools []string
+	Model           string // "", or "inherit" for parent model
+	Color           string
+	InitialPrompt   string // prefix for the subagent's first user message
+	SystemPrompt    string // markdown body of the agent file
+	Source          string // builtin|user|project|plugin|cli
+	BaseDir         string
+}
+
+// readOnlyDeny is the tool set built-in read-only agents (Explore, Plan)
+// may not use — matches real's "All tools except …" list.
+var readOnlyDeny = []string{
+	"Agent", "Artifact", "ArtifactComments", "ArtifactData", "ArtifactCheck",
+	"ExitPlanMode", "Edit", "Write", "NotebookEdit",
+}
+
+// builtinAgentDefs are the default agent types (mod_0950:64).
+var builtinAgentDefs = []AgentDef{
+	{
+		Name:   "general-purpose",
+		Source: "builtin",
+		Description: "General-purpose agent for researching complex questions, searching for code, " +
+			"***REMOVED***" +
+			"***REMOVED***" +
+			"perform the search for you.",
+	},
+	{
+		Name:            "Explore",
+		Source:          "builtin",
+		Model:           "inherit",
+		DisallowedTools: readOnlyDeny,
+		Description: "***REMOVED***" +
+			"***REMOVED***" +
+			"***REMOVED***" +
+			"***REMOVED***" +
+			"\"very thorough\" for multiple locations and naming conventions.",
+		SystemPrompt: "You are a read-only search agent. Locate code and report conclusions — " +
+			"never modify files, run mutating commands, or write anything.",
+	},
+	{
+		Name:            "Plan",
+		Source:          "builtin",
+		Model:           "inherit",
+		DisallowedTools: readOnlyDeny,
+		Description: "Software architect agent for designing implementation plans. Use this when you " +
+			"need to plan the implementation strategy for a task. Returns step-by-step plans",
+		SystemPrompt: "You are a software architect agent. Explore the codebase read-only and " +
+			"return a concrete, step-by-step implementation plan. Do not modify files.",
+	},
+	{
+		Name:   "fork",
+		Source: "builtin",
+		Description: "A fork of the current session — inherits the parent's full conversation and " +
+			"continues with the parent model.",
+	},
+	{
+		Name:   "claude",
+		Source: "builtin",
+		Description: "Catch-all for any task that doesn't fit a more specific agent. FleetView's " +
+			"default when no agent name is typed.",
+	},
+	{
+		Name:   "code-simplifier",
+		Source: "builtin",
+		Description: "code-simplifier: Simplifies and refines code for clarity, consistency, and " +
+			"maintainability while preserving all functionality. Focuses on recently modified code " +
+			"unless instructed otherwise.",
+	},
+	{
+		Name:   "code-reviewer",
+		Source: "builtin",
+		Tools: []string{
+			"Task", "Bash", "Glob", "Grep", "LS", "ExitPlanMode", "Read", "Edit", "MultiEdit",
+			"Write", "NotebookRead", "NotebookEdit", "WebFetch", "TodoWrite", "WebSearch",
+		},
+		Description: "Expert code review specialist. Proactively reviews code for quality, security, " +
+			"and maintainability. Use immediately after writing or modifying code.",
+	},
+	{
+		Name:   "debugger",
+		Source: "builtin",
+		Description: "Debugging specialist for errors, test failures, and unexpected behavior. " +
+			"Use proactively when encountering any issues.",
+	},
+	{
+		Name:        "statusline-setup",
+		Source:      "builtin",
+		Tools:       []string{"Read", "Edit"},
+		Description: "Use this agent to configure the user's Claude Code status line setting.",
+	},
+}
+
+func (d AgentDef) isFork() bool { return strings.EqualFold(d.Name, "fork") }
+
+// effectiveSystemPrompt prefers the bridged bundled prompt for the
+// statusline-setup builtin (real text lives in the repl package's extracted
+// prompts file).
+func (d AgentDef) effectiveSystemPrompt() string {
+	if d.Name == "statusline-setup" && StatuslineSetupPrompt != "" {
+		return StatuslineSetupPrompt
+	}
+	return d.SystemPrompt
+}
+
+func strIn(list []string, s string) bool {
+	for _, v := range list {
+		if strings.EqualFold(v, s) {
+			return true
+		}
+	}
+	return false
+}
+
+func strSet(list []string) map[string]bool {
+	m := make(map[string]bool, len(list))
+	for _, v := range list {
+		m[strings.ToLower(strings.TrimSpace(v))] = true
+	}
+	return m
+}
+
+// resolveAllowed computes the tool allowlist for this def (nil = all tools).
+// extra is an additional restriction layered on top (e.g. a skill's
+// allowed-tools frontmatter passed through to the spawned agent).
+func (d AgentDef) resolveAllowed(extra []string) []string {
+	var base []string
+	star := len(d.Tools) == 0 || strIn(d.Tools, "*") || strIn(d.Tools, "all")
+	if star {
+		if len(d.DisallowedTools) > 0 {
+			dis := strSet(d.DisallowedTools)
+			for _, n := range tools.Names() {
+				if !dis[strings.ToLower(n)] {
+					base = append(base, n)
+				}
+			}
+		}
+	} else {
+		base = append(base, d.Tools...)
+	}
+	if len(extra) > 0 {
+		if base == nil {
+			base = append(base, extra...)
+		} else {
+			ex := strSet(extra)
+			kept := base[:0]
+			for _, n := range base {
+				if ex[strings.ToLower(n)] {
+					kept = append(kept, n)
+				}
+			}
+			base = kept
+		}
+	}
+	if base != nil && len(base) == 0 {
+		return []string{"__none__"} // deny everything — empty means "all" in Loop
+	}
+	return base
+}
+
+// parseToolList parses a frontmatter/JSON tool list: "*", "a, b", "[a, b]".
+func parseToolList(s string) []string {
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, "[]")
+	var out []string
+	for _, t := range strings.Split(s, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// agentFileDirs returns (dir, source) pairs scanned for <name>.md agent defs.
+// Order matters: later dirs win on name collision (project > user > plugin).
+func agentFileDirs(cwd string) []struct{ dir, source string } {
+	home, _ := os.UserHomeDir()
+	var out []struct{ dir, source string }
+	for _, pat := range []string{
+		filepath.Join(home, ".claude", "plugins", "synced", "*", "*", "agents"),
+		filepath.Join(home, ".claude", "plugins", "local", "*", "agents"),
+	} {
+		if dirs, _ := filepath.Glob(pat); len(dirs) > 0 {
+			for _, d := range dirs {
+				out = append(out, struct{ dir, source string }{d, "plugin"})
+			}
+		}
+	}
+	for _, pd := range plugins.EnabledPluginDirs() {
+		out = append(out, struct{ dir, source string }{filepath.Join(pd, "agents"), "plugin"})
+	}
+	out = append(out,
+		struct{ dir, source string }{filepath.Join(home, ".claude", "agents"), "user"},
+		struct{ dir, source string }{filepath.Join(cwd, ".claude", "agents"), "project"},
+	)
+	return out
+}
+
+// parseAgentFile reads one <name>.md agent definition.
+func parseAgentFile(path, source string) (AgentDef, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return AgentDef{}, false
+	}
+	fm, body := splitFrontmatter(string(b))
+	name := fm["name"]
+	if name == "" {
+		name = strings.TrimSuffix(filepath.Base(path), ".md")
+	}
+	return AgentDef{
+		Name:            name,
+		Description:     fm["description"],
+		WhenToUse:       fm["whenToUse"],
+		Tools:           parseToolList(fm["tools"]),
+		DisallowedTools: parseToolList(fm["disallowedTools"]),
+		Model:           fm["model"],
+		Color:           fm["color"],
+		InitialPrompt:   fm["initialPrompt"],
+		SystemPrompt:    body,
+		Source:          source,
+		BaseDir:         filepath.Dir(path),
+	}, true
+}
+
+// loadCLIAgents merges --agents JSON (env CLAUDE_GO_AGENTS_JSON, written by
+// main.go) into the registry as source "cli": [{"name","description","prompt","tools"}].
+func loadCLIAgents() []AgentDef {
+	raw := os.Getenv("CLAUDE_GO_AGENTS_JSON")
+	if raw == "" {
+		return nil
+	}
+	var arr []struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description"`
+		Prompt      string          `json:"prompt"`
+		Tools       json.RawMessage `json:"tools"`
+	}
+	if json.Unmarshal([]byte(raw), &arr) != nil {
+		return nil
+	}
+	var out []AgentDef
+	for _, a := range arr {
+		if a.Name == "" {
+			continue
+		}
+		d := AgentDef{
+			Name:         a.Name,
+			Description:  a.Description,
+			SystemPrompt: a.Prompt,
+			Source:       "cli",
+		}
+		var tl []string
+		if json.Unmarshal(a.Tools, &tl) == nil {
+			d.Tools = tl
+		} else {
+			var s string
+			if json.Unmarshal(a.Tools, &s) == nil {
+				d.Tools = parseToolList(s)
+			}
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
+// AgentTypes returns the full agent-type registry for a cwd: built-ins,
+// plugin agents, user agents, project agents, then --agents JSON — later
+// sources override earlier ones on name collision (case-insensitive).
+func AgentTypes(cwd string) []AgentDef {
+	var order []string
+	m := map[string]AgentDef{}
+	add := func(d AgentDef) {
+		key := strings.ToLower(d.Name)
+		if _, ok := m[key]; !ok {
+			order = append(order, key)
+		}
+		m[key] = d
+	}
+	for _, d := range builtinAgentDefs {
+		add(d)
+	}
+	for _, ds := range agentFileDirs(cwd) {
+		ents, err := os.ReadDir(ds.dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range ents {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+				continue
+			}
+			if d, ok := parseAgentFile(filepath.Join(ds.dir, e.Name()), ds.source); ok {
+				add(d)
+			}
+		}
+	}
+	for _, d := range loadCLIAgents() {
+		add(d)
+	}
+	out := make([]AgentDef, 0, len(order))
+	for _, k := range order {
+		out = append(out, m[k])
+	}
+	return out
+}
+
+// LookupAgentDef resolves an agent type by name (exact, then case-insensitive).
+func LookupAgentDef(cwd, name string) (AgentDef, bool) {
+	defs := AgentTypes(cwd)
+	for _, d := range defs {
+		if d.Name == name {
+			return d, true
+		}
+	}
+	for _, d := range defs {
+		if strings.EqualFold(d.Name, name) {
+			return d, true
+		}
+	}
+	return AgentDef{}, false
+}
+
+func agentTypeNames(cwd string) []string {
+	var out []string
+	for _, d := range AgentTypes(cwd) {
+		out = append(out, d.Name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ---------- Runner ----------
 
 // Runner implements tools.AgentRunner with a nested Loop.
 type Runner struct {
@@ -20,23 +363,60 @@ type Runner struct {
 	User       UserConfig
 	PermRules  map[string][]string
 	Entrypoint string
+	// Parent, when set, is the spawning loop — fork subagents inherit its
+	// messages. Wired by the caller that owns the parent Loop.
+	Parent *Loop
 }
 
 func (r *Runner) RunAgent(c *tools.Context, description, prompt, subagentType, model string, background bool) tools.Result {
+	return r.runAgent(c, description, prompt, subagentType, model, background, nil)
+}
+
+// RunAgentAllowed extends RunAgent with an extra tool allowlist (skills pass
+// their allowed-tools frontmatter through to the spawned agent).
+func (r *Runner) RunAgentAllowed(c *tools.Context, description, prompt, subagentType, model string, background bool, allowedTools []string) tools.Result {
+	return r.runAgent(c, description, prompt, subagentType, model, background, allowedTools)
+}
+
+func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, model string, background bool, extraAllowed []string) tools.Result {
+	if subagentType == "" {
+		subagentType = "general-purpose"
+	}
+	def, ok := LookupAgentDef(c.CWD, subagentType)
+	if !ok {
+		return tools.Result{
+			Content: fmt.Sprintf("unknown agent type %q — available agent types: %s",
+				subagentType, strings.Join(agentTypeNames(c.CWD), ", ")),
+			IsError: true,
+		}
+	}
+	// model precedence: call arg > agent def > inherit (parent model)
 	m := model
-	if m == "" || m == "inherit" {
+	if m == "" {
+		m = def.Model
+	}
+	if def.isFork() || m == "" || m == "inherit" {
 		m = r.Model
 	}
 	if m == "" {
 		m = defaultModel
 	}
-	// resolve agent type -> custom system prompt + tool restriction
-	agentPrompt, allowedTools := resolveAgentType(c.CWD, subagentType)
-	if agentPrompt != "" {
-		prompt = agentPrompt + "\n\n" + prompt
+	name := description
+	if name == "" {
+		name = def.Name
 	}
+	rec := &tools.AgentRecord{
+		Name:    name,
+		AgentID: tools.NewAgentID(),
+		Type:    def.Name,
+		Session: c.Session,
+		Inbox:   make(chan string, 16),
+		Done:    make(chan struct{}),
+	}
+	tools.RegisterAgent(rec)
 	sub := &Loop{
-		AllowedTools: allowedTools,
+		AllowedTools: def.resolveAllowed(extraAllowed),
+		AppendSysP:   def.effectiveSystemPrompt(),
 		Client:       r.Client,
 		Model:        m,
 		MaxTokens:    defaultMaxTokens,
@@ -53,21 +433,54 @@ func (r *Runner) RunAgent(c *tools.Context, description, prompt, subagentType, m
 			Permission: c.Permission,
 			Answerer:   c.Answerer,
 			Searcher:   c.Searcher,
+			Session:    c.Session,
 		},
+	}
+	if def.isFork() && r.Parent != nil {
+		// fork inherits the parent's full conversation
+		sub.Messages = append(sub.Messages, r.Parent.Messages...)
+		sub.started = true
+	}
+	if def.InitialPrompt != "" {
+		prompt = def.InitialPrompt + "\n\n" + prompt
+	}
+	finish := func(res tools.Result) tools.Result {
+		rec.Finish(res.Content)
+		if c.Session != "" {
+			_ = tools.NotifyOnIdle(c.Session,
+				fmt.Sprintf("[agent %q completed] %s", rec.Name, firstLine(res.Content)))
+		}
+		return res
 	}
 	if background {
 		done := make(chan tools.Result, 1)
 		go func() {
-			done <- runAgentTurn(sub, prompt)
+			done <- finish(runAgentTurn(sub, prompt))
 		}()
 		select {
 		case res := <-done:
 			return res
 		default:
-			return tools.Result{Content: fmt.Sprintf("Agent %q launched in background", description)}
+			return tools.Result{Content: fmt.Sprintf(
+				"Launched agent %q (agentId %s, type %s) in the background — "+
+					"SendMessage to:%q reaches it; its completion notice arrives automatically",
+				rec.Name, rec.AgentID, def.Name, rec.Name)}
 		}
 	}
-	return runAgentTurn(sub, prompt)
+	res := runAgentTurn(sub, prompt)
+	rec.Finish(res.Content)
+	return res
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	const max = 200
+	if len(s) > max {
+		s = s[:max] + "…"
+	}
+	return s
 }
 
 func runAgentTurn(sub *Loop, prompt string) tools.Result {
@@ -116,30 +529,6 @@ func (r *Runner) WebSearch(ctx context.Context, query string, allow, block []str
 	return out, nil
 }
 
-// resolveAgentType reads ~/.claude/agents/<name>.md and <cwd>/.claude/agents/<name>.md.
-// Returns (system prompt, allowed tool names or nil for all).
-func resolveAgentType(cwd, name string) (string, []string) {
-	home, _ := os.UserHomeDir()
-	for _, dir := range []string{
-		filepath.Join(home, ".claude", "agents"),
-		filepath.Join(cwd, ".claude", "agents"),
-	} {
-		b, err := os.ReadFile(filepath.Join(dir, name+".md"))
-		if err != nil {
-			continue
-		}
-		fm, body := splitFrontmatter(string(b))
-		var allowed []string
-		if tl := fm["tools"]; tl != "" && tl != "*" {
-			for _, t := range strings.Split(tl, ",") {
-				allowed = append(allowed, strings.TrimSpace(t))
-			}
-		}
-		return body, allowed
-	}
-	return "", nil
-}
-
 func splitFrontmatter(s string) (map[string]string, string) {
 	fm := map[string]string{}
 	if !strings.HasPrefix(s, "---") {
@@ -162,6 +551,12 @@ func splitFrontmatter(s string) (map[string]string, string) {
 // ResolveAgentPrompt returns the system prompt for a named agent type
 // (used by --agent to pick the main-session agent).
 func ResolveAgentPrompt(name, cwd string) string {
-	p, _ := resolveAgentType(cwd, name)
-	return p
+	if d, ok := LookupAgentDef(cwd, name); ok {
+		return d.effectiveSystemPrompt()
+	}
+	return ""
 }
+
+// StatuslineSetupPrompt is assigned by the repl package (bundled real prompt);
+// when empty a minimal default applies.
+var StatuslineSetupPrompt string

@@ -24,9 +24,14 @@ type customCmd struct {
 
 var customCommands map[string]customCmd
 
+// hiddenCommands holds commands marked hidden: they still execute via
+// handleSlash's default case but never appear in help or completion.
+var hiddenCommands map[string]customCmd
+
 // loadCustomCommands scans user + project + plugin command dirs.
 func loadCustomCommands(cwd string) {
 	customCommands = map[string]customCmd{}
+	hiddenCommands = map[string]customCmd{}
 	home, _ := os.UserHomeDir()
 	var dirs []string
 	for _, d := range []string{
@@ -83,9 +88,16 @@ func loadCustomCommands(cwd string) {
 				Agent:       fm["agent"],
 				WhenToUse:   fm["whenToUse"],
 			}
-			customCommands[name] = cmd
-			for _, a := range aliases {
-				customCommands[a] = cmd
+			if cmd.Hidden {
+				hiddenCommands[name] = cmd
+				for _, a := range aliases {
+					hiddenCommands[a] = cmd
+				}
+			} else {
+				customCommands[name] = cmd
+				for _, a := range aliases {
+					customCommands[a] = cmd
+				}
 			}
 			return nil
 		})

@@ -2,6 +2,7 @@ package agent
 
 import (
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -105,8 +106,60 @@ func FirstUserMessage(prompt, cwd, email string) api.Message {
 			"***REMOVED***" +
 			"need it reported back.\n</system-reminder>"})
 	}
-	blocks = append(blocks, api.ContentBlock{Type: "text", Text: prompt})
+	blocks = append(blocks, expandUserImages(prompt)...)
 	return api.BlocksMessage("user", blocks)
+}
+
+// expandUserImages converts \x00IMAGE\x00<path>\x00<size> markers (pasted
+// images, inserted by the editor) into real image blocks.
+func expandUserImages(prompt string) []api.ContentBlock {
+	const marker = "\x00IMAGE\x00"
+	if !strings.Contains(prompt, marker) {
+		return []api.ContentBlock{{Type: "text", Text: prompt}}
+	}
+	var blocks []api.ContentBlock
+	for {
+		i := strings.Index(prompt, marker)
+		if i < 0 {
+			break
+		}
+		if i > 0 {
+			blocks = append(blocks, api.ContentBlock{Type: "text", Text: prompt[:i]})
+		}
+		rest := prompt[i+len(marker):]
+		j := strings.Index(rest, "\x00")
+		if j < 0 {
+			blocks = append(blocks, api.ContentBlock{Type: "text", Text: prompt[i:]})
+			return blocks
+		}
+		path := rest[:j]
+		k := strings.IndexByte(rest[j+1:], '\x00')
+		if k >= 0 {
+			prompt = rest[j+1+k:]
+		} else {
+			prompt = ""
+		}
+		if b, err := os.ReadFile(path); err == nil {
+			mt := "image/png"
+			switch strings.ToLower(filepath.Ext(path)) {
+			case ".jpg", ".jpeg":
+				mt = "image/jpeg"
+			case ".gif":
+				mt = "image/gif"
+			case ".webp":
+				mt = "image/webp"
+			}
+			blocks = append(blocks, api.ContentBlock{
+				Type: "image",
+				Source: &api.ImageSource{Type: "base64", MediaType: mt,
+					Data: base64.StdEncoding.EncodeToString(b)},
+			})
+		}
+	}
+	if prompt != "" {
+		blocks = append(blocks, api.ContentBlock{Type: "text", Text: prompt})
+	}
+	return blocks
 }
 
 // memoryIndex loads MEMORY.md (auto-memory index) — real reads the first

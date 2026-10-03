@@ -41,16 +41,18 @@ func infoFor(model string) modelInfo {
 	return modelInfo{model, model, ""}
 }
 
-// builtinAgents are the default agent types with their tool access.
-var builtinAgents = []agentDef{
-	{"general-purpose", "General-purpose agent for researching complex questions, searching for code, ***REMOVED******REMOVED***perform the search for you.", "*"},
-	{"Explore", "***REMOVED******REMOVED******REMOVED******REMOVED***\"very thorough\" for multiple locations and naming conventions.", "All tools except Agent, Artifact, ArtifactComments, ArtifactData, ArtifactCheck, ExitPlanMode, Edit, Write, NotebookEdit"},
-	{"Plan", "Software architect agent for designing implementation plans. Use this when you need to plan the implementation strategy for a task. Returns step-by-step plans", "All tools except Agent, Artifact, ArtifactComments, ArtifactData, ArtifactCheck, ExitPlanMode, Edit, Write, NotebookEdit"},
-	{"claude", "Catch-all for any task that doesn't fit a more specific agent. FleetView's default when no agent name is typed.", "*"},
-	{"code-simplifier", "code-simplifier: Simplifies and refines code for clarity, consistency, and maintainability while preserving all functionality. Focuses on recently modified code unless instructed otherwise.", "All tools"},
-	{"code-reviewer", "Expert code review specialist. Proactively reviews code for quality, security, and maintainability. Use immediately after writing or modifying code.", "Task, Bash, Glob, Grep, LS, ExitPlanMode, Read, Edit, MultiEdit, Write, NotebookRead, NotebookEdit, WebFetch, TodoWrite, WebSearch"},
-	{"debugger", "Debugging specialist for errors, test failures, and unexpected behavior. Use proactively when encountering any issues.", "All tools"},
-	{"statusline-setup", "Use this agent to configure the user's Claude Code status line setting.", "Read, Edit"},
+// toolSpecString renders the "(Tools: …)" column in the agent-type listing.
+func toolSpecString(d AgentDef) string {
+	if len(d.Tools) == 0 && len(d.DisallowedTools) == 0 {
+		return "All tools"
+	}
+	if len(d.DisallowedTools) > 0 && (len(d.Tools) == 0 || strIn(d.Tools, "*")) {
+		return "All tools except " + strings.Join(d.DisallowedTools, ", ")
+	}
+	if len(d.Tools) == 0 {
+		return "All tools"
+	}
+	return strings.Join(d.Tools, ", ")
 }
 
 // EnvMessage builds the role:"system" message appended after the first user
@@ -89,12 +91,12 @@ func EnvMessage(cwd, model string, addDirs []string, permMode string, sessionID 
 	b.WriteString("\n\n")
 
 	b.WriteString("Available agent types for the Agent tool:\n")
-	agents := append(append([]agentDef{}, builtinAgents...), loadCustomAgents(cwd)...)
+	agents := AgentTypes(cwd)
 	sort.Slice(agents, func(i, j int) bool {
-		return strings.ToLower(agents[i].name) < strings.ToLower(agents[j].name)
+		return strings.ToLower(agents[i].Name) < strings.ToLower(agents[j].Name)
 	})
 	for _, a := range agents {
-		fmt.Fprintf(&b, "- %s: %s (Tools: %s)\n", a.name, a.desc, a.toolSpec)
+		fmt.Fprintf(&b, "- %s: %s (Tools: %s)\n", a.Name, a.Description, toolSpecString(a))
 	}
 	b.WriteString("\nWhen you launch multiple agents for independent work, send them in a single message with multiple tool uses so they run concurrently.\n\n")
 
@@ -128,45 +130,6 @@ func osVersion() string {
 	}
 	out, _ := exec.Command("uname", "-sr").Output()
 	return strings.TrimSpace(string(out))
-}
-
-type agentDef struct{ name, desc, toolSpec string }
-
-// loadCustomAgents scans agent definition dirs: ~/.claude/agents/*.md and
-// <cwd>/.claude/agents/*.md — files have YAML frontmatter (name, description,
-// tools) then a markdown system prompt.
-func loadCustomAgents(cwd string) []agentDef {
-	home, _ := os.UserHomeDir()
-	var out []agentDef
-	for _, dir := range []string{
-		filepath.Join(home, ".claude", "agents"),
-		filepath.Join(cwd, ".claude", "agents"),
-	} {
-		ents, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		for _, e := range ents {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
-				continue
-			}
-			b, err := os.ReadFile(filepath.Join(dir, e.Name()))
-			if err != nil {
-				continue
-			}
-			fm := parseFrontmatter(string(b))
-			name := fm["name"]
-			if name == "" {
-				name = strings.TrimSuffix(e.Name(), ".md")
-			}
-			spec := fm["tools"]
-			if spec == "" {
-				spec = "All tools"
-			}
-			out = append(out, agentDef{name, fm["description"], spec})
-		}
-	}
-	return out
 }
 
 // loadSkillIndex builds the "- name: description" index from skill dirs:

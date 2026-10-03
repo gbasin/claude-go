@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -49,7 +50,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		} else {
 			fmt.Println("  context compacted")
 		}
-	case "cost", "usage":
+	case "cost", "usage", "stats":
 		u := l.UsageTotal
 		fmt.Printf("  input: %d  output: %d  cache-read: %d  cache-write: %d\n",
 			u.InputTokens, u.OutputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens)
@@ -76,15 +77,20 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		memoryCmd(l, arg)
 	case "mcp":
 		mcpCmd(l, arg)
-	case "permissions":
+	case "permissions", "allowed-tools":
 		permissionsCmd(l, arg)
-	case "config":
+	case "config", "settings":
 		configCmd(l, arg)
 	case "agents":
 		fmt.Println("  builtin: general-purpose, Explore, Plan, claude, code-reviewer, code-simplifier, debugger, statusline-setup")
 		fmt.Println("  custom agents load from ~/.claude/agents/ and .claude/agents/")
 	case "hooks":
-		fmt.Println("  hooks configured in settings.json fire on PreToolUse/PostToolUse/UserPromptSubmit/SessionStart/SessionEnd/etc.")
+		// hooks documentation (update-config's hooks-only branch in real CC)
+		body := bundledHooksDocs
+		if arg != "" {
+			body += "\n\n## Task\n\n" + arg
+		}
+		go l.Ask(context.Background(), body)
 	case "resume":
 		if id := PickSession(l.ToolCtx.CWD); id != "" {
 			if msgs, err := session.Load(l.ToolCtx.CWD, id); err == nil {
@@ -96,17 +102,83 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		exportCmd(l, arg)
 	case "init":
 		fmt.Println("  analyzing codebase → CLAUDE.md …")
-		go l.Ask(context.Background(),
-			"Analyze this codebase and create a CLAUDE.md file with: build/test/lint commands, "+
-				"architecture overview, key directories, and conventions to follow. "+
-				"Write it to CLAUDE.md in the project root.")
+		body := bundledInit
+		if foreignAgentConfigExists() {
+			body = strings.Replace(body, "\n- Do not make up information",
+				bundledInitImportHint+"\n- Do not make up information", 1)
+		}
+		go l.Ask(context.Background(), body)
 	case "diff":
 		diffCmd(l)
-	case "review":
-		go l.Ask(context.Background(),
-			"Review the current uncommitted changes for bugs, style issues, and missed edge cases. Report findings.")
-	case "doctor":
-		doctorCmd(l)
+	case "review", "code-review":
+		fmt.Println("  reviewing (medium effort)…")
+		body := bundledCodeReview
+		if arg != "" {
+			body = "Review target: `" + arg + "`\n\n" + body
+		}
+		go l.Ask(context.Background(), body)
+	case "security-review":
+		fmt.Println("  analyzing code changes for security risks…")
+		runBundledPrompt(l, bundledSecurityReview, arg)
+	case "doctor", "checkup":
+		// real /doctor sends the audit skill prompt; /doctor local stays as a
+		// diagnostic variant below via "status"
+		fmt.Println("  health-checking setup…")
+		body := bundledDoctor
+		if arg != "" {
+			body += "\n\n## Additional instructions from the user\n\n" + arg
+		}
+		go l.Ask(context.Background(), body)
+	case "pr":
+		fmt.Println("  creating pull request…")
+		body := bundledPR
+		if arg == "" {
+			body = strings.ReplaceAll(body, "\nUser guidance for this PR: $ARG\n", "\n")
+		} else {
+			body = strings.ReplaceAll(body, "$ARG", arg)
+		}
+		go l.Ask(context.Background(), interpolateBang(body, l.ToolCtx.CWD))
+	case "batch":
+		if arg == "" {
+			fmt.Println("  " + bundledBatchUsage)
+			break
+		}
+		fmt.Println("  planning batch orchestration…")
+		go l.Ask(context.Background(), strings.ReplaceAll(bundledBatch, "$ARG", arg))
+	case "debug":
+		fmt.Println("  investigating…")
+		go l.Ask(context.Background(), debugPrompt(l, arg))
+	case "run":
+		go l.Ask(context.Background(), runPrompt(arg))
+	case "update-config":
+		body := bundledUpdateConfig
+		if strings.HasPrefix(arg, "[hooks-only]") {
+			arg = strings.TrimSpace(strings.TrimPrefix(arg, "[hooks-only]"))
+			body = bundledHooksDocs
+			if arg != "" {
+				body += "\n\n## Task\n\n" + arg
+			}
+		} else if arg != "" {
+			body += "\n\n## User Request\n\n" + arg
+		}
+		go l.Ask(context.Background(), body)
+	case "fewer-permission-prompts":
+		body := bundledFewerPermissionPrompts
+		if arg != "" {
+			body += "\n\n## Additional instructions from the user\n\n" + arg
+		}
+		go l.Ask(context.Background(), body)
+	case "keybindings-help":
+		body := bundledKeybindingsHelp
+		if arg != "" {
+			body += "\n\n## User Request\n\n" + arg
+		}
+		go l.Ask(context.Background(), body)
+	case "memory-types":
+		go l.Ask(context.Background(), bundledMemoryTypes)
+	case "insights":
+		fmt.Println("  analyzing your sessions…")
+		go l.Ask(context.Background(), insightsPrompt())
 	case "bug":
 		url := "https://github.com/anthropics/claude-code/issues"
 		fmt.Println("  report issues at", url)
@@ -114,13 +186,18 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			exec.Command("open", url).Start()
 		}
 	case "vim":
-		ed.vim = !ed.vim
-		ed.mode = "insert"
-		fmt.Printf("  vim mode %s\n", map[bool]string{true: "on", false: "off"}[ed.vim])
+		// real CC: /vim is a compat shim — editor mode moved to /config
+		fmt.Println("  editor mode moved to /config")
 	case "output-style":
 		outputStyleCmd(l, arg)
 	case "statusline":
-		fmt.Println("  set statusLine.command in ~/.claude/settings.json")
+		// real /statusline prompts the model to spawn the statusline-setup agent
+		n := arg
+		if n == "" {
+			n = "Configure my statusLine from my shell PS1 configuration"
+		}
+		go l.Ask(context.Background(),
+			`Create an Agent with subagent_type "statusline-setup" and the prompt "`+n+`"`)
 	case "tasks":
 		tasksCmd(l)
 	case "theme", "color":
@@ -177,9 +254,31 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		}()
 	case "feedback":
 		fmt.Println("  feedback: https://github.com/gbasin/claude-go/issues")
+	case "rename":
+		if arg == "" {
+			fmt.Println("  usage: /rename <title>")
+			return true
+		}
+		if currentStore != nil {
+			currentStore.LogTitle(arg)
+		}
+		fmt.Println("  session renamed:", arg)
 	case "fork":
-		fmt.Println("  (session forking not implemented)")
-	case "rewind":
+		if currentStore == nil {
+			fmt.Println("  (no transcript store — cannot fork)")
+			return true
+		}
+		old := l.Client.SessionID
+		nw, msgs, err := session.Fork(l.CWD, old)
+		if err != nil {
+			fmt.Println("  fork failed:", err)
+			return true
+		}
+		l.Client.SessionID = nw.SessionID
+		l.Messages = msgs
+		currentStore = nw
+		fmt.Printf("  forked to session %s (%d messages carried)\n", nw.SessionID[:8], len(msgs))
+	case "rewind", "checkpoint", "undo":
 		if p, err := tools.Checkpoints.Rewind(); err != nil {
 			fmt.Println(" ", err)
 		} else {
@@ -298,39 +397,254 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		effortCmd(l, arg)
 	case "fast":
 		if arg == "off" || arg == "" {
+			l.SetFastMode(false)
 			fmt.Println("  fast mode off")
 		} else {
-			fmt.Println("  fast mode toggles speed/quality tradeoff")
+			l.SetFastMode(true)
+			fmt.Println("  fast mode on (higher latency spend for quicker turns)")
 		}
 	default:
+		if c, ok := hiddenCommands[cmd]; ok {
+			// hidden custom commands run but don't list in help/completion
+			go l.Ask(context.Background(), expandCustomCommand(c, arg))
+			return false
+		}
 		fmt.Printf("  unknown command: /%s (try /help)\n", cmd)
 	}
 	return false
 }
 
+// runBundledPrompt sends a bundled prompt-skill body to the model, applying
+// the same !`cmd` shell interpolation real CC performs before handing the
+// text to the model.
+func runBundledPrompt(l *agent.Loop, body, arg string) {
+	body = interpolateBang(body, l.ToolCtx.CWD)
+	if arg != "" {
+		body += "\n\n" + arg
+	}
+	go l.Ask(context.Background(), body)
+}
+
+// foreignAgentConfigExists reports whether a Codex or Gemini CLI config is
+// present — real /init only adds the /import hint in that case.
+func foreignAgentConfigExists() bool {
+	home, _ := os.UserHomeDir()
+	for _, p := range []string{
+		filepath.Join(home, ".codex", "config.toml"),
+		filepath.Join(".codex"),
+		filepath.Join(home, ".gemini", "settings.json"),
+		filepath.Join(".gemini"),
+		"GEMINI.md",
+	} {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// debugPrompt fills the runtime slots of the bundled debug skill: session
+// debug-log path, the log tail, daemon status, and the issue description.
+func debugPrompt(l *agent.Loop, arg string) string {
+	home, _ := os.UserHomeDir()
+	logPath := filepath.Join(home, ".claude", "debug", l.Client.SessionID+".txt")
+	tail := "No log file exists yet."
+	if b, err := os.ReadFile(logPath); err == nil {
+		const max = 65536 // real skill reads the last 64KiB
+		if len(b) > max {
+			b = b[len(b)-max:]
+		}
+		tail = "```\n" + strings.TrimSpace(string(b)) + "\n```"
+	}
+	issue := arg
+	if issue == "" {
+		issue = "The user did not describe a specific issue. Read the debug log and summarize any errors, warnings, or notable issues."
+	}
+	body := bundledDebug
+	body = strings.ReplaceAll(body, "@LOGPATH@", logPath)
+	body = strings.ReplaceAll(body, "@LOGTAIL@", tail)
+	body = strings.ReplaceAll(body, "@DAEMON@", bundledDebugNoDaemon)
+	body = strings.ReplaceAll(body, "@ISSUE@", issue)
+	return body
+}
+
+// runPrompt approximates the /run skill — its SKILL.md is embedded in the
+// binary (bunfs), not present in the extracted modules, so this is a
+// reconstruction from the skill's description.
+func runPrompt(arg string) string {
+	body := `Launch and drive this project's app to see a change working.
+
+First look for a project skill that already covers launching the app; otherwise fall back to built-in patterns per project type (CLI, server, TUI, Electron, browser-driven, library).
+
+Figure out how this project runs from its docs and config (package.json scripts, Makefile/Procfile targets, go run, cargo run, docker compose, dev-server commands in the README or CLAUDE.md), start it, exercise the changed behavior end-to-end, and report what you observed — including a screenshot when the surface is visual. Confirm the change works in the real app, not just in tests.`
+	if arg != "" {
+		body += "\n\n## User Request\n\n" + arg
+	}
+	return body
+}
+
+// insightsPrompt reconstructs /insights — the real command computes session
+// facets through a local pipeline and renders an HTML report; the prompt body
+// below keeps the real response contract.
+func insightsPrompt() string {
+	home, _ := os.UserHomeDir()
+	report := filepath.Join(home, ".claude", "insights", "report.html")
+	return `The user just ran /insights to generate a usage report analyzing their Claude Code sessions.
+
+Gather the data first: session transcripts live at ~/.claude/projects/<sanitized-cwd>/*.jsonl, one JSON object per line (user/assistant messages, tool_use entries, timestamps). Scan the most recent sessions across the projects dir (cap ~50 files), and aggregate: total sessions, total messages, approximate active time, git commits, most-used tools and commands, what's working, where things go wrong (friction: permission denials, interruptions, retries), and features worth trying.
+
+Then write a single self-contained HTML report to ` + report + ` summarizing the findings (a few sections: At a Glance, Impressive Things You Did, Where Things Go Wrong, Features to Try), and respond with exactly the following, and nothing else:
+
+Your shareable insights report is ready:
+file://` + report + `
+
+Want to dig into any section or try one of the suggestions?`
+}
+
+// helpEntry maps a builtin command to its help-line description and section.
+// printHelp enumerates builtinSlashCommands() at call time so newly added
+// commands appear automatically (falling back to the "Other" section).
+type helpEntry struct {
+	section string
+	desc    string
+	hidden  bool
+}
+
+var helpTable = map[string]helpEntry{
+	// Session
+	"add-dir": {"Session", "<dir> grant access to another directory", false},
+	"branch":  {"Session", "fork the session onto a new branch", false},
+	"btw":     {"Session", "<question> ask a side question outside the main context", false},
+	"clear":   {"Session", "clear conversation (aliases: /reset, /new)", false},
+	"compact": {"Session", "[focus] compact context (optional focus instructions)", false},
+	"context": {"Session", "context usage", false},
+	"cost":    {"Session", "token usage (aliases: /usage, /stats)", false},
+	"diff":    {"Session", "show git diff summary", false},
+	"exit":    {"Session", "quit", false},
+	"export":  {"Session", "[path] write transcript to file", false},
+	"fork":    {"Session", "fork the session", false},
+	"goal":    {"Session", "<goal> work until the goal holds", false},
+	"import":  {"Session", "<path> read a file into context", false},
+	"loop":    {"Session", "<interval> <prompt> schedule a recurring prompt", false},
+	"memory":  {"Session", "memory files", false},
+	"resume":  {"Session", "resume a session", false},
+	"rewind":  {"Session", "rewind to a checkpoint (aliases: /checkpoint, /undo)", false},
+	"status":  {"Session", "session status", false},
+	"subtask": {"Session", "<prompt> run a subagent", false},
+	"tasks":   {"Session", "background tasks", false},
+	"todos":   {"Session", "todo list", false},
+	// Config
+	"alias":            {"Config", "manage command aliases", false},
+	"config":           {"Config", "get/set settings (alias: /settings)", false},
+	"effort":           {"Config", "[level] show/set effort", false},
+	"fast":             {"Config", "toggle fast mode", false},
+	"keybindings":      {"Config", "edit keyboard shortcuts", false},
+	"login":            {"Config", "sign in with your Anthropic account", false},
+	"logout":           {"Config", "sign out", false},
+	"model":            {"Config", "[name] show/set model", false},
+	"output-style":     {"Config", "[name] set output style", false},
+	"permissions":      {"Config", "permission rules (alias: /allowed-tools)", false},
+	"plan":             {"Config", "enter plan mode", false},
+	"privacy-settings": {"Config", "telemetry settings", false},
+	"sandbox":          {"Config", "toggle sandboxed bash", false},
+	"statusline":       {"Config", "configure the status line (spawns statusline-setup)", false},
+	"terminal-setup":   {"Config", "install terminal keybindings", false},
+	"theme":            {"Config", "set theme", false},
+	"vim":              {"Config", "editor mode moved to /config", false},
+	// Tools (prompt skills + tool-ish builtins)
+	"batch":                    {"Tools", "<instruction> plan a large change; agents open PRs", false},
+	"debug":                    {"Tools", "[issue] investigate problems with debug logging", false},
+	"init":                     {"Tools", "generate CLAUDE.md", false},
+	"pr":                       {"Tools", "[guidance] create a pull request", false},
+	"review":                   {"Tools", "review the current diff (alias of /code-review)", false},
+	"code-review":              {"Tools", "review the diff or a PR for bugs and cleanups", false},
+	"security-review":          {"Tools", "security review of pending changes", false},
+	"run":                      {"Tools", "launch this project's app to see a change working", false},
+	"update-config":            {"Tools", "change settings: hooks, permissions, env vars", false},
+	"fewer-permission-prompts": {"Tools", "pre-approve safe read-only commands from usage", false},
+	"keybindings-help":         {"Tools", "customize keyboard shortcuts", false},
+	"memory-types":             {"Tools", "memory type taxonomy reference", false},
+	"doctor":                   {"Tools", "health-check your setup and fix issues", false},
+	"insights":                 {"Tools", "generate a report analyzing your sessions", false},
+	"mcp":                      {"Tools", "MCP servers", false},
+	"agents":                   {"Tools", "list agent types", false},
+	"skills":                   {"Tools", "list skills", false},
+	"hooks":                    {"Tools", "hooks documentation", false},
+	"files":                    {"Tools", "list tracked files", false},
+	"plugin":                   {"Tools", "plugin management", false},
+	// External / misc
+	"bug":           {"External", "report an issue", false},
+	"feedback":      {"External", "send feedback", false},
+	"help":          {"External", "this help", false},
+	"ide":           {"External", "IDE integration", false},
+	"release-notes": {"External", "version info", false},
+	// hidden
+	"color":     {"", "", true},
+	"low":       {"", "", true},
+	"quit":      {"", "", true},
+	"reset":     {"", "", true},
+	"new":       {"", "", true},
+	"proactive": {"", "", true},
+}
+
+var helpSections = []string{"Session", "Config", "Tools", "External", "Other"}
+
 func printHelp() {
-	fmt.Println(`  /add-dir <dir>      grant access to another directory
-  /agents            list agent types
-  /bug               report an issue
-  /clear             clear conversation
-  /compact [focus]   compact context (optional focus instructions)
-  /config            get/set settings
-  /context           context usage
-  /cost, /usage      token usage
-  /diff              show git diff summary
-  /doctor            diagnostics
-  /export [path]     write transcript to file
-  /init              generate CLAUDE.md
-  /memory            memory files
-  /mcp               MCP servers
-  /model [name]      show/set model
-  /permissions       permission rules
-  /resume            resume a session
-  /review            review current changes
-  /status            session status
-  /tasks             background tasks
-  /vim               toggle vim mode
-  /exit              quit`)
+	bySection := map[string][][2]string{}
+	seen := map[string]bool{}
+	// builtinSlashCommands() is the authority, but our switch may handle
+	// commands it doesn't list yet — union with helpTable keys.
+	names := append([]string{}, builtinSlashCommands()...)
+	for name := range helpTable {
+		names = append(names, name)
+	}
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		e, ok := helpTable[name]
+		if ok && e.hidden {
+			continue
+		}
+		sec := "Other"
+		desc := ""
+		if ok {
+			sec, desc = e.section, e.desc
+		}
+		bySection[sec] = append(bySection[sec], [2]string{"/" + name, desc})
+	}
+	var custom [][2]string
+	for name, c := range customCommands {
+		if c.Hidden || seen[name] || name != c.Name {
+			continue
+		}
+		seen[name] = true
+		desc := c.Description
+		if desc == "" {
+			desc = "custom command"
+		}
+		custom = append(custom, [2]string{"/" + name, desc})
+	}
+	if len(custom) > 0 {
+		bySection["Custom"] = custom
+	}
+	sections := append(append([]string{}, helpSections...), "Custom")
+	for _, sec := range sections {
+		list := bySection[sec]
+		if len(list) == 0 {
+			continue
+		}
+		sort.Slice(list, func(i, j int) bool { return list[i][0] < list[j][0] })
+		fmt.Printf("  %s%s%s\n", bold, sec, reset)
+		for _, e := range list {
+			if e[1] == "" {
+				fmt.Printf("    %s\n", e[0])
+			} else {
+				fmt.Printf("    %-28s %s\n", e[0], e[1])
+			}
+		}
+	}
 }
 
 func memoryCmd(l *agent.Loop, arg string) {
@@ -442,6 +756,9 @@ func diffCmd(l *agent.Loop) {
 	fmt.Print(string(out))
 }
 
+// doctorCmd is the local diagnostics report (like `claude doctor` on the
+// terminal — distinct from the /doctor slash command, which runs the
+// bundledDoctor audit skill).
 func doctorCmd(l *agent.Loop) {
 	fmt.Println("  claude-go doctor")
 	fmt.Println("  version:", api.Version)
@@ -658,3 +975,5 @@ func persistTheme(cwd, theme string) {
 	b, _ := json.MarshalIndent(st, "", "  ")
 	os.WriteFile(p, b, 0o600)
 }
+
+func init() { agent.StatuslineSetupPrompt = bundledStatuslineAgent }

@@ -81,9 +81,9 @@ func StreamEvents(body io.Reader, yield func(*StreamEvent) error) error {
 		}
 		if se.Type == "error" {
 			if se.Error != nil {
-				return &ErrAPI{se.Error}
+				return &ErrAPI{E: se.Error}
 			}
-			return &ErrAPI{&APIError{Type: "error", Message: string(ev.Data)}}
+			return &ErrAPI{E: &APIError{Type: "error", Message: string(ev.Data)}}
 		}
 		if err := yield(&se); err != nil {
 			return err
@@ -93,7 +93,3 @@ func StreamEvents(body io.Reader, yield func(*StreamEvent) error) error {
 		}
 	}
 }
-
-type ErrAPI struct{ E *APIError }
-
-func (e *ErrAPI) Error() string { return e.E.Type + ": " + e.E.Message }
