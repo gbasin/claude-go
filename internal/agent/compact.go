@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -230,12 +231,39 @@ func (l *Loop) ShouldAutoCompact(u api.Usage) bool {
 }
 
 func (l *Loop) contextWindow() int {
+	// CLAUDE_CODE_AUTO_COMPACT_WINDOW / settings autoCompactWindow override
+	// (number or "500k"-style shorthand).
+	for _, v := range []string{os.Getenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW"), l.AutoCompactWindow} {
+		if n := parseWindow(v); n > 0 {
+			return n
+		}
+	}
 	// context-1m-2025-08-07 beta applies to fable/sonnet 5.x; else 200k
 	if strings.Contains(l.Model, "fable") || strings.Contains(l.Model, "sonnet-5") ||
 		strings.Contains(l.Model, "opus-5") {
 		return 1_000_000
 	}
 	return 200_000
+}
+
+func parseWindow(v string) int {
+	if v == "" || v == "auto" {
+		return 0
+	}
+	mult := 1
+	v = strings.TrimSpace(strings.ToLower(v))
+	if strings.HasSuffix(v, "k") {
+		mult = 1000
+		v = v[:len(v)-1]
+	} else if strings.HasSuffix(v, "m") {
+		mult = 1_000_000
+		v = v[:len(v)-1]
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n * mult
 }
 
 // AutoCompact runs compaction when usage crosses the threshold.

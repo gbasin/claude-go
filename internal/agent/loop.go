@@ -63,6 +63,8 @@ type Loop struct {
 	SessionStartSource string   // startup|resume|clear|compact|fork
 	SessionEndReason   string   // clear|logout|prompt_input_exit|other
 	FastMode           bool     // fast mode: output_config.speed="fast"
+	AutoCompactWindow  string   // settings autoCompactWindow ("auto"|"500k"|N)
+	AlwaysThinking     bool     // settings alwaysThinkingEnabled
 	Precompute         bool     // precomputeCompactionEnabled gate
 	RateLimitNote      string   // set once a slow-lane rate-limit note was shown
 	noThinking         bool     // thinking config dropped after a thinking 400
@@ -486,7 +488,7 @@ func (l *Loop) thinkingConfig() json.RawMessage {
 	if l.ThinkingMode == "disabled" {
 		return json.RawMessage(`{"type":"disabled"}`)
 	}
-	if l.ThinkingMode == "enabled" || l.ThinkingBudget > 0 {
+	if l.ThinkingMode == "enabled" || l.ThinkingBudget > 0 || l.AlwaysThinking {
 		budget := l.ThinkingBudget
 		if budget <= 0 {
 			budget = 10000
