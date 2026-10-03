@@ -3,6 +3,7 @@
 package tools
 
 import (
+	"claude-go/internal/netproxy"
 	"fmt"
 	"runtime"
 )
@@ -13,6 +14,6 @@ func platformSandboxAvailable(_ *SandboxSettings) error {
 	return fmt.Errorf("sandboxing is not supported on %s", runtime.GOOS)
 }
 
-func platformSandboxWrap(script string, _ *SandboxSettings, _ string) (string, error) {
+func platformSandboxWrap(script string, _ *SandboxSettings, _ string, _ *netproxy.Proxy) (string, error) {
 	return "", fmt.Errorf("sandboxing is not supported on %s", runtime.GOOS)
 }

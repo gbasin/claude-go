@@ -81,6 +81,10 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 			"permission_mode":   l.PermMode,
 		}, l.ToolCtx.CWD)
 	}
+	// modal dialog owns the screen: un-pin the live zone so the box renders
+	// and scrolls inline instead of fighting the footer
+	compSuspend()
+	defer compResume()
 	// real dialog: titled bordered box, tool card with key:value rows (Edit
 	// gets a colored diff preview), decision-reason line, live M:SS countdown
 	fmt.Printf("\n%s╭─ %s%s%s\n", yellow, bold+name+reset, dim+" ─ permission"+reset, reset)

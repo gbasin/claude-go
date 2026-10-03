@@ -101,7 +101,10 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		}
 		go l.Ask(context.Background(), body)
 	case "resume":
-		if id := PickSession(l.ToolCtx.CWD); id != "" {
+		compSuspend() // the picker draws with \x1b[J — un-pin the live zone
+		id := PickSession(l.ToolCtx.CWD)
+		compResume()
+		if id != "" {
 			if msgs, err := session.Load(l.ToolCtx.CWD, id); err == nil {
 				l.Messages = msgs
 				fmt.Printf("  resumed session %s (%d messages)\n", id, len(msgs))
