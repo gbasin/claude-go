@@ -12,6 +12,8 @@ type Message struct {
 	// Raw, when set, is the full wire message (assistant records persist the
 	// whole API message: id, model, stop_reason, usage — needed for -r).
 	Raw json.RawMessage `json:"-"`
+	// IsCompactSummary marks the post-compact continuation user record.
+	IsCompactSummary bool `json:"-"`
 }
 
 func TextMessage(role, text string) Message {

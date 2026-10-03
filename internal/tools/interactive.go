@@ -449,7 +449,7 @@ func execExitPlan(c *Context, raw json.RawMessage) Result {
 	plan, _ := os.ReadFile(pf)
 	if c.PlanApprove != nil && !c.PlanApprove() {
 		// denial stays in plan mode
-		return Result{Content: "Plan not approved; remain in plan mode and revise.", IsError: true}
+		return Result{Content: "The agent proposed a plan that was rejected by the user. The user chose to stay in plan mode rather than proceed with implementation.", IsError: true}
 	}
 	c.SetPermMode("default")
 	// allowedPrompts (deprecated upstream) are still surfaced as

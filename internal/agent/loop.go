@@ -32,47 +32,49 @@ type Events struct {
 
 // Loop runs the query/tool-use cycle.
 type Loop struct {
-	Client             *api.Client
-	Model              string
-	MaxTokens          int
-	Effort             string
-	Entrypoint         string // "cli" or "sdk-cli"
-	PermMode           string
-	CWD                string
-	AppendSysP         string
-	ExtraSystem        []string
-	PermRules          map[string][]string
-	AddDirs            []string
-	User               UserConfig
-	Messages           []api.Message
-	ToolCtx            *tools.Context
-	Events             Events
-	MaxTurns           int // 0 = unlimited
-	started            bool
-	UsageTotal         api.Usage
-	Transcript         string // path to JSONL transcript (for compact notes)
-	Hooks              hooks.Config
-	inCompact          bool
-	AllowedTools       []string // nil = all
-	Goal               string   // /goal stop-condition
-	Bare               bool     // --bare: skip auto-discovery
-	FallbackModel      string   // --fallback-model retry chain
-	ThinkingMode       string   // --thinking enabled|disabled
-	ThinkingDisplay    string   // --thinking-display updates|omitted
-	ThinkingBudget     int      // --max-thinking-tokens
-	SessionStartSource string   // startup|resume|clear|compact|fork
-	SessionEndReason   string   // clear|logout|prompt_input_exit|other
-	FastMode           bool     // fast mode: output_config.speed="fast"
-	AutoCompactWindow  string   // settings autoCompactWindow ("auto"|"500k"|N)
-	AlwaysThinking     bool     // settings alwaysThinkingEnabled
-	Precompute         bool     // precomputeCompactionEnabled gate
-	RateLimitNote      string   // set once a slow-lane rate-limit note was shown
-	noThinking         bool     // thinking config dropped after a thinking 400
-	dropSafeguards     bool
-	dropOutputConfig   bool
-	dropBetas          bool
-	maxTokensClamp     bool
-	lastTotal          int // last request's total input tokens (incl. cache)
+	Client                *api.Client
+	Model                 string
+	MaxTokens             int
+	Effort                string
+	Entrypoint            string // "cli" or "sdk-cli"
+	PermMode              string
+	CWD                   string
+	AppendSysP            string
+	ExtraSystem           []string
+	PermRules             map[string][]string
+	AddDirs               []string
+	User                  UserConfig
+	Messages              []api.Message
+	ToolCtx               *tools.Context
+	Events                Events
+	MaxTurns              int // 0 = unlimited
+	started               bool
+	UsageTotal            api.Usage
+	Transcript            string // path to JSONL transcript (for compact notes)
+	Hooks                 hooks.Config
+	inCompact             bool
+	AllowedTools          []string // nil = all
+	Goal                  string   // /goal stop-condition
+	Bare                  bool     // --bare: skip auto-discovery
+	FallbackModel         string   // --fallback-model retry chain
+	ThinkingMode          string   // --thinking enabled|disabled
+	ThinkingDisplay       string   // --thinking-display updates|omitted
+	ThinkingBudget        int      // --max-thinking-tokens
+	SessionStartSource    string   // startup|resume|clear|compact|fork
+	SessionEndReason      string   // clear|logout|prompt_input_exit|other
+	FastMode              bool     // fast mode: output_config.speed="fast"
+	AutoCompactWindow     string   // settings autoCompactWindow ("auto"|"500k"|N)
+	AlwaysThinking        bool     // settings alwaysThinkingEnabled
+	pendingTrigger        string   // last compact trigger for the boundary record
+	compactSummaryPending bool     // next user log is the compact continuation
+	Precompute            bool     // precomputeCompactionEnabled gate
+	RateLimitNote         string   // set once a slow-lane rate-limit note was shown
+	noThinking            bool     // thinking config dropped after a thinking 400
+	dropSafeguards        bool
+	dropOutputConfig      bool
+	dropBetas             bool
+	maxTokensClamp        bool
+	lastTotal             int // last request's total input tokens (incl. cache)
 }
 
 func NewLoop(client *api.Client, cwd string) *Loop {
@@ -544,7 +546,6 @@ func (l *Loop) ContextWarnThreshold() int {
 	return (l.contextWindow() - 20000 - 8000 - 4000) * 9 / 10
 }
 
-
 // assistantMessage wraps the response as a full wire message for transcripts.
 func assistantMessage(resp *api.Response) api.Message {
 	b, _ := json.Marshal(resp)
@@ -555,3 +556,9 @@ func mustMarshalBlocks(bs []api.ContentBlock) json.RawMessage {
 	b, _ := json.Marshal(bs)
 	return b
 }
+
+// CompactMeta returns (isCompactSummary, trigger) for the transcript writer.
+func (l *Loop) CompactMeta() (bool, string) { return l.compactSummaryPending, l.pendingTrigger }
+
+// LastInputTokens returns the last request's total input tokens (preTokens).
+func (l *Loop) LastInputTokens() int { return l.lastTotal }

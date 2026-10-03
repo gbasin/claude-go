@@ -345,3 +345,8 @@ func hasBinary(name string) bool {
 	_, err := exec.LookPath(name)
 	return err == nil
 }
+
+func mustJSON(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
+}
