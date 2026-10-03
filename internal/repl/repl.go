@@ -21,7 +21,7 @@ import (
 	"golang.org/x/term"
 )
 
-const (
+var (
 	reset  = "\x1b[0m"
 	dim    = "\x1b[2m"
 	bold   = "\x1b[1m"
@@ -44,6 +44,7 @@ func Run(l *agent.Loop) {
 
 // RunWithStore is Run with session transcript logging.
 func RunWithStore(l *agent.Loop, store Store) {
+	applyTheme(themeSetting(l.CWD), l.CWD)
 	l.Entrypoint = "cli"
 	ed := newEditor()
 	ed.vim = vimEnabled()
