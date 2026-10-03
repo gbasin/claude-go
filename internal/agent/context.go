@@ -115,9 +115,9 @@ func Metadata(sessionID string, cfg UserConfig) json.RawMessage {
 		"account_uuid": cfg.AccountUUID,
 		"session_id":   sessionID,
 	}
-	b, _ := json.Marshal(m)
-	raw, _ := json.Marshal(string(b))
-	return raw
+	inner, _ := json.Marshal(m)
+	outer, _ := json.Marshal(map[string]string{"user_id": string(inner)})
+	return outer
 }
 
 type UserConfig struct {
