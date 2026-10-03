@@ -444,6 +444,16 @@ func main() {
 	if st2 != nil {
 		defer st2.Close()
 		loop.Transcript = st2.Path
+		st2.LogInit(loop.Model) // system/init record at session start (real)
+		tools.OnSnapshot = func(path, backup string, ver int) {
+			st2.LogRecord(map[string]any{
+				"type": "file-history-snapshot", "isSnapshotUpdate": true,
+				"snapshot": map[string]any{"trackedFileBackups": map[string]any{
+					path: map[string]any{"backupFileName": filepath.Base(backup),
+						"version": ver, "backupTime": time.Now().UTC().Format(time.RFC3339)},
+				}},
+			})
+		}
 		if ar, ok := loop.ToolCtx.Agent.(*agent.Runner); ok {
 			ar.Transcript = st2.Path
 		}
