@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 )
 
 // ---------- background task manager ----------
@@ -85,12 +88,38 @@ func init() {
 }
 
 const (
-	fgDefaultTimeout = 600_000 // ms
-	fgMaxTimeout     = 600_000
+	fgDefaultTimeout = 120_000 // ms — BASH_DEFAULT_TIMEOUT_MS overrides
 	bgDefaultTimeout = 1_800_000
-	bgMaxTimeout     = 7_200_000
-	maxOutputBytes   = 30000
 )
+
+// env-configurable caps like real CC
+func fgMaxTimeout() int {
+	if v := os.Getenv("BASH_MAX_TIMEOUT_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return max(n, fgDefault())
+		}
+	}
+	return 600_000
+}
+func fgDefault() int {
+	if v := os.Getenv("BASH_DEFAULT_TIMEOUT_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return fgDefaultTimeout
+}
+func bgMaxTimeout() int {
+	return 7_200_000 // BASH_* env doesn't raise the bg ceiling in our impl
+}
+func bashOutputCap() int {
+	if v := os.Getenv("BASH_MAX_OUTPUT_LENGTH"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return min(max(n, 4000), 128000)
+		}
+	}
+	return 30000
+}
 
 type bashInput struct {
 	Command                   string  `json:"command"`
@@ -108,6 +137,11 @@ func execBash(c *Context, raw json.RawMessage) Result {
 	if in.Command == "" {
 		return Result{Content: "command is required", IsError: true}
 	}
+	for _, r := range in.Command {
+		if unicode.IsControl(r) && r != '\n' && r != '\t' && r != '\r' {
+			return Result{Content: "Command contains control characters that could hide content in the approval UI.", IsError: true}
+		}
+	}
 	if !in.RunInBackground && sleepRe.MatchString(in.Command) {
 		return Result{Content: "Foreground `sleep` is blocked; use Monitor with an until-loop to wait on a condition.", IsError: true}
 	}
@@ -115,7 +149,7 @@ func execBash(c *Context, raw json.RawMessage) Result {
 		c.BgTasks = NewBackground()
 	}
 
-	timeout := fgDefaultTimeout
+	timeout := fgDefault()
 	if in.Timeout > 0 {
 		timeout = int(in.Timeout)
 	}
@@ -123,15 +157,26 @@ func execBash(c *Context, raw json.RawMessage) Result {
 		if in.Timeout <= 0 {
 			timeout = bgDefaultTimeout
 		}
-		if timeout > bgMaxTimeout {
-			timeout = bgMaxTimeout
+		if timeout > bgMaxTimeout() {
+			timeout = bgMaxTimeout()
 		}
-	} else if timeout > fgMaxTimeout {
-		timeout = fgMaxTimeout
+	} else if timeout > fgMaxTimeout() {
+		timeout = fgMaxTimeout()
 	}
 
 	if in.RunInBackground {
 		return c.runBackground(in.Command, timeout, in.DangerouslyDisableSandbox)
+	}
+	// CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS: long fg commands flip to bg
+	if v := os.Getenv("CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 2000 {
+			r := c.runForegroundTimed(in.Command, timeout, n, in.DangerouslyDisableSandbox)
+			if r.autoBgID != "" {
+				return Result{Content: fmt.Sprintf("Command did not complete within its %ds timeout and was moved to the background (ID: %s). Output is being written to: %s.",
+					n/1000, r.autoBgID, r.autoBgFile)}
+			}
+			return r.Result
+		}
 	}
 	return c.runForeground(in.Command, timeout, in.DangerouslyDisableSandbox)
 }
@@ -170,14 +215,14 @@ func (c *Context) runForeground(command string, timeoutMs int, disableSandbox bo
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	err = cmd.Run()
-	res := c.finishBash(&out, command, err, ctx.Err() == context.DeadlineExceeded)
+	res := c.finishBash(&out, command, err, ctx.Err() == context.DeadlineExceeded, timeoutMs)
 	if warn != "" {
 		res.Content = warn + "\n" + res.Content
 	}
 	return res
 }
 
-func (c *Context) finishBash(out *bytes.Buffer, command string, err error, timedOut bool) Result {
+func (c *Context) finishBash(out *bytes.Buffer, command string, err error, timedOut bool, timeoutMs int) Result {
 	raw := out.Bytes()
 	newCWD := ""
 	if i := bytes.LastIndex(raw, []byte(cwdSentinel)); i >= 0 {
@@ -193,14 +238,17 @@ func (c *Context) finishBash(out *bytes.Buffer, command string, err error, timed
 		}
 	}
 	text := string(bytes.TrimRight(raw, "\n"))
-	truncated := false
-	if len(text) > maxOutputBytes {
-		text = text[:maxOutputBytes]
-		truncated = true
+	persisted := ""
+	if len(text) > bashOutputCap() {
+		// real spills large output to a persisted file with a marker
+		if out, err := spillOutput(c, text); err == nil {
+			persisted = out
+		}
+		text = text[:bashOutputCap()]
 	}
 	var b strings.Builder
 	if timedOut {
-		b.WriteString(fmt.Sprintf("Command timed out\n"))
+		b.WriteString(fmt.Sprintf("Command timed out after %s\n", time.Duration(timeoutMs)*time.Millisecond))
 	}
 	if err != nil && !timedOut {
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -210,8 +258,8 @@ func (c *Context) finishBash(out *bytes.Buffer, command string, err error, timed
 		}
 	}
 	b.WriteString(text)
-	if truncated {
-		b.WriteString("\n... (output truncated)")
+	if persisted != "" {
+		b.WriteString("\n<persisted-output>" + persisted + "</persisted-output>")
 	}
 	res := Result{Content: b.String()}
 	if err != nil || timedOut {
@@ -311,4 +359,79 @@ func (b *Background) DrainNotifications() []string {
 	out := b.notif
 	b.notif = nil
 	return out
+}
+
+// spillOutput writes large output to a session file like real CC.
+func spillOutput(c *Context, text string) (string, error) {
+	dir := filepath.Join(os.TempDir(), "claude-go", c.Session)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	f, err := os.CreateTemp(dir, "output-*.txt")
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := f.WriteString(text); err != nil {
+		return "", err
+	}
+	return f.Name(), nil
+}
+
+// runForegroundTimed runs fg with an auto-background handoff at autoAfterMs.
+type fgTimedResult struct {
+	Result
+	autoBgID   string
+	autoBgFile string
+}
+
+func (c *Context) runForegroundTimed(command string, timeoutMs, autoAfterMs int, disableSandbox bool) fgTimedResult {
+	if c.BgTasks == nil {
+		c.BgTasks = NewBackground()
+	}
+	id := fmt.Sprintf("b%d", c.BgTasks.seq.Add(1))
+	t := &BgTask{ID: id, Command: command, Started: time.Now(), Done: make(chan struct{})}
+	// the process gets the BACKGROUND ceiling — it may outlive the fg window
+	procTimeout := timeoutMs
+	if procTimeout < bgDefaultTimeout {
+		procTimeout = bgDefaultTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(procTimeout)*time.Millisecond)
+	t.cancel = cancel
+	cmd, warn, err := c.shellCmd(ctx, command, disableSandbox)
+	if err != nil {
+		cancel()
+		return fgTimedResult{Result: Result{Content: err.Error(), IsError: true}}
+	}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return fgTimedResult{Result: Result{Content: "Error: " + err.Error(), IsError: true}}
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		cancel()
+		res := c.finishBash(&out, command, err, ctx.Err() == context.DeadlineExceeded, timeoutMs)
+		return fgTimedResult{Result: res}
+	case <-time.After(time.Duration(autoAfterMs) * time.Millisecond):
+		// hand off to background — task owns the process now
+		c.BgTasks.tasks[id] = t
+		dir := filepath.Join(os.TempDir(), "claude-go", c.Session)
+		os.MkdirAll(dir, 0o755)
+		outFile := filepath.Join(dir, id+".out")
+		go func() {
+			err := <-done
+			f, _ := os.Create(outFile)
+			f.Write(out.Bytes())
+			f.Close()
+			t.Err = err
+			close(t.Done)
+		}()
+		_ = warn
+		return fgTimedResult{autoBgID: id, autoBgFile: outFile}
+	}
 }

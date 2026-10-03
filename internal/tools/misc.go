@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,9 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"claude-go/internal/plugins"
-	"time"
 )
 
 func init() {
@@ -59,7 +61,18 @@ func execAgent(c *Context, raw json.RawMessage) Result {
 	if in.RunInBackground != nil {
 		bg = *in.RunInBackground
 	}
-	return c.Agent.RunAgent(c, in.Description, in.Prompt, st, in.Model, bg)
+	sub := c
+	if in.Isolation == "worktree" {
+		// run the agent inside a fresh git worktree (real isolation:"worktree")
+		wr := execEnterWorktree(c, json.RawMessage(`{}`))
+		if wr.IsError {
+			return wr
+		}
+		sub = &Context{}
+		*sub = *c
+		sub.CWD = worktreeSession.wtPath
+	}
+	return c.Agent.RunAgent(sub, in.Description, in.Prompt, st, in.Model, bg)
 }
 
 // ---------- Skill ----------
@@ -424,23 +437,139 @@ type monitorIn struct {
 	Description string `json:"description"`
 	TimeoutMs   int    `json:"timeout_ms"`
 	Command     string `json:"command"`
+	Persistent  bool   `json:"persistent"`
+	Ws          string `json:"ws"` // ws:// endpoint — stream frames as events
 }
 
+// Monitor: stream stdout lines as <task-notification> events (200ms batching,
+// real semantics); exit/expiry also notify. Persistent monitors don't auto-stop.
 func execMonitor(c *Context, raw json.RawMessage) Result {
 	var in monitorIn
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return Result{Content: "invalid input: " + err.Error(), IsError: true}
 	}
-	if in.Command == "" {
-		return Result{Content: "command is required", IsError: true}
+	if in.Command == "" && in.Ws == "" {
+		return Result{Content: "command or ws is required", IsError: true}
 	}
-	// Monitor = background command whose exit re-invokes the agent.
-	in2, _ := json.Marshal(bashInput{
-		Command:         in.Command,
-		RunInBackground: true,
-		Timeout:         float64(orZero(in.TimeoutMs, bgDefaultTimeout)),
-	})
-	return execBash(c, in2)
+	timeout := in.TimeoutMs
+	if timeout <= 0 {
+		timeout = 300_000 // real default 5min
+	}
+	if timeout > 1_800_000 {
+		timeout = 1_800_000 // real cap 30min local
+	}
+	if c.BgTasks == nil {
+		c.BgTasks = NewBackground()
+	}
+	taskID := fmt.Sprintf("m%d", c.BgTasks.seq.Add(1))
+	t := &BgTask{ID: taskID, Command: func() string {
+		if in.Command != "" {
+			return in.Command
+		}
+		return "ws " + in.Ws
+	}(), Started: time.Now(), Done: make(chan struct{})}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Millisecond)
+	t.cancel = cancel
+	c.BgTasks.tasks[taskID] = t
+	delivered := 0
+
+	if in.Ws != "" {
+		go monitorWS(ctx, t, in.Ws, &delivered)
+		return Result{Content: fmt.Sprintf("Monitor %s armed on ws://%s (timeout %ds).", taskID, in.Ws, timeout/1000)}
+	}
+
+	cmd, warn, err := c.shellCmd(ctx, in.Command, false)
+	if err != nil {
+		cancel()
+		delete(c.BgTasks.tasks, taskID)
+		return Result{Content: err.Error(), IsError: true}
+	}
+	stdout, _ := cmd.StdoutPipe()
+	cmd.Stderr = &t.Out
+	if err := cmd.Start(); err != nil {
+		cancel()
+		delete(c.BgTasks.tasks, taskID)
+		return Result{Content: "Error: " + err.Error(), IsError: true}
+	}
+	go func() {
+		sc := bufio.NewScanner(stdout)
+		sc.Buffer(make([]byte, 1<<20), 1<<20)
+		var pending []string
+		var lastFlush = time.Now()
+		for sc.Scan() {
+			pending = append(pending, sc.Text())
+			delivered++
+			if time.Since(lastFlush) >= 200*time.Millisecond && len(pending) > 0 {
+				queuePrompt("<task-notification>Monitor " + taskID + " — " +
+					strings.Join(pending, "\n") + "</task-notification>")
+				pending = pending[:0]
+				lastFlush = time.Now()
+			}
+			// flood guard — real auto-stops high-rate monitors
+			if delivered > 500 {
+				queuePrompt("<task-notification>Monitor " + taskID +
+					" auto-stopped after 500 events (flood guard).</task-notification>")
+				cancel()
+				break
+			}
+		}
+		if len(pending) > 0 {
+			queuePrompt("<task-notification>Monitor " + taskID + " — " +
+				strings.Join(pending, "\n") + "</task-notification>")
+		}
+		err := cmd.Wait()
+		if !in.Persistent {
+			var tail string
+			if ctx.Err() == context.DeadlineExceeded {
+				if delivered > 0 {
+					tail = fmt.Sprintf("[Monitor expired after %ds with %d events delivered. Re-arm it if you still need the watch.]", timeout/1000, delivered)
+				} else {
+					tail = fmt.Sprintf("[Monitor expired after %ds with no events delivered. Re-arm it or widen the filter.]", timeout/1000)
+				}
+			} else {
+				code := 0
+				if ee, ok := err.(*exec.ExitError); ok {
+					code = ee.ExitCode()
+				}
+				tail = fmt.Sprintf("[Monitor %s exited code %d, %d events delivered]", taskID, code, delivered)
+			}
+			queuePrompt("<task-notification>" + tail + "</task-notification>")
+		}
+		t.Err = err
+		close(t.Done)
+	}()
+	_ = warn
+	return Result{Content: fmt.Sprintf("Monitor %s armed: %s (timeout %ds, %s).", taskID, in.Command, timeout/1000, map[bool]string{true: "persistent", false: "one-shot"}[in.Persistent])}
+}
+
+// monitorWS: minimal RFC6455 text-frame reader (no deps). Each text frame
+// becomes a task-notification; binary frames report size only.
+func monitorWS(ctx context.Context, t *BgTask, url string, delivered *int) {
+	conn, err := wsDial(url)
+	if err != nil {
+		queuePrompt("<task-notification>Monitor " + t.ID + " ws connect failed: " + err.Error() + "</task-notification>")
+		close(t.Done)
+		return
+	}
+	defer conn.Close()
+	go func() { <-ctx.Done(); conn.Close() }()
+	for {
+		op, payload, err := wsRead(conn)
+		if err != nil {
+			if ctx.Err() == nil {
+				queuePrompt("<task-notification>Monitor " + t.ID + " ws closed: " + err.Error() + "</task-notification>")
+			}
+			close(t.Done)
+			return
+		}
+		if op == 1 {
+			queuePrompt("<task-notification>Monitor " + t.ID + " — " + string(payload) + "</task-notification>")
+			*delivered++
+		} else if op == 2 {
+			queuePrompt(fmt.Sprintf("<task-notification>Monitor %s — [binary frame, %d bytes]</task-notification>", t.ID, len(payload)))
+			*delivered++
+		}
+	}
 }
 
 func orZero(v, d int) int {

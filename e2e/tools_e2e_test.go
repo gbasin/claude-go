@@ -247,7 +247,10 @@ func TestSandbox(t *testing.T) {
 	if len(trs3) == 0 {
 		t.Fatalf("no tool_result for master.passwd:\n%s", r3.stdout)
 	}
-	contains(t, strings.ToLower(trs3[0]), "permission denied", "master.passwd denial")
+	lower3 := strings.ToLower(trs3[0])
+	if !strings.Contains(lower3, "not permitted") && !strings.Contains(lower3, "denied") {
+		t.Fatalf("expected master.passwd read denied, got: %s", trs3[0])
+	}
 }
 
 // TestAuthAPIKeyHeader: ANTHROPIC_API_KEY auth sends x-api-key on requests.

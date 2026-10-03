@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -118,7 +119,7 @@ var (
 
 func nextTaskID() string {
 	taskSeq++
-	return fmt.Sprintf("t%d", taskSeq)
+	return fmt.Sprintf("%d", taskSeq) // real IDs are numeric ("Task #N")
 }
 
 func findTask(id string) *SessionTask {
@@ -147,9 +148,9 @@ func execTaskCreate(c *Context, raw json.RawMessage) Result {
 	t := SessionTask{ID: nextTaskID(), Subject: in.Subject, Description: in.Desc,
 		ActiveForm: in.ActiveForm, Status: "pending", Metadata: in.Metadata}
 	tasksList = append(tasksList, t)
+	persistTasks(c)
 	tasksMu.Unlock()
-	out, _ := json.Marshal(map[string]any{"task": map[string]string{"id": t.ID, "subject": t.Subject}})
-	return Result{Content: string(out)}
+	return Result{Content: fmt.Sprintf("Task #%s created successfully: %s", t.ID, t.Subject)}
 }
 
 func execTaskGet(c *Context, raw json.RawMessage) Result {
@@ -161,23 +162,45 @@ func execTaskGet(c *Context, raw json.RawMessage) Result {
 	defer tasksMu.Unlock()
 	t := findTask(in.TaskID)
 	if t == nil {
-		return Result{Content: fmt.Sprintf(`{"task":null} — no task with id %q`, in.TaskID), IsError: true}
+		return Result{Content: "Task not found", IsError: true}
 	}
-	out, _ := json.Marshal(map[string]any{"task": t})
-	return Result{Content: string(out)}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Task #%s: %s\nStatus: %s\nDescription: %s\n", t.ID, t.Subject, t.Status, t.Description)
+	if len(t.BlockedBy) > 0 {
+		fmt.Fprintf(&b, "Blocked by: #%s\n", strings.Join(t.BlockedBy, ", #"))
+	}
+	if len(t.Blocks) > 0 {
+		fmt.Fprintf(&b, "Blocks: #%s\n", strings.Join(t.Blocks, ", #"))
+	}
+	if t.Owner != "" {
+		fmt.Fprintf(&b, "Owner: %s\n", t.Owner)
+	}
+	return Result{Content: strings.TrimRight(b.String(), "\n")}
 }
 
 func execTaskList(c *Context, raw json.RawMessage) Result {
 	tasksMu.Lock()
 	defer tasksMu.Unlock()
-	vis := []SessionTask{}
-	for _, t := range tasksList {
-		if t.Status != "deleted" {
-			vis = append(vis, t)
-		}
+	if len(tasksList) == 0 {
+		return Result{Content: "No tasks yet."}
 	}
-	out, _ := json.Marshal(map[string]any{"tasks": vis})
-	return Result{Content: string(out)}
+	var b strings.Builder
+	for _, t := range tasksList {
+		if t.Status == "deleted" {
+			continue
+		}
+		fmt.Fprintf(&b, "#%s ☐ %s", t.ID, t.Subject)
+		if t.Status == "in_progress" {
+			b.WriteString(" ← in progress")
+		} else if t.Status == "completed" {
+			b.WriteString(" (completed)")
+		}
+		if t.Owner != "" {
+			fmt.Fprintf(&b, " · owner %s", t.Owner)
+		}
+		b.WriteString("\n")
+	}
+	return Result{Content: strings.TrimRight(b.String(), "\n")}
 }
 
 func execTaskUpdate(c *Context, raw json.RawMessage) Result {
@@ -202,28 +225,37 @@ func execTaskUpdate(c *Context, raw json.RawMessage) Result {
 		return Result{Content: fmt.Sprintf("no task with id %q", in.TaskID), IsError: true}
 	}
 	var fields []string
-	var statusChange map[string]string
-	if in.Subject != nil {
+	completed := false
+	if in.Subject != nil && t.Subject != *in.Subject {
 		t.Subject = *in.Subject
 		fields = append(fields, "subject")
 	}
-	if in.Desc != nil {
+	if in.Desc != nil && t.Description != *in.Desc {
 		t.Description = *in.Desc
 		fields = append(fields, "description")
 	}
-	if in.ActiveForm != nil {
+	if in.ActiveForm != nil && t.ActiveForm != *in.ActiveForm {
 		t.ActiveForm = *in.ActiveForm
 		fields = append(fields, "activeForm")
 	}
-	if in.Status != nil {
-		from := t.Status
+	if in.Status != nil && t.Status != *in.Status {
 		t.Status = *in.Status
 		fields = append(fields, "status")
-		statusChange = map[string]string{"from": from, "to": *in.Status}
+		completed = *in.Status == "completed"
 	}
-	t.Blocks = append(t.Blocks, in.AddBlocks...)
-	t.BlockedBy = append(t.BlockedBy, in.AddBlockedBy...)
-	if in.Owner != nil {
+	for _, id := range in.AddBlocks {
+		if !strSliceHas(t.Blocks, id) {
+			t.Blocks = append(t.Blocks, id)
+			fields = append(fields, "blocks")
+		}
+	}
+	for _, id := range in.AddBlockedBy {
+		if !strSliceHas(t.BlockedBy, id) {
+			t.BlockedBy = append(t.BlockedBy, id)
+			fields = append(fields, "blockedBy")
+		}
+	}
+	if in.Owner != nil && t.Owner != *in.Owner {
 		t.Owner = *in.Owner
 		fields = append(fields, "owner")
 	}
@@ -231,12 +263,22 @@ func execTaskUpdate(c *Context, raw json.RawMessage) Result {
 		if t.Metadata == nil {
 			t.Metadata = map[string]any{}
 		}
-		t.Metadata[k] = v
+		if v == nil {
+			delete(t.Metadata, k) // real: null deletes the key
+		} else {
+			t.Metadata[k] = v
+		}
 		fields = append(fields, "metadata")
 	}
-	out, _ := json.Marshal(map[string]any{
-		"success": true, "taskId": t.ID, "updatedFields": fields, "statusChange": statusChange})
-	return Result{Content: string(out)}
+	persistTasks(c)
+	msg := fmt.Sprintf("Updated task #%s", t.ID)
+	if len(fields) > 0 {
+		msg += " " + strings.Join(fields, ", ")
+	}
+	if completed {
+		msg += "\n\nTask completed. Call TaskList now to see what's ready to work on next."
+	}
+	return Result{Content: msg}
 }
 
 // ---- todos (in-memory per real semantics) ----
@@ -281,8 +323,8 @@ func execTodoWrite(c *Context, raw json.RawMessage) Result {
 		todosList = in.Todos
 	}
 	todosMu.Unlock()
-	out, _ := json.Marshal(map[string]any{"oldTodos": old, "newTodos": in.Todos})
-	return Result{Content: string(out)}
+	_ = old
+	return Result{Content: "Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable"}
 }
 
 // TodosText renders the live todo list for the REPL status area.
@@ -303,4 +345,45 @@ func TodosText() string {
 		fmt.Fprintf(&b, "%s %s\n", mark, t.Content)
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// persistTasks writes the session task list so teammates/subagents share it.
+func persistTasks(c *Context) {
+	dir := filepath.Join(os.TempDir(), "claude-go", c.Session)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	b, _ := json.Marshal(tasksList)
+	os.WriteFile(filepath.Join(dir, "tasks.json"), b, 0o644)
+}
+
+// LoadTasks restores the session task list (session resume).
+func LoadTasks(c *Context) {
+	p := filepath.Join(os.TempDir(), "claude-go", c.Session, "tasks.json")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return
+	}
+	tasksMu.Lock()
+	defer tasksMu.Unlock()
+	var list []SessionTask
+	if json.Unmarshal(b, &list) == nil {
+		tasksList = list
+		for _, t := range list {
+			var n int
+			fmt.Sscanf(t.ID, "%d", &n)
+			if n > taskSeq {
+				taskSeq = n
+			}
+		}
+	}
+}
+
+func strSliceHas(l []string, s string) bool {
+	for _, v := range l {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }

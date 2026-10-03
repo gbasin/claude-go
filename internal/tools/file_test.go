@@ -61,7 +61,7 @@ func TestEditUniqueness(t *testing.T) {
 	rd, _ := json.Marshal(map[string]string{"file_path": p})
 	execRead(c, rd)
 	e, _ := json.Marshal(map[string]any{"file_path": p, "old_string": "aaa", "new_string": "b"})
-	if r := execEdit(c, e); !r.IsError || !strings.Contains(r.Content, "2 times") {
+	if r := execEdit(c, e); !r.IsError || !strings.Contains(r.Content, "Found 2 matches") {
 		t.Errorf("expected uniqueness error, got: %s", r.Content)
 	}
 	e2, _ := json.Marshal(map[string]any{"file_path": p, "old_string": "aaa", "new_string": "b", "replace_all": true})
@@ -84,11 +84,16 @@ func TestReadOffsetLimit(t *testing.T) {
 	os.WriteFile(p, []byte(strings.Join(lines, "\n")), 0o644)
 	rd, _ := json.Marshal(map[string]any{"file_path": p, "offset": 10, "limit": 5})
 	r := execRead(c, rd)
-	got := strings.Count(r.Content, "\n") + 1
+	// truncated views get a PARTIAL marker after the numbered lines
+	first := strings.SplitN(r.Content, "\n\n[Truncated:", 2)[0]
+	got := strings.Count(first, "\n") + 1
 	if got != 5 {
 		t.Errorf("expected 5 lines, got %d:\n%s", got, r.Content)
 	}
 	if !strings.Contains(r.Content, "    11\t") {
 		t.Errorf("expected to start at line 11:\n%s", r.Content)
+	}
+	if !strings.Contains(r.Content, "[Truncated: PARTIAL view") {
+		t.Errorf("expected truncation marker:\n%s", r.Content)
 	}
 }
