@@ -155,7 +155,7 @@ func (c *Client) headers(req *http.Request) {
 // anything the client set.
 func applyCustomHeaders(req *http.Request) {
 	if ch := os.Getenv("ANTHROPIC_CUSTOM_HEADERS"); ch != "" {
-		for _, line := range strings.Split(ch, "\n") {
+		for _, line := range strings.FieldsFunc(ch, func(r rune) bool { return r == 10 || r == 13 }) {
 			if k, v, ok := strings.Cut(line, ":"); ok {
 				req.Header.Set(strings.TrimSpace(k), strings.TrimSpace(v))
 			}

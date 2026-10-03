@@ -114,7 +114,26 @@ func EnvMessage(cwd, model string, addDirs []string, permMode string, sessionID 
 			"the dedicated Read, Edit, or Write tools. Fall back to a dedicated tool only when Bash genuinely cannot do the job.\n")
 	}
 	fmt.Fprintf(&b, "\nToday's date is %s.\n", time.Now().Format("2006-01-02"))
+	if ar := attributionReminder(cwd); ar != "" {
+		b.WriteString("\n" + ar + "\n")
+	}
 	return b.String()
+}
+
+// attributionReminder mirrors real CC's commit/PR attribution reminder:
+// "End git commit messages with: <trailer>" or the do-not-attribute form
+// when includeCoAuthoredBy is false.
+func attributionReminder(cwd string) string {
+	st := config.Load(cwd)
+	replaces := "this replaces Claude Code's own earlier attribution guidance, such as a previous copy of this reminder"
+	if !st.CoAuthoredBy() {
+		return "From here on, do not add attribution lines to git commit messages or pull request descriptions (" +
+			replaces + ", and applies even if a CLAUDE.md or memory rule asks for attribution lines)."
+	}
+	trailer := "Co-Authored-By: Claude <noreply@anthropic.com>"
+	note := "the user's own instructions about these lines, such as a CLAUDE.md or memory rule, take precedence over this reminder, but do not add attribution lines this reminder leaves out"
+	return "Attribution for git commits and pull requests you create from here on (" + replaces + "; " + note + "):\n" +
+		"- End git commit messages with:\n" + trailer
 }
 
 func osVersion() string {

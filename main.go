@@ -321,6 +321,11 @@ func main() {
 	if loop.Effort == "" && st.EffortLevel != "" {
 		loop.Effort = st.EffortLevel
 	}
+	loop.AutoCompactWindow = st.AutoCompactWindow
+	loop.AlwaysThinking = st.AlwaysThinkingEnabled
+	if st.FastMode == "on" || st.FastMode == "true" {
+		loop.FastMode = true
+	}
 	rules := map[string][]string{}
 	if st.Permissions != nil {
 		rules["allow"] = st.Permissions.Allow
