@@ -2,12 +2,12 @@
 package tools
 
 import (
-	"sort"
 	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 
 	"claude-go/internal/api"
@@ -47,6 +47,8 @@ type Context struct {
 	EndSession    func()
 	Session       string        // session id for skill substitutions
 	OAuthToken    func() string // claude.ai oauth access token for remote APIs
+	OnCwdChanged  func(newCWD string)
+	OnFileChanged func(path, kind string)
 }
 
 type readState struct {
@@ -173,7 +175,6 @@ type Answerer func(ctx context.Context, prompt, pageText string) (string, error)
 
 // Searcher performs a web search (WebSearch backend).
 type Searcher func(ctx context.Context, query string, allow, block []string) (string, error)
-
 
 // Names returns registered tool names (for stream-json init event).
 func Names() []string {

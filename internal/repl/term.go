@@ -39,6 +39,8 @@ type editor struct {
 	onToggleExpand func()
 	onToggleTodos  func()
 	onKillAgents   func()
+	insertRemaps   []string // vimInsertModeRemaps: 2-char sequences -> <Esc>
+	lastIns        rune
 	vimOp          rune
 	vimFind        rune
 	vimPendingG    rune
@@ -288,6 +290,27 @@ func (e *editor) insertKey(k key) *readResult {
 			e.cycleMode()
 		}
 	case k.r != 0:
+		// vimInsertModeRemaps: 2-char sequence mapped to <Esc>
+		if e.vim && len(e.insertRemaps) > 0 && e.lastIns != 0 {
+			pair := string([]rune{e.lastIns, k.r})
+			for _, seq := range e.insertRemaps {
+				if seq == pair {
+					// remove the first char of the pair
+					if e.pos > 0 {
+						e.buf = append(e.buf[:e.pos-1], e.buf[e.pos:]...)
+						e.pos--
+					}
+					e.lastIns = 0
+					e.mode = "normal"
+					if e.pos > 0 {
+						e.pos--
+					}
+					e.redraw()
+					return nil
+				}
+			}
+		}
+		e.lastIns = k.r
 		e.insert(k.r)
 	case c >= 32 && c < 127:
 		e.insert(rune(c))
@@ -1238,4 +1261,25 @@ func appendHistoryFile(line string) {
 		"display": line, "timestamp": time.Now().UnixMilli(),
 	})
 	f.Write(append(b, '\n'))
+}
+
+// vimInsertRemaps reads vimInsertModeRemaps from settings (["jj","jk"]…).
+func vimInsertRemaps() []string {
+	home, _ := os.UserHomeDir()
+	for _, p := range []string{
+		filepath.Join(home, ".claude", "settings.json"),
+		filepath.Join(home, ".claude.json"),
+	} {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var st struct {
+			VimInsertModeRemaps []string `json:"vimInsertModeRemaps"`
+		}
+		if json.Unmarshal(b, &st) == nil && len(st.VimInsertModeRemaps) > 0 {
+			return st.VimInsertModeRemaps
+		}
+	}
+	return nil
 }

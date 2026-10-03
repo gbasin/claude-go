@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -101,6 +102,8 @@ func execScheduleWakeup(c *Context, raw json.RawMessage) Result {
 
 // ---------- PushNotification ----------
 
+var UserActive atomic.Bool
+
 func execPushNotification(c *Context, raw json.RawMessage) Result {
 	var in struct {
 		Message string `json:"message"`
@@ -109,6 +112,10 @@ func execPushNotification(c *Context, raw json.RawMessage) Result {
 	json.Unmarshal(raw, &in)
 	if in.Message == "" {
 		return Result{Content: "message is required", IsError: true}
+	}
+	// real skips the push when the user is actively at the terminal
+	if UserActive.Load() && Interactive {
+		return Result{Content: "Notification not sent — the user is actively at the terminal."}
 	}
 	title := "Claude Code"
 	if in.Status != "" {

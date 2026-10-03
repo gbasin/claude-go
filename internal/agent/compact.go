@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	_ "embed"
+	"os"
 	"regexp"
 	"strings"
 
@@ -46,11 +47,14 @@ func (l *Loop) Compact(ctx context.Context, transcriptPath string) error {
 	return nil
 }
 
-// ShouldAutoCompact reports whether the context is nearing the window.
-// claude-fable-5-1 ships the context-1m beta; CC auto-compacts ~92%.
+// ShouldAutoCompact: window minus max-output reserve (20000) minus buffers
+// (8000+4000), matching real autoCompactWindow intent.
 func (l *Loop) ShouldAutoCompact(u api.Usage) bool {
+	if os.Getenv("DISABLE_COMPACT") != "" {
+		return false
+	}
 	total := u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
-	return total > int(float64(l.contextWindow())*0.92)
+	return total > l.contextWindow()-20000-8000-4000
 }
 
 func (l *Loop) contextWindow() int {

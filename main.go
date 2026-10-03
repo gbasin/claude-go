@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -73,41 +74,46 @@ Subcommands:
 
 func main() {
 	var (
-		printMode   bool
-		mockMode    bool
-		mockPort    int
-		model       string
-		outFormat   = "text"
-		maxTurns    int
-		permMode    = "default"
-		appendSys   string
-		addDirs     []string
-		cont        bool
-		resume      string
-		prompt      []string
-		allowTools  string
-		denyTools   string
-		sysPrompt   string
-		sysPromptF  string
-		sessID      string
-		forkSess    bool
-		bareMode    bool
-		agentsJSON  string
-		toolsList   string
-		workload    string
-		fileArgs    []string
-		_           = agentsJSON
-		_           = workload
-		debug       bool
-		verbose     bool
-		mcpConfig   string
-		strictMCP   bool
-		settingsF   string
-		fallback    string
-		partialMsgs bool
-		inFormat    string
-		jsonSchema  string
-		agentName   string
+		printMode       bool
+		mockMode        bool
+		mockPort        int
+		model           string
+		outFormat       = "text"
+		maxTurns        int
+		permMode        = "default"
+		appendSys       string
+		addDirs         []string
+		cont            bool
+		resume          string
+		prompt          []string
+		allowTools      string
+		denyTools       string
+		sysPrompt       string
+		sysPromptF      string
+		sessID          string
+		forkSess        bool
+		bareMode        bool
+		agentsJSON      string
+		toolsList       string
+		workload        string
+		fileArgs        []string
+		thinkingMode    string
+		thinkingDisplay string
+		thinkingBudget  int
+		maxBudget       float64
+		debugFile       string
+		_               = agentsJSON
+		_               = workload
+		debug           bool
+		verbose         bool
+		mcpConfig       string
+		strictMCP       bool
+		settingsF       string
+		fallback        string
+		partialMsgs     bool
+		inFormat        string
+		jsonSchema      string
+		agentName       string
 	)
 	args := os.Args[1:]
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -132,6 +138,9 @@ func main() {
 			return
 		case "purge":
 			purgeSub(args[1:])
+			return
+		case "plugin":
+			pluginSub(args[1:])
 			return
 		case "setup-token":
 			fmt.Println("token: uses ANTHROPIC_API_KEY or Claude Code keychain credentials")
@@ -209,6 +218,18 @@ func main() {
 			os.Setenv("CLAUDE_GO_WORKLOAD", workload)
 		case a == "--agents":
 			agentsJSON = next()
+		case a == "--thinking":
+			thinkingMode = next()
+		case a == "--thinking-display":
+			thinkingDisplay = next()
+		case a == "--max-thinking-tokens":
+			if n, err := strconv.Atoi(next()); err == nil {
+				thinkingBudget = n
+			}
+		case a == "--max-budget-usd":
+			maxBudget, _ = strconv.ParseFloat(next(), 64)
+		case a == "--debug-file":
+			debugFile = next()
 		case a == "--agent":
 			agentName = next()
 		case a == "-c" || a == "--continue":
@@ -295,6 +316,9 @@ func main() {
 		}
 	}
 	loop.FallbackModel = fallback
+	loop.ThinkingMode = thinkingMode
+	loop.ThinkingDisplay = thinkingDisplay
+	loop.ThinkingBudget = thinkingBudget
 	st := config.Load(cwd)
 	rules := map[string][]string{}
 	if st.Permissions != nil {
@@ -403,6 +427,11 @@ func main() {
 	if debug || verbose {
 		os.Setenv("CLAUDE_GO_DEBUG", "1")
 	}
+	if debugFile != "" {
+		if f, err := os.OpenFile(debugFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+			os.Stderr = f
+		}
+	}
 	if printMode {
 		tools.Interactive = false
 		if inFormat == "stream-json" {
@@ -416,6 +445,9 @@ func main() {
 			}, name, input, loop.ToolCtx.CWD) == perms.Allow
 		}
 		code := runPrint(loop, strings.Join(prompt, " ")+promptAtt, outFormat, st2, jsonSchema)
+		if maxBudget > 0 {
+			fmt.Fprintf(os.Stderr, "note: --max-budget-usd %.2f (per-request cost tracking not yet enforced)\n", maxBudget)
+		}
 		os.Exit(code)
 	}
 	tools.Interactive = true
