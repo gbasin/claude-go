@@ -205,6 +205,9 @@ func execWrite(c *Context, raw json.RawMessage) Result {
 	if err := os.WriteFile(in.FilePath, []byte(in.Content), 0o644); err != nil {
 		return Result{Content: "Error: " + err.Error(), IsError: true}
 	}
+	if c.OnFileChanged != nil {
+		c.OnFileChanged(in.FilePath, "change")
+	}
 	st, _ := os.Stat(in.FilePath)
 	if st != nil {
 		c.MarkRead(in.FilePath, st.ModTime().UnixNano(), st.Size())
@@ -260,6 +263,9 @@ func execEdit(c *Context, raw json.RawMessage) Result {
 	st, _ := os.Stat(in.FilePath)
 	if st != nil {
 		c.MarkRead(in.FilePath, st.ModTime().UnixNano(), st.Size())
+	}
+	if c.OnFileChanged != nil {
+		c.OnFileChanged(in.FilePath, "change")
 	}
 	msg := "The file " + in.FilePath + " has been updated successfully."
 	if stale {

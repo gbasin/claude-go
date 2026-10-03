@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"claude-go/internal/plugins"
 	"time"
 )
 
@@ -82,6 +84,9 @@ func skillDirs(cwd string) []string {
 		filepath.Join(home, ".claude", "plugins", "local", "*", "skills"),
 	} {
 		dirs = append(dirs, globAll(pat)...)
+	}
+	for _, pd := range plugins.EnabledPluginDirs() {
+		dirs = append(dirs, filepath.Join(pd, "skills"))
 	}
 	return dirs
 }
@@ -298,10 +303,13 @@ func settingStr(cwd, key string) string {
 
 func execExitWorktree(c *Context, raw json.RawMessage) Result {
 	var in struct {
-		Action         string `json:"action"` // keep|remove
+		Action         string `json:"action"` // keep|remove — required
 		DiscardChanges bool   `json:"discard_changes"`
 	}
 	json.Unmarshal(raw, &in)
+	if in.Action != "keep" && in.Action != "remove" {
+		return Result{Content: "action is required (keep|remove)", IsError: true}
+	}
 	worktreeSession.mu.Lock()
 	if !worktreeSession.active {
 		worktreeSession.mu.Unlock()

@@ -47,6 +47,9 @@ func RunWithStore(l *agent.Loop, store Store) {
 	l.Entrypoint = "cli"
 	ed := newEditor()
 	ed.vim = vimEnabled()
+	if ed.vim {
+		ed.insertRemaps = vimInsertRemaps()
+	}
 	ed.completer = slashCompleter
 	loadCustomCommands(l.ToolCtx.CWD)
 	ed.cycleMode = func() {
@@ -89,6 +92,17 @@ func RunWithStore(l *agent.Loop, store Store) {
 	}
 	endSession := func() { fmt.Println(); os.Exit(0) }
 	l.ToolCtx.SetPermMode = func(mode string) { l.PermMode = mode }
+	l.ToolCtx.OnCwdChanged = func(nc string) {
+		hooks.Run(l.Hooks, hooks.CwdChanged, map[string]any{
+			"session_id": l.Client.SessionID, "cwd": nc, "transcript_path": l.Transcript,
+		}, nc)
+	}
+	l.ToolCtx.OnFileChanged = func(p, kind string) {
+		hooks.Run(l.Hooks, hooks.FileChanged, map[string]any{
+			"session_id": l.Client.SessionID, "file_path": p, "kind": kind,
+			"transcript_path": l.Transcript,
+		}, l.ToolCtx.CWD)
+	}
 	l.ToolCtx.EndSession = endSession
 	l.ToolCtx.PlanApprove = func() bool {
 		return pr.ask(l, ks, "ExitPlanMode", "Approve the plan above?")
@@ -152,6 +166,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 
 	for {
 		printStatus(l)
+		tools.UserActive.Store(true)
 		res := ed.readLine(ks)
 		if res.quit {
 			fmt.Println()
@@ -191,6 +206,8 @@ func RunWithStore(l *agent.Loop, store Store) {
 		var queued []string
 		var draftBack []rune
 		runTurn := func(line string) {
+			tools.UserActive.Store(false)
+			defer tools.UserActive.Store(true)
 			printedDot = false
 			spin := newSpinner()
 			*spinRef = *spin
@@ -241,6 +258,11 @@ func RunWithStore(l *agent.Loop, store Store) {
 			close(respDone)
 			cancel()
 			fmt.Println()
+			// context-low warning like real CC
+			tok := l.UsageTotal.InputTokens + l.UsageTotal.CacheReadInputTokens + l.UsageTotal.CacheCreationInputTokens
+			if tok > 150000 {
+				fmt.Printf("%s  Context limit nearing · /compact or /clear to continue%s\n", yellow, reset)
+			}
 			if err != nil {
 				if ctx.Err() == context.Canceled {
 					fmt.Printf("%s⏺ Interrupted%s\n", yellow, reset)

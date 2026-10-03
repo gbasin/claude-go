@@ -31,31 +31,34 @@ type Events struct {
 
 // Loop runs the query/tool-use cycle.
 type Loop struct {
-	Client        *api.Client
-	Model         string
-	MaxTokens     int
-	Effort        string
-	Entrypoint    string // "cli" or "sdk-cli"
-	PermMode      string
-	CWD           string
-	AppendSysP    string
-	ExtraSystem   []string
-	PermRules     map[string][]string
-	AddDirs       []string
-	User          UserConfig
-	Messages      []api.Message
-	ToolCtx       *tools.Context
-	Events        Events
-	MaxTurns      int // 0 = unlimited
-	started       bool
-	UsageTotal    api.Usage
-	Transcript    string // path to JSONL transcript (for compact notes)
-	Hooks         hooks.Config
-	inCompact     bool
-	AllowedTools  []string // nil = all
-	Goal          string   // /goal stop-condition
-	Bare          bool     // --bare: skip auto-discovery
-	FallbackModel string   // --fallback-model retry chain
+	Client          *api.Client
+	Model           string
+	MaxTokens       int
+	Effort          string
+	Entrypoint      string // "cli" or "sdk-cli"
+	PermMode        string
+	CWD             string
+	AppendSysP      string
+	ExtraSystem     []string
+	PermRules       map[string][]string
+	AddDirs         []string
+	User            UserConfig
+	Messages        []api.Message
+	ToolCtx         *tools.Context
+	Events          Events
+	MaxTurns        int // 0 = unlimited
+	started         bool
+	UsageTotal      api.Usage
+	Transcript      string // path to JSONL transcript (for compact notes)
+	Hooks           hooks.Config
+	inCompact       bool
+	AllowedTools    []string // nil = all
+	Goal            string   // /goal stop-condition
+	Bare            bool     // --bare: skip auto-discovery
+	FallbackModel   string   // --fallback-model retry chain
+	ThinkingMode    string   // --thinking enabled|disabled
+	ThinkingDisplay string   // --thinking-display updates|omitted
+	ThinkingBudget  int      // --max-thinking-tokens
 }
 
 func NewLoop(client *api.Client, cwd string) *Loop {
@@ -91,7 +94,7 @@ func (l *Loop) buildRequest() *api.Request {
 		System:            SystemBlocks(l.Entrypoint, l.CWD, l.Model, l.AppendSysP, l.ExtraSystem),
 		Tools:             tools.Defs(),
 		Metadata:          Metadata(l.Client.SessionID, l.User),
-		Thinking:          ThinkingFor(l.Entrypoint),
+		Thinking:          l.thinkingConfig(),
 		ContextManagement: DefaultContextManagement(),
 		Safeguards:        Safeguards(l.PermMode, l.ToolCtx.CWD, l.PermRules),
 		OutputConfig:      json.RawMessage(fmt.Sprintf(`{"effort":%q}`, effort)),
@@ -300,6 +303,9 @@ func resultBlocks(r tools.Result) []api.ContentBlock {
 
 // thinkingDisplay: interactive sessions show thinking updates.
 func (l *Loop) thinkingDisplay() string {
+	if l.ThinkingDisplay == "updates" || l.ThinkingDisplay == "omitted" {
+		return l.ThinkingDisplay
+	}
 	if l.Entrypoint == "cli" {
 		return "updates"
 	}
@@ -363,4 +369,18 @@ func (l *Loop) runAdvisor(ctx context.Context) tools.Result {
 		return tools.Result{Content: "advisor returned no advice", IsError: true}
 	}
 	return tools.Result{Content: text}
+}
+
+func (l *Loop) thinkingConfig() json.RawMessage {
+	if l.ThinkingMode == "disabled" {
+		return nil
+	}
+	display := "omitted"
+	if l.Entrypoint == "cli" {
+		display = "updates"
+	}
+	if l.ThinkingDisplay == "updates" || l.ThinkingDisplay == "omitted" {
+		display = l.ThinkingDisplay
+	}
+	return json.RawMessage(`{"type":"adaptive","display":"` + display + `"}`)
 }

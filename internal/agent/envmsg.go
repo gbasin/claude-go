@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+
+	"claude-go/internal/plugins"
 	"strings"
 	"time"
 )
@@ -183,6 +185,11 @@ func skillRoots(cwd string) []string {
 	} {
 		machines, _ := filepath.Glob(filepath.Join(base, "*", "*", "skills"))
 		dirs = append(dirs, machines...)
+	}
+	for _, pd := range plugins.EnabledPluginDirs() {
+		if st, err := os.Stat(filepath.Join(pd, "skills")); err == nil && st.IsDir() {
+			dirs = append(dirs, filepath.Join(pd, "skills"))
+		}
 	}
 	return dirs
 }

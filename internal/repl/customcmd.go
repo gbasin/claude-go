@@ -2,7 +2,9 @@ package repl
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -12,6 +14,12 @@ type customCmd struct {
 	Body        string
 	ArgHint     string
 	AllowTools  string
+	Model       string
+	Aliases     []string
+	Hidden      bool
+	Context     string // "fork" → run in a subagent
+	Agent       string
+	WhenToUse   string
 }
 
 var customCommands map[string]customCmd
@@ -36,31 +44,51 @@ func loadCustomCommands(cwd string) {
 		dirs = append(dirs, matches...)
 	}
 	for _, dir := range dirs {
-		ents, err := os.ReadDir(dir)
-		if err != nil {
+		if _, err := os.Stat(dir); err != nil {
 			continue
 		}
-		for _, e := range ents {
-			if !strings.HasSuffix(e.Name(), ".md") {
-				continue
+		// recurse for subdirectory namespacing (dir:cmd like real CC)
+		filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() || !strings.HasSuffix(info.Name(), ".md") {
+				return nil
 			}
-			b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			b, err := os.ReadFile(p)
 			if err != nil {
-				continue
+				return nil
 			}
 			fm, body := splitMDFrontmatter(string(b))
 			name := fm["name"]
 			if name == "" {
-				name = strings.TrimSuffix(e.Name(), ".md")
+				rel, _ := filepath.Rel(dir, p)
+				name = strings.TrimSuffix(filepath.ToSlash(rel), ".md")
+				name = strings.ReplaceAll(name, "/", ":") // dir:cmd namespacing
 			}
-			customCommands[name] = customCmd{
+			var aliases []string
+			if a := fm["aliases"]; a != "" {
+				aliases = strings.Split(a, ",")
+				for i := range aliases {
+					aliases[i] = strings.TrimSpace(aliases[i])
+				}
+			}
+			cmd := customCmd{
 				Name:        name,
 				Description: fm["description"],
 				Body:        body,
 				ArgHint:     fm["argument-hint"],
 				AllowTools:  fm["allowed-tools"],
+				Model:       fm["model"],
+				Aliases:     aliases,
+				Hidden:      fm["hidden"] == "true" || fm["isHidden"] == "true",
+				Context:     fm["context"],
+				Agent:       fm["agent"],
+				WhenToUse:   fm["whenToUse"],
 			}
-		}
+			customCommands[name] = cmd
+			for _, a := range aliases {
+				customCommands[a] = cmd
+			}
+			return nil
+		})
 	}
 }
 
@@ -83,9 +111,21 @@ func splitMDFrontmatter(s string) (map[string]string, string) {
 	return fm, strings.TrimSpace(rest[end+4:])
 }
 
-// expandCustomCommand substitutes $ARGUMENTS/$1..$9 and returns the prompt.
+// expandCustomCommand substitutes $ARGUMENTS/$1..$9, ${CLAUDE_*} vars, and
+// !`cmd` shell interpolation, then returns the prompt.
 func expandCustomCommand(c customCmd, arg string) string {
 	out := c.Body
+	// ${CLAUDE_*} substitutions like the real command engine
+	cwd, _ := os.Getwd()
+	vars := map[string]string{
+		"${CLAUDE_PROJECT_DIR}":  cwd,
+		"${CLAUDE_COMMAND_NAME}": "/" + c.Name,
+	}
+	for k, v := range vars {
+		out = strings.ReplaceAll(out, k, v)
+	}
+	// !`cmd` interpolation: run the command, substitute stdout
+	out = interpolateBang(out, cwd)
 	if !strings.Contains(out, "$ARGUMENTS") && arg != "" {
 		out += "\n\n" + arg
 	}
@@ -98,4 +138,20 @@ func expandCustomCommand(c customCmd, arg string) string {
 		out = strings.ReplaceAll(out, "$"+string(rune('1'+i)), p)
 	}
 	return out
+}
+
+var bangRe = regexp.MustCompile("!`([^`]+)`")
+
+// interpolateBang runs !`command` shell snippets inside command bodies.
+func interpolateBang(s, cwd string) string {
+	return bangRe.ReplaceAllStringFunc(s, func(m string) string {
+		cmdStr := bangRe.FindStringSubmatch(m)[1]
+		cmd := exec.Command("sh", "-c", cmdStr)
+		cmd.Dir = cwd
+		out, err := cmd.Output()
+		if err != nil {
+			return m // keep literal on failure
+		}
+		return strings.TrimSpace(string(out))
+	})
 }
