@@ -14,6 +14,8 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -419,7 +421,7 @@ func TestConnectPassthrough(t *testing.T) {
 }
 
 func TestProxyEnv(t *testing.T) {
-	env := ProxyEnv(4321, 0, "/ca/cert.pem", "", "")
+	env := ProxyEnv(4321, 0, "/ca/cert.pem", "", "", "")
 	m := map[string]string{}
 	for _, e := range env {
 		k, v, _ := strings.Cut(e, "=")
@@ -454,7 +456,7 @@ func TestProxyEnv(t *testing.T) {
 
 // The full CBt() surface: socks port + auth token + command tag.
 func TestProxyEnvFull(t *testing.T) {
-	env := ProxyEnv(4321, 5678, "/ca/cert.pem", "tok-123", "echo hi")
+	env := ProxyEnv(4321, 5678, "/ca/cert.pem", "tok-123", "", "echo hi")
 	m := map[string]string{}
 	for _, e := range env {
 		k, v, _ := strings.Cut(e, "=")
@@ -902,5 +904,485 @@ func TestSocksUnauthenticatedRefusal(t *testing.T) {
 	socksGreeting(t, c2, []byte{0}, 0)
 	if rep := socksConnect(t, c2, "ok.test", 443); rep != 2 {
 		t.Fatalf("unauthenticated non-22 reply = %d, want 2", rep)
+	}
+}
+
+// ---------- port-qualified CIDRs (real's Zf/A0) ----------
+
+func TestPortQualifiedCIDR(t *testing.T) {
+	p := New(nil)
+	p.Resolve = func(context.Context, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("10.9.9.9")}, nil
+	}
+	p.SetRules(Rules{
+		AllowedDomains: []string{"10.0.0.0/8:443"},
+		DeniedDomains:  []string{"172.16.0.0/12:22"},
+	})
+	cases := []struct {
+		host string
+		port int
+		want bool
+	}{
+		{"10.1.2.3", 443, true},      // port-qualified allow hit
+		{"10.1.2.3", 80, false},      // right CIDR, wrong port
+		{"resolves.test", 443, true}, // hostname resolving into allowed CIDR:443
+		{"resolves.test", 22, false}, // same host, other port
+		{"172.16.5.5", 22, false},    // port-qualified deny hit
+		{"172.16.5.5", 443, false},   // wrong port → falls through to not-allowed
+	}
+	for _, c := range cases {
+		got, _ := p.decide(context.Background(), c.host, c.port)
+		if got != c.want {
+			t.Errorf("decide(%q,%d)=%v want %v", c.host, c.port, got, c.want)
+		}
+	}
+	// ":0" and oversized ports are not valid qualifiers — the whole string
+	// is treated as a pattern that matches nothing.
+	if pat, port := parseRule("example.com:0"); pat != "example.com:0" || port != 0 {
+		t.Errorf("parseRule(example.com:0) = %q,%d", pat, port)
+	}
+	if pat, port := parseRule("example.com:70000"); pat != "example.com:70000" || port != 0 {
+		t.Errorf("parseRule(example.com:70000) = %q,%d", pat, port)
+	}
+	if pat, port := parseRule("[::1]:8443"); pat != "::1" || port != 8443 {
+		t.Errorf("parseRule([::1]:8443) = %q,%d", pat, port)
+	}
+}
+
+// ---------- deniedDomainReasons ----------
+
+func TestDeniedDomainReasons(t *testing.T) {
+	p := New(nil)
+	p.Resolve = func(context.Context, string) ([]netip.Addr, error) { return nil, nil }
+	p.SetRules(Rules{
+		DeniedDomains: []string{"github.com:22", "exfil.io"},
+		DeniedDomainReasons: map[string]string{
+			"github.com:22": "SSH pushes to GitHub are blocked; use an https remote",
+		},
+	})
+	ok, reason := p.decide(context.Background(), "github.com", 22)
+	if ok || reason != "SSH pushes to GitHub are blocked; use an https remote" {
+		t.Errorf("custom deny reason not surfaced: ok=%v %q", ok, reason)
+	}
+	// key is the exact entry string — the port matters
+	ok, reason = p.decide(context.Background(), "github.com", 443)
+	if ok || reason != "host is not on the allow list" {
+		t.Errorf("github.com:443 should be unmatched, got %v %q", ok, reason)
+	}
+	// entry without a mapped reason → generic text
+	ok, reason = p.decide(context.Background(), "exfil.io", 443)
+	if ok || reason != "host is on the deny list" {
+		t.Errorf("generic deny reason expected, got %v %q", ok, reason)
+	}
+}
+
+// The custom reason must ride in the 403 body a denied client sees.
+func TestDeniedReasonInBody(t *testing.T) {
+	p := New(nil)
+	p.SetRules(Rules{
+		AllowedDomains:      []string{"ok.test"},
+		DeniedDomains:       []string{"blocked.test"},
+		DeniedDomainReasons: map[string]string{"blocked.test": "per policy: reach the mirror at mirror.corp"},
+	})
+	if err := p.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	conn, err := net.Dial("tcp", p.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "CONNECT blocked.test:443 HTTP/1.1\r\nHost: blocked.test:443\r\nProxy-Authorization: %s\r\n\r\n", proxyAuthHeader(p))
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "CONNECT"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 403 || !strings.Contains(string(body), "per policy: reach the mirror at mirror.corp") {
+		t.Fatalf("403 body should carry the mapped reason, got %d %q", resp.StatusCode, body)
+	}
+	// and it's recorded as a violation line
+	if vs := p.ViolationsFor(""); len(vs) == 0 {
+		t.Error("expected a recorded violation")
+	}
+}
+
+// ---------- strictAllowlist ----------
+
+func TestStrictAllowlistSkipsPrompt(t *testing.T) {
+	p := New(nil)
+	p.Resolve = func(context.Context, string) ([]netip.Addr, error) { return nil, nil }
+	p.SetRules(Rules{AllowedDomains: []string{"ok.test"}, StrictAllowlist: true})
+	asked := false
+	p.SetPromptAllow(func(string, int) bool { asked = true; return true })
+	if ok, _ := p.gate(context.Background(), "maybe.test", 443, ""); ok {
+		t.Error("strict allowlist should deny unmatched hosts")
+	}
+	if asked {
+		t.Error("strict allowlist must not invoke the ask callback")
+	}
+	// the session allowlist is also bypassed under strict
+	p.AllowHost("maybe.test")
+	if ok, _ := p.decide(context.Background(), "maybe.test", 443); ok {
+		t.Error("session allowlist should not rescue hosts under strictAllowlist")
+	}
+}
+
+// ---------- masked-credential substitution ----------
+
+func TestCredStoreSubstitute(t *testing.T) {
+	cs := NewCredStore()
+	sent := cs.Register("env:KEY", "sk-real-secret", []string{"api.example.test"})
+	if !strings.HasPrefix(sent, "fake_value_") {
+		t.Fatalf("sentinel should carry the fake_value_ prefix: %q", sent)
+	}
+	in := "Bearer " + sent
+	if got := cs.SubstituteString(in, "api.example.test"); got != "Bearer sk-real-secret" {
+		t.Errorf("injectable host should substitute: %q", got)
+	}
+	if got := cs.SubstituteString(in, "other.test"); got != in {
+		t.Errorf("non-injectable host must pass the sentinel: %q", got)
+	}
+	if real, ok := cs.LookupReal(sent); !ok || real != "sk-real-secret" {
+		t.Errorf("LookupReal = %q,%v", real, ok)
+	}
+}
+
+// MITM'd HTTPS request: the client sends the sentinel, upstream receives
+// the real credential. The response back to the client is untouched.
+func TestCredentialInjectionMITM(t *testing.T) {
+	var gotAuth string
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		io.WriteString(w, "ok")
+	}))
+	defer upstream.Close()
+
+	p := startProxy(t, Rules{AllowedDomains: []string{"api.example.test"}},
+		strings.TrimPrefix(upstream.URL, "https://"), true)
+	sent := p.Creds.Register("env:ANTHROPIC_API_KEY", "sk-real-secret",
+		[]string{"api.example.test"})
+
+	client := proxyClient(p, &tls.Config{RootCAs: p.CA.Pool()})
+	req, _ := http.NewRequest("GET", "https://api.example.test/", nil)
+	req.Header.Set("Authorization", "Bearer "+sent)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET through MITM proxy: %v", err)
+	}
+	resp.Body.Close()
+	if gotAuth != "Bearer sk-real-secret" {
+		t.Fatalf("upstream saw %q, want the real credential", gotAuth)
+	}
+	// a second request to a non-injectable host keeps the sentinel —
+	// but the host isn't on the allow list here, so exercise the store
+	// directly for the not-injectable case (covered by
+	// TestCredStoreSubstitute above).
+}
+
+// A sentinel in a request body is substituted end-to-end, with
+// Content-Length dropped when lengths differ (real's chunked fallback).
+func TestCredentialInjectionBody(t *testing.T) {
+	var gotBody []byte
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		io.WriteString(w, "ok")
+	}))
+	defer upstream.Close()
+
+	p := startProxy(t, Rules{AllowedDomains: []string{"api.example.test"}},
+		strings.TrimPrefix(upstream.URL, "https://"), true)
+	// injectHosts nil → not injectable anywhere; use the request host so the
+	// substitution fires (tools layer defaults injectHosts to allowedDomains).
+	sent := p.Creds.Register("env:TOK", "x", []string{"api.example.test"})
+
+	client := proxyClient(p, &tls.Config{RootCAs: p.CA.Pool()})
+	body := "token=" + sent + "&more=1"
+	resp, err := client.Post("https://api.example.test/submit", "text/plain",
+		strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	resp.Body.Close()
+	if string(gotBody) != "token=x&more=1" {
+		t.Fatalf("upstream body = %q", gotBody)
+	}
+}
+
+// Plain-HTTP substitution only happens under allowPlaintextInject.
+func TestCredentialInjectionPlaintextGate(t *testing.T) {
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		io.WriteString(w, "ok")
+	}))
+	defer upstream.Close()
+	addr := strings.TrimPrefix(upstream.URL, "http://")
+
+	p := startProxy(t, Rules{AllowedDomains: []string{"plain.example.test"}}, addr, false)
+	sent := p.Creds.Register("env:K", "sk-plain", []string{"plain.example.test"})
+
+	get := func() {
+		client := proxyClient(p, nil)
+		req, _ := http.NewRequest("GET", "http://plain.example.test/", nil)
+		req.Header.Set("Authorization", "Bearer "+sent)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("plain GET: %v", err)
+		}
+		resp.Body.Close()
+	}
+
+	get()
+	if gotAuth != "Bearer "+sent {
+		t.Fatalf("plaintext path must not substitute by default, got %q", gotAuth)
+	}
+	p.AllowPlaintextInject = true
+	get()
+	if gotAuth != "Bearer sk-plain" {
+		t.Fatalf("allowPlaintextInject should substitute, got %q", gotAuth)
+	}
+}
+
+// ---------- TMPDIR (real's CBt !o branch) ----------
+
+func TestProxyEnvTmpdir(t *testing.T) {
+	env := ProxyEnv(4321, 0, "", "", "/tmp/claude", "")
+	if len(env) < 2 || env[0] != "SANDBOX_RUNTIME=1" || env[1] != "TMPDIR=/tmp/claude" {
+		t.Fatalf("TMPDIR should follow SANDBOX_RUNTIME: %v", env)
+	}
+	// real emits TMPDIR even with no proxy ports (before the early return)
+	env = ProxyEnv(0, 0, "", "", "/tmp/claude", "")
+	found := false
+	for _, e := range env {
+		if e == "TMPDIR=/tmp/claude" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("TMPDIR missing from no-proxy env: %v", env)
+	}
+	env = ProxyEnv(4321, 0, "", "", "", "")
+	for _, e := range env {
+		if strings.HasPrefix(e, "TMPDIR=") {
+			t.Fatalf("TMPDIR should be omitted when tmpdir is granted: %v", env)
+		}
+	}
+}
+
+func TestEnvCreatesTmpDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "nested", "claude-tmp")
+	t.Setenv("CLAUDE_CODE_TMPDIR", dir)
+	p := New(nil)
+	if err := p.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	env := p.Env("ls")
+	found := false
+	for _, e := range env {
+		if e == "TMPDIR="+dir {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("env should carry TMPDIR=%s: %v", dir, env)
+	}
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		t.Fatalf("TmpDir should be pre-created: %v", err)
+	}
+}
+
+// ---------- violations ----------
+
+func TestViolationsTaggedToCommand(t *testing.T) {
+	p := New(nil)
+	p.Resolve = func(context.Context, string) ([]netip.Addr, error) { return nil, nil }
+	p.SetRules(Rules{AllowedDomains: []string{"ok.test"}})
+	// deny carries the command tag from the auth username
+	p.gate(context.Background(), "nope.test", 443, commandTag("curl nope.test"))
+	p.gate(context.Background(), "other.test", 443, commandTag("other cmd"))
+	if vs := p.ViolationsFor("curl nope.test"); len(vs) != 1 ||
+		!strings.Contains(vs[0], "deny network-outbound nope.test:443 (host is not on the allow list)") {
+		t.Fatalf("ViolationsFor = %v", vs)
+	}
+}
+
+// ---------- parent proxy chaining ----------
+
+// parentProxyServer is an httptest server that acts as an HTTP proxy:
+// CONNECT → dial target (remapped to upAddr) and splice; plain requests get
+// their absolute-form URI recorded and a canned response.
+type parentProxyServer struct {
+	*httptest.Server
+	connects  chan string
+	requested chan string
+}
+
+func startParentProxy(t *testing.T, upAddr string) *parentProxyServer {
+	pp := &parentProxyServer{
+		connects:  make(chan string, 8),
+		requested: make(chan string, 8),
+	}
+	pp.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodConnect {
+			pp.connects <- r.Host
+			target := r.Host
+			if upAddr != "" {
+				target = upAddr // remap like startProxy's DialContext
+			}
+			up, err := net.DialTimeout("tcp", target, 5*time.Second)
+			if err != nil {
+				http.Error(w, "upstream", http.StatusBadGateway)
+				return
+			}
+			hj := w.(http.Hijacker)
+			conn, rw, err := hj.Hijack()
+			if err != nil {
+				up.Close()
+				return
+			}
+			rw.WriteString("HTTP/1.1 200 Connection established\r\n\r\n")
+			rw.Flush()
+			// drain already-buffered tunnel bytes before live reads
+			go func() { io.Copy(up, io.MultiReader(rw.Reader, conn)); up.Close() }()
+			go func() { io.Copy(conn, up); conn.Close() }()
+			return
+		}
+		pp.requested <- r.URL.String() // absolute-form URI on the proxy path
+		io.WriteString(w, "via-parent")
+	}))
+	t.Cleanup(pp.Server.Close)
+	return pp
+}
+
+// CONNECT through our proxy lands as a CONNECT at the parent, which tunnels
+// it — the end-to-end TLS session still works.
+func TestParentProxyConnect(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, "parented")
+	}))
+	defer upstream.Close()
+	upAddr := strings.TrimPrefix(upstream.URL, "https://")
+	parent := startParentProxy(t, upAddr)
+
+	p := New(testCA(t)) // MITM on — exercises the parent's CONNECT tunnel
+	p.SetRules(Rules{
+		AllowedDomains: []string{"*"},
+		ParentProxy:    &ParentProxyConfig{HTTP: parent.URL, HTTPS: parent.URL},
+	})
+	p.UpstreamTLS = &tls.Config{InsecureSkipVerify: true}
+	if err := p.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	client := proxyClient(p, &tls.Config{RootCAs: p.CA.Pool()})
+	resp, err := client.Get("https://app.example.test/")
+	if err != nil {
+		t.Fatalf("GET via parent: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "parented" {
+		t.Fatalf("body = %q", body)
+	}
+	select {
+	case dest := <-parent.connects:
+		if dest != "app.example.test:443" {
+			t.Errorf("parent CONNECT authority = %q", dest)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("parent never saw a CONNECT")
+	}
+}
+
+// Plain-HTTP requests reach the parent in absolute-form; NO_PROXY entries
+// bypass it entirely.
+func TestParentProxyPlainAndBypass(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, "direct")
+	}))
+	defer upstream.Close()
+	upAddr := strings.TrimPrefix(upstream.URL, "http://")
+	parent := startParentProxy(t, "")
+
+	p := New(nil)
+	p.SetRules(Rules{
+		AllowedDomains: []string{"*"},
+		ParentProxy: &ParentProxyConfig{
+			HTTP:    parent.URL,
+			HTTPS:   parent.URL,
+			NoProxy: "bypass.test",
+		},
+	})
+	parentAddr := strings.TrimPrefix(parent.URL, "http://")
+	p.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if addr == parentAddr {
+			// the parent hop dials its real address — only *target* dials
+			// are remapped to the upstream test server
+			return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", addr)
+		}
+		return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", upAddr)
+	}
+	if err := p.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	client := proxyClient(p, nil)
+
+	resp, err := client.Get("http://app.example.test/path?q=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "via-parent" {
+		t.Fatalf("expected parent response, got %q", body)
+	}
+	select {
+	case u := <-parent.requested:
+		if u != "http://app.example.test/path?q=1" {
+			t.Errorf("parent saw URI %q — should be absolute-form", u)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("parent never saw the request")
+	}
+
+	// bypassed host goes straight to upstream
+	resp2, err := client.Get("http://bypass.test/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if string(body2) != "direct" {
+		t.Fatalf("bypassed host should reach upstream directly, got %q", body2)
+	}
+}
+
+// env fallback: HTTP_PROXY is picked up when settings carry no parentProxy.
+func TestParentProxyEnvFallback(t *testing.T) {
+	parent := startParentProxy(t, "")
+	t.Setenv("HTTP_PROXY", parent.URL)
+	pp := resolveParentProxy(nil)
+	if pp == nil || pp.HTTPURL == nil || pp.HTTPURL.Host != strings.TrimPrefix(parent.URL, "http://") {
+		t.Fatalf("env parent proxy not resolved: %+v", pp)
+	}
+	if !pp.bypass("localhost") || !pp.bypass("127.0.0.1") {
+		t.Error("localhost/loopback must bypass the parent")
+	}
+	if pp.bypass("example.com") {
+		t.Error("example.com should not bypass")
+	}
+	// settings override env
+	pp2 := resolveParentProxy(&ParentProxyConfig{HTTP: "http://corp:3128", NoProxy: "*.int"})
+	if pp2 == nil || pp2.HTTPURL == nil || pp2.HTTPURL.Host != "corp:3128" {
+		t.Fatalf("settings parent proxy not resolved: %+v", pp2)
+	}
+	if !pp2.bypass("db.int") || !pp2.bypass("int") {
+		t.Error("*.int noProxy should cover subdomains and apex")
 	}
 }

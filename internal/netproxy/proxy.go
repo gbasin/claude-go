@@ -22,36 +22,113 @@ import (
 // in AllowedDomains/DeniedDomains follow real CC's Dyn() semantics: exact
 // host, "*.suffix" (subdomains only, never the apex and never IP literals),
 // "*" for all, and an optional ":port" qualifier. Entries that parse as an IP
-// or CIDR are matched against the destination address instead (real's S6r).
+// or CIDR are matched against the destination address instead (real's S6r) —
+// with the same optional ":port" qualifier ("10.0.0.0/8:443" allows only that
+// port; omitting it covers all ports).
 // AllowAllLocal is a claude-go extension analogous to real's allowLocalBinding:
 // it whitelists loopback/private/link-local destinations.
 type Rules struct {
 	AllowedDomains []string
 	DeniedDomains  []string
-	AllowedCidrs   []string
-	AllowAllLocal  bool
+	// DeniedDomainReasons is real's sandbox.network.deniedDomainReasons:
+	// model-facing deny reasons keyed by the *exact* deniedDomains entry
+	// string ("github.com:22" → reason). A matching deny reports the mapped
+	// reason in the 403 body / violations line instead of the generic one.
+	DeniedDomainReasons map[string]string
+	AllowedCidrs        []string
+	// DeniedResolvedAddresses is real's network.deniedResolvedAddresses:
+	// IPs/CIDRs a permitted hostname must not resolve to.
+	DeniedResolvedAddresses []string
+	AllowAllLocal           bool
+	// StrictAllowlist is real's network.strictAllowlist: hosts not in
+	// allowedDomains are denied outright — the interactive-approval upgrade
+	// and the session allowlist do not apply.
+	StrictAllowlist bool
+	// ParentProxy routes non-bypassed upstream traffic through an outer
+	// proxy (real's network.parentProxy + HTTP(S)_PROXY env fallback).
+	ParentProxy *ParentProxyConfig
+	// IgnoreViolations suppresses <sandbox_violations> recording: map of
+	// command-substring → path-substrings, "*" matching all commands.
+	IgnoreViolations map[string][]string
+}
+
+// netRuleSet is real's Zf output: CIDR rules bucketed into an any-port set
+// plus a per-port set, so "10.0.0.0/8:443" only matches port 443 while
+// "10.0.0.0/8" matches all.
+type netRuleSet struct {
+	anyPort []netip.Prefix
+	byPort  map[int][]netip.Prefix
+}
+
+func (s *netRuleSet) add(p netip.Prefix, port int) {
+	if port == 0 {
+		s.anyPort = append(s.anyPort, p)
+		return
+	}
+	if s.byPort == nil {
+		s.byPort = map[int][]netip.Prefix{}
+	}
+	s.byPort[port] = append(s.byPort[port], p)
+}
+
+func (s *netRuleSet) empty() bool {
+	return len(s.anyPort) == 0 && len(s.byPort) == 0
+}
+
+// contains is real's A0: the any-port set matches every port; a port
+// qualifier matches only that destination port.
+func (s *netRuleSet) contains(ip netip.Addr, port int) bool {
+	for _, n := range s.anyPort {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	for _, n := range s.byPort[port] {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *netRuleSet) containsAny(ips []netip.Addr, port int) bool {
+	for _, ip := range ips {
+		if s.contains(ip, port) {
+			return true
+		}
+	}
+	return false
 }
 
 type compiledRules struct {
 	allow         []string
 	deny          []string
-	allowNet      []netip.Prefix
-	denyNet       []netip.Prefix
+	denyReasons   map[string]string
+	allowNet      netRuleSet
+	denyNet       netRuleSet
+	deniedResolve []netip.Prefix
 	allowAllLocal bool
+	strict        bool
+	parent        *ParentProxy
+	ignoreViol    map[string][]string
 }
 
 func compileRules(r Rules) compiledRules {
 	var c compiledRules
 	c.allowAllLocal = r.AllowAllLocal
-	split := func(entries []string, hosts *[]string, nets *[]netip.Prefix) {
+	c.denyReasons = r.DeniedDomainReasons
+	c.strict = r.StrictAllowlist
+	c.ignoreViol = r.IgnoreViolations
+	c.parent = resolveParentProxy(r.ParentProxy)
+	split := func(entries []string, hosts *[]string, nets *netRuleSet) {
 		for _, e := range entries {
-			h, _ := parseRule(e)
+			h, port := parseRule(e)
 			if p, err := netip.ParsePrefix(h); err == nil {
-				*nets = append(*nets, p.Masked())
+				nets.add(p.Masked(), port)
 				continue
 			}
 			if ip, err := netip.ParseAddr(h); err == nil {
-				*nets = append(*nets, netip.PrefixFrom(ip, ip.BitLen()))
+				nets.add(netip.PrefixFrom(ip, ip.BitLen()), port)
 				continue
 			}
 			*hosts = append(*hosts, e)
@@ -60,28 +137,61 @@ func compileRules(r Rules) compiledRules {
 	split(r.AllowedDomains, &c.allow, &c.allowNet)
 	split(r.DeniedDomains, &c.deny, &c.denyNet)
 	split(r.AllowedCidrs, &c.allow, &c.allowNet)
+	for _, e := range r.DeniedResolvedAddresses {
+		h, _ := parseRule(e)
+		if p, err := netip.ParsePrefix(h); err == nil {
+			c.deniedResolve = append(c.deniedResolve, p.Masked())
+		} else if ip, err := netip.ParseAddr(h); err == nil {
+			c.deniedResolve = append(c.deniedResolve, netip.PrefixFrom(ip, ip.BitLen()))
+		}
+	}
 	return c
 }
 
 // parseRule splits an optional ":port" qualifier off a rule, handling
 // "host", "host:port", "[v6]", "[v6]:port" and bare IPv6 (mod_0215.js l8).
+// A suffix that isn't a valid port (real's Q: 1-65535, no leading zero)
+// leaves the whole string as the pattern — "example.com:0" therefore never
+// matches a host, same as real.
 func parseRule(s string) (pattern string, port int) {
 	if strings.HasPrefix(s, "[") {
 		if i := strings.Index(s, "]"); i >= 0 {
-			pattern = s[1:i]
 			rest := s[i+1:]
-			if strings.HasPrefix(rest, ":") {
-				port, _ = strconv.Atoi(rest[1:])
+			if rest == "" {
+				return s[1:i], 0
 			}
-			return
+			if strings.HasPrefix(rest, ":") {
+				if n, ok := validRulePort(rest[1:]); ok {
+					return s[1:i], n
+				}
+			}
+			return s, 0
 		}
 	}
 	if i := strings.LastIndex(s, ":"); i > 0 && strings.Index(s, ":") == i {
-		if n, err := strconv.Atoi(s[i+1:]); err == nil {
+		if n, ok := validRulePort(s[i+1:]); ok {
 			return s[:i], n
 		}
 	}
 	return s, 0
+}
+
+// validRulePort is real's Q: /^[1-9][0-9]{0,4}$/ and ≤ 65535.
+func validRulePort(s string) (int, bool) {
+	if len(s) == 0 || len(s) > 5 || s[0] < '1' || s[0] > '9' {
+		return 0, false
+	}
+	n := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, false
+		}
+		n = n*10 + int(s[i]-'0')
+	}
+	if n > 65535 {
+		return 0, false
+	}
+	return n, true
 }
 
 // matchDomain implements hBe: "*" matches all; "*.x" matches strict
@@ -180,6 +290,15 @@ type Proxy struct {
 	// under SRT_DEBUG=1 (same gate as real's bt()).
 	Logf func(format string, args ...any)
 
+	// Creds is the masked-credential sentinel registry (real's `pc`,
+	// sandbox.credentials). The tools layer registers env/file secrets at
+	// wrap time; the proxy substitutes sentinel→real on matching egress.
+	Creds *CredStore
+	// AllowPlaintextInject is sandbox.credentials.allowPlaintextInject:
+	// sentinel substitution on the plain-HTTP path. Off by default —
+	// without TLS termination the upstream identity is unverified.
+	AllowPlaintextInject bool
+
 	// Injectable hooks (tests; production uses real dialing):
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 	Resolve     func(ctx context.Context, host string) ([]netip.Addr, error)
@@ -194,6 +313,8 @@ type Proxy struct {
 	rules        compiledRules
 	sessionAllow map[string]bool // hosts approved interactively / via /sandbox allow
 	promptMu     sync.Mutex      // serializes interactive prompts
+	violations   []netViolation  // deny log, capped at 100 (real's yp)
+	violTotal    int
 
 	ln      net.Listener
 	socksLn net.Listener
@@ -209,6 +330,7 @@ func New(ca *CA) *Proxy {
 		CA:           ca,
 		Intercept:    ca != nil,
 		AuthToken:    NewAuthToken(),
+		Creds:        NewCredStore(),
 		sessionAllow: map[string]bool{},
 	}
 	p.srv = &http.Server{Handler: p, ReadHeaderTimeout: 30 * time.Second}
@@ -306,18 +428,36 @@ func (p *Proxy) logf(format string, args ...any) {
 }
 
 // Env returns the sandboxed-command environment — real's CBt() wiring:
-// SANDBOX_RUNTIME, HTTP(S)_PROXY (both cases), ALL_PROXY/GRPC_PROXY pointing
-// at this proxy, NO_PROXY covering local ranges, every CA-bundle env var a
-// common toolchain honors pointed at the CA cert, plus the SOCKS-side
-// variables (GIT_SSH_COMMAND, FTP_PROXY, RSYNC_PROXY, DOCKER_*_PROXY,
-// CLOUDSDK_*). command becomes the base64 tag inside the auth username so
-// egress can be attributed to the command that made it.
+// SANDBOX_RUNTIME, TMPDIR (when the sandboxed tmpdir differs), HTTP(S)_PROXY
+// (both cases), ALL_PROXY/GRPC_PROXY pointing at this proxy, NO_PROXY
+// covering local ranges, every CA-bundle env var a common toolchain honors
+// pointed at the CA cert, plus the SOCKS-side variables (GIT_SSH_COMMAND,
+// FTP_PROXY, RSYNC_PROXY, DOCKER_*_PROXY, CLOUDSDK_*). command becomes the
+// base64 tag inside the auth username so egress can be attributed to the
+// command that made it.
 func (p *Proxy) Env(command string) []string {
 	caPath := ""
 	if p.CA != nil {
 		caPath = p.CA.CertPath
 	}
-	return ProxyEnv(p.Port(), p.SocksPort(), caPath, p.AuthToken, command)
+	// real emits TMPDIR when the sandbox has no writeConfig grant for the
+	// system tmpdir. Our seatbelt profile grants /tmp regardless, but we
+	// still point TMPDIR at a dedicated dir (pre-created here) so sandboxed
+	// temp files stay out of the shared /tmp — matching real's env output.
+	tmpDir := sandboxTmpDir()
+	os.MkdirAll(tmpDir, 0o700)
+	return ProxyEnv(p.Port(), p.SocksPort(), caPath, p.AuthToken, tmpDir, command)
+}
+
+// sandboxTmpDir is real's CLAUDE_CODE_TMPDIR || CLAUDE_TMPDIR || /tmp/claude.
+func sandboxTmpDir() string {
+	if v := os.Getenv("CLAUDE_CODE_TMPDIR"); v != "" {
+		return v
+	}
+	if v := os.Getenv("CLAUDE_TMPDIR"); v != "" {
+		return v
+	}
+	return "/tmp/claude"
 }
 
 // caBundleEnvKeys is real's `oe` list — every CA-file env var exported into
@@ -330,10 +470,11 @@ var caBundleEnvKeys = []string{
 }
 
 // ProxyEnv builds the env list — a faithful port of real's CBt(e,t,r,n,o,i):
-// e=httpPort, t=socksPort, r=caCertPath, n=authToken, i=command (tagged via
-// Soe). Real's TMPDIR push (o) is skipped: our seatbelt profile always
-// grants /tmp and /var/folders, so no redirect is needed.
-func ProxyEnv(httpPort, socksPort int, caCertPath, authToken, command string) []string {
+// e=httpPort, t=socksPort, r=caCertPath, n=authToken, o=tmpdirGranted,
+// i=command (tagged via Soe). tmpDir non-empty corresponds to real's `!o`
+// branch — TMPDIR is emitted (right after SANDBOX_RUNTIME, before the
+// no-proxy early return) when the sandbox can't write the system tmpdir.
+func ProxyEnv(httpPort, socksPort int, caCertPath, authToken, tmpDir, command string) []string {
 	user := authUser(commandTag(command))
 	// userinfo prefix "<user>:<token>@", present only when auth is on; the
 	// username is percent-encoded, the token goes in raw (base64url-safe).
@@ -342,6 +483,9 @@ func ProxyEnv(httpPort, socksPort int, caCertPath, authToken, command string) []
 		auth = encodeURIComponent(user) + ":" + authToken + "@"
 	}
 	env := []string{"SANDBOX_RUNTIME=1"}
+	if tmpDir != "" {
+		env = append(env, "TMPDIR="+tmpDir)
+	}
 	if caCertPath != "" {
 		for _, k := range caBundleEnvKeys {
 			env = append(env, k+"="+caCertPath)
@@ -444,17 +588,6 @@ func (p *Proxy) resolve(ctx context.Context, host string) []netip.Addr {
 	return out
 }
 
-func anyInNets(ips []netip.Addr, nets []netip.Prefix) bool {
-	for _, ip := range ips {
-		for _, n := range nets {
-			if n.Contains(ip) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func isLocalAddr(ip netip.Addr) bool {
 	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
 }
@@ -464,9 +597,11 @@ func isLocalAddr(ip netip.Addr) bool {
 // absent from the allowlist, never for explicit denies).
 const reasonNotAllowed = "host is not on the allow list"
 
-// decide applies the real SRT order (mod_0222.js): denied host rules, denied
-// addresses (literal + resolved), allowed host rules (+ the session
-// allowlist), allowed addresses, allowAllLocal — unmatched is denied.
+// decide applies the real SRT order (mod_0222.js GT + $u): denied host
+// rules (with deniedDomainReasons reasons), denied addresses (literal +
+// resolved), allowed host rules, strictAllowlist short-circuit, session
+// allowlist (≈ per-command rules), allowed addresses, deniedResolved
+// addresses, allowAllLocal — unmatched is denied.
 func (p *Proxy) decide(ctx context.Context, host string, port int) (bool, string) {
 	host = normalizeHost(host)
 	if host == "" || len(host) > 255 || strings.Contains(host, "%") {
@@ -475,17 +610,21 @@ func (p *Proxy) decide(ctx context.Context, host string, port int) (bool, string
 	r := p.rulesSnapshot()
 	for _, d := range r.deny {
 		if matchRule(host, port, d) {
-			return false, "host is on the deny list"
+			reason := "host is on the deny list"
+			if rr, ok := r.denyReasons[d]; ok && rr != "" {
+				reason = rr
+			}
+			return false, reason
 		}
 	}
 	// resolve when CIDR/local checks could apply
 	var ips []netip.Addr
 	if ip, err := netip.ParseAddr(host); err == nil {
 		ips = []netip.Addr{ip.Unmap()}
-	} else if len(r.allowNet)+len(r.denyNet) > 0 || r.allowAllLocal {
+	} else if !r.allowNet.empty() || !r.denyNet.empty() || len(r.deniedResolve) > 0 || r.allowAllLocal {
 		ips = p.resolve(ctx, host)
 	}
-	if len(r.denyNet) > 0 && anyInNets(ips, r.denyNet) {
+	if r.denyNet.containsAny(ips, port) {
 		return false, "address is on the deny list"
 	}
 	for _, a := range r.allow {
@@ -493,14 +632,27 @@ func (p *Proxy) decide(ctx context.Context, host string, port int) (bool, string
 			return true, ""
 		}
 	}
+	// real denies here before per-command/session rules when strictAllowlist
+	if r.strict {
+		return false, reasonNotAllowed
+	}
 	p.mu.RLock()
 	sessionOK := p.sessionAllow[host]
 	p.mu.RUnlock()
 	if sessionOK {
 		return true, ""
 	}
-	if len(r.allowNet) > 0 && anyInNets(ips, r.allowNet) {
+	if r.allowNet.containsAny(ips, port) {
 		return true, ""
+	}
+	if len(r.deniedResolve) > 0 {
+		for _, ip := range ips {
+			for _, n := range r.deniedResolve {
+				if n.Contains(ip) {
+					return false, "a listed address"
+				}
+			}
+		}
 	}
 	if r.allowAllLocal {
 		if host == "localhost" || strings.HasSuffix(host, ".localhost") {
@@ -531,20 +683,23 @@ func (p *Proxy) SetPromptAllow(f func(host string, port int) bool) {
 }
 
 // gate is the verdict used by every listener: decide, then — for the
-// unmatched-host deny class only — the interactive-approval upgrade
-// (real's non-strictAllowlist ask callback), then an audit line on denies
-// carrying the auth tag so egress is attributable to a command.
+// unmatched-host deny class only, and only when strictAllowlist is off —
+// the interactive-approval upgrade (real's ask callback), then a deny audit
+// line plus a <sandbox_violations> record carrying the auth tag so egress
+// is attributable to a command.
 func (p *Proxy) gate(ctx context.Context, host string, port int, tag string) (bool, string) {
 	ok, reason := p.decide(ctx, host, port)
 	p.mu.RLock()
 	prompt := p.promptAllowFn
+	strict := p.rules.strict
 	p.mu.RUnlock()
-	if !ok && reason == reasonNotAllowed && prompt != nil {
+	if !ok && reason == reasonNotAllowed && prompt != nil && !strict {
 		if p.promptAllow(normalizeHost(host), port, prompt) {
 			return true, ""
 		}
 	}
 	if !ok {
+		p.recordViolation(tag, fmt.Sprintf("deny network-outbound %s:%d (%s)", host, port, reason))
 		if cmd := decodeTagCommand(tag); cmd != "" {
 			p.logf("denied %s:%d: %s (command: %q)", host, port, reason, cmd)
 		} else {
@@ -552,6 +707,88 @@ func (p *Proxy) gate(ctx context.Context, host string, port int, tag string) (bo
 		}
 	}
 	return ok, reason
+}
+
+// ---------- sandbox_violations (real's fc/KT/wy) ----------
+
+// netViolation is one recorded deny: the rendered line plus the encoded
+// command tag it belongs to.
+type netViolation struct {
+	tag  string // base64 command tag from the proxy auth username
+	line string
+}
+
+// sanitizeViolationLine is real's nT: control chars → spaces, < > stripped.
+func sanitizeViolationLine(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || r == '<' || r == '>' ||
+			(r >= 0x80 && r <= 0x9f) || r == 0xad {
+			if r == '<' || r == '>' {
+				continue
+			}
+			r = ' '
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// violationIgnored is real's al: ignoreViolations maps command patterns to
+// substrings; "*" applies to every command.
+func violationIgnored(rules map[string][]string, line, command string) bool {
+	if len(rules) == 0 {
+		return false
+	}
+	for _, sub := range rules["*"] {
+		if sub != "" && strings.Contains(line, sub) {
+			return true
+		}
+	}
+	if command == "" {
+		return false
+	}
+	for pat, subs := range rules {
+		if pat == "*" || !strings.Contains(command, pat) {
+			continue
+		}
+		for _, sub := range subs {
+			if sub != "" && strings.Contains(line, sub) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (p *Proxy) recordViolation(tag, line string) {
+	line = sanitizeViolationLine(line)
+	r := p.rulesSnapshot()
+	if violationIgnored(r.ignoreViol, line, decodeTagCommand(tag)) {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.violations = append(p.violations, netViolation{tag: tag, line: line})
+	p.violTotal++
+	if len(p.violations) > 100 {
+		p.violations = p.violations[len(p.violations)-100:]
+	}
+}
+
+// ViolationsFor returns the recorded deny lines attributable to command —
+// real's getViolationsForCommand(command) matched by base64 tag.
+func (p *Proxy) ViolationsFor(command string) []string {
+	tag := commandTag(command)
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var out []string
+	for _, v := range p.violations {
+		if v.tag == tag {
+			out = append(out, v.line)
+		}
+	}
+	return out
 }
 
 // promptAllow serializes interactive prompts and re-checks the verdict
@@ -599,6 +836,10 @@ func denyHTTP(w http.ResponseWriter, host, reason string) {
 }
 
 // handleHTTP forwards a plain-HTTP proxy request (absolute-form URI).
+// Credential sentinels substitute here only when allowPlaintextInject is
+// set (real's mutateHeadersPlaintext) — without TLS termination the
+// upstream identity is unverified, so the credential would ride cleartext
+// to whatever answers.
 func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tag string) {
 	authority := r.URL.Host
 	if authority == "" {
@@ -618,6 +859,9 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tag string) {
 		out.URL.Host = authority
 	}
 	stripHopHeaders(out.Header)
+	if p.AllowPlaintextInject {
+		p.applyCredentialMutation(out, host)
+	}
 	resp, err := p.upstream().RoundTrip(out)
 	if err != nil {
 		var pe *policyError
@@ -693,9 +937,11 @@ func hijackSource(hj http.Hijacker) (net.Conn, io.Reader, error) {
 	return conn, io.MultiReader(rw.Reader, conn), nil
 }
 
-// tunnel is plain CONNECT passthrough: dial upstream, splice both ways.
+// tunnel is plain CONNECT passthrough: dial upstream (directly, or through
+// the parent proxy when one is configured and the host doesn't bypass it),
+// splice both ways.
 func (p *Proxy) tunnel(w http.ResponseWriter, hj http.Hijacker, host string, port int) {
-	upstream, err := p.dialChecked(context.Background(), "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	upstream, err := p.dialTarget(context.Background(), host, port)
 	if err != nil {
 		var pe *policyError
 		if errors.As(err, &pe) {
@@ -807,8 +1053,7 @@ func (p *Proxy) splice(a, b net.Conn) {
 // non-fatally — the MITM then offers http/1.1 only and upstream errors
 // surface per-request as before.
 func (p *Proxy) probeUpstreamTLS(host string, port int) (*tls.Conn, bool, error) {
-	raw, err := p.dialChecked(context.Background(), "tcp",
-		net.JoinHostPort(host, strconv.Itoa(port)))
+	raw, err := p.dialTarget(context.Background(), host, port)
 	if err != nil {
 		return nil, false, err
 	}
@@ -860,6 +1105,9 @@ func (p *Proxy) serveTLSConn(tc *tls.Conn, tag string) {
 		req.URL.Host = authority
 		req.RequestURI = ""
 		stripHopHeaders(req.Header)
+		// TLS-terminated path: sentinel→real substitution is always on
+		// (real's mutateHeaders + getBodySubstitutions).
+		p.applyCredentialMutation(req, host)
 		resp, err := p.upstream().RoundTrip(req)
 		if err != nil {
 			var pe *policyError
@@ -881,6 +1129,49 @@ func (p *Proxy) serveTLSConn(tc *tls.Conn, tag string) {
 			return
 		}
 	}
+}
+
+// applyCredentialMutation rewrites req in place, substituting registered
+// sentinels for their real values in headers (real's mutateHeaders =
+// pc.substituteInHeaders) and the request body (real's Qf/k3 transform).
+//
+// Body rules per real's Qf: GET/HEAD/OPTIONS without body headers skip;
+// Content-Encoding bodies skip with a warning (the sentinel would reach the
+// upstream as the fake value); when a sentinel differs in length from its
+// real value, Content-Length is dropped so the transport re-chunks.
+func (p *Proxy) applyCredentialMutation(req *http.Request, host string) {
+	if p.Creds == nil || p.Creds.Size() == 0 {
+		return
+	}
+	p.Creds.SubstituteHeaders(req.Header, host)
+	hasBodyHdr := req.ContentLength > 0 || req.Header.Get("Content-Length") != "" ||
+		req.Header.Get("Transfer-Encoding") != "" || len(req.TransferEncoding) > 0
+	switch req.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		if !hasBodyHdr {
+			return
+		}
+	}
+	if req.Body == nil || req.Body == http.NoBody {
+		return
+	}
+	subs := p.Creds.SentinelsForHost(host)
+	if len(subs) == 0 {
+		return
+	}
+	if enc := req.Header.Get("Content-Encoding"); enc != "" {
+		p.logf("[body-substitution] %s: request body has Content-Encoding %q; masked-credential substitution skipped — a sentinel in this body reaches the upstream as the fake value", host, enc)
+		return
+	}
+	if !allSameLen(subs) {
+		req.Header.Del("Content-Length")
+		req.ContentLength = -1
+	}
+	body, _ := bodySubstitution(req.Body, subs)
+	req.Body = struct {
+		io.Reader
+		io.Closer
+	}{body, req.Body}
 }
 
 func writeRawResponse(w io.Writer, code int, body, proxyErr string, close bool) {
@@ -918,11 +1209,16 @@ func (p *Proxy) dial(ctx context.Context, network, addr string) (net.Conn, error
 // dialChecked dials, then re-verifies the connected remote IP against the
 // CIDR/local address rules — real closes the same DNS-rebinding window by
 // filtering resolved addresses before dial; the post-dial check covers the
-// TOCTOU gap between decide()'s resolution and the dialer's own.
+// TOCTOU gap between decide()'s resolution and the dialer's own. Dials to a
+// configured parent proxy's own endpoint are exempt (real skips
+// resolved-address rules for parent-routed hops).
 func (p *Proxy) dialChecked(ctx context.Context, network, addr string) (net.Conn, error) {
 	c, err := p.dial(ctx, network, addr)
 	if err != nil {
 		return nil, err
+	}
+	if p.isParentDial(addr) {
+		return c, nil
 	}
 	if err := p.verifyRemote(c); err != nil {
 		c.Close()
@@ -933,25 +1229,35 @@ func (p *Proxy) dialChecked(ctx context.Context, network, addr string) (net.Conn
 
 // verifyRemote applies the address rules to a connected socket's remote IP:
 // deny CIDRs deny; an allow CIDR match passes; with allowAllLocal the remote
-// must be loopback/private/link-local. Non-IP remote addresses can't be
-// verified and pass.
+// must be loopback/private/link-local. Port-qualified CIDRs compare against
+// the connected port. Non-IP remote addresses can't be verified and pass.
 func (p *Proxy) verifyRemote(c net.Conn) error {
 	var ip netip.Addr
+	var port int
 	if ta, ok := c.RemoteAddr().(*net.TCPAddr); ok {
 		ip, _ = netip.AddrFromSlice(ta.IP)
-	} else if h, _, err := net.SplitHostPort(c.RemoteAddr().String()); err == nil {
+		port = ta.Port
+	} else if h, ps, err := net.SplitHostPort(c.RemoteAddr().String()); err == nil {
 		ip, _ = netip.ParseAddr(h)
+		port, _ = strconv.Atoi(ps)
 	}
 	if !ip.IsValid() {
 		return nil
 	}
 	ip = ip.Unmap()
 	r := p.rulesSnapshot()
-	if len(r.denyNet) > 0 && anyInNets([]netip.Addr{ip}, r.denyNet) {
+	if r.denyNet.contains(ip, port) {
 		return &policyError{"upstream address is on the deny list"}
 	}
-	if len(r.allowNet) > 0 && anyInNets([]netip.Addr{ip}, r.allowNet) {
+	if r.allowNet.contains(ip, port) {
 		return nil
+	}
+	// deniedResolvedAddresses applies even to allow-listed hosts — real's
+	// resolved-address check runs at dial time, past the host allow match.
+	for _, n := range r.deniedResolve {
+		if n.Contains(ip) {
+			return &policyError{"upstream address is on the deny list"}
+		}
 	}
 	if r.allowAllLocal && !isLocalAddr(ip) {
 		return &policyError{"upstream address is not a local address"}
@@ -970,6 +1276,10 @@ func (p *Proxy) upstream() *http.Transport {
 	}
 	if p.tr == nil {
 		p.tr = &http.Transport{
+			// nil-returning proxy func unless a parent proxy is configured
+			// and the destination doesn't bypass it — the transport then
+			// emits absolute-form http requests / CONNECT+TLS itself.
+			Proxy:                 p.transportProxyFunc(),
 			DialContext:           p.dialChecked,
 			TLSClientConfig:       p.UpstreamTLS,
 			TLSHandshakeTimeout:   15 * time.Second,

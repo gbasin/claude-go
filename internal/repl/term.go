@@ -3,6 +3,7 @@ package repl
 
 import (
 	"bytes"
+	"claude-go/internal/auth"
 	"claude-go/internal/config"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 
 	"encoding/json"
 
+	"claude-go/internal/voice"
 	"golang.org/x/term"
 )
 
@@ -67,6 +69,10 @@ type editor struct {
 	imgN           int               // pasted-image counter
 	zoneEdit       bool              // input box lives in the compositor live zone
 	boxAll         []string          // last-rendered full box (for the scrollback echo)
+	voice          *voiceUI          // voice session glue (internal/voice)
+	voiceBase      string            // api.BaseURL for the voice_stream ws
+	voiceCreds     *auth.Credentials // OAuth creds for Bearer auth
+	voiceCWD       string            // cwd for settings + keyterms
 }
 
 func newEditor() *editor {
@@ -85,7 +91,7 @@ func (e *editor) boxFrame() (box []string, curRow, curCol int) {
 		e.boxAll = []string{"╭─╮", ln, "╰─╯"}
 		return e.boxAll, 1, visWidth(ln)
 	}
-	lines := strings.Split(string(e.buf), "\n")
+	lines := strings.Split(e.renderedBuf(), "\n")
 	pw := visWidth(e.prompt)
 	all := make([]string, 0, len(lines)+2)
 	all = append(all, "╭─╮")
@@ -95,6 +101,10 @@ func (e *editor) boxFrame() (box []string, curRow, curCol int) {
 		} else {
 			all = append(all, "│"+strings.Repeat(" ", pw)+ln)
 		}
+	}
+	if hint := e.voiceHint(); hint != "" {
+		// voice indicator row (real renders it inside the composer area)
+		all = append(all, "│"+strings.Repeat(" ", pw)+hint)
 	}
 	all = append(all, "╰─╯")
 	e.boxAll = all
@@ -128,7 +138,11 @@ func (e *editor) redraw() {
 	}
 	var b strings.Builder
 	b.WriteString("\r\x1b[J") // col0, clear to screen bottom
-	b.WriteString("│" + e.prompt + string(e.buf))
+	hint := e.voiceHint()
+	b.WriteString("│" + e.prompt + e.renderedBuf())
+	if hint != "" {
+		b.WriteString("\r\n  " + hint)
+	}
 	// reposition cursor to e.pos
 	before := string(e.buf[:e.pos])
 	totalNL := strings.Count(string(e.buf), "\n")
@@ -137,7 +151,10 @@ func (e *editor) redraw() {
 	if nlBefore == 0 {
 		col += len(e.prompt) + 1 // +1 for left border
 	}
-	if up := totalNL - nlBefore; up > 0 {
+	if up := totalNL - nlBefore; up > 0 || hint != "" {
+		if hint != "" {
+			up++ // voice hint occupies a row below the buffer
+		}
 		fmt.Fprintf(&b, "\x1b[%dA", up)
 	}
 	b.WriteString("\r")
@@ -226,7 +243,28 @@ func (e *editor) readLine(ks *keySource) readResult {
 	} else {
 		os.Stdout.WriteString("╭─╮\n│" + e.prompt)
 	}
-	for k := range ks.ch {
+	for {
+		var k key
+		var ev *voiceEvent
+		var ve voiceEvent
+		select {
+		case kk, ok := <-ks.ch:
+			if !ok {
+				return readResult{quit: true}
+			}
+			k = kk
+		case v2 := <-e.voiceChan():
+			ve = v2
+			ev = &ve
+		}
+		if ev != nil {
+			// voice controller event (interim/final/error/state) — may
+			// submit the line on autoSubmit
+			if r := e.voiceApply(*ev); r != nil {
+				return *r
+			}
+			continue
+		}
 		if e.vim && e.mode == "normal" {
 			if r := e.vimKey(k); r != nil {
 				return *r
@@ -237,7 +275,6 @@ func (e *editor) readLine(ks *keySource) readResult {
 			return *r
 		}
 	}
-	return readResult{quit: true}
 }
 
 func (e *editor) insertKey(k key) *readResult {
@@ -247,6 +284,36 @@ func (e *editor) insertKey(k key) *readResult {
 	}
 	if e.histSearch {
 		return e.searchKey(k)
+	}
+	// voice session takes esc/ctrl+c and its bound push-to-talk key first
+	// (WMe handler in mod_0747 runs before composer keys)
+	if e.voice != nil && e.voice.ctl != nil {
+		st := e.voice.ctl.CurrentState()
+		if st != voice.StateIdle {
+			// escape or ctrl+c (no shift/meta) — real's WMe handler
+			if (k.b == 0x1b && k.seq == "" && k.mod == 0) ||
+				(c == 3 && k.mod&(modShift|modAlt|modCmd) == 0) {
+				e.voiceCancel()
+				return nil
+			}
+		}
+	}
+	// voice:pushToTalk bound to a printable char (default: space) — real
+	// fires only with input empty (tap) or while a session is live
+	if k.b == ' ' && k.mod == 0 && k.seq == "" &&
+		e.kb["space"] == "voice:pushToTalk" {
+		st := voice.StateIdle
+		if e.voice != nil && e.voice.ctl != nil {
+			st = e.voice.ctl.CurrentState()
+		}
+		switch {
+		case st == voice.StateRecording:
+			e.voiceToggle() // tap again → finish
+			return nil
+		case st == voice.StateIdle && len(e.buf) == 0 && e.voiceEnabled():
+			e.voiceToggle()
+			return nil
+		}
 	}
 	// keybinding layer (defaults + ~/.claude/keybindings.json), incl. chords
 	if res, done := e.bindingKey(k); done {

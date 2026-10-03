@@ -52,6 +52,9 @@ func RunWithStore(l *agent.Loop, store Store) {
 	currentStore = store
 	l.Entrypoint = "cli"
 	ed := newEditor()
+	ed.voiceBase = l.Client.BaseURL
+	ed.voiceCreds = l.Client.Creds
+	ed.voiceCWD = l.ToolCtx.CWD
 	ed.vim = vimEnabled()
 	if ed.vim {
 		ed.insertRemaps = vimInsertRemaps()
@@ -235,6 +238,9 @@ func RunWithStore(l *agent.Loop, store Store) {
 		tools.UserActive.Store(true)
 		res := ed.readLine(ks)
 		if res.quit || wantQuit.Load() {
+			if ed.voice != nil && ed.voice.ctl != nil {
+				ed.voice.ctl.Cancel() // drop any live capture+stream on exit
+			}
 			l.SessionEndReason = "prompt_input_exit"
 			fmt.Println()
 			fireSessionEndHook(l)
@@ -323,12 +329,15 @@ func RunWithStore(l *agent.Loop, store Store) {
 								}
 								queuedPending.Add(1)
 								queueBuf = nil
+								compQueueDraft("")
 								fmt.Fprintf(os.Stderr, "\n  %s➤ queued%s\n", dim, reset)
 							}
 						} else if k.r != 0 {
 							queueBuf = append(queueBuf, k.r)
+							compQueueDraft(string(queueBuf))
 						} else if k.b == 0x7f && len(queueBuf) > 0 {
 							queueBuf = queueBuf[:len(queueBuf)-1]
+							compQueueDraft(string(queueBuf))
 						}
 					}
 				}
@@ -822,7 +831,7 @@ var slashCommands = []string{
 	"keybindings", "login", "logout", "mcp", "memory", "model", "output-style",
 	"permissions", "plugin", "privacy-settings", "quit", "release-notes",
 	"resume", "review", "status", "statusline", "tasks", "terminal-setup",
-	"theme", "todos", "usage", "vim",
+	"theme", "todos", "usage", "vim", "voice",
 }
 
 func termWidth() (int, error) {
@@ -1230,7 +1239,7 @@ func SlashCommandNames() []string {
 }
 
 func builtinSlashCommands() []string {
-	return []string{"add-dir", "agents", "alias", "allowed-tools", "auto", "batch", "branch", "btw", "bug", "checkpoint", "checkup", "clear", "code-review", "color", "compact", "config", "context", "cost", "debug", "diff", "doctor", "effort", "exit", "export", "fast", "feedback", "fewer-permission-prompts", "files", "fork", "goal", "help", "high", "hooks", "ide", "import", "init", "insights", "keybindings", "keybindings-help", "login", "logout", "loop", "low", "max", "mcp", "medium", "memory", "memory-types", "model", "new", "output-style", "permissions", "plan", "plugin", "pr", "privacy-settings", "proactive", "quit", "release-notes", "rename", "reset", "resume", "review", "rewind", "run", "sandbox", "security-review", "settings", "skills", "stats", "status", "statusline", "subtask", "tasks", "terminal-setup", "theme", "todos", "undo", "update-config", "usage", "vim", "xhigh"}
+	return []string{"add-dir", "agents", "alias", "allowed-tools", "auto", "batch", "branch", "btw", "bug", "checkpoint", "checkup", "clear", "code-review", "color", "compact", "config", "context", "cost", "debug", "diff", "doctor", "effort", "exit", "export", "fast", "feedback", "fewer-permission-prompts", "files", "fork", "goal", "help", "high", "hooks", "ide", "import", "init", "insights", "keybindings", "keybindings-help", "login", "logout", "loop", "low", "max", "mcp", "medium", "memory", "memory-types", "model", "new", "output-style", "permissions", "plan", "plugin", "pr", "privacy-settings", "proactive", "quit", "release-notes", "rename", "reset", "resume", "review", "rewind", "run", "sandbox", "security-review", "settings", "skills", "stats", "status", "statusline", "subtask", "tasks", "terminal-setup", "theme", "todos", "undo", "update-config", "usage", "vim", "voice", "xhigh"}
 }
 
 // currentStore is set by RunWithStore so slash commands can write records.

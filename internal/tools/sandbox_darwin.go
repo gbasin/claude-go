@@ -87,8 +87,10 @@ func sbRule(b *strings.Builder, op string, paths []string) {
 // on loopback: all egress is denied except traffic to that port (real's
 // seatbelt rules emit exactly this pair), and the CA cert gets a read grant
 // — it lives under the deny-read $HOME but sandboxed TLS clients must read
-// it via SSL_CERT_FILE & friends.
-func buildSeatbeltProfile(s *SandboxSettings, cwd string, px *netproxy.Proxy) string {
+// it via SSL_CERT_FILE & friends. cred carries the credential-mask plan:
+// on macOS every masked file degrades to a read deny (real's note: "file
+// mask degrades to deny on macOS until the interposer lands").
+func buildSeatbeltProfile(s *SandboxSettings, cwd string, px *netproxy.Proxy, cred *credPlan) string {
 	proxyPort := 0
 	socksPort := 0
 	caPath := ""
@@ -135,11 +137,14 @@ func buildSeatbeltProfile(s *SandboxSettings, cwd string, px *netproxy.Proxy) st
 		}
 		writable = append(writable, expandSandboxPaths(s.Filesystem.AllowWrite, cwd)...)
 
-		// deny-read: mandatory list + /dev + user denyRead + credential files
+		// deny-read: mandatory list + /dev + user denyRead + credential
+		// paths (mode deny, plus mode mask degraded to deny on macOS).
 		denyRead := append([]string{}, seatbeltDenyRead...)
 		denyRead = append(denyRead, "/dev")
 		denyRead = append(denyRead, expandSandboxPaths(s.Filesystem.DenyRead, cwd)...)
-		denyRead = append(denyRead, expandSandboxPaths(s.Credentials.Files, cwd)...)
+		if cred != nil {
+			denyRead = append(denyRead, cred.denyRead...)
+		}
 		if home != "" {
 			denyRead = append(denyRead, home)
 		}
@@ -195,7 +200,9 @@ func buildSeatbeltProfile(s *SandboxSettings, cwd string, px *netproxy.Proxy) st
 		sbRule(&b, "deny file-write*", []string{"/"})
 		sbRule(&b, "allow file-write*", withReal(writable))
 		denyWrite := expandSandboxPaths(s.Filesystem.DenyWrite, cwd)
-		denyWrite = append(denyWrite, expandSandboxPaths(s.Credentials.Files, cwd)...)
+		if cred != nil {
+			denyWrite = append(denyWrite, cred.denyRead...)
+		}
 		sbRule(&b, "deny file-write*", withReal(denyWrite))
 
 		// devices: read+write (literal for nodes, subpath for /dev/fd).
@@ -261,12 +268,12 @@ func emitUnixSocketRules(b *strings.Builder, n *SandboxNetwork) {
 // OS temp dir and returns the sandbox-exec command line. The whole script
 // (command + cwd sentinel) runs inside the sandboxed shell so `cd` tracking
 // still works.
-func platformSandboxWrap(script string, s *SandboxSettings, cwd string, px *netproxy.Proxy) (string, error) {
+func platformSandboxWrap(script string, s *SandboxSettings, cwd string, px *netproxy.Proxy, cred *credPlan) (string, error) {
 	se, err := seatbeltPath()
 	if err != nil {
 		return "", fmt.Errorf("sandbox-exec not found")
 	}
-	profile := buildSeatbeltProfile(s, cwd, px)
+	profile := buildSeatbeltProfile(s, cwd, px, cred)
 	dir := filepath.Join(os.TempDir(), "claude-go-sandbox")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
