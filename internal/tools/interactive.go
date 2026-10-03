@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"claude-go/internal/config"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -417,10 +420,33 @@ func execAskUser(c *Context, raw json.RawMessage) Result {
 // points it at a scratchpad plan file and ExitPlanMode reads it back).
 // Real CC tracks this on the session (Context.PlanFile equivalent); this
 // build derives it deterministically from the session id.
+var planNameOnce sync.Once
+var planName string
+
+// planPath → ~/.claude/plans/<adj>-<adj>-<animal>.md — real CC persists plan
+// files there (survive reboot; ExitPlanMode reads it back).
 func planPath(c *Context) string {
-	dir := filepath.Join(os.TempDir(), "claude-go", c.Session)
+	planNameOnce.Do(func() {
+		planName = whimsicalPlanName(c.Session)
+	})
+	dir := filepath.Join(config.ClaudeDir(), "plans")
 	os.MkdirAll(dir, 0o755)
-	return filepath.Join(dir, "plan.md")
+	return filepath.Join(dir, planName+".md")
+}
+
+var planAdjs = []string{"amber", "brisk", "calm", "crisp", "dusty", "ember",
+	"fern", "gentle", "harbor", "ivory", "jade", "keen", "lunar", "misty",
+	"noble", "onyx", "pale", "quiet", "rustic", "sage", "tidal", "umber",
+	"velvet", "willow", "zephyr"}
+var planAnimals = []string{"badger", "capybara", "dolphin", "egret", "fox",
+	"gecko", "heron", "ibex", "jaguar", "koala", "lemur", "marmot",
+	"newt", "otter", "panda", "quail", "raven", "seal", "tapir", "urchin",
+	"viper", "walrus", "yak", "zebu"}
+
+func whimsicalPlanName(seed string) string {
+	h := sha256.Sum256([]byte(seed + "plan"))
+	pick := func(pool []string, off int) string { return pool[int(h[off])%len(pool)] }
+	return pick(planAdjs, 0) + "-" + pick(planAdjs, 1) + "-" + pick(planAnimals, 2)
 }
 
 func execEnterPlan(c *Context, raw json.RawMessage) Result {
@@ -484,14 +510,13 @@ func execEndConversation(c *Context, raw json.RawMessage) Result {
 //
 // Real CC queues a local draft for explicit user approval — it never sends
 // anything and produces no UI. claude-go keeps the same contract: the draft
-// lands in ~/.claude-go/feedback/pending/ for the user to inspect/submit,
+// lands in ~/.claude/feedback/pending/ for the user to inspect/submit,
 // and the result announces nothing beyond the recording.
 
 func execSendFeedback(c *Context, raw json.RawMessage) Result {
 	var in map[string]any
 	json.Unmarshal(raw, &in)
-	home, _ := os.UserHomeDir()
-	dir := filepath.Join(home, ".claude-go", "feedback", "pending")
+	dir := filepath.Join(config.ClaudeDir(), "feedback", "pending")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return Result{Content: "Feedback recorded locally"}
 	}

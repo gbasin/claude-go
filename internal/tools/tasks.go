@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -348,35 +349,57 @@ func TodosText() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// persistTasks writes the session task list so teammates/subagents share it.
+// persistTasks writes one <id>.json per task + a .highwatermark sequence file —
+// the real ~/.claude/tasks/<sid>/ layout. tasks.json is kept as a merged
+// index for older readers.
 func persistTasks(c *Context) {
-	// real stores session task lists under the config dir
 	dir := filepath.Join(config.ClaudeDir(), "tasks", c.Session)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return
 	}
+	var maxID int
+	for _, t := range tasksList {
+		b, _ := json.MarshalIndent(t, "", "  ")
+		os.WriteFile(filepath.Join(dir, t.ID+".json"), b, 0o644)
+		if n, _ := strconv.Atoi(t.ID); n > maxID {
+			maxID = n
+		}
+	}
+	os.WriteFile(filepath.Join(dir, ".highwatermark"), []byte(strconv.Itoa(maxID)), 0o644)
 	b, _ := json.Marshal(tasksList)
 	os.WriteFile(filepath.Join(dir, "tasks.json"), b, 0o644)
 }
 
-// LoadTasks restores the session task list (session resume).
+// LoadTasks restores the session task list (session resume). Reads the
+// per-task files first (real layout), then the merged tasks.json index.
 func LoadTasks(c *Context) {
-	p := filepath.Join(config.ClaudeDir(), "tasks", c.Session, "tasks.json")
-	b, err := os.ReadFile(p)
-	if err != nil {
-		return
+	dir := filepath.Join(config.ClaudeDir(), "tasks", c.Session)
+	ents, _ := filepath.Glob(filepath.Join(dir, "*.json"))
+	var list []SessionTask
+	for _, p := range ents {
+		if filepath.Base(p) == "tasks.json" {
+			continue
+		}
+		var t SessionTask
+		if b, err := os.ReadFile(p); err == nil && json.Unmarshal(b, &t) == nil && t.ID != "" {
+			list = append(list, t)
+		}
+	}
+	if len(list) == 0 {
+		b, err := os.ReadFile(filepath.Join(dir, "tasks.json"))
+		if err != nil {
+			return
+		}
+		json.Unmarshal(b, &list)
 	}
 	tasksMu.Lock()
 	defer tasksMu.Unlock()
-	var list []SessionTask
-	if json.Unmarshal(b, &list) == nil {
-		tasksList = list
-		for _, t := range list {
-			var n int
-			fmt.Sscanf(t.ID, "%d", &n)
-			if n > taskSeq {
-				taskSeq = n
-			}
+	tasksList = list
+	for _, t := range list {
+		var n int
+		fmt.Sscanf(t.ID, "%d", &n)
+		if n > taskSeq {
+			taskSeq = n
 		}
 	}
 }

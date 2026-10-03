@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"claude-go/internal/config"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -496,12 +497,14 @@ type sessionEntry struct {
 	TS        time.Time `json:"ts"`
 }
 
+// Real CC keeps the live-session registry at ~/.claude/sessions/<pid>.json and
+// the project mailbox under <cwd>/.claude/mailbox/ — we follow suit so real
+// sessions can see ours.
 func goHome() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude-go")
+	return config.ClaudeDir()
 }
 
-func registryPath() string { return filepath.Join(goHome(), "agent-registry.json") }
+func registryPath() string { return filepath.Join(goHome(), "sessions") }
 
 func withRegistryLock(fn func() error) error {
 	os.MkdirAll(goHome(), 0o755)
@@ -523,77 +526,66 @@ func withRegistryLock(fn func() error) error {
 	return fn()
 }
 
+// sessions dir holds one <pid>.json per live session (real layout); reads
+// glob the dir; also accepts our older single-file agent-registry.json.
 func readRegistry() []sessionEntry {
-	b, err := os.ReadFile(registryPath())
-	if err != nil {
-		return nil
-	}
 	var out []sessionEntry
-	json.Unmarshal(b, &out)
+	if ents, err := filepath.Glob(filepath.Join(registryPath(), "*.json")); err == nil {
+		for _, p := range ents {
+			var e sessionEntry
+			if b, err := os.ReadFile(p); err == nil && json.Unmarshal(b, &e) == nil && e.SessionID != "" {
+				out = append(out, e)
+			}
+		}
+	}
+	if b, err := os.ReadFile(filepath.Join(goHome(), "agent-registry.json")); err == nil {
+		var legacy []sessionEntry
+		json.Unmarshal(b, &legacy)
+		out = append(out, legacy...)
+	}
 	return out
 }
 
-func writeRegistry(entries []sessionEntry) error {
-	b, err := json.MarshalIndent(entries, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(registryPath(), b, 0o644)
+func sessionFile(pid int) string {
+	return filepath.Join(registryPath(), fmt.Sprint(pid)+".json")
 }
+
+func writeRegistry(_ []sessionEntry) error { return nil } // per-file writes now
 
 // RegisterSession publishes this session so other local claude-go sessions
 // can SendMessage to it. Call once at startup (wired elsewhere).
 func RegisterSession(sessionID, cwd, name string) error {
-	return withRegistryLock(func() error {
-		entries := readRegistry()
-		var kept []sessionEntry
-		for _, e := range entries {
-			if e.SessionID != sessionID && pidAlive(e.PID) {
-				kept = append(kept, e)
-			}
-		}
-		if name == "" {
-			name = filepath.Base(cwd)
-		}
-		kept = append(kept, sessionEntry{
-			SessionID: sessionID, CWD: cwd, Name: name,
-			PID: os.Getpid(), TS: time.Now(),
-		})
-		return writeRegistry(kept)
-	})
+	if name == "" {
+		name = filepath.Base(cwd)
+	}
+	os.MkdirAll(registryPath(), 0o755)
+	e := sessionEntry{
+		SessionID: sessionID, CWD: cwd, Name: name,
+		PID: os.Getpid(), TS: time.Now(),
+	}
+	b, err := json.MarshalIndent(e, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(sessionFile(e.PID), b, 0o644)
 }
 
 // UnregisterSession removes this session from the registry (call at exit).
 func UnregisterSession(sessionID string) {
-	_ = withRegistryLock(func() error {
-		var kept []sessionEntry
-		for _, e := range readRegistry() {
-			if e.SessionID != sessionID {
-				kept = append(kept, e)
-			}
-		}
-		return writeRegistry(kept)
-	})
+	os.Remove(sessionFile(os.Getpid()))
 }
 
 // liveSessions returns registry entries whose process is still alive,
 // pruning dead rows in the same locked pass.
 func liveSessions() []sessionEntry {
 	var out []sessionEntry
-	_ = withRegistryLock(func() error {
-		entries := readRegistry()
-		var kept []sessionEntry
-		for _, e := range entries {
-			if pidAlive(e.PID) {
-				kept = append(kept, e)
-			}
+	for _, e := range readRegistry() {
+		if pidAlive(e.PID) {
+			out = append(out, e)
+		} else {
+			os.Remove(sessionFile(e.PID)) // prune dead sessions
 		}
-		if len(kept) != len(entries) {
-			writeRegistry(kept)
-		}
-		out = kept
-		return nil
-	})
+	}
 	return out
 }
 
@@ -622,7 +614,7 @@ type mailMsg struct {
 	TS      time.Time `json:"ts"`
 }
 
-func mailboxDir() string { return filepath.Join(goHome(), "mailbox") }
+func mailboxDir() string { return filepath.Join(goHome(), "mailbox") } // ~/.claude/mailbox/
 
 func mailboxPath(sessionID string) string {
 	if sessionID == "" {
