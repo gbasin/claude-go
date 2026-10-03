@@ -37,6 +37,10 @@ func (cs *CheckpointStore) Init(sessionID string) {
 }
 
 // Snapshot records a file's pre-write state.
+// OnSnapshot is invoked after each snapshot so callers can log a
+// file-history-snapshot transcript record (real rewind interop).
+var OnSnapshot func(path, backupFile string, version int)
+
 func (cs *CheckpointStore) Snapshot(path string) {
 	if cs.dir == "" {
 		return
@@ -45,14 +49,19 @@ func (cs *CheckpointStore) Snapshot(path string) {
 	abs, _ := filepath.Abs(path)
 	meta := ckMeta{Path: abs, TS: time.Now().Format(time.RFC3339)}
 	if b, err := os.ReadFile(abs); err == nil {
-		sum := sha256.Sum256(b)
-		snap := filepath.Join(cs.dir, fmt.Sprintf("%03d-%s", cs.seq, hex.EncodeToString(sum[:6])))
+		// real naming: <sha-of-path>@v<version>
+		pSum := sha256.Sum256([]byte(abs))
+		snap := filepath.Join(cs.dir, fmt.Sprintf("%s@v%d",
+			hex.EncodeToString(pSum[:8]), cs.seq))
 		os.WriteFile(snap, b, 0o644)
 		meta.Before = snap
 		meta.Existed = true
 	}
 	mb, _ := json.Marshal(meta)
 	os.WriteFile(filepath.Join(cs.dir, fmt.Sprintf("%03d.json", cs.seq)), mb, 0o644)
+	if OnSnapshot != nil {
+		OnSnapshot(abs, meta.Before, cs.seq)
+	}
 }
 
 // Rewind restores the most recent snapshot. Returns the restored path.
