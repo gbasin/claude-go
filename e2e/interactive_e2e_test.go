@@ -188,7 +188,7 @@ func TestSlashSmoke(t *testing.T) {
 	cmd("/help\r", "/exit", 20*time.Second) // help lists commands incl. /exit
 	cmd("/model foo-model\r", "model → foo-model", 20*time.Second)
 	cmd("/clear\r", "context cleared", 20*time.Second)
-	cmd("/compact\r", "context compacted", 30*time.Second)
+	cmd("/compact\r", "Compacted", 30*time.Second)
 	cmd("/rename e2e-title\r", "session renamed: e2e-title", 20*time.Second)
 	cmd("/rewind\r", "no checkpoints", 20*time.Second)
 

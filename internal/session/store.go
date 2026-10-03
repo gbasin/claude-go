@@ -114,6 +114,9 @@ func (s *Store) Log(m api.Message) error { return s.LogMessage(m) }
 
 // LogMessage appends a user/assistant message event.
 func (s *Store) LogMessage(m api.Message) error {
+	if m.IsCompactSummary {
+		return s.logMessage(m, true, "Compact summary")
+	}
 	return s.logMessage(m, false, "")
 }
 

@@ -227,7 +227,7 @@ func execWebSearch(c *Context, raw json.RawMessage) Result {
 		return Result{Content: "invalid input: " + err.Error(), IsError: true}
 	}
 	if in.Query == "" {
-		return Result{Content: "query is required", IsError: true}
+		return Result{Content: "Error: Missing query", IsError: true}
 	}
 	if len(in.AllowedDomains) > 0 && len(in.BlockedDomains) > 0 {
 		return Result{Content: "Error: Cannot specify both allowed_domains and blocked_domains in the same request", IsError: true}
