@@ -60,7 +60,6 @@ Flags:
   --debug, --verbose            debug logging
   --mock                        run against the built-in mock API (no auth needed)
   --mock-port <port>            start a standalone mock server on a port and exit
-  --cron-daemon                 run scheduled jobs (CronCreate) in foreground
   -v, --version                 print version
   -h, --help                    this help
 
@@ -80,7 +79,7 @@ func main() {
 		model       string
 		outFormat   = "text"
 		maxTurns    int
-		permMode    = "auto"
+		permMode    = "default"
 		appendSys   string
 		addDirs     []string
 		cont        bool
@@ -92,6 +91,13 @@ func main() {
 		sysPromptF  string
 		sessID      string
 		forkSess    bool
+		bareMode    bool
+		agentsJSON  string
+		toolsList   string
+		workload    string
+		fileArgs    []string
+		_           = agentsJSON
+		_           = workload
 		debug       bool
 		verbose     bool
 		mcpConfig   string
@@ -102,7 +108,6 @@ func main() {
 		inFormat    string
 		jsonSchema  string
 		agentName   string
-		cronDaemon  bool
 	)
 	args := os.Args[1:]
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -121,6 +126,12 @@ func main() {
 			return
 		case "login":
 			authLoginSub()
+			return
+		case "auth":
+			authSub(args[1:])
+			return
+		case "purge":
+			purgeSub(args[1:])
 			return
 		case "setup-token":
 			fmt.Println("token: uses ANTHROPIC_API_KEY or Claude Code keychain credentials")
@@ -141,8 +152,6 @@ func main() {
 			printMode = true
 		case a == "--mock":
 			mockMode = true
-		case a == "--cron-daemon":
-			cronDaemon = true
 		case a == "--mock-port":
 			fmt.Sscanf(next(), "%d", &mockPort)
 		case a == "--model":
@@ -189,6 +198,17 @@ func main() {
 			inFormat = next()
 		case a == "--json-schema":
 			jsonSchema = next()
+		case a == "--bare":
+			bareMode = true
+		case a == "--file":
+			fileArgs = append(fileArgs, next())
+		case a == "--tools":
+			toolsList = next()
+		case a == "--workload":
+			workload = next()
+			os.Setenv("CLAUDE_GO_WORKLOAD", workload)
+		case a == "--agents":
+			agentsJSON = next()
 		case a == "--agent":
 			agentName = next()
 		case a == "-c" || a == "--continue":
@@ -216,10 +236,6 @@ func main() {
 		runMockServer(mockPort)
 		return
 	}
-	if cronDaemon {
-		runCronDaemon()
-		return
-	}
 
 	cwd, _ := os.Getwd()
 	sessionID := newUUID()
@@ -238,17 +254,22 @@ func main() {
 		}
 	}()
 
+	if bareMode {
+		os.Setenv("CLAUDE_CODE_SIMPLE", "1")
+	}
+	var promptAtt string
 	loop := agent.NewLoop(client, cwd)
 	if !mockMode {
 		agent.QuotaCheck(context.Background(), client, model)
 	}
 	loop.Entrypoint = "sdk-cli"
 	if model != "" {
-		loop.Model = model
+		loop.Model = resolveModel(model)
 	}
 	loop.MaxTurns = maxTurns
 	loop.PermMode = permMode
 	loop.AppendSysP = appendSys
+	loop.ToolCtx.Session = sessionID
 	email, acct, dev := config.Account()
 	loop.User = agent.UserConfig{Email: email, AccountUUID: acct, DeviceID: dev}
 	loop.AddDirs = addDirs
@@ -260,31 +281,51 @@ func main() {
 	if sysPrompt != "" {
 		loop.AppendSysP = sysPrompt
 	}
-	_ = forkSess
-	_ = fallback
+	for _, fp := range fileArgs {
+		if b, err := os.ReadFile(fp); err == nil {
+			promptAtt += fmt.Sprintf("\n<file path=%q>\n%s\n</file>\n", fp, string(b))
+		}
+	}
+	loop.ToolCtx.OAuthToken = func() string { return clientCreds() }
 	_ = partialMsgs
 	_ = jsonSchema
-	_ = agentName
+	if agentName != "" {
+		if p := agent.ResolveAgentPrompt(agentName, cwd); p != "" {
+			loop.AppendSysP = p
+		}
+	}
+	loop.FallbackModel = fallback
 	st := config.Load(cwd)
 	rules := map[string][]string{}
 	if st.Permissions != nil {
 		rules["allow"] = st.Permissions.Allow
+		rules["deny"] = append(st.ManagedDeny, rules["deny"]...)
+		rules["ask"] = append(st.ManagedAsk, rules["ask"]...)
 		rules["deny"] = st.Permissions.Deny
 		rules["ask"] = st.Permissions.Ask
-		if permMode == "auto" && st.Permissions.DefaultMode != "" {
+		if st.Permissions.DefaultMode != "" {
 			loop.PermMode = st.Permissions.DefaultMode
 		}
 	}
 	if allowTools != "" {
 		rules["allow"] = append(rules["allow"], strings.Split(allowTools, ",")...)
 	}
+	if toolsList != "" {
+		loop.AllowedTools = strings.Split(toolsList, ",")
+	}
 	if denyTools != "" {
 		rules["deny"] = append(rules["deny"], strings.Split(denyTools, ",")...)
 	}
 	if settingsF != "" {
-		if b, err := os.ReadFile(settingsF); err == nil {
+		var sb []byte
+		if strings.HasPrefix(strings.TrimSpace(settingsF), "{") {
+			sb = []byte(settingsF) // --settings accepts a JSON string too
+		} else {
+			sb, _ = os.ReadFile(settingsF)
+		}
+		if len(sb) > 0 {
 			var s2 config.Settings
-			if json.Unmarshal(b, &s2) == nil && s2.Permissions != nil {
+			if json.Unmarshal(sb, &s2) == nil && s2.Permissions != nil {
 				rules["allow"] = append(rules["allow"], s2.Permissions.Allow...)
 				rules["deny"] = append(rules["deny"], s2.Permissions.Deny...)
 				rules["ask"] = append(rules["ask"], s2.Permissions.Ask...)
@@ -324,6 +365,9 @@ func main() {
 	if st2 != nil {
 		defer st2.Close()
 		loop.Transcript = st2.Path
+		loop.Events.OnCompact = func() {
+			st2.LogCompactBoundary(0, len(loop.Messages))
+		}
 	}
 
 	if cont || resume != "" {
@@ -343,7 +387,15 @@ func main() {
 		if id != "" {
 			if msgs, err := session.Load(cwd, id); err == nil && len(msgs) > 0 {
 				loop.Messages = msgs
-				fmt.Fprintf(os.Stderr, "resumed session %s (%d messages)\n", id, len(msgs))
+				if forkSess && st2 != nil {
+					st2.LogRecord(map[string]any{
+						"type": "system", "subtype": "fork",
+						"forkedFrom": map[string]string{"sessionId": id},
+					})
+					fmt.Fprintf(os.Stderr, "forked session %s → %s (%d messages)\n", id[:8], sessionID[:8], len(msgs))
+				} else {
+					fmt.Fprintf(os.Stderr, "resumed session %s (%d messages)\n", id, len(msgs))
+				}
 			}
 		}
 	}
@@ -363,7 +415,7 @@ func main() {
 				Allow: rules["allow"], Deny: rules["deny"], Ask: rules["ask"],
 			}, name, input, loop.ToolCtx.CWD) == perms.Allow
 		}
-		code := runPrint(loop, strings.Join(prompt, " "), outFormat, st2)
+		code := runPrint(loop, strings.Join(prompt, " ")+promptAtt, outFormat, st2, jsonSchema)
 		os.Exit(code)
 	}
 	tools.Interactive = true
@@ -455,18 +507,17 @@ func buildClient(mockMode bool, sessionID string) (*api.Client, func()) {
 	if err != nil {
 		fatal("%v", err)
 	}
+	lastCreds = creds
 	return api.NewClient(creds, sessionID, api.EntrySDKCLI), func() {}
 }
 
-// runCronDaemon executes due cron jobs every minute.
-func runCronDaemon() {
-	fmt.Println("claude-go cron daemon running (ctrl-C to stop)")
-	for {
-		tools.CronTick(func(prompt string) {
-			fmt.Printf("[cron] firing: %.60s\n", prompt)
-		})
-		time.Sleep(60 * time.Second)
+var lastCreds *auth.Credentials
+
+func clientCreds() string {
+	if lastCreds != nil {
+		return lastCreds.AccessToken
 	}
+	return ""
 }
 
 func runMockServer(port int) {
@@ -478,11 +529,18 @@ func runMockServer(port int) {
 	select {}
 }
 
-func runPrint(l *agent.Loop, prompt, format string, st *session.Store) int {
+func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema string) int {
 	var out strings.Builder
-	if format == "stream-json" {
-		fmt.Printf(`{"type":"system","subtype":"init","session_id":%q,"model":%q,"cwd":%q}`+"\n",
-			l.Client.SessionID, l.Model, l.CWD)
+	sj := format == "stream-json"
+	if sj {
+		toolNames := tools.Names()
+		initEv, _ := json.Marshal(map[string]any{
+			"type": "system", "subtype": "init",
+			"session_id": l.Client.SessionID, "model": l.Model, "cwd": l.CWD,
+			"tools": toolNames, "mcp_servers": []string{}, "permissionMode": l.PermMode,
+			"slash_commands": repl.SlashCommandNames(), "apiKeySource": "none",
+		})
+		fmt.Println(string(initEv))
 	}
 	l.Events.OnTextDelta = func(t string) {
 		switch format {
@@ -492,15 +550,33 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store) int {
 			out.WriteString(t)
 		}
 	}
+	turns := 0
 	l.Events.OnToolUse = func(name string, input json.RawMessage) {
-		if format == "stream-json" {
-			fmt.Printf(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":%q,"input":%s}]}}`+"\n",
-				name, string(input))
+		if sj {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "assistant",
+				"message": map[string]any{"role": "assistant", "content": []map[string]any{{
+					"type": "tool_use", "name": name, "input": json.RawMessage(input)}}},
+				"session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
+	}
+	l.Events.OnToolResult = func(name string, tr tools.Result) {
+		if sj {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "user",
+				"message": map[string]any{"role": "user", "content": []map[string]any{{
+					"type": "tool_result", "content": tr.Content, "is_error": tr.IsError}}},
+				"session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
 		}
 	}
 	ctx := context.Background()
 	start := time.Now()
 	resp, err := l.Ask(ctx, prompt)
+	turns++
 	if st != nil {
 		for _, mm := range l.Messages {
 			st.LogMessage(mm)
@@ -510,17 +586,37 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store) int {
 		fmt.Println()
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error:", err)
+		if sj {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "result", "subtype": "error", "is_error": true,
+				"error": err.Error(), "session_id": l.Client.SessionID,
+				"duration_ms": time.Since(start).Milliseconds(), "num_turns": turns,
+			})
+			fmt.Println(string(ev))
+		} else {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+		}
 		return 1
 	}
 	switch format {
 	case "json", "stream-json":
+		if schema != "" {
+			// real wraps the result in structured output when a schema is given
+			var v any
+			if json.Unmarshal([]byte(out.String()), &v) != nil {
+				out.Reset()
+				b2, _ := json.Marshal(map[string]any{"result": out.String()})
+				out.Write(b2)
+			}
+		}
 		b, _ := json.MarshalIndent(map[string]any{
 			"type":        "result",
 			"subtype":     "success",
+			"is_error":    false,
 			"result":      out.String(),
 			"session_id":  l.Client.SessionID,
 			"duration_ms": time.Since(start).Milliseconds(),
+			"num_turns":   turns,
 			"usage":       resp.Usage,
 		}, "", "  ")
 		fmt.Println(string(b))
@@ -597,4 +693,37 @@ func authLoginSub() {
 		fatal("keychain write failed: %v", err)
 	}
 	fmt.Println("logged in")
+}
+
+// resolveModel maps short aliases + env overrides to concrete model IDs,
+// matching real resolution: sonnet/opus/haiku/default + ANTHROPIC_DEFAULT_*.
+func resolveModel(m string) string {
+	switch m {
+	case "default", "":
+		return ""
+	case "sonnet":
+		if v := os.Getenv("ANTHROPIC_DEFAULT_SONNET_MODEL"); v != "" {
+			return v
+		}
+		return "claude-sonnet-4-6"
+	case "opus":
+		if v := os.Getenv("ANTHROPIC_DEFAULT_OPUS_MODEL"); v != "" {
+			return v
+		}
+		return "claude-opus-4-6"
+	case "haiku":
+		if v := os.Getenv("ANTHROPIC_DEFAULT_HAIKU_MODEL"); v != "" {
+			return v
+		}
+		if v := os.Getenv("ANTHROPIC_SMALL_FAST_MODEL"); v != "" {
+			return v
+		}
+		return "claude-haiku-4-5"
+	case "fable":
+		if v := os.Getenv("ANTHROPIC_DEFAULT_FABLE_MODEL"); v != "" {
+			return v
+		}
+		return "claude-fable-5-1"
+	}
+	return m // full id or [1m] suffix passes through
 }

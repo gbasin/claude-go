@@ -58,20 +58,37 @@ func execAskUser(c *Context, raw json.RawMessage) Result {
 		}
 		answers[q.Question] = sel
 	}
-	out, _ := json.Marshal(map[string]any{
-		"questions": in.Questions, "answers": answers,
-	})
-	return Result{Content: string(out)}
+	// Real tool returns guidance text with distinct outcomes.
+	if len(answers) == 0 {
+		return Result{Content: "The user did not answer the questions."}
+	}
+	var b strings.Builder
+	for q, sel := range answers {
+		fmt.Fprintf(&b, "%s: %s. ", q, strings.Join(sel, ", "))
+	}
+	return Result{Content: fmt.Sprintf(
+		"Your questions have been answered: %s You can now continue with these answers in mind.",
+		b.String())}
 }
 
 // ---------- plan mode ----------
+
+// planPath is where the model writes its plan during plan mode (real CC
+// points it at a scratchpad plan file and ExitPlanMode reads it back).
+func planPath(c *Context) string {
+	dir := filepath.Join(os.TempDir(), "claude-go", c.Session)
+	os.MkdirAll(dir, 0o755)
+	return filepath.Join(dir, "plan.md")
+}
 
 func execEnterPlan(c *Context, raw json.RawMessage) Result {
 	if c.SetPermMode == nil {
 		return Result{Content: "plan mode requires an interactive session", IsError: true}
 	}
 	c.SetPermMode("plan")
-	return Result{Content: "Entered plan mode. You may explore the codebase read-only; present your plan with ExitPlanMode."}
+	return Result{Content: fmt.Sprintf(
+		"Entered plan mode. Explore the codebase read-only, then write your plan to %s and present it with ExitPlanMode.",
+		planPath(c))}
 }
 
 func execExitPlan(c *Context, raw json.RawMessage) Result {
@@ -79,14 +96,30 @@ func execExitPlan(c *Context, raw json.RawMessage) Result {
 		return Result{Content: "plan mode requires an interactive session", IsError: true}
 	}
 	var in struct {
-		AllowedPrompts []string `json:"allowedPrompts"`
+		AllowedPrompts []struct {
+			Tool   string `json:"tool"`
+			Prompt string `json:"prompt"`
+		} `json:"allowedPrompts"`
 	}
 	json.Unmarshal(raw, &in)
+	// real reads the plan file the model wrote
+	plan, _ := os.ReadFile(planPath(c))
 	if c.PlanApprove != nil && !c.PlanApprove() {
 		return Result{Content: "Plan not approved; remain in plan mode and revise.", IsError: true}
 	}
-	c.SetPermMode("auto")
-	return Result{Content: "Plan approved — exiting plan mode."}
+	c.SetPermMode("default")
+	// approved applies become session permission rules
+	for _, ap := range in.AllowedPrompts {
+		if ap.Tool != "" && ap.Prompt != "" {
+			// surfaced to the user as an allowlist suggestion
+			fmt.Fprintf(os.Stderr, "  + %s(%s)\n", ap.Tool, ap.Prompt)
+		}
+	}
+	msg := "Plan approved — exited plan mode."
+	if len(plan) > 0 {
+		msg = fmt.Sprintf("Plan approved — exited plan mode.\n\n<planContent>\n%s\n</planContent>", plan)
+	}
+	return Result{Content: msg}
 }
 
 // ---------- EndConversation ----------

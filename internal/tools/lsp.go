@@ -79,6 +79,52 @@ func execLSP(c *Context, raw json.RawMessage) Result {
 			return Result{Content: "lsp: " + err.Error(), IsError: true}
 		}
 		return Result{Content: string(res)}
+	case "goToImplementation":
+		locs, err := client.Locations("textDocument/implementation", in.FilePath, in.Line, in.Character)
+		if err != nil {
+			return Result{Content: "lsp: " + err.Error(), IsError: true}
+		}
+		var b strings.Builder
+		for _, l := range locs {
+			b.WriteString(locStr(l) + "\n")
+		}
+		if b.Len() == 0 {
+			return Result{Content: "no results"}
+		}
+		return Result{Content: b.String()}
+	case "prepareCallHierarchy":
+		res, err := client.Call("textDocument/prepareCallHierarchy", map[string]any{
+			"textDocument": map[string]string{"uri": "file://" + in.FilePath},
+			"position":     map[string]int{"line": in.Line - 1, "character": in.Character - 1},
+		})
+		if err != nil {
+			return Result{Content: "lsp: " + err.Error(), IsError: true}
+		}
+		return Result{Content: string(res)}
+	case "incomingCalls", "outgoingCalls":
+		item, err := client.Call("textDocument/prepareCallHierarchy", map[string]any{
+			"textDocument": map[string]string{"uri": "file://" + in.FilePath},
+			"position":     map[string]int{"line": in.Line - 1, "character": in.Character - 1},
+		})
+		if err != nil {
+			return Result{Content: "lsp: " + err.Error(), IsError: true}
+		}
+		var items []json.RawMessage
+		json.Unmarshal(item, &items)
+		if len(items) == 0 {
+			return Result{Content: "no results"}
+		}
+		var it any
+		json.Unmarshal(items[0], &it)
+		method := "callHierarchy/incomingCalls"
+		if in.Operation == "outgoingCalls" {
+			method = "callHierarchy/outgoingCalls"
+		}
+		res, err := client.Call(method, map[string]any{"item": it})
+		if err != nil {
+			return Result{Content: "lsp: " + err.Error(), IsError: true}
+		}
+		return Result{Content: string(res)}
 	case "diagnostics":
 		res, err := client.Diagnostics(in.FilePath)
 		if err != nil {

@@ -16,6 +16,7 @@ const (
 	ModePlan       Mode = "plan"
 	ModeBypass     Mode = "bypassPermissions"
 	ModeAuto       Mode = "auto"
+	ModeDontAsk    Mode = "dontAsk" // noninteractive: would-ask -> deny
 )
 
 type Decision int
@@ -46,20 +47,60 @@ func Check(mode Mode, rules *Rules, toolName string, input json.RawMessage, cwd 
 		return Deny
 	}
 	spec := toolSpec(toolName, input, cwd)
-	for _, r := range deny(rules) {
-		if matchRule(r, toolName, spec) {
-			return Deny
+	// Bash commands are split into subcommands — each is checked.
+	specs := []string{spec}
+	if toolName == "Bash" {
+		specs = splitShell(spec)
+	}
+	d := func(check func(string) Decision) Decision {
+		worst := Allow
+		for _, s := range specs {
+			if d := check(s); d != Allow {
+				return d
+			}
+			_ = worst
+		}
+		return Allow
+	}
+	// order: deny > ask > allow
+	if dd := d(func(s string) Decision {
+		for _, r := range deny(rules) {
+			if matchRule(r, toolName, s) {
+				return Deny
+			}
+		}
+		return Allow
+	}); dd == Deny {
+		return Deny
+	}
+	if dd := d(func(s string) Decision {
+		for _, r := range askList(rules) {
+			if matchRule(r, toolName, s) {
+				return Ask
+			}
+		}
+		return Allow
+	}); dd == Ask {
+		return Ask
+	}
+	for _, s := range specs {
+		allAllowed := true
+		matched := false
+		for _, r := range allow(rules) {
+			if matchRule(r, toolName, s) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			allAllowed = false
+		}
+		if allAllowed && len(specs) == len(specs) {
+			continue
 		}
 	}
-	for _, r := range allow(rules) {
-		if matchRule(r, toolName, spec) {
-			return Allow
-		}
-	}
-	for _, r := range askList(rules) {
-		if matchRule(r, toolName, spec) {
-			return Ask
-		}
+	if allSpecsAllowed(rules, toolName, specs) {
+		return Allow
 	}
 	if mode == ModeAcceptEdit && isEditTool(toolName) {
 		return Allow
@@ -70,7 +111,70 @@ func Check(mode Mode, rules *Rules, toolName string, input json.RawMessage, cwd 
 		// rules restrict; everything else proceeds.
 		return Allow
 	}
+	if mode == ModeDontAsk {
+		return Deny
+	}
 	return Ask // default mode asks for anything not allowed
+}
+
+// allSpecsAllowed: every subcommand must be covered by an allow rule.
+func allSpecsAllowed(rules *Rules, toolName string, specs []string) bool {
+	for _, s := range specs {
+		ok := false
+		for _, r := range allow(rules) {
+			if matchRule(r, toolName, s) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	return len(specs) > 0
+}
+
+// splitShell splits a command line on &&, ||, ;, | (naive, quote-aware).
+func splitShell(cmd string) []string {
+	var parts []string
+	var cur strings.Builder
+	var quote rune
+	rs := []rune(cmd)
+	for i := 0; i < len(rs); i++ {
+		c := rs[i]
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			}
+			cur.WriteRune(c)
+			continue
+		}
+		if c == '\'' || c == '"' || c == '`' {
+			quote = c
+			cur.WriteRune(c)
+			continue
+		}
+		if c == ';' || c == '|' || (c == '&' && i+1 < len(rs) && rs[i+1] == '&') {
+			if t := strings.TrimSpace(cur.String()); t != "" {
+				parts = append(parts, t)
+			}
+			cur.Reset()
+			if c == '&' {
+				i++
+			} else if c == '|' && i+1 < len(rs) && rs[i+1] == '|' {
+				i++
+			}
+			continue
+		}
+		cur.WriteRune(c)
+	}
+	if t := strings.TrimSpace(cur.String()); t != "" {
+		parts = append(parts, t)
+	}
+	if len(parts) == 0 {
+		return []string{cmd}
+	}
+	return parts
 }
 
 func deny(r *Rules) []string {
@@ -151,6 +255,10 @@ func matchRule(rule, toolName, spec string) bool {
 		name, arg = rule[:i], rule[i+1:len(rule)-1]
 	}
 	if name != toolName {
+		// mcp__server rules match every tool on that server
+		if strings.HasPrefix(toolName, name+"__") {
+			return true
+		}
 		return false
 	}
 	if arg == "" {

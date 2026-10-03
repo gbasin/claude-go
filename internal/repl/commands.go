@@ -8,7 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"time"
 
 	"claude-go/internal/agent"
 	"claude-go/internal/api"
@@ -31,16 +33,12 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		return true
 	case "help":
 		printHelp()
-	case "model":
-		if arg == "" {
-			fmt.Println("  model:", l.Model)
-		} else {
-			l.Model = arg
-			fmt.Println("  model set to", arg)
-		}
-	case "clear":
+	case "plan":
+		l.PermMode = "plan"
+		fmt.Println("  ⏸ plan mode — explore read-only, then ExitPlanMode to implement")
+	case "clear", "reset", "new":
 		l.Messages = nil
-		fmt.Println("  context cleared")
+		fmt.Println("  context cleared (previous session remains resumable via /resume)")
 	case "compact":
 		fmt.Println("  compacting…")
 		if arg != "" {
@@ -187,6 +185,115 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		} else {
 			fmt.Println("  rewound:", p)
 		}
+	case "loop", "proactive":
+		if arg == "" {
+			fmt.Println("  usage: /loop <interval-or-dynamic> <prompt> — ScheduleWakeup drives self-paced loops")
+			fmt.Println("  e.g. /loop 300 check the build")
+			return true
+		}
+		fields := strings.Fields(arg)
+		if len(fields) < 2 {
+			fmt.Println("  usage: /loop <interval-seconds> <prompt>")
+			return true
+		}
+		sec, _ := strconv.Atoi(fields[0])
+		if sec < 60 {
+			sec = 60
+		}
+		prompt := strings.TrimSpace(strings.TrimPrefix(arg, fields[0]))
+		fmt.Printf("  loop armed: every %ds fires %q\n", sec, prompt)
+		go func() {
+			for range time.Tick(time.Duration(sec) * time.Second) {
+				select {
+				case tools.SessionQueue <- prompt:
+				default:
+				}
+			}
+		}()
+	case "goal":
+		if arg == "clear" || arg == "" {
+			l.Goal = ""
+			fmt.Println("  goal cleared")
+			return true
+		}
+		l.Goal = arg
+		fmt.Println("  goal set — I'll keep working until it holds (stop-hook semantics)")
+	case "subtask":
+		if arg == "" {
+			fmt.Println("  usage: /subtask <prompt> — run a subagent, result returns here")
+			return true
+		}
+		if l.ToolCtx.Agent == nil {
+			fmt.Println("  (sub-agents unavailable)")
+			return true
+		}
+		res := l.ToolCtx.Agent.RunAgent(l.ToolCtx, "subtask", arg, "general-purpose", "", false)
+		fmt.Println(" ", res.Content)
+	case "branch":
+		// fork conversation onto a new session branch
+		old := l.Client.SessionID
+		l.Client.SessionID = session.NewID()
+		n, o := l.Client.SessionID, old
+		if len(n) > 8 {
+			n = n[:8]
+		}
+		if len(o) > 8 {
+			o = o[:8]
+		}
+		fmt.Printf("  branched session → %s (original %s resumable via /resume)\n", n, o)
+	case "sandbox":
+		if os.Getenv("CLAUDE_GO_SANDBOX") == "1" {
+			os.Unsetenv("CLAUDE_GO_SANDBOX")
+			fmt.Println("  sandbox off")
+		} else {
+			os.Setenv("CLAUDE_GO_SANDBOX", "1")
+			fmt.Println("  sandbox on (bash commands run under sandbox-exec)")
+		}
+	case "skills":
+		skills := agent.SkillNames(l.ToolCtx.CWD)
+		if len(skills) == 0 {
+			fmt.Println("  no skills found")
+			return true
+		}
+		fmt.Println("  Skills:")
+		for _, s := range skills {
+			fmt.Printf("    /%s\n", s)
+		}
+	case "model":
+		if arg == "" {
+			// interactive picker
+			models := []string{"claude-fable-5-1", "claude-fable-5-1[1m]", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"}
+			for i, m := range models {
+				mark := "  "
+				if l.Model == m {
+					mark = "● "
+				}
+				fmt.Printf("%s%d. %s\n", mark, i+1, m)
+			}
+			fmt.Print("  number (esc keeps " + l.Model + "): ")
+			var pick strings.Builder
+			for k := range ks.ch {
+				if k.b == 0x1b || k.b == 3 {
+					fmt.Println()
+					break
+				}
+				if k.b == '\r' {
+					fmt.Println()
+					if n, err := strconv.Atoi(pick.String()); err == nil && n >= 1 && n <= len(models) {
+						l.Model = models[n-1]
+						fmt.Println("  model →", l.Model)
+					}
+					break
+				}
+				if k.b >= '0' && k.b <= '9' {
+					pick.WriteByte(k.b)
+					fmt.Print(string(k.b))
+				}
+			}
+			return true
+		}
+		l.Model = arg
+		fmt.Println("  model →", l.Model)
 	case "effort":
 		effortCmd(l, arg)
 	case "fast":
@@ -429,10 +536,14 @@ func aliasCmd(l *agent.Loop, arg string) {
 
 func effortCmd(l *agent.Loop, arg string) {
 	switch strings.ToLower(arg) {
-	case "low", "medium", "high":
-		fmt.Println("  effort:", arg, "(applies to output_config on next request)")
+	case "low", "medium", "high", "xhigh", "max", "auto":
+		l.Effort = strings.ToLower(arg)
+		fmt.Println("  effort set to", l.Effort)
+	case "":
+		fmt.Println("  current effort:", l.Effort)
+		fmt.Println("  levels: low | medium | high | xhigh | max | auto")
 	default:
-		fmt.Println("  effort levels: low | medium | high — set in settings or per-request")
+		fmt.Println("  effort levels: low | medium | high | xhigh | max | auto")
 	}
 }
 

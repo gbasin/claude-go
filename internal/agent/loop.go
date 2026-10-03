@@ -25,33 +25,37 @@ type Events struct {
 	OnToolUse     func(name string, input json.RawMessage)
 	OnToolResult  func(name string, r tools.Result)
 	OnUsage       func(u api.Usage)
+	OnCompact     func()
 	OnAutoCompact func(tokens int)
 }
 
 // Loop runs the query/tool-use cycle.
 type Loop struct {
-	Client       *api.Client
-	Model        string
-	MaxTokens    int
-	Effort       string
-	Entrypoint   string // "cli" or "sdk-cli"
-	PermMode     string
-	CWD          string
-	AppendSysP   string
-	ExtraSystem  []string
-	PermRules    map[string][]string
-	AddDirs      []string
-	User         UserConfig
-	Messages     []api.Message
-	ToolCtx      *tools.Context
-	Events       Events
-	MaxTurns     int // 0 = unlimited
-	started      bool
-	UsageTotal   api.Usage
-	Transcript   string // path to JSONL transcript (for compact notes)
-	Hooks        hooks.Config
-	inCompact    bool
-	AllowedTools []string // nil = all
+	Client        *api.Client
+	Model         string
+	MaxTokens     int
+	Effort        string
+	Entrypoint    string // "cli" or "sdk-cli"
+	PermMode      string
+	CWD           string
+	AppendSysP    string
+	ExtraSystem   []string
+	PermRules     map[string][]string
+	AddDirs       []string
+	User          UserConfig
+	Messages      []api.Message
+	ToolCtx       *tools.Context
+	Events        Events
+	MaxTurns      int // 0 = unlimited
+	started       bool
+	UsageTotal    api.Usage
+	Transcript    string // path to JSONL transcript (for compact notes)
+	Hooks         hooks.Config
+	inCompact     bool
+	AllowedTools  []string // nil = all
+	Goal          string   // /goal stop-condition
+	Bare          bool     // --bare: skip auto-discovery
+	FallbackModel string   // --fallback-model retry chain
 }
 
 func NewLoop(client *api.Client, cwd string) *Loop {
@@ -65,7 +69,7 @@ func NewLoop(client *api.Client, cwd string) *Loop {
 		MaxTokens:  defaultMaxTokens,
 		Effort:     "medium",
 		Entrypoint: "sdk-cli",
-		PermMode:   "auto",
+		PermMode:   "default",
 		CWD:        abs,
 		ToolCtx: &tools.Context{
 			Ctx: context.Background(),
@@ -103,8 +107,13 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 	if !l.started {
 		msg = FirstUserMessage(prompt, l.CWD, l.User.Email)
 		l.started = true
-		l.Messages = append(l.Messages, msg,
-			api.TextMessage("system", EnvMessage(l.ToolCtx.CWD, l.Model, l.AddDirs, l.PermMode, l.Client.SessionID)))
+		envBlocks := api.BlocksMessage("system", []api.ContentBlock{{
+			Type:         "text",
+			Text:         EnvMessage(l.ToolCtx.CWD, l.Model, l.AddDirs, l.PermMode, l.Client.SessionID),
+			CacheControl: &api.CacheControl{Type: "ephemeral", TTL: "1h"},
+		}})
+		envBlocks.OutputConfig = DefaultOutputConfig()
+		l.Messages = append(l.Messages, msg, envBlocks)
 	} else {
 		msg = api.TextMessage("user", prompt)
 		l.Messages = append(l.Messages, msg)
@@ -122,32 +131,46 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		return nil, fmt.Errorf("max turns (%d) reached", l.MaxTurns)
 	}
 	l.ToolCtx.Ctx = ctx
-	resp, err := l.Client.StreamMessage(ctx, l.buildRequest(), func(ev *api.StreamEvent) error {
-		if ev.Type == "content_block_delta" && ev.Delta != nil {
-			switch ev.Delta.Type {
-			case "text_delta":
-				if l.Events.OnTextDelta != nil {
-					l.Events.OnTextDelta(ev.Delta.Text)
-				}
-			case "thinking_delta":
-				if l.Events.OnThinking != nil {
-					l.Events.OnThinking(ev.Delta.Thinking)
+	var resp *api.Response
+	var err error
+	models := append([]string{l.Model}, l.fallbackModels()...)
+	for mi, m := range models {
+		if mi > 0 {
+			l.Model = m // try the next fallback
+		}
+		resp, err = l.Client.StreamMessage(ctx, l.buildRequest(), func(ev *api.StreamEvent) error {
+			if ev.Type == "content_block_delta" && ev.Delta != nil {
+				switch ev.Delta.Type {
+				case "text_delta":
+					if l.Events.OnTextDelta != nil {
+						l.Events.OnTextDelta(ev.Delta.Text)
+					}
+				case "thinking_delta":
+					if l.Events.OnThinking != nil {
+						l.Events.OnThinking(ev.Delta.Thinking)
+					}
 				}
 			}
-		}
-		if ev.Type == "message_start" && ev.Message != nil {
-			l.UsageTotal.InputTokens += ev.Message.Usage.InputTokens
-			l.UsageTotal.CacheReadInputTokens += ev.Message.Usage.CacheReadInputTokens
-			l.UsageTotal.CacheCreationInputTokens += ev.Message.Usage.CacheCreationInputTokens
-		}
-		if ev.Type == "message_delta" && ev.Usage != nil {
-			l.UsageTotal.OutputTokens += ev.Usage.OutputTokens
-			if l.Events.OnUsage != nil {
-				l.Events.OnUsage(*ev.Usage)
+			if ev.Type == "message_start" && ev.Message != nil {
+				l.UsageTotal.InputTokens += ev.Message.Usage.InputTokens
+				l.UsageTotal.CacheReadInputTokens += ev.Message.Usage.CacheReadInputTokens
+				l.UsageTotal.CacheCreationInputTokens += ev.Message.Usage.CacheCreationInputTokens
 			}
+			if ev.Type == "message_delta" && ev.Usage != nil {
+				l.UsageTotal.OutputTokens += ev.Usage.OutputTokens
+				if l.Events.OnUsage != nil {
+					l.Events.OnUsage(*ev.Usage)
+				}
+			}
+			return nil
+		})
+		if err == nil {
+			break
 		}
-		return nil
-	})
+		if !retryableErr(err) || mi == len(models)-1 {
+			break
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +190,11 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 			results = append(results, toolResultBlock(b.ID, r))
 			continue
 		}
-		if pre := l.runHook(hooks.PreToolUse, map[string]any{
+		if b.Name == "advisor" {
+			// the advisor tool forwards the whole conversation to a second
+			// model call and returns its advice — real client behavior
+			r = l.runAdvisor(ctx)
+		} else if pre := l.runHook(hooks.PreToolUse, map[string]any{
 			"tool_name": b.Name, "tool_input": json.RawMessage(b.Input),
 		}); pre.Block {
 			r = tools.Result{Content: "Tool call blocked by hook: " + pre.Reason, IsError: true}
@@ -292,4 +319,48 @@ func appendNotificationBlocks(raw json.RawMessage, notes []string) json.RawMessa
 	blocks = append(blocks, orig...)
 	out, _ := json.Marshal(blocks)
 	return out
+}
+
+func (l *Loop) fallbackModels() []string {
+	if l.FallbackModel == "" {
+		return nil
+	}
+	var out []string
+	for _, m := range strings.Split(l.FallbackModel, ",") {
+		if m = strings.TrimSpace(m); m != "" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func retryableErr(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "429") || strings.Contains(s, "529") ||
+		strings.Contains(s, "overloaded") || strings.Contains(s, "rate_limit") ||
+		strings.Contains(s, "500") || strings.Contains(s, "502") || strings.Contains(s, "503")
+}
+
+// runAdvisor answers an advisor tool_use: a second model call over the
+// current conversation, stripped of tool defs.
+func (l *Loop) runAdvisor(ctx context.Context) tools.Result {
+	if l.Events.OnTextDelta != nil {
+		l.Events.OnTextDelta("\n  (advisor thinking…)\n")
+	}
+	req := l.buildRequest()
+	req.Tools = nil // advisor sees context only
+	resp, err := l.Client.StreamMessage(ctx, req, func(*api.StreamEvent) error { return nil })
+	if err != nil {
+		return tools.Result{Content: "advisor unavailable: " + err.Error(), IsError: true}
+	}
+	var text string
+	for _, b := range resp.Content {
+		if b.Type == "text" {
+			text += b.Text
+		}
+	}
+	if text == "" {
+		return tools.Result{Content: "advisor returned no advice", IsError: true}
+	}
+	return tools.Result{Content: text}
 }

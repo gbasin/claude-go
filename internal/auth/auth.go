@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -34,6 +35,9 @@ type credFile struct {
 //  3. macOS Keychain "Claude Code-credentials"
 //  4. ~/.claude/.credentials.json
 func Load() (*Credentials, error) {
+	if k := os.Getenv("ANTHROPIC_AUTH_TOKEN"); k != "" {
+		return &Credentials{AccessToken: k}, nil
+	}
 	if k := os.Getenv("ANTHROPIC_API_KEY"); k != "" {
 		return &Credentials{AccessToken: k, IsAPIKey: true}, nil
 	}
@@ -42,6 +46,10 @@ func Load() (*Credentials, error) {
 	}
 	if k := os.Getenv("CLAUDE_GO_TOKEN"); k != "" {
 		return &Credentials{AccessToken: k}, nil
+	}
+	// apiKeyHelper: a user-configured command producing credentials
+	if helper := apiKeyHelper(); helper != "" {
+		return &Credentials{AccessToken: helper}, nil
 	}
 	if runtime.GOOS == "darwin" {
 		if c, err := fromKeychain(); err == nil {
@@ -148,5 +156,33 @@ func (c *Credentials) Refresh() error {
 	if out.ExpiresIn > 0 {
 		c.ExpiresAt = time.Now().UnixMilli() + out.ExpiresIn*1000
 	}
+	// persist refreshed creds back to keychain — rotated refresh tokens
+	// would otherwise be lost on exit
+	if runtime.GOOS == "darwin" && out.RefreshToken != "" {
+		WriteKeychain(c)
+	}
 	return nil
+}
+
+func apiKeyHelper() string {
+	home, _ := os.UserHomeDir()
+	for _, p := range []string{
+		filepath.Join(home, ".claude", "settings.json"),
+	} {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var st struct {
+			ApiKeyHelper string `json:"apiKeyHelper"`
+		}
+		if json.Unmarshal(b, &st) != nil || st.ApiKeyHelper == "" {
+			continue
+		}
+		out, err := exec.Command("sh", "-c", st.ApiKeyHelper).Output()
+		if err == nil && len(out) > 0 {
+			return strings.TrimSpace(string(out))
+		}
+	}
+	return ""
 }

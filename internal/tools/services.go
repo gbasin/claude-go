@@ -24,6 +24,17 @@ func init() {
 	Register(&Tool{Def: loadSchema("ListAgents"), Exec: execListAgents})
 }
 
+// SessionQueue holds prompts injected by timers/cron/monitors —
+// the REPL drains it after each turn and asks them as user turns.
+var SessionQueue = make(chan string, 64)
+
+func queuePrompt(p string) {
+	select {
+	case SessionQueue <- p:
+	default:
+	}
+}
+
 // ---------- ScheduleWakeup ----------
 // Schedules a wake: after delaySeconds, a queued note is delivered to the
 // agent as a system message on its next turn (or immediately if idle).
@@ -70,16 +81,22 @@ func execScheduleWakeup(c *Context, raw json.RawMessage) Result {
 	if in.Stop {
 		return Result{Content: "Wakeup scheduling is not active for this session."}
 	}
-	d := time.Duration(in.DelaySeconds * float64(time.Second))
-	if d < 0 {
-		d = 0
+	d := in.DelaySeconds
+	if d < 60 {
+		d = 60
+	}
+	if d > 3600 {
+		d = 3600
 	}
 	note := in.Prompt
 	if note == "" {
 		note = "Scheduled wakeup"
 	}
-	Wakeups.schedule(d, fmt.Sprintf("[scheduled wakeup fired] %s", note))
-	return Result{Content: fmt.Sprintf("Wakeup scheduled in %.0fs.", in.DelaySeconds)}
+	// the prompt is re-fired as a new turn when the timer fires
+	time.AfterFunc(time.Duration(d*float64(time.Second)), func() {
+		queuePrompt(note)
+	})
+	return Result{Content: fmt.Sprintf("Wakeup scheduled in %.0fs.", d)}
 }
 
 // ---------- PushNotification ----------
@@ -125,29 +142,6 @@ type cronJob struct {
 	Durable   bool      `json:"durable"`
 	Created   time.Time `json:"created"`
 	LastRun   time.Time `json:"last_run,omitempty"`
-}
-
-func cronPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude-go", "cron.json")
-}
-
-func loadCron() ([]cronJob, error) {
-	b, err := os.ReadFile(cronPath())
-	if err != nil {
-		return nil, nil
-	}
-	var jobs []cronJob
-	json.Unmarshal(b, &jobs)
-	return jobs, nil
-}
-
-func saveCron(jobs []cronJob) error {
-	if err := os.MkdirAll(filepath.Dir(cronPath()), 0o755); err != nil {
-		return err
-	}
-	b, _ := json.MarshalIndent(jobs, "", "  ")
-	return os.WriteFile(cronPath(), b, 0o644)
 }
 
 // matchCron evaluates a 5-field cron expr against t (min hour dom mon dow).
@@ -211,6 +205,42 @@ func matchCronPart(p string, v, fieldIdx int) bool {
 	return false
 }
 
+var (
+	cronMu   sync.Mutex
+	sessJobs []cronJob
+	cronOnce sync.Once
+)
+
+func cronTickSession() {
+	now := time.Now()
+	cronMu.Lock()
+	var keep []cronJob
+	for _, j := range sessJobs {
+		if matchCron(j.Cron, now) {
+			queuePrompt(j.Prompt)
+			j.LastRun = now
+			if !j.Recurring {
+				continue // one-shot: auto-delete
+			}
+		}
+		keep = append(keep, j)
+	}
+	sessJobs = keep
+	cronMu.Unlock()
+}
+
+func ensureCronTicker() {
+	cronOnce.Do(func() {
+		go func() {
+			for range time.Tick(30 * time.Second) {
+				cronTickSession()
+			}
+		}()
+	})
+}
+
+// Real Cron* tools are session-only — "nothing is written to disk, and the
+// job is gone when Claude exits". durable is a documented no-op.
 func execCronCreate(c *Context, raw json.RawMessage) Result {
 	var in struct {
 		Cron      string `json:"cron"`
@@ -224,17 +254,16 @@ func execCronCreate(c *Context, raw json.RawMessage) Result {
 	if len(strings.Fields(in.Cron)) != 5 {
 		return Result{Content: "invalid cron expression (expected 5 fields)", IsError: true}
 	}
-	jobs, _ := loadCron()
+	ensureCronTicker()
 	j := cronJob{
 		ID:   fmt.Sprintf("job_%d", time.Now().UnixNano()%1e8),
 		Cron: in.Cron, Prompt: in.Prompt,
-		Recurring: in.Recurring, Durable: in.Durable, Created: time.Now(),
+		Recurring: in.Recurring, Created: time.Now(),
 	}
-	jobs = append(jobs, j)
-	if err := saveCron(jobs); err != nil {
-		return Result{Content: "failed to save: " + err.Error(), IsError: true}
-	}
-	return Result{Content: fmt.Sprintf("Created job %s (cron %q). Run `claude-go --cron-daemon` to execute scheduled jobs locally.", j.ID, j.Cron)}
+	cronMu.Lock()
+	sessJobs = append(sessJobs, j)
+	cronMu.Unlock()
+	return Result{Content: fmt.Sprintf("Created session job %s (cron %q). Fires as a new turn in this session; gone when Claude exits.", j.ID, j.Cron)}
 }
 
 func execCronDelete(c *Context, raw json.RawMessage) Result {
@@ -242,10 +271,11 @@ func execCronDelete(c *Context, raw json.RawMessage) Result {
 		ID string `json:"id"`
 	}
 	json.Unmarshal(raw, &in)
-	jobs, _ := loadCron()
-	out := jobs[:0]
+	cronMu.Lock()
+	defer cronMu.Unlock()
+	out := sessJobs[:0]
 	var found bool
-	for _, j := range jobs {
+	for _, j := range sessJobs {
 		if j.ID == in.ID {
 			found = true
 			continue
@@ -255,53 +285,40 @@ func execCronDelete(c *Context, raw json.RawMessage) Result {
 	if !found {
 		return Result{Content: "no such job: " + in.ID, IsError: true}
 	}
-	saveCron(out)
+	sessJobs = out
 	return Result{Content: "Deleted job " + in.ID}
 }
 
 func execCronList(c *Context, raw json.RawMessage) Result {
-	jobs, _ := loadCron()
-	if len(jobs) == 0 {
+	cronMu.Lock()
+	defer cronMu.Unlock()
+	if len(sessJobs) == 0 {
 		return Result{Content: "No scheduled jobs."}
 	}
 	var b strings.Builder
-	for _, j := range jobs {
-		fmt.Fprintf(&b, "%s  cron=%q  recurring=%t  durable=%t  prompt=%q\n",
-			j.ID, j.Cron, j.Recurring, j.Durable, j.Prompt)
+	for _, j := range sessJobs {
+		fmt.Fprintf(&b, "%s  cron=%q  recurring=%t  prompt=%q\n",
+			j.ID, j.Cron, j.Recurring, j.Prompt)
 	}
 	return Result{Content: b.String()}
-}
-
-// CronTick runs due jobs once (used by --cron-daemon and tests).
-func CronTick(run func(prompt string)) {
-	jobs, _ := loadCron()
-	now := time.Now()
-	changed := false
-	var keep []cronJob
-	for _, j := range jobs {
-		if matchCron(j.Cron, now) {
-			go run(j.Prompt)
-			j.LastRun = now
-			changed = true
-			if !j.Recurring {
-				continue // one-shot: drop
-			}
-		}
-		keep = append(keep, j)
-	}
-	if changed {
-		saveCron(keep)
-	}
 }
 
 // ---------- ReportFindings ----------
 
 func execReportFindings(c *Context, raw json.RawMessage) Result {
 	var in struct {
-		Level    string `json:"level"`
-		Findings string `json:"findings"`
+		Level    string            `json:"level"`
+		Findings []json.RawMessage `json:"findings"`
 	}
-	json.Unmarshal(raw, &in)
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return Result{Content: "invalid input: " + err.Error(), IsError: true}
+	}
+	if len(in.Findings) == 0 {
+		return Result{Content: "findings array is required", IsError: true}
+	}
+	if len(in.Findings) > 32 {
+		return Result{Content: "too many findings (max 32)", IsError: true}
+	}
 	dir := filepath.Join(os.TempDir(), "claude-go-findings")
 	os.MkdirAll(dir, 0o755)
 	p := filepath.Join(dir, fmt.Sprintf("findings-%d.json", time.Now().Unix()))

@@ -2,10 +2,12 @@
 package tools
 
 import (
+	"sort"
 	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 
 	"claude-go/internal/api"
@@ -43,11 +45,14 @@ type Context struct {
 	SetPermMode   func(mode string)
 	PlanApprove   func() bool
 	EndSession    func()
+	Session       string        // session id for skill substitutions
+	OAuthToken    func() string // claude.ai oauth access token for remote APIs
 }
 
 type readState struct {
 	mtimeNs int64
 	size    int64
+	sha256  string
 }
 
 var registry = map[string]*Tool{}
@@ -130,7 +135,25 @@ func (c *Context) MarkRead(path string, mtimeNs, size int64) {
 	if c.readFiles == nil {
 		c.readFiles = map[string]readState{}
 	}
-	c.readFiles[path] = readState{mtimeNs, size}
+	c.readFiles[path] = readState{mtimeNs, size, fileSHA(path)}
+}
+
+// Stale returns true when the file changed since it was last read (sha or stat).
+func (c *Context) Stale(path string) bool {
+	c.mu.Lock()
+	st, ok := c.readFiles[path]
+	c.mu.Unlock()
+	if !ok {
+		return false
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return true // gone = stale
+	}
+	if fi.Size() != st.size || fi.ModTime().UnixNano() != st.mtimeNs {
+		return true
+	}
+	return false
 }
 
 func (c *Context) WasRead(path string) (readState, bool) {
@@ -150,3 +173,14 @@ type Answerer func(ctx context.Context, prompt, pageText string) (string, error)
 
 // Searcher performs a web search (WebSearch backend).
 type Searcher func(ctx context.Context, query string, allow, block []string) (string, error)
+
+
+// Names returns registered tool names (for stream-json init event).
+func Names() []string {
+	var out []string
+	for n := range registry {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}

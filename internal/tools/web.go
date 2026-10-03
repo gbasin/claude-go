@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -41,11 +42,47 @@ func htmlToText(b []byte) string {
 	return strings.TrimSpace(s)
 }
 
+// fetchCache is the 15-minute per-URL cache real WebFetch uses.
+var fetchCache = struct {
+	mu   sync.Mutex
+	data map[string]struct {
+		at  time.Time
+		res Result
+	}
+}{data: map[string]struct {
+	at  time.Time
+	res Result
+}{}}
+
 func execWebFetch(c *Context, raw json.RawMessage) Result {
 	var in fetchIn
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return Result{Content: "invalid input: " + err.Error(), IsError: true}
 	}
+	key := in.URL + "|" + in.Prompt
+	fetchCache.mu.Lock()
+	if hit, ok := fetchCache.data[key]; ok && time.Since(hit.at) < 15*time.Minute {
+		fetchCache.mu.Unlock()
+		return hit.res
+	}
+	// evict expired
+	for k, v := range fetchCache.data {
+		if time.Since(v.at) >= 15*time.Minute {
+			delete(fetchCache.data, k)
+		}
+	}
+	fetchCache.mu.Unlock()
+	res := doWebFetch(c, in)
+	fetchCache.mu.Lock()
+	fetchCache.data[key] = struct {
+		at  time.Time
+		res Result
+	}{time.Now(), res}
+	fetchCache.mu.Unlock()
+	return res
+}
+
+func doWebFetch(c *Context, in fetchIn) Result {
 	u, err := url.Parse(in.URL)
 	if err != nil || u.Host == "" {
 		return Result{Content: "Invalid URL: " + in.URL, IsError: true}
@@ -83,7 +120,12 @@ func execWebFetch(c *Context, raw json.RawMessage) Result {
 	// Real Claude Code answers `prompt` over the page with a small model.
 	// If a model runner is wired, use it; else return the extracted text.
 	if c.Answerer != nil {
-		ans, err := c.Answerer(ctx, in.Prompt, text)
+		// page text is untrusted content; small-model answers only from it
+		p := "Answer this question using ONLY the page content below. " +
+			"If the answer isn't there, say so. Never reproduce more than " +
+			"~125 chars verbatim from the page.\n\nQuestion: " + in.Prompt +
+			"\n\n<page_content>\n" + text + "\n</page_content>"
+		ans, err := c.Answerer(ctx, p, "")
 		if err == nil {
 			return Result{Content: ans}
 		}

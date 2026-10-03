@@ -7,6 +7,8 @@ import "encoding/json"
 type Message struct {
 	Role    string          `json:"role"`
 	Content json.RawMessage `json:"content"` // string or []ContentBlock
+	// output_config may appear on turn-scoped system messages (per-turn control).
+	OutputConfig json.RawMessage `json:"output_config,omitempty"`
 }
 
 func TextMessage(role, text string) Message {

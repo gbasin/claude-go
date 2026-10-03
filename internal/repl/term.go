@@ -4,25 +4,54 @@ package repl
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"encoding/json"
+
+	"golang.org/x/term"
 )
 
 // editor is a modal (vim-capable) multiline line editor fed by keySource.
 type editor struct {
-	history   []string
-	hIdx      int
-	buf       []rune
-	pos       int
-	prompt    string
-	saved     []rune
-	vim       bool
-	mode      string            // "insert" | "normal"
-	pastes    map[string]string // placeholder -> pasted content
-	pasteN    int
-	lastCtrlC time.Time
-	completer func(prefix string) []string // slash command completion
-	cycleMode func()                       // shift+tab -> permission mode cycle
+	history        []string
+	hIdx           int
+	buf            []rune
+	pos            int
+	prompt         string
+	saved          []rune
+	vim            bool
+	mode           string            // "insert" | "normal"
+	pastes         map[string]string // placeholder -> pasted content
+	pasteN         int
+	lastCtrlC      time.Time
+	lastEsc        int64
+	completer      func(prefix string) []string // slash command completion
+	cycleMode      func()                       // shift+tab -> permission mode cycle
+	keys           *keySource
+	pendingX       bool
+	chordAt        time.Time
+	actions        map[byte]func(*editor) *readResult
+	histSearch     bool
+	searchBuf      []rune
+	onToggleExpand func()
+	onToggleTodos  func()
+	onKillAgents   func()
+	vimOp          rune
+	vimFind        rune
+	vimPendingG    rune
+	vimCount       int
+	vimCountRaw    int
+	vimVisual      int
+	vimReplace     bool
+	lastFindCh     rune
+	lastFindDir    rune
+	lastDel        string
+	lastChange     rune
+	undoStack      [][]rune
+	undoPos        []int
 }
 
 func newEditor() *editor {
@@ -82,6 +111,7 @@ func (e *editor) submitLine() string {
 	}
 	if strings.TrimSpace(l) != "" {
 		e.history = append(e.history, l)
+		appendHistoryFile(l)
 	}
 	e.buf = e.buf[:0]
 	e.pos = 0
@@ -105,10 +135,11 @@ func (e *editor) expandPaste(pasted string) string {
 }
 
 type readResult struct {
-	line string
-	ok   bool // got a line
-	intr bool // ctrl-C pressed with empty buffer (double-tap = exit)
-	quit bool // double ctrl-C / ctrl-D -> exit repl
+	line   string
+	ok     bool // got a line
+	intr   bool // ctrl-C pressed with empty buffer (double-tap = exit)
+	quit   bool // double ctrl-C / ctrl-D -> exit repl
+	rewind bool // esc-esc: open the rewind/message selector
 }
 
 // readLine consumes keys until submit. Vim-normal mode supported.
@@ -132,6 +163,33 @@ func (e *editor) readLine(ks *keySource) readResult {
 
 func (e *editor) insertKey(k key) *readResult {
 	c := k.b
+	// ctrl+x chord prefix (3s window like real CC)
+	if e.pendingX {
+		e.pendingX = false
+		if c == 'k' && time.Since(e.chordAt) < 3*time.Second {
+			if e.actions != nil {
+				if a := e.actions[24]; a != nil { // ctrl+x ctrl+k -> killAgents
+					return a(e)
+				}
+			}
+		}
+	}
+	if c == 24 { // ctrl+x
+		e.pendingX = true
+		e.chordAt = time.Now()
+		return nil
+	}
+	// global action bindings (ctrl+o/r/t/g/l)
+	if e.actions != nil && !e.vim {
+		if a, ok := e.actions[c]; ok {
+			if res := a(e); res != nil {
+				return res
+			}
+		}
+	}
+	if e.histSearch {
+		return e.searchKey(k)
+	}
 	switch {
 	case k.paste != "":
 		e.insert([]rune(e.expandPaste(k.paste))...)
@@ -214,6 +272,11 @@ func (e *editor) insertKey(k key) *readResult {
 			}
 			e.redraw()
 		} else {
+			if e.lastEsc > 0 && time.Since(time.Unix(0, e.lastEsc)) < 400*time.Millisecond {
+				e.lastEsc = 0
+				return &readResult{rewind: true}
+			}
+			e.lastEsc = time.Now().UnixNano()
 			e.buf = e.buf[:0]
 			e.pos = 0
 			e.redraw()
@@ -232,102 +295,340 @@ func (e *editor) insertKey(k key) *readResult {
 	return nil
 }
 
-// vimKey handles normal-mode keys.
+// vimKey handles normal-mode keys — full state machine: counts, operators
+// (d/c/y/>/<) × motions, linewise ops, f/F/t/T finds, registers, undo,
+// dot-repeat.
 func (e *editor) vimKey(k key) *readResult {
 	c := k.b
 	toInsert := func() { e.mode = "insert"; e.redraw() }
-	switch {
-	case k.paste != "":
+	if k.paste != "" {
+		e.pushUndo()
 		e.insert([]rune(e.expandPaste(k.paste))...)
-	case k.seq == "[C":
-		if e.pos < len(e.buf)-1 {
-			e.pos++
-		}
+		return nil
+	}
+	switch k.seq {
+	case "[C":
+		e.pos = min(len(e.buf), e.pos+1)
 		e.redraw()
-	case k.seq == "[D":
+		return nil
+	case "[D":
 		if e.pos > 0 {
 			e.pos--
 		}
 		e.redraw()
-	case k.seq == "[A":
+		return nil
+	case "[A":
 		e.histPrev()
-	case k.seq == "[B":
+		return nil
+	case "[B":
 		e.histNext()
-	case c == '\r':
+		return nil
+	}
+	if c == '\r' {
 		os.Stdout.WriteString("\n╰─╯\n")
 		return &readResult{line: e.submitLine(), ok: true}
-	case c == 'i':
+	}
+	if e.mode == "visual" {
+		return e.visualKey(k)
+	}
+
+	// find-char states (f/F/t/T awaiting target)
+	if e.vimFind != 0 {
+		fc := e.vimFind
+		e.vimFind = 0
+		if c >= 32 {
+			e.lastFindCh = rune(c)
+			e.lastFindDir = fc
+			np := e.findChar(e.lastFindCh, fc)
+			if np >= 0 {
+				e.vimApplyOrMove(np, fc == 't' || fc == 'T')
+			}
+		}
+		return nil
+	}
+	// operator-pending: next key resolves the motion
+	if e.vimOp != 0 {
+		op := e.vimOp
+		e.vimOp = 0
+		// linewise ops: dd cc yy >><<
+		if rune(c) == op {
+			e.linewiseOp(op)
+			e.vimCount = 0
+			return nil
+		}
+		if c >= '1' && c <= '9' {
+			e.vimOp = op
+			e.vimCount = int(c - '0')
+			return nil
+		}
+		if c == '0' && e.vimCount > 0 {
+			e.vimCount *= 10
+			e.vimOp = op
+			return nil
+		}
+		switch c {
+		case 'w', 'b', 'e', 'W', 'B', 'E', '0', '^', '$', 'h', 'l', ' ':
+			e.vimCount = max(1, e.vimCount)
+			e.applyOp(op, e.motionEnd(c))
+		case 'f', 'F', 't', 'T':
+			e.vimOp = op
+			e.vimFind = rune(c)
+			return nil
+		case 'g':
+			// operator g — fall through to gg
+			e.vimPendingG = op
+			return nil
+		case 'j', 'k':
+			// linewise
+			lines := e.vimCount
+			if lines == 0 {
+				lines = 1
+			}
+			start, end := e.linelRange(c, lines)
+			e.applyOpRange(op, start, end, true)
+		case 0x1b:
+			// cancelled
+		}
+		e.vimCount = 0
+		return nil
+	}
+	// g-pending (gg, g_ motions)
+	if e.vimPendingG != 0 {
+		op := e.vimPendingG
+		e.vimPendingG = 0
+		if c == 'g' {
+			if op == 'm' {
+				e.pos = 0
+				e.redraw()
+			} else {
+				// operator to top of buffer
+				e.applyOpRange(op, 0, e.lineEndAt(0)+1, true)
+			}
+		}
+		return nil
+	}
+	// count prefix
+	if c >= '1' && c <= '9' || (c == '0' && e.vimCount > 0) {
+		if e.vimCount > 10000 {
+			e.vimCount = 10000
+		} else {
+			e.vimCount = e.vimCount*10 + int(c-'0')
+		}
+		return nil
+	}
+	cnt := e.vimCount
+	e.vimCount = 0
+	if cnt == 0 {
+		cnt = 1
+	}
+	repeat := func() { e.lastChange = rune(c) }
+	switch c {
+	case 'i':
 		toInsert()
-	case c == 'a':
-		e.pos++
+	case 'a':
+		e.pos = min(len(e.buf), e.pos+1)
 		toInsert()
-	case c == 'A':
+	case 'A':
 		e.pos = e.lineEnd()
 		toInsert()
-	case c == 'I':
+	case 'I':
 		e.pos = e.lineStart()
 		toInsert()
-	case c == 'o':
+	case 'o':
 		e.pos = e.lineEnd()
+		e.pushUndo()
 		e.insert('\n')
 		toInsert()
-	case c == 'O':
+		repeat()
+	case 'O':
 		e.pos = e.lineStart()
+		e.pushUndo()
 		e.insert('\n')
 		e.pos--
 		toInsert()
-	case c == 'h':
-		if e.pos > 0 {
+		repeat()
+	case 'h', 0x7f:
+		e.pos = max(0, e.pos-cnt)
+		e.redraw()
+	case 'l', ' ':
+		e.pos = min(len(e.buf)-1, e.pos+cnt)
+		e.redraw()
+	case 'j':
+		for i := 0; i < cnt; i++ {
+			e.pos = e.lineBelow()
+		}
+		e.redraw()
+	case 'k':
+		for i := 0; i < cnt; i++ {
+			e.pos = e.lineAbove()
+		}
+		e.redraw()
+	case 'w', 'W':
+		for i := 0; i < cnt; i++ {
+			e.pos = e.wordFwd()
+		}
+		e.redraw()
+	case 'b', 'B':
+		for i := 0; i < cnt; i++ {
+			e.pos = e.wordBack()
+		}
+		e.redraw()
+	case 'e', 'E':
+		for i := 0; i < cnt; i++ {
+			e.pos = e.wordEnd()
+		}
+		e.redraw()
+	case '0':
+		e.pos = e.lineStart()
+		e.redraw()
+	case '^':
+		p := e.lineStart()
+		for p < len(e.buf) && (e.buf[p] == ' ' || e.buf[p] == '\t') {
+			p++
+		}
+		e.pos = p
+		e.redraw()
+	case '$':
+		e.pos = max(e.lineStart(), e.lineEnd()-1)
+		e.redraw()
+	case 'G':
+		if e.vimCountRaw > 0 {
+			e.pos = e.lineStartOf(e.vimCountRaw - 1)
+		} else {
+			e.pos = e.lineStartOf(e.lineCount() - 1)
+		}
+		e.redraw()
+	case 'g':
+		e.vimPendingG = 'm' // gg marker
+	case 'f', 'F', 't', 'T':
+		e.vimFind = rune(c)
+	case ';':
+		e.pos = e.findChar(e.lastFindCh, e.lastFindDir)
+		e.redraw()
+	case ',':
+		e.pos = e.findChar(e.lastFindCh, flipDir(e.lastFindDir))
+		e.redraw()
+	case 'x':
+		e.pushUndo()
+		for i := 0; i < cnt && e.pos < len(e.buf); i++ {
+			e.buf = append(e.buf[:e.pos], e.buf[e.pos+1:]...)
+		}
+		e.recordReg(e.lastDel, 0)
+		e.redraw()
+		repeat()
+	case 'X':
+		e.pushUndo()
+		for i := 0; i < cnt && e.pos > 0; i++ {
+			e.buf = append(e.buf[:e.pos-1], e.buf[e.pos:]...)
 			e.pos--
 		}
 		e.redraw()
-	case c == 'l':
-		if e.pos < len(e.buf)-1 {
-			e.pos++
+		repeat()
+	case 'd', 'c', 'y', '>', '<':
+		e.vimOp = rune(c)
+		if cnt > 0 {
+			e.vimCount = cnt
 		}
-		e.redraw()
-	case c == '0':
-		e.pos = e.lineStart()
-		e.redraw()
-	case c == '$':
-		e.pos = max(0, e.lineEnd()-1)
-		e.redraw()
-	case c == 'w':
-		e.pos = e.wordFwd()
-		e.redraw()
-	case c == 'b':
-		e.pos = e.wordBack()
-		e.redraw()
-	case c == 'x':
-		e.del(false)
-	case c == 'd': // dd only (dw simplification)
-		// second key handled by pending op? keep simple: dd
-		// consume next key
-		select {
-		case k2 := <-pendingKey:
-			_ = k2
-		default:
-		}
-	case c == 'D':
+	case 'D':
+		e.pushUndo()
+		e.lastDel = string(e.buf[e.pos:e.lineEnd()])
 		e.buf = e.buf[:e.pos]
 		e.redraw()
-	case c == 'G':
-		e.pos = len(e.buf) - 1
+		repeat()
+	case 'C':
+		e.pushUndo()
+		e.lastDel = string(e.buf[e.pos:e.lineEnd()])
+		e.buf = e.buf[:e.pos]
+		toInsert()
+		repeat()
+	case 'Y':
+		s, en := e.linelRange('j', 0)
+		e.lastDel = string(e.buf[s:en])
 		e.redraw()
-	case c == 'j':
-		e.pos = e.lineBelow()
+	case 's':
+		e.pushUndo()
+		for i := 0; i < cnt && e.pos < len(e.buf); i++ {
+			e.buf = append(e.buf[:e.pos], e.buf[e.pos+1:]...)
+		}
+		toInsert()
+		repeat()
+	case 'S':
+		e.pushUndo()
+		s, en := e.linelRange('j', 0)
+		e.lastDel = string(e.buf[s:en])
+		e.buf = append(e.buf[:s], e.buf[en:]...)
+		e.pos = s
+		toInsert()
+		repeat()
+	case 'r':
+		e.vimReplace = true
+	case 'p':
+		if e.lastDel != "" {
+			e.pushUndo()
+			at := e.pos + 1
+			if strings.Contains(e.lastDel, "\n") {
+				at = e.lineEnd() + 1
+			}
+			for i := 0; i < cnt; i++ {
+				e.buf = append(e.buf[:at], append([]rune(e.lastDel), e.buf[at:]...)...)
+			}
+			e.redraw()
+		}
+	case 'u':
+		e.undo()
+	case '.':
+		e.dotRepeat()
+	case '~':
+		if e.pos < len(e.buf) {
+			e.pushUndo()
+			r := e.buf[e.pos]
+			if r >= 'a' && r <= 'z' {
+				e.buf[e.pos] = r - 32
+			} else if r >= 'A' && r <= 'Z' {
+				e.buf[e.pos] = r + 32
+			}
+			e.pos++
+			e.redraw()
+			repeat()
+		}
+	case 'J':
+		e.pushUndo()
+		le := e.lineEnd()
+		if le < len(e.buf) {
+			e.buf[le] = ' '
+			e.buf = append(e.buf[:le+1], append([]rune{}, e.buf[le+1:]...)...)
+		}
 		e.redraw()
-	case c == 'k':
-		e.pos = e.lineAbove()
+		repeat()
+	case 'v':
+		e.vimVisual = e.pos // visual anchor
+		e.mode = "visual"
 		e.redraw()
-	case c == 'u':
-		// undo not implemented
+	case '?':
+		// help hint — real shows keybindings; noop visually
+	case '/':
+		e.histSearch = true
+		e.searchBuf = e.searchBuf[:0]
+		e.redrawSearch()
+	case 0x1b:
+		// already normal
 	}
 	return nil
 }
 
-var pendingKey = make(chan key, 1)
-
+func flipDir(d rune) rune {
+	switch d {
+	case 'f':
+		return 'F'
+	case 'F':
+		return 'f'
+	case 't':
+		return 'T'
+	case 'T':
+		return 't'
+	}
+	return d
+}
 func (e *editor) lineStart() int {
 	p := e.pos
 	for p > 0 && e.buf[p-1] != '\n' {
@@ -468,4 +769,473 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// registerDefaultActions wires the standard global keybindings.
+func (e *editor) registerDefaultActions() {
+	if e.actions == nil {
+		e.actions = map[byte]func(*editor) *readResult{}
+	}
+	e.actions[12] = func(e *editor) *readResult { // ctrl+l clear input
+		e.buf = e.buf[:0]
+		e.pos = 0
+		e.redraw()
+		return nil
+	}
+	e.actions[7] = func(e *editor) *readResult { // ctrl+g external editor
+		return e.externalEditor()
+	}
+	e.actions[18] = func(e *editor) *readResult { // ctrl+r history search
+		e.histSearch = true
+		e.searchBuf = e.searchBuf[:0]
+		e.redrawSearch()
+		return nil
+	}
+	e.actions[15] = func(e *editor) *readResult { // ctrl+o toggle expand
+		if e.onToggleExpand != nil {
+			e.onToggleExpand()
+		}
+		return nil
+	}
+	e.actions[20] = func(e *editor) *readResult { // ctrl+t toggle todos
+		if e.onToggleTodos != nil {
+			e.onToggleTodos()
+		}
+		return nil
+	}
+	e.actions[24] = func(e *editor) *readResult { // ctrl+x ctrl+k kill agents
+		if e.onKillAgents != nil {
+			e.onKillAgents()
+		}
+		return nil
+	}
+}
+
+// externalEditor opens $VISUAL/$EDITOR with the buffer and imports the result.
+func (e *editor) externalEditor() *readResult {
+	ed := os.Getenv("VISUAL")
+	if ed == "" {
+		ed = os.Getenv("EDITOR")
+	}
+	if ed == "" {
+		ed = "vi"
+	}
+	dir, _ := os.MkdirTemp("", "claude-go-edit-")
+	path := filepath.Join(dir, "prompt.md")
+	os.WriteFile(path, []byte(string(e.buf)), 0o600)
+	os.Stdout.WriteString("\r\x1b[2K  ($EDITOR: " + ed + ")\r\n")
+	if e.keys != nil {
+		term.Restore(int(os.Stdin.Fd()), e.keys.old)
+	}
+	cmd := exec.Command("sh", "-c", ed+" "+path)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Run()
+	if e.keys != nil {
+		if st, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
+			e.keys.old = st
+		}
+	}
+	if b, err := os.ReadFile(path); err == nil {
+		e.buf = []rune(strings.TrimRight(string(b), "\n"))
+		e.pos = len(e.buf)
+	}
+	e.redraw()
+	return nil
+}
+
+// searchKey handles ctrl+r history search mode.
+func (e *editor) searchKey(k key) *readResult {
+	c := k.b
+	switch {
+	case c == 3 || (c == 0x1b && k.seq == ""): // esc/ctrl-c exits search
+		e.histSearch = false
+		e.searchBuf = e.searchBuf[:0]
+		os.Stdout.WriteString("\r\x1b[2K" + e.prompt)
+		e.redraw()
+	case c == '\r':
+		e.histSearch = false
+		if m := e.searchMatch(); m != "" {
+			e.buf = []rune(m)
+			e.pos = len(e.buf)
+		}
+		e.searchBuf = e.searchBuf[:0]
+		e.redraw()
+	case c == 0x7f || c == 8:
+		if len(e.searchBuf) > 0 {
+			e.searchBuf = e.searchBuf[:len(e.searchBuf)-1]
+		}
+		e.redrawSearch()
+	case c == 18: // ctrl+r again cycles matches — naive: keep searching
+		e.redrawSearch()
+	case c >= 32 && c < 127:
+		e.searchBuf = append(e.searchBuf, rune(c))
+		e.redrawSearch()
+	}
+	return nil
+}
+
+func (e *editor) searchMatch() string {
+	q := string(e.searchBuf)
+	// subsequence match against history, newest first
+	for i := len(e.history) - 1; i >= 0; i-- {
+		h := e.history[i]
+		if subseq(q, h) {
+			return h
+		}
+	}
+	return ""
+}
+
+func subseq(q, s string) bool {
+	qi := 0
+	for _, ch := range s {
+		if qi < len(q) && rune(q[qi]) == ch {
+			qi++
+		}
+	}
+	return qi == len(q)
+}
+
+func (e *editor) redrawSearch() {
+	m := e.searchMatch()
+	os.Stdout.WriteString("\r\x1b[2K  " + dim + "(search prompts `" + string(e.searchBuf) + "`): " + reset + m)
+}
+
+// ---- vim helpers ----
+
+func (e *editor) pushUndo() {
+	e.undoStack = append(e.undoStack, append([]rune{}, e.buf...))
+	e.undoPos = append(e.undoPos, e.pos)
+	if len(e.undoStack) > 50 {
+		e.undoStack = e.undoStack[1:]
+		e.undoPos = e.undoPos[1:]
+	}
+}
+
+func (e *editor) undo() {
+	if len(e.undoStack) == 0 {
+		return
+	}
+	e.buf = e.undoStack[len(e.undoStack)-1]
+	e.pos = e.undoPos[len(e.undoPos)-1]
+	e.undoStack = e.undoStack[:len(e.undoStack)-1]
+	e.undoPos = e.undoPos[:len(e.undoPos)-1]
+	e.redraw()
+}
+
+func (e *editor) dotRepeat() {
+	if e.lastChange == 0 {
+		return
+	}
+	e.vimKey(key{b: byte(e.lastChange)})
+}
+
+func (e *editor) recordReg(s string, _ int) { e.lastDel = s }
+
+func (e *editor) wordEnd() int {
+	p := e.pos
+	n := len(e.buf)
+	p++
+	for p < n && isWordSep(e.buf[p]) {
+		p++
+	}
+	for p < n && !isWordSep(e.buf[p]) {
+		p++
+	}
+	if p > 0 {
+		p--
+	}
+	return min(p, n-1)
+}
+
+func isWordSep(r rune) bool { return r == ' ' || r == '\t' || r == '\n' }
+
+// findChar searches for ch in the current line; dir 'f'/'t' forward, 'F'/'T' back.
+func (e *editor) findChar(ch rune, dir rune) int {
+	if ch == 0 {
+		return e.pos
+	}
+	c := ch
+	switch dir {
+	case 'f', 't':
+		p := e.pos + 1
+		end := e.lineEnd()
+		for p < end {
+			if e.buf[p] == c {
+				if dir == 't' && p > e.pos+1 {
+					return p - 1
+				}
+				return p
+			}
+			p++
+		}
+	case 'F', 'T':
+		p := e.pos - 1
+		st := e.lineStart()
+		for p >= st {
+			if e.buf[p] == c {
+				if dir == 'T' && p < e.pos-1 {
+					return p + 1
+				}
+				return p
+			}
+			p--
+		}
+	}
+	return e.pos
+}
+
+// vimApplyOrMove resolves a completed find-motion under a pending operator.
+func (e *editor) vimApplyOrMove(np int, _ bool) {
+	if e.vimOp != 0 {
+		op := e.vimOp
+		e.vimOp = 0
+		e.applyOp(op, np)
+		return
+	}
+	e.pos = np
+	e.redraw()
+}
+
+// motionEnd returns the target position for a single-char motion.
+func (e *editor) motionEnd(c byte) int {
+	switch c {
+	case 'w', 'W':
+		return e.wordFwd()
+	case 'b', 'B':
+		return e.wordBack()
+	case 'e', 'E':
+		return e.wordEnd()
+	case '0', '^':
+		return e.lineStart()
+	case '$':
+		return e.lineEnd()
+	case 'h':
+		return max(0, e.pos-1)
+	case 'l', ' ':
+		return min(len(e.buf)-1, e.pos+1)
+	}
+	return e.pos
+}
+
+// applyOp applies operator op over [pos, target).
+func (e *editor) applyOp(op rune, target int) {
+	s, en := e.pos, target
+	if s > en {
+		s, en = en, s
+	}
+	if s == en && en < len(e.buf) {
+		en++
+	}
+	e.applyOpRange(op, s, en, false)
+}
+
+func (e *editor) applyOpRange(op rune, s, en int, linewise bool) {
+	if en > len(e.buf) {
+		en = len(e.buf)
+	}
+	if s < 0 {
+		s = 0
+	}
+	if en <= s {
+		return
+	}
+	switch op {
+	case 'd', 'c', 'y':
+		e.lastDel = string(e.buf[s:en])
+		if op == 'y' {
+			e.redraw()
+			return
+		}
+		e.pushUndo()
+		e.buf = append(e.buf[:s], e.buf[en:]...)
+		e.pos = s
+		if op == 'c' {
+			e.mode = "insert"
+		}
+		e.lastChange = op
+	case '>':
+		e.pushUndo()
+		for p := s; p < en && p < len(e.buf); p++ {
+			if e.buf[p] == '\n' || p == s {
+				// indent at line start
+				e.buf = append(e.buf[:p], append([]rune("  "), e.buf[p:]...)...)
+				en += 2
+				p++
+			}
+		}
+		e.pos = s
+	case '<':
+		e.pushUndo()
+		var nb []rune
+		for p := 0; p < len(e.buf); p++ {
+			lineStart := p == 0 || e.buf[p-1] == '\n'
+			if lineStart && p >= s && p < en && p+1 < len(e.buf) && e.buf[p] == ' ' && e.buf[p+1] == ' ' {
+				p++ // skip two spaces
+				continue
+			}
+			nb = append(nb, e.buf[p])
+		}
+		e.buf = nb
+		e.pos = min(s, len(e.buf))
+	}
+	e.redraw()
+}
+
+// linewiseOp handles dd/cc/yy/>>/<<.
+func (e *editor) linewiseOp(op rune) {
+	s, en := e.linelRange('j', 0)
+	cnt := e.vimCount
+	if cnt > 1 {
+		// extend down cnt-1 lines
+		end := en
+		for i := 1; i < cnt && end < len(e.buf); i++ {
+			ne := end
+			for ne < len(e.buf) && e.buf[ne] != '\n' {
+				ne++
+			}
+			end = ne + 1
+		}
+		en = end
+	}
+	if op == 'y' {
+		e.lastDel = string(e.buf[s:en])
+		e.redraw()
+		return
+	}
+	e.applyOpRange(op, s, en, true)
+}
+
+// linelRange returns [start,end) covering the current line plus n extra
+// lines in direction dir ('j' or 'k'). dir 'j' with n=0 covers just this line.
+func (e *editor) linelRange(dir byte, n int) (int, int) {
+	s := e.lineStart()
+	en := e.lineEnd()
+	if en < len(e.buf) {
+		en++ // include the newline
+	}
+	if dir == 'k' && n > 0 {
+		for i := 0; i < n && s > 0; i++ {
+			s--
+			for s > 0 && e.buf[s-1] != '\n' {
+				s--
+			}
+		}
+	} else {
+		for i := 0; i < n && en <= len(e.buf); i++ {
+			ne := en
+			for ne < len(e.buf) && e.buf[ne] != '\n' {
+				ne++
+			}
+			if ne >= len(e.buf) {
+				break
+			}
+			en = ne + 1
+		}
+	}
+	return s, en
+}
+
+func (e *editor) lineStartOf(ln int) int {
+	if ln < 0 {
+		ln = 0
+	}
+	cur, p := 0, 0
+	for p < len(e.buf) {
+		if cur == ln {
+			return p
+		}
+		if e.buf[p] == '\n' {
+			cur++
+		}
+		p++
+	}
+	return len(e.buf)
+}
+
+func (e *editor) lineEndAt(p int) int {
+	for p < len(e.buf) && e.buf[p] != '\n' {
+		p++
+	}
+	return p
+}
+
+func (e *editor) lineCount() int {
+	n := 1
+	for _, r := range e.buf {
+		if r == '\n' {
+			n++
+		}
+	}
+	return n
+}
+
+// visualKey handles VISUAL mode: motions extend the anchor selection,
+// operators apply to the selection.
+func (e *editor) visualKey(k key) *readResult {
+	c := k.b
+	exit := func() { e.mode = "normal"; e.vimVisual = -1; e.redraw() }
+	switch c {
+	case 0x1b, 'v':
+		exit()
+		return nil
+	case 'h', 0x7f:
+		if e.pos > 0 {
+			e.pos--
+		}
+		e.redraw()
+	case 'l', ' ':
+		if e.pos < len(e.buf)-1 {
+			e.pos++
+		}
+		e.redraw()
+	case 'w', 'W':
+		e.pos = e.wordFwd()
+		e.redraw()
+	case 'b', 'B':
+		e.pos = e.wordBack()
+		e.redraw()
+	case 'e', 'E':
+		e.pos = e.wordEnd()
+		e.redraw()
+	case '0':
+		e.pos = e.lineStart()
+		e.redraw()
+	case '$':
+		e.pos = max(e.lineStart(), e.lineEnd()-1)
+		e.redraw()
+	case 'o':
+		e.pos, e.vimVisual = e.vimVisual, e.pos // swap anchor/cursor
+		e.redraw()
+	case 'd', 'x', 'y', 'c':
+		s, en := min(e.pos, e.vimVisual), max(e.pos, e.vimVisual)+1
+		op := rune(c)
+		if c == 'x' {
+			op = 'd'
+		}
+		e.mode = "normal"
+		e.vimVisual = -1
+		e.applyOpRange(op, s, en, false)
+		return nil
+	}
+	return nil
+}
+
+// appendHistoryFile persists prompts to ~/.claude/history.jsonl (real file).
+func appendHistoryFile(line string) {
+	home, _ := os.UserHomeDir()
+	dir := filepath.Join(home, ".claude")
+	os.MkdirAll(dir, 0o755)
+	f, err := os.OpenFile(filepath.Join(dir, "history.jsonl"),
+		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	b, _ := json.Marshal(map[string]any{
+		"display": line, "timestamp": time.Now().UnixMilli(),
+	})
+	f.Write(append(b, '\n'))
 }

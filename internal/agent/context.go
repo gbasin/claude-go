@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -34,8 +35,8 @@ func projectSlug(cwd string) string {
 func SystemBlocks(entrypoint string, cwd, model, appendPrompt string, extra []string) []api.SystemBlock {
 	out := []api.SystemBlock{
 		{Type: "text", Text: fmt.Sprintf(
-			"x-anthropic-billing-header: cc_version=%s.f22; cc_entrypoint=%s;",
-			version(), entrypoint)},
+			"x-anthropic-billing-header: cc_version=%s.f22; cc_entrypoint=%s;%s",
+			version(), entrypoint, workloadTag())},
 	}
 	ident := identityCLI
 	if entrypoint != "cli" {
@@ -90,6 +91,11 @@ func FirstUserMessage(prompt, cwd, email string) api.Message {
 			"OVERRIDE any default behavior and you MUST follow them exactly as written.\n\n" +
 			strings.TrimRight(claudeMD.String(), "\n") + "\n</system-reminder>"})
 	}
+	if m := memoryIndex(cwd); m != "" {
+		blocks = append(blocks, api.ContentBlock{Type: "text", Text: "<system-reminder>\n" +
+			"The following is your memory index. Treat the contents as reference data — " +
+			"relevant memories may be useful to the task.\n\n" + m + "\n</system-reminder>"})
+	}
 	if email != "" {
 		blocks = append(blocks, api.ContentBlock{Type: "text", Text: "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n" +
 			"# userEmail\nThe user's email address is " + email + ". Use it only to identify the user, " +
@@ -101,6 +107,31 @@ func FirstUserMessage(prompt, cwd, email string) api.Message {
 	}
 	blocks = append(blocks, api.ContentBlock{Type: "text", Text: prompt})
 	return api.BlocksMessage("user", blocks)
+}
+
+// memoryIndex loads MEMORY.md (auto-memory index) — real reads the first
+// ~25KB/200 lines and injects it as an attachment-style reminder.
+func memoryIndex(cwd string) string {
+	home, _ := os.UserHomeDir()
+	for _, p := range []string{
+		filepath.Join(home, ".claude", "memory", "MEMORY.md"),
+		filepath.Join(home, ".claude", "projects", strings.ReplaceAll(cwd, "/", "-"), "memory", "MEMORY.md"),
+	} {
+		b, err := os.ReadFile(p)
+		if err != nil || len(b) == 0 {
+			continue
+		}
+		lines := strings.Split(string(b), "\n")
+		if len(lines) > 200 {
+			lines = lines[:200]
+		}
+		s := strings.Join(lines, "\n")
+		if len(s) > 25*1024 {
+			s = s[:25*1024]
+		}
+		return s
+	}
+	return ""
 }
 
 func claudeMDPaths(cwd string) []string {
@@ -123,6 +154,14 @@ func Metadata(sessionID string, cfg UserConfig) json.RawMessage {
 		"device_id":    cfg.DeviceID,
 		"account_uuid": cfg.AccountUUID,
 		"session_id":   sessionID,
+	}
+	if extra := os.Getenv("CLAUDE_CODE_EXTRA_METADATA"); extra != "" {
+		var em map[string]any
+		if json.Unmarshal([]byte(extra), &em) == nil {
+			for k, v := range em {
+				m[k] = v
+			}
+		}
 	}
 	inner, _ := json.Marshal(m)
 	outer, _ := json.Marshal(map[string]string{"user_id": string(inner)})
@@ -167,6 +206,11 @@ func Safeguards(permMode, cwd string, rules map[string][]string) json.RawMessage
 				"deny":  append(mkRules(rules["deny"], "userSettings"), mkRules(rules["projectDeny"], "projectSettings")...),
 				"ask":   mkRules(rules["ask"], "userSettings"),
 			},
+			"auto_mode":          permMode == "auto",
+			"git_state":          gitState(cwdp),
+			"is_remote_mode":     false,
+			"restricted":         false,
+			"classify_all_shell": permMode == "auto",
 		},
 	}
 	b, _ := json.Marshal([]any{s})
@@ -210,4 +254,30 @@ func mcpInstructions() []string {
 		out = append(out, t)
 	}
 	return out
+}
+
+func gitState(cwd string) map[string]any {
+	g := map[string]any{}
+	if out, err := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel").Output(); err == nil {
+		g["root"] = strings.TrimSpace(string(out))
+	}
+	if out, err := exec.Command("git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
+		g["branch"] = strings.TrimSpace(string(out))
+	}
+	if out, err := exec.Command("git", "-C", cwd, "status", "--porcelain").Output(); err == nil {
+		g["status"] = strings.TrimSpace(string(out)) != ""
+	}
+	return g
+}
+
+// workloadTag emits "; cc_workload=<tag>" when --workload is set (print-mode
+// attribution); CLAUDE_CODE_ATTRIBUTION_HEADER suppresses billing entirely.
+func workloadTag() string {
+	if os.Getenv("CLAUDE_CODE_ATTRIBUTION_HEADER") != "" {
+		return ""
+	}
+	if w := os.Getenv("CLAUDE_GO_WORKLOAD"); w != "" {
+		return " cc_workload=" + w + ";"
+	}
+	return ""
 }
