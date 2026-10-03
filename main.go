@@ -101,7 +101,11 @@ func main() {
 		case a == "-c" || a == "--continue":
 			cont = true
 		case a == "-r" || a == "--resume":
-			resume = next()
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				resume = next()
+			} else {
+				resume = "-"
+			}
 		case a == "-v" || a == "--version":
 			fmt.Println(version + " (Claude Code)")
 			return
@@ -114,7 +118,6 @@ func main() {
 			prompt = append(prompt, a)
 		}
 	}
-	_ = addDirs
 
 	if mockPort > 0 {
 		runMockServer(mockPort)
@@ -136,6 +139,9 @@ func main() {
 	}()
 
 	loop := agent.NewLoop(client, cwd)
+	if !mockMode {
+		agent.QuotaCheck(context.Background(), client, model)
+	}
 	loop.Entrypoint = "sdk-cli"
 	if model != "" {
 		loop.Model = model
@@ -145,6 +151,7 @@ func main() {
 	loop.AppendSysP = appendSys
 	email, acct, dev := config.Account()
 	loop.User = agent.UserConfig{Email: email, AccountUUID: acct, DeviceID: dev}
+	loop.AddDirs = addDirs
 	st := config.Load(cwd)
 	rules := map[string][]string{}
 	if st.Permissions != nil {
@@ -178,9 +185,7 @@ func main() {
 		}
 		return out, nil
 	}
-	loop.ToolCtx.Searcher = func(ctx context.Context, q string, allow, block []string) (string, error) {
-		return "", fmt.Errorf("web search backend not configured")
-	}
+	loop.ToolCtx.Searcher = loop.ToolCtx.Agent.(*agent.Runner).WebSearch
 	if st.Model != "" && model == "" {
 		loop.Model = st.Model
 	}
@@ -198,6 +203,10 @@ func main() {
 			if l2, err := session.Latest(cwd); err == nil {
 				id = l2
 			}
+		}
+		if id == "-" {
+			session.Print(cwd)
+			return
 		}
 		if id != "" {
 			if msgs, err := session.Load(cwd, id); err == nil && len(msgs) > 0 {

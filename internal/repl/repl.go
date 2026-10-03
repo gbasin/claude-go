@@ -1,6 +1,7 @@
 package repl
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,7 +13,10 @@ import (
 	"claude-go/internal/agent"
 	"claude-go/internal/api"
 	"claude-go/internal/perms"
+	"claude-go/internal/session"
 	"claude-go/internal/tools"
+
+	"golang.org/x/term"
 )
 
 const (
@@ -38,8 +42,13 @@ func Run(l *agent.Loop) {
 
 // RunWithStore is Run with session transcript logging.
 func RunWithStore(l *agent.Loop, store Store) {
+	l.Entrypoint = "cli"
 	ed := newEditor()
 	pr := &promptUI{}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		runPipe(l)
+		return
+	}
 	ks, err := startKeys()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "repl: raw mode:", err)
@@ -66,7 +75,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 	l.Events.OnTextDelta = func(t string) {
 		spinRef.stop()
 		if !printedDot {
-			fmt.Print("⏺ ")
+			fmt.Print("\r\x1b[K⏺ ")
 			printedDot = true
 		}
 		md.Write(t)
@@ -76,7 +85,8 @@ func RunWithStore(l *agent.Loop, store Store) {
 		fmt.Print(dim + t + reset)
 	}
 	l.Events.OnToolUse = func(name string, input json.RawMessage) {
-		fmt.Printf("\n%s⏺%s %s%s%s\n", green, reset, bold+name+reset, summarize(name, input), "")
+		spinRef.stop()
+		fmt.Printf("\r\x1b[K%s⏺%s %s%s%s\n", green, reset, bold+name+reset, summarize(name, input), "")
 	}
 	l.Events.OnToolResult = func(name string, r tools.Result) {
 		lines := strings.Split(strings.TrimRight(r.Content, "\n"), "\n")
@@ -143,6 +153,8 @@ func RunWithStore(l *agent.Loop, store Store) {
 		}()
 		_, err := l.Ask(ctx, expandMentions(l, line))
 		spin.stop()
+		fmt.Fprint(os.Stderr, "\r\x1b[K")
+		fireStopHook(l)
 		if store != nil {
 			for _, m := range l.Messages {
 				store.Log(m)
@@ -257,8 +269,20 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		fmt.Println("  MCP servers are loaded from ~/.claude.json and .mcp.json at startup")
 	case "permissions":
 		fmt.Println("  permission mode:", l.PermMode)
-	case "config", "agents", "review", "diff", "resume", "login", "logout",
-		"init", "doctor", "bug", "vim", "hooks", "output-style", "export":
+	case "resume":
+		fmt.Println("  recent sessions:")
+		session.Print(l.ToolCtx.CWD)
+		fmt.Println("  restart with: claude-go -r <session-id>")
+	case "export":
+		if l.Transcript != "" {
+			fmt.Println("  transcript:", l.Transcript)
+		} else {
+			fmt.Println("  no transcript")
+		}
+	case "init":
+		fmt.Println(`  tip: ask claude-go to "analyze this codebase and write CLAUDE.md"`)
+	case "config", "agents", "review", "diff", "login", "logout",
+		"doctor", "bug", "vim", "hooks", "output-style":
 		fmt.Printf("  /%s is not yet implemented in claude-go\n", cmd)
 	default:
 		fmt.Printf("  unknown command: /%s (try /help)\n", cmd)
@@ -317,7 +341,6 @@ func (s *spinner) run() {
 	for {
 		select {
 		case <-s.done:
-			fmt.Fprintf(os.Stderr, "\r\x1b[K")
 			return
 		case <-t.C:
 			el := time.Since(start).Round(time.Second)
@@ -379,4 +402,25 @@ func runBang(l *agent.Loop, cmd string) {
 	fmt.Println("  ⎿ ", strings.TrimSpace(res.Content))
 	l.PushUser([]api.ContentBlock{{Type: "text",
 		Text: "<bash-mode>\n" + cmd + "\n</bash-mode>\n\n<bash-output>\n" + res.Content + "\n</bash-output>"}})
+}
+
+// runPipe handles non-TTY stdin: each line is a prompt (like `claude < in.txt`).
+func runPipe(l *agent.Loop) {
+	l.Events.OnTextDelta = func(t string) { fmt.Print(t) }
+	sc := bufio.NewScanner(os.Stdin)
+	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		if _, err := l.Ask(context.Background(), expandMentions(l, line)); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+		}
+		fmt.Println()
+	}
+}
+
+func fireStopHook(l *agent.Loop) {
+	// SessionEnd/Stop hooks run through agent.Loop's hook runner when present.
 }

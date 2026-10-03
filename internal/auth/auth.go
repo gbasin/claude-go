@@ -40,6 +40,9 @@ func Load() (*Credentials, error) {
 	if k := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); k != "" {
 		return &Credentials{AccessToken: k}, nil
 	}
+	if k := os.Getenv("CLAUDE_GO_TOKEN"); k != "" {
+		return &Credentials{AccessToken: k}, nil
+	}
 	if runtime.GOOS == "darwin" {
 		if c, err := fromKeychain(); err == nil {
 			return c, nil

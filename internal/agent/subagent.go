@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"claude-go/internal/api"
@@ -75,4 +76,33 @@ func runAgentTurn(sub *Loop, prompt string) tools.Result {
 		out = "(agent produced no text output)"
 	}
 	return tools.Result{Content: out}
+}
+
+// WebSearch implements tools.Searcher via the API's server-side web_search tool.
+func (r *Runner) WebSearch(ctx context.Context, query string, allow, block []string) (string, error) {
+	tool := map[string]any{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}
+	if len(allow) > 0 {
+		tool["allowed_domains"] = allow
+	}
+	if len(block) > 0 {
+		tool["blocked_domains"] = block
+	}
+	tb, _ := json.Marshal(tool)
+	req := &api.Request{
+		Model:     "claude-haiku-4-5-20251001",
+		MaxTokens: 4096,
+		Messages:  []api.Message{api.TextMessage("user", query)},
+		Tools:     []api.Tool{{Name: "web_search", InputSchema: tb}},
+	}
+	resp, err := r.Client.StreamMessage(ctx, req, func(*api.StreamEvent) error { return nil })
+	if err != nil {
+		return "", err
+	}
+	var out string
+	for _, b := range resp.Content {
+		if b.Type == "text" {
+			out += b.Text
+		}
+	}
+	return out, nil
 }

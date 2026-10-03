@@ -40,6 +40,7 @@ type Loop struct {
 	AppendSysP  string
 	ExtraSystem []string
 	PermRules   map[string][]string
+	AddDirs     []string
 	User        UserConfig
 	Messages    []api.Message
 	ToolCtx     *tools.Context
@@ -49,6 +50,7 @@ type Loop struct {
 	UsageTotal  api.Usage
 	Transcript  string // path to JSONL transcript (for compact notes)
 	Hooks       hooks.Config
+	inCompact   bool
 }
 
 func NewLoop(client *api.Client, cwd string) *Loop {
@@ -100,10 +102,12 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 	if !l.started {
 		msg = FirstUserMessage(prompt, l.CWD, l.User.Email)
 		l.started = true
+		l.Messages = append(l.Messages, msg,
+			api.TextMessage("system", EnvMessage(l.ToolCtx.CWD, l.Model, l.AddDirs, l.PermMode)))
 	} else {
 		msg = api.TextMessage("user", prompt)
+		l.Messages = append(l.Messages, msg)
 	}
-	l.Messages = append(l.Messages, msg)
 	return l.run(ctx, 0)
 }
 
@@ -185,6 +189,11 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		})
 	}
 	if len(results) == 0 {
+		if l.ShouldAutoCompact(resp.Usage) && !l.inCompact {
+			l.inCompact = true
+			_ = l.Compact(ctx, l.Transcript)
+			l.inCompact = false
+		}
 		return resp, nil
 	}
 	l.PushUser(results)

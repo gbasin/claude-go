@@ -117,7 +117,7 @@ func execBash(c *Context, raw json.RawMessage) Result {
 
 // shellCmd builds a command that runs in the persisted cwd and reports the
 // resulting cwd back via a sentinel so the session can track `cd`.
-const cwdSentinel = "\x00__CLAUDE_GO_CWD__\x00"
+const cwdSentinel = "__CLAUDE_GO_CWD_SENTINEL__"
 
 func (c *Context) shellCmd(ctx context.Context, command string) *exec.Cmd {
 	wrapped := command + "\nprintf '" + cwdSentinel + "%s' \"$PWD\""
