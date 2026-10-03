@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -490,11 +491,15 @@ func ListInProcessAgents() []*AgentRecord {
 // Mutations are serialized with an O_EXCL lockfile.
 
 type sessionEntry struct {
-	SessionID string    `json:"sessionId"`
-	CWD       string    `json:"cwd"`
-	Name      string    `json:"name"`
-	PID       int       `json:"pid"`
-	TS        time.Time `json:"ts"`
+	SessionID           string    `json:"sessionId"`
+	CWD                 string    `json:"cwd"`
+	Name                string    `json:"name"`
+	PID                 int       `json:"pid"`
+	TS                  time.Time `json:"ts"`
+	MessagingSocketPath string    `json:"messagingSocketPath,omitempty"`
+	Kind                string    `json:"kind,omitempty"`       // interactive|bg
+	Entrypoint          string    `json:"entrypoint,omitempty"` // cli
+	StartedAt           time.Time `json:"startedAt,omitempty"`
 }
 
 // Real CC keeps the live-session registry at ~/.claude/sessions/<pid>.json and
@@ -562,6 +567,8 @@ func RegisterSession(sessionID, cwd, name string) error {
 	e := sessionEntry{
 		SessionID: sessionID, CWD: cwd, Name: name,
 		PID: os.Getpid(), TS: time.Now(),
+		Kind: "interactive", Entrypoint: "cli", StartedAt: time.Now(),
+		MessagingSocketPath: socketPath(), // peers can push instantly
 	}
 	b, err := json.MarshalIndent(e, "", "  ")
 	if err != nil {
@@ -881,10 +888,13 @@ func execSendMessage(c *Context, raw json.RawMessage) Result {
 	if len(matches) == 1 {
 		e := matches[0]
 		if in.Message != "" {
-			if err := mailboxAppend(e.SessionID, mailMsg{
-				From: sender, Kind: "message", Message: in.Message, Summary: in.Summary,
-			}); err != nil {
-				return Result{Content: "send failed: " + err.Error(), IsError: true}
+			m := mailMsg{From: sender, To: e.SessionID, Kind: "message",
+				Message: in.Message, Summary: in.Summary}
+			if !socketDeliver(e, m) {
+				// peer offline — persist to the mailbox for its next turn
+				if err := mailboxAppend(e.SessionID, m); err != nil {
+					return Result{Content: "send failed: " + err.Error(), IsError: true}
+				}
 			}
 		}
 		note := ""
@@ -964,4 +974,65 @@ func execListAgents(c *Context, raw json.RawMessage) Result {
 		return Result{Content: "No agents or messages found."}
 	}
 	return Result{Content: b.String()}
+}
+
+// ---------- unix-socket peer messaging ----------
+// Each session listens on $TMPDIR/cc-socks/<pid>.sock and records the path in
+// its sessions/<pid>.json entry (real field name: messagingSocketPath).
+// mailboxAppend still persists; a live socket delivers instantly.
+
+func socketDir() string {
+	return filepath.Join(os.TempDir(), "cc-socks")
+}
+
+func socketPath() string {
+	return filepath.Join(socketDir(), fmt.Sprint(os.Getpid())+".sock")
+}
+
+// StartMessenger listens for inbound peer messages; each is rendered and
+// queued as a session prompt. Call once from the REPL entrypoint.
+func StartMessenger(sessionID string) (cleanup func()) {
+	if err := os.MkdirAll(socketDir(), 0o700); err != nil {
+		return func() {}
+	}
+	p := socketPath()
+	os.Remove(p)
+	ln, err := net.Listen("unix", p)
+	if err != nil {
+		return func() {}
+	}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				c.SetDeadline(time.Now().Add(5 * time.Second))
+				var m mailMsg
+				if json.NewDecoder(c).Decode(&m) == nil {
+					QueuePrompt(renderMail(m))
+				}
+			}(conn)
+		}
+	}()
+	return func() {
+		ln.Close()
+		os.Remove(p)
+	}
+}
+
+// socketDeliver pushes a mailMsg to a peer's socket. Returns false if the
+// peer has no socket or isn't listening (caller falls back to the mailbox).
+func socketDeliver(e sessionEntry, m mailMsg) bool {
+	if e.MessagingSocketPath == "" {
+		return false
+	}
+	c, err := net.DialTimeout("unix", e.MessagingSocketPath, 2*time.Second)
+	if err != nil {
+		return false
+	}
+	defer c.Close()
+	return json.NewEncoder(c).Encode(m) == nil
 }

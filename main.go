@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -172,7 +173,7 @@ func main() {
 			configSub(args[1:])
 			return
 		case "update", "install":
-			fmt.Println("claude-go is built from source; update via git pull && go build")
+			selfUpdate()
 			return
 		case "login":
 			authLoginSub()
@@ -395,6 +396,8 @@ func main() {
 	loop.Hooks = hooks.Load(cwd)
 	loop.SessionStartSource = "startup"
 	tools.RegisterSession(sessionID, cwd, "")
+	messengerCleanup := tools.StartMessenger(sessionID)
+	defer messengerCleanup()
 	defer tools.UnregisterSession(sessionID)
 	loop.ToolCtx.Agent = &agent.Runner{Hooks: loop.Hooks,
 		Client: client, PermMode: loop.PermMode, Model: loop.Model,
@@ -622,6 +625,14 @@ func startMCP(cwd, configFile string, strict bool) (clients []*mcp.Client) {
 		}(name, cfg)
 	}
 	wg.Wait()
+	// IDE bridge: ~/.claude/ide/*.lock → MCP-over-WS (VSCode/Cursor extension)
+	if ic, err := mcp.ConnectIDE(cwd, config.ClaudeDir()); err == nil && ic != nil {
+		for _, t := range ic.Tools {
+			tools.RegisterMCP(ic.Name, ic, t.Name, t.Description, t.InputSchema)
+		}
+		tools.RegisterMCPServer(ic.Name, ic)
+		clients = append(clients, ic)
+	}
 	return clients
 }
 
@@ -928,4 +939,54 @@ func stampProjectState(cwd, sessionID, model string, gracefulEnd bool) {
 		cfg["numStartups"] = n + 1
 	}
 	config.WriteClaudeJSON(p, cfg)
+}
+
+// selfUpdate rebuilds from the source checkout that produced this binary —
+// claude-go ships from source, so "update" = git pull + go build + swap.
+func selfUpdate() {
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Println("update: can't locate binary:", err)
+		return
+	}
+	exe, _ = filepath.EvalSymlinks(exe)
+	// find the repo root above the binary
+	dir := filepath.Dir(exe)
+	repo := ""
+	for d := dir; ; d = filepath.Dir(d) {
+		if st, err := os.Stat(filepath.Join(d, "go.mod")); err == nil && !st.IsDir() {
+			b, _ := os.ReadFile(filepath.Join(d, "go.mod"))
+			if strings.Contains(string(b), "module claude-go") {
+				repo = d
+				break
+			}
+		}
+		if d == "/" || d == "." {
+			break
+		}
+	}
+	if repo == "" {
+		fmt.Println("update: binary isn't inside a claude-go source checkout — rebuild with `go install github.com/gbasin/claude-go@latest`")
+		return
+	}
+	out, err := exec.Command("git", "-C", repo, "pull", "--ff-only").CombinedOutput()
+	if err != nil {
+		fmt.Printf("update: pull failed: %s\n", out)
+		return
+	}
+	fmt.Print(string(out))
+	tmp := exe + ".new"
+	cmd := exec.Command("go", "build", "-o", tmp, ".")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		os.Remove(tmp)
+		fmt.Printf("update: build failed: %s\n", out)
+		return
+	}
+	if err := os.Rename(tmp, exe); err != nil {
+		os.Remove(tmp)
+		fmt.Println("update: couldn't replace binary:", err)
+		return
+	}
+	fmt.Println("updated claude-go →", exe)
 }

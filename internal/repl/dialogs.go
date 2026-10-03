@@ -66,6 +66,10 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 			return false, pr.Reason
 		}
 	}
+	// take over stdin for the dialog (turn busy-loop forwards to us)
+	dch := make(chan key, 16)
+	ks.dialog.Store(&dch)
+	defer ks.dialog.Store(nil)
 	notifyAttention(l.ToolCtx.CWD)
 	if l.Hooks != nil {
 		hooks.Run(l.Hooks, hooks.Notification, map[string]any{
@@ -77,36 +81,50 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 			"permission_mode":   l.PermMode,
 		}, l.ToolCtx.CWD)
 	}
-	fmt.Printf("\n%sDo you want to proceed?%s\n", bold, reset)
+	// real dialog: titled bordered box, tool card with key:value rows (Edit
+	// gets a colored diff preview), decision-reason line, live M:SS countdown
+	fmt.Printf("\n%s╭─ %s%s%s\n", yellow, bold+name+reset, dim+" ─ permission"+reset, reset)
+	printToolCard(name, input, summary)
 	if reason != "" {
 		fmt.Printf("  %s%s%s\n", yellow, reason, reset)
 		if config != "" {
 			fmt.Printf("  %s%s%s\n", dim, config, reset)
 		}
 	}
-	fmt.Printf("  %s%s\n  %s%s%s\n", dim, name, reset, trunc(summary, 200), reset)
-	fmt.Printf("  %s⏵ Claude Code will automatically deny this request in about 5 minutes, to avoid blocking progress on an unattended session%s\n",
-		dim, reset)
-	fmt.Printf("  %s1.%s Yes\n  %s2.%s Yes, and don't ask again for %s in %s\n  %s3.%s No\n  %s4.%s No, and tell Claude what to do differently\n  ",
-		bold, reset, bold, reset, name, l.ToolCtx.CWD, bold, reset, bold, reset)
 	deadline := time.Now().Add(permAskTimeout)
+	// live countdown — real ticks `in M:SS`
+	printOpts := func(rem time.Duration) {
+		fmt.Printf("\r\x1b[K  %s⏵ auto-deny in %d:%02d — to avoid blocking an unattended session%s\n", dim, int(rem.Minutes()), int(rem.Seconds())%60, reset)
+		fmt.Printf("  %s1.%s Yes\n  %s2.%s Yes, and don't ask again for %s in %s\n  %s3.%s No\n  %s4.%s No, and tell Claude what to do differently\n  %s⌘ enter confirm · escape cancel%s\n\x1b[6A\r",
+			bold, reset, bold, reset, name, l.ToolCtx.CWD, bold, reset, bold, reset, dim, reset)
+	}
+	printOpts(permAskTimeout)
 	timeout := time.NewTimer(permAskTimeout)
+	tick := time.NewTicker(time.Second)
 	defer timeout.Stop()
+	defer tick.Stop()
 	for {
 		select {
+		case <-tick.C:
+			rem := time.Until(deadline)
+			if rem > 0 {
+				printOpts(rem)
+			}
 		case <-timeout.C:
+			fmt.Print("\x1b[6B") // below the options block
 			fmt.Printf("\n  %s⏵ auto-denied — unattended for %s%s\n", dim, permAskTimeout, reset)
 			return false, ""
-		case k, ok := <-ks.ch:
+		case k, ok := <-dch:
 			if !ok {
 				return false, ""
 			}
+			fmt.Print("\x1b[6B\r") // clear the options block
 			switch k.b {
 			case '1', 'y', 'Y', '\r':
-				fmt.Println("1")
+				fmt.Println("1. Yes")
 				return true, ""
 			case '2', 'a', 'A':
-				fmt.Println("2")
+				fmt.Println("2. Yes, always")
 				p.always[name] = true
 				// real writes a permission rule to .claude/settings.local.json
 				if rule := ruleSuggestion(name, summary); rule != "" {
@@ -115,12 +133,14 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 				}
 				return true, ""
 			case '3', 'n', 'N', 0x1b, 3:
-				fmt.Println("3")
+				fmt.Println("3. No")
 				return false, ""
 			case '4', 'd', 'D':
-				fmt.Println("4")
+				fmt.Println("4. No, with feedback")
 				return false, readFeedbackLine(ks, deadline)
 			}
+			fmt.Print("\x1b[6A\r") // unrecognized — back to the block
+			printOpts(time.Until(deadline))
 		}
 	}
 }
@@ -471,4 +491,61 @@ func installShiftEnterBinding(kb string) {
 	}
 	fmt.Println("  installed shift+enter → newline in", kb)
 	fmt.Println("  reload the editor window to pick it up")
+}
+
+// printToolCard renders the tool input as real's card: key: value rows for
+// scalars (capped), a colored diff for Edit, and a sentinel for oversized
+// parameter sets.
+func printToolCard(name string, input json.RawMessage, summary string) {
+	var kv map[string]any
+	if len(input) == 0 || json.Unmarshal(input, &kv) != nil {
+		fmt.Printf("  %s(parameters are not an object — deny unless expected)%s\n", dim, reset)
+		return
+	}
+	if name == "Edit" {
+		printEditCard(kv)
+		return
+	}
+	keys := 0
+	for _, k := range sortedKeys(kv) {
+		if keys >= 8 {
+			fmt.Printf("  %s… (+%d more parameters)%s\n", dim, len(kv)-keys, reset)
+			break
+		}
+		v := fmt.Sprint(kv[k])
+		if len(v) > 200 {
+			v = trunc(v, 200) + dim + " …" + reset
+		}
+		fmt.Printf("  %s%-16s%s %s\n", dim, k, reset, v)
+		keys++
+	}
+	if len(kv) > 12 {
+		fmt.Printf("  %s(%d parameters — too many to show — deny unless expected)%s\n", dim, len(kv), reset)
+	}
+}
+
+// printEditCard shows old_string/new_string as red/green hunks (real shows a
+// colored diff preview inside the permission box).
+func printEditCard(kv map[string]any) {
+	fmt.Printf("  %s%-16s%s %s\n", dim, "file_path", reset, kv["file_path"])
+	old, _ := kv["old_string"].(string)
+	newS, _ := kv["new_string"].(string)
+	for _, ln := range strings.Split(strings.TrimRight(old, "\n"), "\n") {
+		fmt.Printf("    %s-%s %s%s\n", red, reset, red, trunc(ln, 110)+reset)
+	}
+	for _, ln := range strings.Split(strings.TrimRight(newS, "\n"), "\n") {
+		fmt.Printf("    %s+%s %s%s\n", green, reset, green, trunc(ln, 110)+reset)
+	}
+	if len(strings.Split(old, "\n")) > 8 || len(strings.Split(newS, "\n")) > 8 {
+		fmt.Printf("    %s… (truncated diff)%s\n", dim, reset)
+	}
+}
+
+func sortedKeys(m map[string]any) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
 }

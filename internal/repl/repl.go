@@ -287,6 +287,9 @@ func RunWithStore(l *agent.Loop, store Store) {
 							return
 						}
 						sawInput.Store(true)
+						if ks.forward(k) {
+							continue // modal dialog owns the key
+						}
 						if (k.b == 0x1b || k.b == 3) && k.seq == "" {
 							cancel()
 							// popQueuedIntoDraft: unfinished queued text returns to the editor
