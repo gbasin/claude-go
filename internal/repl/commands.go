@@ -53,10 +53,11 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		if arg != "" {
 			l.AppendSysP += "\n\n## Compact Instructions\n" + arg
 		}
+		before := len(l.Messages)
 		if err := l.Compact(context.Background(), l.Transcript); err != nil {
 			fmt.Println("  compact failed:", err)
 		} else {
-			fmt.Println("  context compacted")
+			fmt.Printf("  Compacted · %d messages summarized (ctrl+o to see them)\n", before)
 		}
 	case "cost", "usage", "stats":
 		u := l.UsageTotal
