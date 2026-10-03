@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strconv"
 	"syscall"
 	"time"
 )
@@ -152,8 +151,10 @@ func (p *Proxy) handleSocksConn(c net.Conn) {
 		socksReply(c, socksNotAllowed)
 		return
 	}
-	up, err := p.dialChecked(context.Background(), "tcp",
-		net.JoinHostPort(host, strconv.Itoa(port)))
+	// dialTarget routes through the parent proxy when configured and the
+	// destination doesn't bypass it (real's uXn-vs-Myn choice), else dials
+	// directly with post-dial address re-verification.
+	up, err := p.dialTarget(context.Background(), host, port)
 	if err != nil {
 		reply := byte(socksHostUnreachable)
 		var pe *policyError

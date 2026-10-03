@@ -11,12 +11,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1155,12 +1157,19 @@ const (
 )
 
 // firstLineDeadlineMs is real's configurable state field (i.firstLineDeadlineMs
-// ?? UMn); tests may shrink it.
-var firstLineDeadlineMs = firstLineDeadline
+// ?? UMn); tests may shrink it. Atomic: servePeer goroutines read it while
+// tests write it.
+var firstLineDeadlineMs atomic.Int64
 
 // messengerAuthRequired mirrors real's u().authRequired = requireAuth ?? OAn()
 // — OAn() is "windows" only; single-user posix accepts unauthenticated conns.
-var messengerAuthRequired = authRequired()
+// Atomic for the same reason.
+var messengerAuthRequired atomic.Bool
+
+func init() {
+	firstLineDeadlineMs.Store(int64(firstLineDeadline))
+	messengerAuthRequired.Store(authRequired())
+}
 
 func authRequired() bool { return runtime.GOOS == "windows" }
 
@@ -1594,6 +1603,14 @@ type peerFrame struct {
 	State      string `json:"state,omitempty"` // idle|exited|unavailable
 	Detail     string `json:"detail,omitempty"`
 	FromMode   string `json:"from_mode,omitempty"`
+	// artifact reply-yield trio (aEo/cEo/lEo schemas)
+	Slugs     []string `json:"slugs,omitempty"`      // yield/unyield: slugs being handed over
+	SentAt    *float64 `json:"sent_at,omitempty"`    // yield: request epoch ms (staleness gate)
+	ClaimedAt *float64 `json:"claimed_at,omitempty"` // yield: claimant's claim timestamp
+	Yielded   []string `json:"yielded,omitempty"`    // yielded reply: slugs handed over
+	NotHeld   []string `json:"not_held,omitempty"`   // yielded reply: slugs not held here
+	Refused   bool     `json:"refused,omitempty"`    // yielded reply: request refused
+	Stopped   bool     `json:"stopped,omitempty"`    // unyield: handback because it stopped
 	// user extras we accept but don't materialize
 	FileAttachments json.RawMessage `json:"file_attachments,omitempty"`
 }
@@ -1606,7 +1623,7 @@ func servePeer(c net.Conn, sessionID string) {
 	defer c.Close()
 	// firstLineDeadlineMs: a conn that sends no complete line in time is
 	// closed (real logs cross_session_inbox_auth/silent_connection_deadline).
-	c.SetReadDeadline(time.Now().Add(firstLineDeadlineMs))
+	c.SetReadDeadline(time.Now().Add(time.Duration(firstLineDeadlineMs.Load())))
 	var (
 		buf       []byte
 		parsed    int // parsed-line count; auth is honored only on line 1
@@ -1623,9 +1640,16 @@ func servePeer(c net.Conn, sessionID string) {
 	creds := func() bool {
 		if !credsDone {
 			credsDone = true
-			p, u, _, ok := peerCredsOf(c)
+			p, u, _, ok := peerCreds(c)
 			if ok {
-				peerPid, peerUid = p, u
+				peerPid = p
+				// real's uid_collapse rule: a peer in a user namespace
+				// without a uid map reads as the kernel overflow uid —
+				// its creds are unverifiable, not foreign
+				if classifyPeerUID(u, os.Getuid()) == peerUIDOverflow {
+					u = -1
+				}
+				peerUid = u
 			}
 		}
 		if peerUid >= 0 && peerUid != os.Getuid() {
@@ -1634,15 +1658,27 @@ func servePeer(c net.Conn, sessionID string) {
 		}
 		return true
 	}
+	// selfSent lazily resolves real's ce()/ye() verdict once per conn —
+	// after creds() ran, so peerPid and the (line-1-only) auth class are
+	// final. Self-sent frames are still delivered but get no reply-status
+	// receipts back (real's Oe() skips registering their reply route).
+	var selfSentVal, selfSentSet bool
+	selfSent := func() bool {
+		if !selfSentSet {
+			selfSentSet = true
+			selfSentVal = peerSelfSent(peerPid, authCls)
+		}
+		return selfSentVal
+	}
 	// handle returns false to drop the connection (real's f()/destroy()).
 	handle := func(line []byte) bool {
 		if len(bytes.TrimSpace(line)) == 0 {
 			// a blank line before auth when auth is required → drop
-			return !(messengerAuthRequired && authCls == "")
+			return !(messengerAuthRequired.Load() && authCls == "")
 		}
 		var f peerFrame
 		if json.Unmarshal(line, &f) != nil {
-			if messengerAuthRequired && authCls == "" {
+			if messengerAuthRequired.Load() && authCls == "" {
 				return false // unparseable line before auth
 			}
 			return true
@@ -1651,19 +1687,19 @@ func servePeer(c net.Conn, sessionID string) {
 		if f.Type == "auth" {
 			if parsed == 1 {
 				authCls = peerTokenClass(f.Token)
-				if authCls == "" && messengerAuthRequired {
+				if authCls == "" && messengerAuthRequired.Load() {
 					return false // bad auth frame when auth is required
 				}
 			}
 			return true // later auth lines are ignored (real: only first line)
 		}
-		if messengerAuthRequired && authCls == "" {
+		if messengerAuthRequired.Load() && authCls == "" {
 			return false // non-auth line before authenticating
 		}
 		if !creds() {
 			return false
 		}
-		dispatchPeerFrame(f, sessionID, peerPid, authCls)
+		dispatchPeerFrame(f, sessionID, peerPid, authCls, selfSent)
 		return true
 	}
 
@@ -1698,8 +1734,8 @@ func servePeer(c net.Conn, sessionID string) {
 					var f peerFrame
 					if json.Unmarshal(line, &f) == nil {
 						parsed++
-						if f.Type != "auth" && !(messengerAuthRequired && authCls == "") && creds() {
-							dispatchPeerFrame(f, sessionID, peerPid, authCls)
+						if f.Type != "auth" && !(messengerAuthRequired.Load() && authCls == "") && creds() {
+							dispatchPeerFrame(f, sessionID, peerPid, authCls, selfSent)
 						}
 					}
 				}
@@ -1732,6 +1768,132 @@ func peerUIDOf(c net.Conn) int {
 	return uid
 }
 
+// peerCreds resolves inbound conn creds for servePeer; tests stub it via
+// stubPeerCreds (the kernel call can't produce foreign/overflow uids or a
+// non-self pid for our own loopback conns). Atomic pointer: servePeer
+// goroutines read it while tests swap it.
+type peerCredsFunc func(net.Conn) (pid, uid, gid int, ok bool)
+
+var peerCredsStub atomic.Pointer[peerCredsFunc]
+
+func stubPeerCreds(fn func(net.Conn) (pid, uid, gid int, ok bool)) {
+	if fn == nil {
+		peerCredsStub.Store(nil)
+		return
+	}
+	f := peerCredsFunc(fn)
+	peerCredsStub.Store(&f)
+}
+
+func peerCreds(c net.Conn) (pid, uid, gid int, ok bool) {
+	if f := peerCredsStub.Load(); f != nil {
+		return (*f)(c)
+	}
+	return peerCredsOf(c)
+}
+
+// peerOverflowUID is the kernel overflow uid ("nobody"): a peer inside a
+// user namespace without a uid map presents it. Real's uid_collapse rule
+// treats those creds as unverifiable rather than foreign — the conn is not
+// dropped for it, but the uid vouches for nothing.
+const peerOverflowUID = 65534
+
+type peerUIDClass int
+
+const (
+	peerUIDSelf     peerUIDClass = iota // same uid as us
+	peerUIDUnknown                      // platform can't report one
+	peerUIDOverflow                     // overflow nobody — unverifiable
+	peerUIDForeign                      // a different real uid — drop
+)
+
+// classifyPeerUID is real's getPeerUid check plus the uid_collapse carve-out.
+func classifyPeerUID(uid, own int) peerUIDClass {
+	switch {
+	case uid < 0:
+		return peerUIDUnknown
+	case uid == own:
+		return peerUIDSelf
+	case uid == peerOverflowUID:
+		return peerUIDOverflow
+	default:
+		return peerUIDForeign
+	}
+}
+
+// peerSelfSent is real's ce()/ye(): a frame is self-sent when the verified
+// peer pid is our own pid or sits in our descendant chain — our pid appears
+// in the peer's ppid ancestry (a spawned child dialing back). With no pid
+// evidence a presented child token counts as self on macos (real's
+// "no-evidence" && childTokenPresented fallback); pid 1 / windows fall to
+// the child token directly.
+func peerSelfSent(peerPid int, authCls string) bool {
+	self := os.Getpid()
+	if self == 1 || runtime.GOOS == "windows" {
+		return authCls == "child"
+	}
+	if !peerCredOSSupport {
+		return false // !needsVerdict
+	}
+	if peerPid <= 0 {
+		// no evidence: verdict path runs on macos only
+		return runtime.GOOS == "darwin" && authCls == "child"
+	}
+	if peerPid == self {
+		return true
+	}
+	anc := procAncestors(peerPid)
+	if anc == nil {
+		// ancestry unreadable → "no-evidence"; macos accepts a child token
+		return runtime.GOOS == "darwin" && authCls == "child"
+	}
+	for _, p := range anc {
+		if p == self {
+			return true
+		}
+	}
+	return false
+}
+
+// procAncestors returns pid's ppid chain — real's jAn ancestor read —
+// bounded at 4 levels. nil when the first read fails (no evidence).
+func procAncestors(pid int) []int {
+	out := []int{} // non-nil: an empty chain (e.g. pid 1) is still evidence
+	seen := map[int]bool{pid: true}
+	for i := 0; i < 4 && pid > 1; i++ {
+		ppid := ppidOf(pid)
+		if ppid < 0 {
+			if i == 0 {
+				return nil // ancestry walk failed — no evidence
+			}
+			break
+		}
+		if ppid == 0 || seen[ppid] {
+			break
+		}
+		seen[ppid] = true
+		out = append(out, ppid)
+		pid = ppid
+	}
+	return out
+}
+
+// ppidOf shells `ps -o ppid= -p <pid>` like real; -1 when unreadable.
+func ppidOf(pid int) int {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "-o", "ppid=", "-p",
+		fmt.Sprint(pid)).Output()
+	if err != nil {
+		return -1
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return -1
+	}
+	return n
+}
+
 // peerSessionOK is real's Ie(): a session_id, when present, must be ours.
 func peerSessionOK(f peerFrame, sessionID string) bool {
 	return f.SessionID == "" || f.SessionID == sessionID
@@ -1740,10 +1902,12 @@ func peerSessionOK(f peerFrame, sessionID string) bool {
 // dispatchPeerFrame is real's be()/ze(): user frames route to the prompt
 // queue; control frames dispatch on action. Ingress dedup (real's Vjr)
 // drops a second delivery of the same msg_id inside a 5-minute window.
-func dispatchPeerFrame(f peerFrame, sessionID string, peerPid int, authCls string) {
+// selfSent is the conn's lazy ce() verdict — self-sent frames deliver
+// normally but earn no reply-status receipts (real's Oe()).
+func dispatchPeerFrame(f peerFrame, sessionID string, peerPid int, authCls string, selfSent func() bool) {
 	if f.MsgID != "" && peerMsgIDSeen(f.MsgID) {
 		peerLogf("dropping re-delivered msg_id %s", f.MsgID)
-		if f.Type == "user" {
+		if f.Type == "user" && !selfSent() {
 			sendPeerStatusReply(f.From, peerPid, "dropped", f.MsgID, "duplicate")
 		}
 		return
@@ -1762,9 +1926,10 @@ func dispatchPeerFrame(f peerFrame, sessionID string, peerPid int, authCls strin
 			return
 		}
 		// real's Hpt gate can hold a peer message for recipient approval;
-		// we hold while mid-turn or when the peer is kernel-unverifiable.
+		// we hold while mid-turn, in a restrictive permission mode, or
+		// when the peer is kernel-unverifiable.
 		if shouldHoldPeerMsg(peerPid, authCls) {
-			holdPeerMsg(f, msg.Content, peerPid)
+			holdPeerMsg(f, msg.Content, peerPid, selfSent())
 			return
 		}
 		// real validates priority via z4e (now|next|later) — all land in the
@@ -1776,8 +1941,8 @@ func dispatchPeerFrame(f peerFrame, sessionID string, peerPid int, authCls strin
 		}
 		switch f.Action {
 		case "rename":
-			if sessionRename != nil {
-				sessionRename(f.Name)
+			if rn := sessionRename.Load(); rn != nil {
+				(*rn)(f.Name)
 			}
 		case "peer_message_status":
 			handlePeerMessageStatus(f)
@@ -1789,9 +1954,12 @@ func dispatchPeerFrame(f peerFrame, sessionID string, peerPid int, authCls strin
 			// claude-go extension: force-flush held peer messages early
 			// (real releases on user approval / prompt boundary only)
 			FlushHeldPeerMessages()
-		case "yield_artifact_replies", "unyield_artifact_replies", "artifact_replies_yielded":
-			// artifact live-subscribe protocol — accept-and-log only
-			peerLogf("control %s accepted (artifact yield protocol unimplemented)", f.Action)
+		case "yield_artifact_replies":
+			handleYieldArtifactReplies(f, sessionID, peerPid)
+		case "unyield_artifact_replies":
+			handleUnyieldArtifactReplies(f, peerPid)
+		case "artifact_replies_yielded":
+			handleArtifactRepliesYielded(f)
 		default:
 			peerLogf("unhandled control action: %s", f.Action)
 		}
@@ -1897,10 +2065,31 @@ func resolveReceipt(msgID string, r peerReceipt) {
 	}
 }
 
+// peerStatusReason is real's mn(): the human-readable reason string carried
+// on outbound peer_message_status receipts.
+func peerStatusReason(status string) string {
+	switch status {
+	case "held":
+		return "Your message is held for the recipient user's approval before it reaches their Claude session (permission-mode parity)."
+	case "denied":
+		return "The recipient user declined your message; it was not delivered to their Claude session."
+	case "expired":
+		return "Your held message expired without approval and was not delivered to the recipient's Claude session."
+	case "delivered":
+		return "Your previously-held message was approved and released to the recipient's Claude session."
+	case "refused":
+		return "The recipient session is not accepting cross-session messages (the feature is off there, or a setting or policy there refuses them); your message was not delivered to its Claude."
+	case "dropped":
+		return "The recipient's session dropped your message at its inbox (rate limit, duplicate, relay loop, or full queue); it was not delivered and will not be."
+	}
+	return ""
+}
+
 // sendPeerStatusReply replies to a peer frame's sender with a
 // peer_message_status receipt — real answers on a fresh connection to the
 // frame's `from` address, never on the inbound conn. dropReason is only
-// meaningful for status "dropped".
+// meaningful for status "dropped". Real wires "refused" as
+// status="expired" + status_detail="refused"; other statuses verbatim.
 func sendPeerStatusReply(fromRaw string, peerPid int, status, origMsgID, dropReason string) {
 	if !isUUID(origMsgID) {
 		return // nothing for the sender to correlate against
@@ -1910,9 +2099,14 @@ func sendPeerStatusReply(fromRaw string, peerPid int, status, origMsgID, dropRea
 		peerLogf("peer_message_status %s not sent: unshapable reply target %q", status, fromRaw)
 		return
 	}
+	wireStatus, detail := status, ""
+	if status == "refused" {
+		wireStatus, detail = "expired", "refused"
+	}
 	socketWriteFrame(target, peerFrame{
 		Type: "control", MsgV: 1, MsgID: newUUID(),
-		Action: "peer_message_status", Status: status,
+		Action: "peer_message_status", Status: wireStatus,
+		StatusDetail: detail, Reason: peerStatusReason(status),
 		OrigMsgID: origMsgID, DropReason: dropReason,
 		From: udsAddr(socketPath()),
 	})
@@ -1962,9 +2156,11 @@ func peerMsgIDSeen(id string) bool {
 // Real's peer_message_status "held": a peer user message that needs
 // recipient approval (its Hpt permission gate) waits instead of landing in
 // the prompt queue; the sender gets a "held" receipt and a "delivered" one
-// when it is released. We hold while the session is mid-turn or the peer is
-// kernel-unverifiable on a creds platform, and flush at the prompt boundary
-// (FireIdleNotifications) or on a control release.
+// when it is released. We hold while the session is mid-turn, while a
+// restrictive permission mode is active (real's hold decision gates on the
+// RECIPIENT's permission context — "permission-mode parity"), or when the
+// peer is kernel-unverifiable on a creds platform; flush at the prompt
+// boundary (FireIdleNotifications) or on a control release.
 
 var peerSessionBusy atomic.Bool
 
@@ -1972,10 +2168,39 @@ var peerSessionBusy atomic.Bool
 // REPL at turn start/end so inbound peer messages hold for the boundary.
 func SetPeerSessionBusy(b bool) { peerSessionBusy.Store(b) }
 
+// peerPermModeFn reports this session's permission mode — wired by main
+// from loop.PermMode (real's Ci().inbound.getCurrentMode). Restrictive
+// modes — where inbound automation must wait for the user — hold peer
+// messages for approval rather than delivering mid-conversation.
+var peerPermModeFn atomic.Pointer[func() string]
+
+// SetPeerPermMode registers the permission-mode getter used by the
+// messenger's hold gate (and, elsewhere, from_mode on outbound notices).
+func SetPeerPermMode(fn func() string) {
+	if fn == nil {
+		peerPermModeFn.Store(nil)
+		return
+	}
+	peerPermModeFn.Store(&fn)
+}
+
+func currentPermMode() string {
+	if g := peerPermModeFn.Load(); g != nil {
+		return (*g)()
+	}
+	return ""
+}
+
 // shouldHoldPeerMsg decides whether an inbound user frame waits for the
 // prompt boundary instead of queueing immediately.
 func shouldHoldPeerMsg(peerPid int, authCls string) bool {
 	if peerSessionBusy.Load() {
+		return true
+	}
+	// permission-mode parity: "plan"/"dontAsk"-style modes gate inbound
+	// automation behind the user — peer messages wait for approval
+	switch currentPermMode() {
+	case "plan", "dontAsk":
 		return true
 	}
 	// unverified: on a platform where kernel creds exist, a peer with no
@@ -2001,12 +2226,19 @@ var heldPeerMsgs = struct {
 	q  []heldPeerMsg
 }{}
 
-func holdPeerMsg(f peerFrame, content string, peerPid int) {
-	replyTo, _ := shapePeerReplyTarget(f.From, peerPid)
+// selfSent suppresses receipts (real's Oe() never registers a reply route
+// for self-sent origins — there is no peer session to answer).
+func holdPeerMsg(f peerFrame, content string, peerPid int, selfSent bool) {
+	replyTo := ""
+	if !selfSent {
+		replyTo, _ = shapePeerReplyTarget(f.From, peerPid)
+	}
 	heldPeerMsgs.mu.Lock()
 	if len(heldPeerMsgs.q) >= peerHeldCap {
 		heldPeerMsgs.mu.Unlock()
-		sendPeerStatusReply(f.From, peerPid, "dropped", f.MsgID, "queue-full")
+		if !selfSent {
+			sendPeerStatusReply(f.From, peerPid, "dropped", f.MsgID, "queue-full")
+		}
 		return
 	}
 	heldPeerMsgs.q = append(heldPeerMsgs.q, heldPeerMsg{
@@ -2014,7 +2246,9 @@ func holdPeerMsg(f peerFrame, content string, peerPid int) {
 		origMsgID: f.MsgID, heldAt: time.Now(),
 	})
 	heldPeerMsgs.mu.Unlock()
-	sendPeerStatusReply(f.From, peerPid, "held", f.MsgID, "")
+	if !selfSent {
+		sendPeerStatusReply(f.From, peerPid, "held", f.MsgID, "")
+	}
 }
 
 // FlushHeldPeerMessages releases every held peer message at a prompt
@@ -2030,6 +2264,7 @@ func FlushHeldPeerMessages() {
 			socketWriteFrame(h.replyTo, peerFrame{
 				Type: "control", MsgV: 1, MsgID: newUUID(),
 				Action: "peer_message_status", Status: "delivered",
+				Reason:    peerStatusReason("delivered"),
 				OrigMsgID: h.origMsgID,
 				From:      udsAddr(socketPath()),
 			})
@@ -2327,11 +2562,229 @@ func sendPeerIdleNotice(sockPath, origMsgID, state string, finishedAt int64, det
 	socketWriteFrame(sockPath, f)
 }
 
+// ---------- artifact reply-yield trio ----------
+// Real's reply-lane handoff (mod_1488 + aEo/cEo/lEo schemas): a peer session
+// of the SAME conversation asks us to yield artifact-reply routing for a set
+// of slugs via yield_artifact_replies {from, msg_id, session_id, slugs,
+// reason:resume|claim, sent_at, claimed_at?, requester?}; we answer
+// artifact_replies_yielded {orig_msg_id, yielded, not_held, refused?} on a
+// fresh conn to the requester's `from`. We run no artifact service — holder
+// === null in real's terms — so a verified, fresh request is granted empty:
+// every asked slug answers not_held.
+
+const (
+	peerYieldSlugCap = 16   // lIt: max slugs per yield frame
+	peerYieldStaleMs = 3500 // A-500: requests older than this are refused
+	peerYieldSkewMs  = 1000 // sent_at this far in the future is refused
+	yieldGrantCap    = 64   // granted-yield table cap
+)
+
+// artifactYieldGrant records a yield we answered, so a later
+// unyield_artifact_replies (real's yEo) can correlate by orig_msg_id and the
+// granting peer's verified pid, then clear it.
+type artifactYieldGrant struct {
+	target  string // canonical requester sock
+	peerPid int
+	slugs   []string
+	at      int64
+}
+
+var artifactYieldGrants = struct {
+	mu sync.Mutex
+	m  map[string]artifactYieldGrant
+}{m: map[string]artifactYieldGrant{}}
+
+// liveSessionForSock resolves the registry entry bound at sock — real's
+// yUt: the session record keyed by its inbox path.
+func liveSessionForSock(sock string) *sessionEntry {
+	canon := canonSock(sock)
+	for _, e := range readRegistry() {
+		if e.MessagingSocketPath == "" || canonSock(e.MessagingSocketPath) != canon {
+			continue
+		}
+		if !pidAlive(e.PID) {
+			return nil
+		}
+		cp := e
+		return &cp
+	}
+	return nil
+}
+
+// handleYieldArtifactReplies is real's yield_artifact_replies arm of be():
+// validate the aEo frame, shape the reply target, require the requester to
+// be a verified live session of this conversation, refuse stale requests,
+// else grant (empty — we hold nothing).
+func handleYieldArtifactReplies(f peerFrame, sessionID string, peerPid int) {
+	if f.MsgID == "" || len(f.MsgID) > 128 || f.SessionID == "" ||
+		len(f.SessionID) > 512 || len(f.From) > 512 || f.Slugs == nil ||
+		len(f.Slugs) > peerYieldSlugCap || f.SentAt == nil ||
+		math.IsNaN(*f.SentAt) || math.IsInf(*f.SentAt, 0) {
+		peerLogf("yield_artifact_replies dropped: malformed frame")
+		return
+	}
+	for _, s := range f.Slugs {
+		if len(s) > 128 {
+			peerLogf("yield_artifact_replies dropped: malformed frame")
+			return
+		}
+	}
+	own, _ := activeSock.Load().(string)
+	if own == "" {
+		peerLogf("yield_artifact_replies dropped: own inbox not bound (%q)", f.From)
+		return
+	}
+	target, ok := shapePeerReplyTarget(f.From, peerPid)
+	if !ok {
+		peerLogf("yield_artifact_replies dropped: reply address unshaped or outside our socket namespace (%q)", f.From)
+		return
+	}
+	if canonSock(target) == canonSock(own) {
+		peerLogf("yield_artifact_replies dropped: reply target is this session")
+		return
+	}
+	// real's check: the requester must be a verified live session of THIS
+	// conversation — registry entry at the sock, session id match, and a
+	// kernel-verified pid must equal the record's pid
+	if req := liveSessionForSock(target); req == nil ||
+		req.SessionID != sessionID || (peerPid > 0 && req.PID != peerPid) {
+		peerLogf("yield_artifact_replies refused: requester is not a verified live session of this conversation (%q)", f.From)
+		answerArtifactYield(target, f.MsgID, nil, nil, true)
+		return
+	}
+	// real's staleness gate (Wvr): older than A-500ms, from the future, or
+	// claimed_at after sent_at+1s → refuse
+	now, sentAt := float64(time.Now().UnixMilli()), *f.SentAt
+	if now-sentAt > peerYieldStaleMs || sentAt > now+peerYieldSkewMs ||
+		(f.ClaimedAt != nil && *f.ClaimedAt > sentAt+peerYieldSkewMs) {
+		peerLogf("yield_artifact_replies refused: stale request")
+		answerArtifactYield(target, f.MsgID, nil, nil, true)
+		return
+	}
+	notHeld := append([]string(nil), f.Slugs...)
+	recordArtifactYield(f.MsgID, target, peerPid, notHeld)
+	answerArtifactYield(target, f.MsgID, nil, notHeld, false)
+}
+
+func recordArtifactYield(origMsgID, target string, peerPid int, slugs []string) {
+	artifactYieldGrants.mu.Lock()
+	defer artifactYieldGrants.mu.Unlock()
+	if len(artifactYieldGrants.m) >= yieldGrantCap {
+		var oldest string
+		var oldestAt int64 = -1
+		for k, g := range artifactYieldGrants.m {
+			if oldestAt < 0 || g.at < oldestAt {
+				oldest, oldestAt = k, g.at
+			}
+		}
+		delete(artifactYieldGrants.m, oldest)
+	}
+	artifactYieldGrants.m[origMsgID] = artifactYieldGrant{
+		target: canonSock(target), peerPid: peerPid,
+		slugs: slugs, at: time.Now().UnixMilli(),
+	}
+}
+
+// answerArtifactYield sends artifact_replies_yielded to the requester —
+// real's sendAnswer (jvr): refused answers carry refused:true; grants carry
+// the not_held slugs.
+func answerArtifactYield(sock, origMsgID string, yielded, notHeld []string, refused bool) {
+	f := peerFrame{
+		Type: "control", MsgV: 1, MsgID: newUUID(),
+		Action: "artifact_replies_yielded", OrigMsgID: origMsgID,
+		From: udsAddr(socketPath()),
+	}
+	if refused {
+		f.Refused = true
+	} else {
+		f.Yielded, f.NotHeld = yielded, notHeld
+	}
+	socketWriteFrame(sock, f)
+}
+
+// handleUnyieldArtifactReplies is real's unyield arm (cEo): the holder hands
+// the named slugs back — must correlate to a yield we granted this peer.
+func handleUnyieldArtifactReplies(f peerFrame, peerPid int) {
+	if f.OrigMsgID == "" || len(f.OrigMsgID) > 128 || f.Slugs == nil ||
+		len(f.Slugs) > peerYieldSlugCap {
+		peerLogf("unyield_artifact_replies dropped: malformed, uncorrelated or already handed back")
+		return
+	}
+	for _, s := range f.Slugs {
+		if len(s) > 128 {
+			peerLogf("unyield_artifact_replies dropped: malformed, uncorrelated or already handed back")
+			return
+		}
+	}
+	artifactYieldGrants.mu.Lock()
+	g, ok := artifactYieldGrants.m[f.OrigMsgID]
+	if ok && g.peerPid > 0 && peerPid > 0 && g.peerPid != peerPid {
+		ok = false // correlation binds to the granting peer's verified pid
+	}
+	if ok {
+		delete(artifactYieldGrants.m, f.OrigMsgID)
+	}
+	artifactYieldGrants.mu.Unlock()
+	if !ok {
+		peerLogf("unyield_artifact_replies dropped: malformed, uncorrelated or already handed back")
+		return
+	}
+	peerLogf("unyield_artifact_replies: %d slugs handed back (stopped=%v)",
+		len(f.Slugs), f.Stopped)
+}
+
+// ---------- outbound artifact yields (real's outstanding/fEo) ----------
+// If we ever ask a peer to yield (we have no artifact service, so this stays
+// empty in practice), the ask's msg_id lands here; an inbound
+// artifact_replies_yielded settles it one-shot.
+
+var outboundYieldAsks = struct {
+	mu sync.Mutex
+	m  map[string]time.Time
+}{m: map[string]time.Time{}}
+
+func recordOutboundYieldAsk(msgID string) {
+	outboundYieldAsks.mu.Lock()
+	outboundYieldAsks.m[msgID] = time.Now()
+	outboundYieldAsks.mu.Unlock()
+}
+
+func consumeOutboundYieldAsk(msgID string) bool {
+	outboundYieldAsks.mu.Lock()
+	defer outboundYieldAsks.mu.Unlock()
+	if _, ok := outboundYieldAsks.m[msgID]; !ok {
+		return false
+	}
+	delete(outboundYieldAsks.m, msgID)
+	return true
+}
+
+// handleArtifactRepliesYielded is real's lEo arm: settle an outstanding ask.
+func handleArtifactRepliesYielded(f peerFrame) {
+	if f.OrigMsgID == "" || len(f.OrigMsgID) > 128 {
+		peerLogf("artifact_replies_yielded dropped: malformed frame")
+		return
+	}
+	if !consumeOutboundYieldAsk(f.OrigMsgID) {
+		peerLogf("artifact_replies_yielded dropped: uncorrelated or already settled")
+		return
+	}
+	peerLogf("artifact_replies_yielded: refused=%v yielded=%d not_held=%d",
+		f.Refused, len(f.Yielded), len(f.NotHeld))
+}
+
 // sessionRename is wired by the REPL so a peer "rename" control frame works.
-var sessionRename func(string)
+// Atomic: servePeer goroutines read it while the REPL/tests register it.
+var sessionRename atomic.Pointer[func(string)]
 
 // SetSessionRenamer registers the rename callback.
-func SetSessionRenamer(fn func(string)) { sessionRename = fn }
+func SetSessionRenamer(fn func(string)) {
+	if fn == nil {
+		sessionRename.Store(nil)
+		return
+	}
+	sessionRename.Store(&fn)
+}
 
 // newUUID: real's crypto.randomUUID — msg_id must match /^[0-9a-f]{8}-
 // [0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i to correlate receipts.

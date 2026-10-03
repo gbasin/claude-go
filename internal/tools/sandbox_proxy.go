@@ -19,11 +19,11 @@ var sessionProxy struct {
 	inited bool
 }
 
-// sharedNetProxy returns the session proxy with rules applied from n. The
+// sharedNetProxy returns the session proxy with rules applied from s. The
 // string return is a non-fatal note (e.g. CA unavailable → CONNECT
 // passthrough mode). A failed proxy is a conservative degradation: the
 // caller emits a deny-all network profile instead.
-func sharedNetProxy(n *SandboxNetwork) (*netproxy.Proxy, string, error) {
+func sharedNetProxy(s *SandboxSettings) (*netproxy.Proxy, string, error) {
 	sessionProxy.mu.Lock()
 	defer sessionProxy.mu.Unlock()
 	if !sessionProxy.inited {
@@ -45,11 +45,20 @@ func sharedNetProxy(n *SandboxNetwork) (*netproxy.Proxy, string, error) {
 	if sessionProxy.px == nil {
 		return nil, "", sessionProxy.err
 	}
+	n := s.Network
+	if n == nil {
+		n = &SandboxNetwork{}
+	}
 	sessionProxy.px.SetRules(netproxy.Rules{
-		AllowedDomains: n.AllowedDomains,
-		DeniedDomains:  n.DeniedDomains,
-		AllowedCidrs:   n.AllowedCidrs,
-		AllowAllLocal:  n.AllowAllLocal,
+		AllowedDomains:          n.effectiveAllowed(),
+		DeniedDomains:           n.DeniedDomains,
+		DeniedDomainReasons:     n.DeniedDomainReasons,
+		AllowedCidrs:            n.AllowedCidrs,
+		DeniedResolvedAddresses: n.DeniedResolvedAddresses,
+		AllowAllLocal:           n.AllowAllLocal,
+		StrictAllowlist:         n.StrictAllowlist,
+		ParentProxy:             n.ParentProxy,
+		IgnoreViolations:        s.IgnoreViolations,
 	})
 	return sessionProxy.px, sessionProxy.caNote, nil
 }
@@ -65,6 +74,17 @@ func SandboxAllowHost(host string) string {
 	}
 	sessionProxy.px.AllowHost(host)
 	return fmt.Sprintf("allowed %s for this session", host)
+}
+
+// sandboxViolations returns the proxy-recorded deny lines for command —
+// real's fc.getViolationsForCommand feeding the <sandbox_violations> block.
+func sandboxViolations(command string) []string {
+	sessionProxy.mu.Lock()
+	defer sessionProxy.mu.Unlock()
+	if sessionProxy.px == nil {
+		return nil
+	}
+	return sessionProxy.px.ViolationsFor(command)
 }
 
 // resetNetProxyForTest tears the singleton down between tests.

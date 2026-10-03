@@ -36,7 +36,7 @@ func TestLiveSandboxCurl(t *testing.T) {
 	})
 
 	s := &SandboxSettings{Enabled: true, Network: &SandboxNetwork{AllowedDomains: []string{"example.com"}}}
-	profile := buildSeatbeltProfile(s, "/tmp", px)
+	profile := buildSeatbeltProfile(s, "/tmp", px, nil)
 	pf := dir + "/p.sb"
 	if err := os.WriteFile(pf, []byte(profile), 0o644); err != nil {
 		t.Fatal(err)

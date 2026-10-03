@@ -17,6 +17,7 @@ import (
 	"claude-go/internal/agent"
 	"claude-go/internal/api"
 	"claude-go/internal/auth"
+	"claude-go/internal/bridge"
 	"claude-go/internal/config"
 	"claude-go/internal/hooks"
 	"claude-go/internal/mcp"
@@ -152,6 +153,7 @@ Subcommands:
   purge [--dry-run] [--all]     delete local project state
   sandbox trust                 trust the sandbox MITM CA (macOS keychain)
   setup-token                   store a long-lived token
+  remote-control, rc            Remote Control server (control-plane skeleton)
   gateway, ssh, connect, self-hosted-runner  (stubs; not supported)
 `, version)
 }
@@ -200,11 +202,27 @@ func main() {
 		case "import":
 			importSub(args[1:])
 			return
+		case "remote-control", "rc":
+			remoteControlSub(args[1:])
+			return
 		case "gateway", "ssh", "connect", "self-hosted-runner":
 			fmt.Printf("claude-go %s: not supported — %s needs hosted infrastructure claude-go doesn't have\n", args[0], args[0])
 			return
 		}
 	}
+	// `claude <root flags> remote-control`: real refuses root options that
+	// wouldn't carry into spawned sessions (mod_0690.js k()/D()).
+	if len(args) > 0 && strings.HasPrefix(args[0], "-") {
+		if vi := bridge.FindVerb(args); vi > 0 {
+			if refused := bridge.RefusedRootOptions(args[:vi]); len(refused) > 0 {
+				fmt.Fprintln(os.Stderr, bridge.RootOptionsRefusedMessage(refused))
+				os.Exit(1)
+			}
+			remoteControlSub(args[vi+1:])
+			return
+		}
+	}
+
 	o := parseCLI(args)
 
 	// env wiring that must precede client construction
@@ -399,6 +417,7 @@ func main() {
 	stampProjectState(cwd, sessionID, loop.Model, false)
 	loop.Hooks = hooks.Load(cwd)
 	loop.SessionStartSource = "startup"
+	tools.SetPeerPermMode(func() string { return loop.PermMode })
 	tools.RegisterSession(sessionID, cwd, "")
 	messengerCleanup := tools.StartMessenger(sessionID)
 	defer messengerCleanup()

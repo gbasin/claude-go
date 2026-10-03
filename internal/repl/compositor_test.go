@@ -366,12 +366,12 @@ func TestCompExitEditEchoesBox(t *testing.T) {
 	f.buf.Reset()
 	compExitEdit([]string{"╭─╮", "│ > hi", "╰─╯"})
 	out := f.buf.String()
-	// region shrank back to 2 zone rows
-	if !strings.Contains(out, "\x1b[1;38r") {
-		t.Fatalf("zone did not shrink back: %q", out)
+	// turn-mode zone = spinner + pinned box (3) + status = 5 rows
+	if !strings.Contains(out, "\x1b[1;35r") {
+		t.Fatalf("zone did not shrink to turn layout: %q", out)
 	}
-	if compZoneH != 2 {
-		t.Fatalf("compZoneH = %d, want 2", compZoneH)
+	if compZoneH != 5 {
+		t.Fatalf("compZoneH = %d, want 5 (spinner+box+status)", compZoneH)
 	}
 	// the submitted box is echoed into the scroll region
 	if !strings.Contains(out, "│ > hi\r\n") || !strings.Contains(out, "╰─╯\r\n") {

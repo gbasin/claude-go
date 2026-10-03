@@ -55,23 +55,107 @@ type SandboxFilesystem struct {
 	AllowManagedReadPathsOnly bool // only policy-tier allowRead applies
 }
 
-// SandboxNetwork mirrors sandbox.network (mod_1164.js q, trimmed).
+// SandboxNetwork mirrors sandbox.network (mod_1164.js q).
 type SandboxNetwork struct {
-	AllowedDomains      []string
-	DeniedDomains       []string // a bare "*" denies all egress
+	AllowedDomains []string
+	DeniedDomains  []string // a bare "*" denies all egress
+	// DeniedDomainReasons maps an exact deniedDomains entry to the
+	// model-facing reason shown when that entry denies a connection.
+	DeniedDomainReasons map[string]string
 	AllowedCidrs        []string
-	AllowUnixSockets    []string // macOS only
-	AllowAllUnixSockets bool
-	AllowAllLocal       bool // claude-go extension: like real's allowLocalBinding
+	// DeniedResolvedAddresses holds IPs/CIDRs a permitted hostname must not
+	// resolve to (real's network.deniedResolvedAddresses).
+	DeniedResolvedAddresses []string
+	AllowUnixSockets        []string // macOS only
+	AllowAllUnixSockets     bool
+	AllowAllLocal           bool // claude-go extension: like real's allowLocalBinding
 	// InteractiveHostApproval upgrades "not on the allow list" denials into
 	// an interactive prompt (real's non-strictAllowlist ask callback). Hosts
 	// approved this way land on the proxy's session allowlist.
 	InteractiveHostApproval bool
+	// StrictAllowlist deterministically denies hosts not in allowedDomains
+	// — no prompt, no session allowlist. Honored only from policy and user
+	// settings (real ignores project settings, and drops their
+	// allowedDomains while it's on).
+	StrictAllowlist bool
+	// AllowManagedDomainsOnly (policy tier only): only managed-settings
+	// allowedDomains apply; user/project/local entries are ignored.
+	AllowManagedDomainsOnly bool
+	// ParentProxy routes upstream traffic through an outer proxy; unset
+	// fields fall back to HTTP(S)_PROXY/NO_PROXY env vars.
+	ParentProxy *netproxy.ParentProxyConfig
+
+	policyAllowed   []string // allowedDomains contributed by the policy tier
+	nonProjectAllow []string // allowedDomains from policy + user tiers
 }
 
-// SandboxCredentials mirrors sandbox.credentials (mod_1164.js U, files only).
+// effectiveAllowed is the allowlist the proxy enforces:
+// allowManagedDomainsOnly → policy tier only; strictAllowlist → policy+user
+// (project/local entries are left out); otherwise the merged list.
+func (n *SandboxNetwork) effectiveAllowed() []string {
+	if n.AllowManagedDomainsOnly {
+		return n.policyAllowed
+	}
+	if n.StrictAllowlist {
+		return n.nonProjectAllow
+	}
+	return n.AllowedDomains
+}
+
+// SandboxCredentials mirrors sandbox.credentials (mod_1164.js U).
+// mode "deny" entries unshare the file/env var; mode "mask" entries replace
+// the real value inside the sandbox with a "fake_value_..." sentinel the
+// egress proxy swaps back for the real value on hosts matching injectHosts
+// (default: network.allowedDomains). AWS SigV4 re-signing (awsPairs/sigv4)
+// is parsed for schema parity but not implemented — masked AWS pairs will
+// fail upstream signing rather than being re-signed by the proxy.
 type SandboxCredentials struct {
-	Files []string
+	Files   []SandboxCredFile
+	EnvVars []SandboxCredVar
+	// AllowPlaintextInject permits sentinel→real substitution on the
+	// plain-HTTP proxy path (default false — TLS-terminated only).
+	AllowPlaintextInject bool
+	AWSPairs             []SandboxAWSPair
+	SigV4                *SandboxSigV4
+}
+
+// SandboxCredFile is one credentials.files entry.
+type SandboxCredFile struct {
+	Path             string
+	Mode             string // "deny" | "mask"
+	Extract          string // regex; group 1 is the credential
+	OnExtractNoMatch string // "warn" (default) | "deny" | "error"
+	Decode           string // "jwt" enables JWT-aware masking
+	MaskClaims       []string
+	MaskDuplicates   bool
+	InjectHosts      []string
+}
+
+// SandboxCredVar is one credentials.envVars entry.
+type SandboxCredVar struct {
+	Name             string
+	Mode             string // "deny" | "mask"
+	Extract          string
+	OnExtractNoMatch string
+	Decode           string
+	MaskClaims       []string
+	MaskDuplicates   bool
+	InjectHosts      []string
+}
+
+// SandboxAWSPair groups masked env vars into a SigV4 credential set.
+type SandboxAWSPair struct {
+	AccessKeyIDVar     string `json:"accessKeyIdVar"`
+	SecretAccessKeyVar string `json:"secretAccessKeyVar"`
+	SessionTokenVar    string `json:"sessionTokenVar,omitempty"`
+}
+
+// SandboxSigV4 holds the policies for request shapes the proxy cannot
+// re-sign: "deny" (default) or "passthrough".
+type SandboxSigV4 struct {
+	Streaming string `json:"streaming,omitempty"`
+	Presigned string `json:"presigned,omitempty"`
+	SigV4a    string `json:"sigv4a,omitempty"`
 }
 
 // raw JSON mirror of one settings file's sandbox block.
@@ -98,17 +182,39 @@ type sandboxFSJSON struct {
 }
 
 type sandboxNetJSON struct {
-	AllowedDomains          []string `json:"allowedDomains"`
-	DeniedDomains           []string `json:"deniedDomains"`
-	AllowedCidrs            []string `json:"allowedCidrs"`
-	AllowUnixSockets        []string `json:"allowUnixSockets"`
-	AllowAllUnixSockets     *bool    `json:"allowAllUnixSockets"`
-	AllowAllLocal           *bool    `json:"allowAllLocal"`
-	InteractiveHostApproval *bool    `json:"interactiveHostApproval"`
+	AllowedDomains          []string                    `json:"allowedDomains"`
+	DeniedDomains           []string                    `json:"deniedDomains"`
+	DeniedDomainReasons     map[string]string           `json:"deniedDomainReasons"`
+	AllowedCidrs            []string                    `json:"allowedCidrs"`
+	DeniedResolvedAddresses []string                    `json:"deniedResolvedAddresses"`
+	AllowUnixSockets        []string                    `json:"allowUnixSockets"`
+	AllowAllUnixSockets     *bool                       `json:"allowAllUnixSockets"`
+	AllowAllLocal           *bool                       `json:"allowAllLocal"`
+	InteractiveHostApproval *bool                       `json:"interactiveHostApproval"`
+	StrictAllowlist         *bool                       `json:"strictAllowlist"`
+	AllowManagedDomainsOnly *bool                       `json:"allowManagedDomainsOnly"`
+	ParentProxy             *netproxy.ParentProxyConfig `json:"parentProxy"`
 }
 
 type sandboxCredJSON struct {
-	Files []string `json:"files"`
+	Files                []sandboxCredEntryJSON `json:"files"`
+	EnvVars              []sandboxCredEntryJSON `json:"envVars"`
+	AllowPlaintextInject *bool                  `json:"allowPlaintextInject"`
+	AWSPairs             []SandboxAWSPair       `json:"awsPairs"`
+	SigV4                *SandboxSigV4          `json:"sigv4"`
+}
+
+// sandboxCredEntryJSON covers both files (path) and envVars (name) entries.
+type sandboxCredEntryJSON struct {
+	Path             string   `json:"path"`
+	Name             string   `json:"name"`
+	Mode             string   `json:"mode"`
+	Extract          string   `json:"extract"`
+	OnExtractNoMatch string   `json:"onExtractNoMatch"`
+	Decode           string   `json:"decode"`
+	MaskClaims       []string `json:"maskClaims"`
+	MaskDuplicates   *bool    `json:"maskDuplicates"`
+	InjectHosts      []string `json:"injectHosts"`
 }
 
 func managedSandboxSettingsPath() string {
@@ -118,9 +224,20 @@ func managedSandboxSettingsPath() string {
 	return "/etc/claude-code/managed-settings.json"
 }
 
-// apply folds one file's sandbox block into s. policy=true marks every scalar
-// it sets as locked so user/project/local files cannot change it later.
-func (s *SandboxSettings) apply(f *sandboxFileJSON, policy bool) {
+// settings tiers in merge order (policy first — it locks what it sets).
+const (
+	tierPolicy = iota
+	tierUser
+	tierProject
+	tierLocal
+)
+
+// apply folds one file's sandbox block into s. The policy tier marks every
+// scalar it sets as locked so user/project/local files cannot change it
+// later. Tier restrictions mirror real: strictAllowlist is honored only
+// from policy/user, allowManagedDomainsOnly only from policy.
+func (s *SandboxSettings) apply(f *sandboxFileJSON, tier int) {
+	policy := tier == tierPolicy
 	set := func(key string, v *bool, dst *bool) {
 		if v == nil || s.locked[key] {
 			return
@@ -157,15 +274,68 @@ func (s *SandboxSettings) apply(f *sandboxFileJSON, policy bool) {
 			s.Network = &SandboxNetwork{}
 		}
 		s.Network.AllowedDomains = append(s.Network.AllowedDomains, n.AllowedDomains...)
+		if policy {
+			s.Network.policyAllowed = append(s.Network.policyAllowed, n.AllowedDomains...)
+		}
+		if tier <= tierUser {
+			s.Network.nonProjectAllow = append(s.Network.nonProjectAllow, n.AllowedDomains...)
+		}
 		s.Network.DeniedDomains = append(s.Network.DeniedDomains, n.DeniedDomains...)
 		s.Network.AllowedCidrs = append(s.Network.AllowedCidrs, n.AllowedCidrs...)
+		s.Network.DeniedResolvedAddresses = append(s.Network.DeniedResolvedAddresses, n.DeniedResolvedAddresses...)
 		s.Network.AllowUnixSockets = append(s.Network.AllowUnixSockets, n.AllowUnixSockets...)
+		if len(n.DeniedDomainReasons) > 0 {
+			if s.Network.DeniedDomainReasons == nil {
+				s.Network.DeniedDomainReasons = map[string]string{}
+			}
+			for k, v := range n.DeniedDomainReasons {
+				s.Network.DeniedDomainReasons[k] = v
+			}
+		}
 		set("network.allowAllUnixSockets", n.AllowAllUnixSockets, &s.Network.AllowAllUnixSockets)
 		set("network.allowAllLocal", n.AllowAllLocal, &s.Network.AllowAllLocal)
 		set("network.interactiveHostApproval", n.InteractiveHostApproval, &s.Network.InteractiveHostApproval)
+		// real honors strictAllowlist from managed/policy, user, and
+		// --settings only — project settings are ignored entirely.
+		if n.StrictAllowlist != nil && tier <= tierUser {
+			set("network.strictAllowlist", n.StrictAllowlist, &s.Network.StrictAllowlist)
+		}
+		// allowManagedDomainsOnly takes effect only from managed settings.
+		if n.AllowManagedDomainsOnly != nil && policy {
+			set("network.allowManagedDomainsOnly", n.AllowManagedDomainsOnly, &s.Network.AllowManagedDomainsOnly)
+		}
+		if n.ParentProxy != nil && !s.locked["network.parentProxy"] {
+			s.Network.ParentProxy = n.ParentProxy
+			if policy {
+				s.locked["network.parentProxy"] = true
+			}
+		}
 	}
 	if c := f.Credentials; c != nil {
-		s.Credentials.Files = append(s.Credentials.Files, c.Files...)
+		for _, e := range c.Files {
+			s.Credentials.Files = append(s.Credentials.Files, SandboxCredFile{
+				Path: e.Path, Mode: e.Mode, Extract: e.Extract,
+				OnExtractNoMatch: e.OnExtractNoMatch, Decode: e.Decode,
+				MaskClaims: e.MaskClaims, InjectHosts: e.InjectHosts,
+				MaskDuplicates: e.MaskDuplicates != nil && *e.MaskDuplicates,
+			})
+		}
+		for _, e := range c.EnvVars {
+			s.Credentials.EnvVars = append(s.Credentials.EnvVars, SandboxCredVar{
+				Name: e.Name, Mode: e.Mode, Extract: e.Extract,
+				OnExtractNoMatch: e.OnExtractNoMatch, Decode: e.Decode,
+				MaskClaims: e.MaskClaims, InjectHosts: e.InjectHosts,
+				MaskDuplicates: e.MaskDuplicates != nil && *e.MaskDuplicates,
+			})
+		}
+		set("credentials.allowPlaintextInject", c.AllowPlaintextInject, &s.Credentials.AllowPlaintextInject)
+		s.Credentials.AWSPairs = append(s.Credentials.AWSPairs, c.AWSPairs...)
+		if c.SigV4 != nil && !s.locked["credentials.sigv4"] {
+			s.Credentials.SigV4 = c.SigV4
+			if policy {
+				s.locked["credentials.sigv4"] = true
+			}
+		}
 	}
 	if f.BwrapPath != "" && !s.locked["bwrapPath"] {
 		s.BwrapPath = f.BwrapPath
@@ -185,13 +355,13 @@ func loadSandboxSettings(cwd string) *SandboxSettings {
 		locked:                   map[string]bool{},
 	}
 	files := []struct {
-		path   string
-		policy bool
+		path string
+		tier int
 	}{
-		{managedSandboxSettingsPath(), true},
-		{filepath.Join(config.ClaudeDir(), "settings.json"), false},
-		{filepath.Join(cwd, ".claude", "settings.json"), false},
-		{filepath.Join(cwd, ".claude", "settings.local.json"), false},
+		{managedSandboxSettingsPath(), tierPolicy},
+		{filepath.Join(config.ClaudeDir(), "settings.json"), tierUser},
+		{filepath.Join(cwd, ".claude", "settings.json"), tierProject},
+		{filepath.Join(cwd, ".claude", "settings.local.json"), tierLocal},
 	}
 	for _, f := range files {
 		b, err := os.ReadFile(f.path)
@@ -202,7 +372,7 @@ func loadSandboxSettings(cwd string) *SandboxSettings {
 			Sandbox sandboxFileJSON `json:"sandbox"`
 		}
 		if json.Unmarshal(b, &outer) == nil {
-			s.apply(&outer.Sandbox, f.policy)
+			s.apply(&outer.Sandbox, f.tier)
 		}
 	}
 	return s
@@ -235,7 +405,7 @@ func (s *SandboxSettings) networkDenied() bool {
 			return true
 		}
 	}
-	return len(s.Network.AllowedDomains) == 0
+	return len(s.Network.effectiveAllowed()) == 0
 }
 
 // needsNetworkProxy reports whether egress goes through the netproxy MITM
@@ -244,7 +414,7 @@ func (s *SandboxSettings) networkDenied() bool {
 // is set — deny-only configs collapse to deny-all without it).
 func (s *SandboxSettings) needsNetworkProxy() bool {
 	n := s.Network
-	return n != nil && (len(n.AllowedDomains) > 0 || len(n.AllowedCidrs) > 0 || n.AllowAllLocal)
+	return n != nil && (len(n.effectiveAllowed()) > 0 || len(n.AllowedCidrs) > 0 || n.AllowAllLocal)
 }
 
 // allowRead returns the effective allowRead list, honoring
@@ -409,13 +579,42 @@ func shellQuote(s string) string {
 
 // ---------- dispatch ----------
 
+// sandboxEnv carries the env deltas a sandboxed command needs: Set entries
+// ("K=V") are appended to the inherited environment; Unset names are removed
+// from it (credential mode:"deny" variables, masked-extract degradations).
+type sandboxEnv struct {
+	Set   []string
+	Unset []string
+}
+
+// applyTo builds the child environment: inherited vars minus Unset, plus Set.
+func (e *sandboxEnv) applyTo(base []string) []string {
+	if e == nil {
+		return base
+	}
+	if len(e.Unset) > 0 {
+		drop := make(map[string]bool, len(e.Unset))
+		for _, n := range e.Unset {
+			drop[n] = true
+		}
+		kept := make([]string, 0, len(base))
+		for _, kv := range base {
+			if k, _, _ := strings.Cut(kv, "="); !drop[k] {
+				kept = append(kept, kv)
+			}
+		}
+		base = kept
+	}
+	return append(base, e.Set...)
+}
+
 // sandboxWrap decides whether script runs sandboxed and returns the final
-// command string plus extra env vars for the child process. command is the
+// command string plus env deltas for the child process. command is the
 // raw user command (for excludedCommands); script is command plus the cwd
-// sentinel trailer. Returns (wrapped, env, warn, err): env is appended to
-// the command environment (proxy vars when network rules apply); warn is a
-// non-fatal note to surface; err aborts the call.
-func (c *Context) sandboxWrap(command, script string, disable bool) (string, []string, string, error) {
+// sentinel trailer. Returns (wrapped, env, warn, err): env is applied over
+// the command's inherited environment (proxy vars, credential masking);
+// warn is a non-fatal note to surface; err aborts the call.
+func (c *Context) sandboxWrap(command, script string, disable bool) (string, *sandboxEnv, string, error) {
 	s := sandboxSettings(c.CWD)
 	if s == nil || !s.enabled() {
 		return script, nil, "", nil
@@ -451,7 +650,7 @@ func addNote(warn, msg string) string {
 // failIfUnavailable when the sandbox cannot be applied. When sandbox.network
 // grants any destination, it also brings up the session MITM proxy and
 // exports its env vars; seatbelt then denies all egress except the proxy.
-func (c *Context) sandboxedScript(command, script string, s *SandboxSettings, warn string) (string, []string, string, error) {
+func (c *Context) sandboxedScript(command, script string, s *SandboxSettings, warn string) (string, *sandboxEnv, string, error) {
 	if err := platformSandboxAvailable(s); err != nil {
 		if s.FailIfUnavailable {
 			return "", nil, "", fmt.Errorf("sandbox unavailable: %v (sandbox.failIfUnavailable is set)", err)
@@ -459,18 +658,19 @@ func (c *Context) sandboxedScript(command, script string, s *SandboxSettings, wa
 		note := fmt.Sprintf("sandbox unavailable: %v; running unsandboxed", err)
 		return script, nil, addNote(warn, note), nil
 	}
-	var env []string
+	env := &sandboxEnv{}
 	var px *netproxy.Proxy
 	if s.needsNetworkProxy() {
-		if p2, note, err := sharedNetProxy(s.Network); err != nil {
+		if p2, note, err := sharedNetProxy(s); err != nil {
 			warn = addNote(warn, fmt.Sprintf("sandbox network proxy failed: %v; denying all egress", err))
 		} else {
 			px = p2
-			env = px.Env(command)
+			env.Set = append(env.Set, px.Env(command)...)
 			// interactive host approval: unmatched-host denials become a
 			// prompt when the tool context can ask (real's ask callback);
-			// approved hosts join the session allowlist.
-			if s.Network.InteractiveHostApproval && c.AskStructured != nil {
+			// approved hosts join the session allowlist. strictAllowlist
+			// disables this path (the proxy also refuses to prompt).
+			if s.Network.InteractiveHostApproval && !s.Network.StrictAllowlist && c.AskStructured != nil {
 				px.SetPromptAllow(func(host string, port int) bool {
 					sel, err := c.AskStructured("Blocked host",
 						fmt.Sprintf("The sandboxed command tried to reach %s:%d, which is not in sandbox.network.allowedDomains.", host, port),
@@ -485,7 +685,22 @@ func (c *Context) sandboxedScript(command, script string, s *SandboxSettings, wa
 			}
 		}
 	}
-	wrapped, err := platformSandboxWrap(script, s, c.CWD, px)
+	// sandbox.credentials: deny-mode env vars drop out of the child env,
+	// mask-mode vars/files become sentinels the proxy swaps back on egress.
+	var cred *credPlan
+	if len(s.Credentials.Files) > 0 || len(s.Credentials.EnvVars) > 0 {
+		cp, err := s.prepareCredentials(px, c.CWD)
+		if err != nil {
+			return "", nil, "", err // onExtractNoMatch "error" aborts the wrap
+		}
+		cred = cp
+		env.Set = append(env.Set, cred.setEnv...)
+		env.Unset = append(env.Unset, cred.unsetEnv...)
+		for _, w := range cred.warns {
+			warn = addNote(warn, w)
+		}
+	}
+	wrapped, err := platformSandboxWrap(script, s, c.CWD, px, cred)
 	if err != nil {
 		if s.FailIfUnavailable {
 			return "", nil, "", fmt.Errorf("sandbox failed to start: %v (sandbox.failIfUnavailable is set)", err)

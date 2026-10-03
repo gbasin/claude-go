@@ -76,18 +76,30 @@ func setupMessengerHome(t *testing.T) (string, string, func()) {
 	t.Setenv("HOME", t.TempDir())
 	sessionID := "test-sess-1"
 	drain := StartMessenger(sessionID)
-	oldDeadline, oldAuth := firstLineDeadlineMs, messengerAuthRequired
+	oldDeadline, oldAuth := firstLineDeadlineMs.Load(), messengerAuthRequired.Load()
+	// default stubbed creds: a verified NON-SELF peer (pid 1) so the
+	// self-sent path doesn't swallow reply receipts in tests; tests that
+	// exercise self-sent/foreign/collapsed creds override this.
+	stubPeerCreds(func(net.Conn) (int, int, int, bool) {
+		return 1, os.Getuid(), os.Getuid(), true
+	})
 	return sessionID, home, func() {
 		drain()
-		firstLineDeadlineMs, messengerAuthRequired = oldDeadline, oldAuth
+		firstLineDeadlineMs.Store(oldDeadline)
+		messengerAuthRequired.Store(oldAuth)
 		SetSessionRenamer(nil)
 		SetPeerSessionBusy(false)
+		SetPeerPermMode(nil)
+		stubPeerCreds(nil)
 		heldPeerMsgs.mu.Lock()
 		heldPeerMsgs.q = nil
 		heldPeerMsgs.mu.Unlock()
 		outboundIdleSubs.mu.Lock()
 		outboundIdleSubs.subs = nil
 		outboundIdleSubs.mu.Unlock()
+		artifactYieldGrants.mu.Lock()
+		artifactYieldGrants.m = map[string]artifactYieldGrant{}
+		artifactYieldGrants.mu.Unlock()
 	}
 }
 
@@ -167,7 +179,7 @@ func TestMessengerWrongToken(t *testing.T) {
 	}
 
 	// with auth required (windows behavior) a bad token must drop the conn
-	messengerAuthRequired = true
+	messengerAuthRequired.Store(true)
 	c2, err := net.Dial("unix", socketPath())
 	if err != nil {
 		t.Fatal(err)
@@ -214,7 +226,7 @@ func TestUDSControlRename(t *testing.T) {
 func TestUDSFirstLineDeadline(t *testing.T) {
 	_, done := setupMessenger(t)
 	defer done()
-	firstLineDeadlineMs = 150 * time.Millisecond
+	firstLineDeadlineMs.Store(int64(150 * time.Millisecond))
 
 	c, err := net.Dial("unix", socketPath())
 	if err != nil {
@@ -228,7 +240,7 @@ func TestUDSFirstLineDeadline(t *testing.T) {
 		t.Fatal("silent connection was not closed by the first-line deadline")
 	}
 	// deadline cancels once the first complete line arrives
-	firstLineDeadlineMs = 150 * time.Millisecond
+	firstLineDeadlineMs.Store(int64(150 * time.Millisecond))
 	c2, err := net.Dial("unix", socketPath())
 	if err != nil {
 		t.Fatal(err)
@@ -716,5 +728,319 @@ func TestExplicitSocketPathVet(t *testing.T) {
 	os.Chmod(lax, 0o755)
 	if err := vetExplicitSocketPath(filepath.Join(lax, "x.sock")); err == nil {
 		t.Fatal("non-private explicit dir accepted")
+	}
+}
+
+// ---------- round 3: perm-mode hold, self-sent, uid_collapse, childToken, yield ----------
+
+// Held-by-permission-mode: a restrictive mode (plan/dontAsk) holds inbound
+// peer messages for user approval — held receipt carries real's mn() reason;
+// releasing to "default" delivers immediately.
+func TestPeerHeldByPermMode(t *testing.T) {
+	sessionID, done := setupMessenger(t)
+	defer done()
+
+	sock, frames, inboxDone := peerInbox(t, "99996.sock")
+	defer inboxDone()
+
+	mode := "plan"
+	SetPeerPermMode(func() string { return mode })
+
+	msgID := newUUID()
+	c, err := net.Dial("unix", socketPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	writeLine(t, c, peerFrame{
+		Type: "user", MsgID: msgID, SessionID: sessionID, From: udsAddr(sock),
+		Message: mustJSON(map[string]any{"role": "user", "content": "plan-mode peer"}),
+	})
+	f := waitStatus(t, frames, "held", msgID)
+	if f.Reason != peerStatusReason("held") {
+		t.Fatalf("held reason = %q, want %q", f.Reason, peerStatusReason("held"))
+	}
+	if drainUntil(t, "plan-mode peer", 200*time.Millisecond) {
+		t.Fatal("peer message queued despite plan mode")
+	}
+	mode = "default"
+	FlushHeldPeerMessages()
+	if !drainUntil(t, "plan-mode peer", 2*time.Second) {
+		t.Fatal("held message never released")
+	}
+	waitStatus(t, frames, "delivered", msgID)
+
+	// in default mode a fresh peer message queues immediately
+	writeLine(t, c, peerFrame{
+		Type: "user", MsgID: newUUID(), SessionID: sessionID, From: udsAddr(sock),
+		Message: mustJSON(map[string]any{"role": "user", "content": "default-mode peer"}),
+	})
+	if !drainUntil(t, "default-mode peer", 2*time.Second) {
+		t.Fatal("default-mode peer message held")
+	}
+}
+
+// Self-sent: a conn whose verified pid is our own pid is flagged self-sent
+// — the frame still queues but no reply-status receipts are emitted (real's
+// Oe skips registering the reply route).
+func TestPeerSelfSentSkipsReceipt(t *testing.T) {
+	if !peerCredOSSupport {
+		t.Skip("self-sent needs kernel peer creds")
+	}
+	sessionID, done := setupMessenger(t)
+	defer done()
+
+	sock, frames, inboxDone := peerInbox(t, "99995.sock")
+	defer inboxDone()
+
+	stubPeerCreds(func(net.Conn) (int, int, int, bool) {
+		return os.Getpid(), os.Getuid(), os.Getuid(), true
+	})
+	if !peerSelfSent(os.Getpid(), "") {
+		t.Fatal("own pid not detected as self-sent")
+	}
+	SetPeerSessionBusy(true)
+	defer SetPeerSessionBusy(false)
+
+	msgID := newUUID()
+	c, err := net.Dial("unix", socketPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	writeLine(t, c, peerFrame{
+		Type: "user", MsgID: msgID, SessionID: sessionID, From: udsAddr(sock),
+		Message: mustJSON(map[string]any{"role": "user", "content": "self msg"}),
+	})
+	// held silently: message waits, but NO held receipt reaches `from`
+	time.Sleep(300 * time.Millisecond)
+	select {
+	case f := <-frames:
+		t.Fatalf("self-sent frame got a reply-status receipt: %+v", f)
+	default:
+	}
+	FlushHeldPeerMessages()
+	if !drainUntil(t, "self msg", 2*time.Second) {
+		t.Fatal("self-sent message never queued")
+	}
+	// and no delivered receipt either
+	time.Sleep(300 * time.Millisecond)
+	select {
+	case f := <-frames:
+		t.Fatalf("self-sent flush emitted a receipt: %+v", f)
+	default:
+	}
+}
+
+// uid_collapse: a peer reading as the overflow uid (65534 — userns without a
+// uid map) is unverifiable, not foreign — conn stays up; a genuinely foreign
+// uid drops.
+func TestPeerUIDCollapse(t *testing.T) {
+	sessionID, done := setupMessenger(t)
+	defer done()
+
+	// unit shape
+	own := os.Getuid()
+	foreign := own + 1
+	for foreign == peerOverflowUID {
+		foreign++
+	}
+	if classifyPeerUID(65534, own) != peerUIDOverflow {
+		t.Fatal("65534 not classified overflow")
+	}
+	if classifyPeerUID(own, own) != peerUIDSelf {
+		t.Fatal("own uid not classified self")
+	}
+	if classifyPeerUID(foreign, own) != peerUIDForeign {
+		t.Fatal("foreign uid not classified foreign")
+	}
+	if classifyPeerUID(-1, own) != peerUIDUnknown {
+		t.Fatal("missing uid not classified unknown")
+	}
+
+	// wire level: overflow-uid peer's frame is delivered (conn not dropped)
+	stubPeerCreds(func(net.Conn) (int, int, int, bool) {
+		return 4242, 65534, 65534, true
+	})
+	c, err := net.Dial("unix", socketPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	writeLine(t, c, peerFrame{
+		Type: "user", SessionID: sessionID,
+		Message: mustJSON(map[string]any{"role": "user", "content": "overflow-uid peer"}),
+	})
+	if !drainUntil(t, "overflow-uid peer", 2*time.Second) {
+		t.Fatal("overflow-uid peer connection dropped as foreign")
+	}
+
+	// foreign uid → conn dropped, frame never lands
+	stubPeerCreds(func(net.Conn) (int, int, int, bool) {
+		return 4242, foreign, own, true
+	})
+	c2, err := net.Dial("unix", socketPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	writeLine(t, c2, peerFrame{
+		Type: "user", SessionID: sessionID,
+		Message: mustJSON(map[string]any{"role": "user", "content": "foreign peer"}),
+	})
+	if drainUntil(t, "foreign peer", 400*time.Millisecond) {
+		t.Fatal("foreign-uid peer frame delivered")
+	}
+}
+
+// childToken: CLAUDE_CODE_MESSAGING_TOKEN is exported for spawned children
+// and its class validates like the peer token — both must authenticate.
+func TestChildTokenAuth(t *testing.T) {
+	sessionID, done := setupMessenger(t)
+	defer done()
+
+	if os.Getenv("CLAUDE_CODE_MESSAGING_TOKEN") != peerTokens.child {
+		t.Fatal("child token not exported to child env")
+	}
+	if cls := peerTokenClass(peerTokens.child); cls != "child" {
+		t.Fatalf("child token classified %q", cls)
+	}
+	if cls := peerTokenClass(peerTokens.peer); cls != "peer" {
+		t.Fatalf("peer token classified %q", cls)
+	}
+	if cls := peerTokenClass("deadbeef"); cls != "" {
+		t.Fatalf("bogus token classified %q", cls)
+	}
+
+	// child token auth line is accepted, including under required-auth
+	messengerAuthRequired.Store(true)
+	c, err := net.Dial("unix", socketPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	writeLine(t, c, peerFrame{Type: "auth", Token: peerTokens.child})
+	writeLine(t, c, peerFrame{
+		Type: "user", SessionID: sessionID,
+		Message: mustJSON(map[string]any{"role": "user", "content": "child authed"}),
+	})
+	if !drainUntil(t, "child authed", 2*time.Second) {
+		t.Fatal("child-token-authed frame dropped under required auth")
+	}
+}
+
+// Artifact yield trio: a verified same-conversation requester gets an
+// artifact_replies_yielded grant with every slug not_held; a subsequent
+// unyield correlates and clears the grant; unknown requesters get refused.
+func TestArtifactYieldRoundTrip(t *testing.T) {
+	sessionID, home, done := setupMessengerHome(t)
+	defer done()
+
+	sock, frames, inboxDone := peerInbox(t, "99994.sock")
+	defer inboxDone()
+
+	// the requester must be a verified live session of this conversation:
+	// register a fake entry pointing at the fake inbox, pid == the stubbed
+	// verified peer pid (ours — pid verification binds them)
+	stubPeerCreds(func(net.Conn) (int, int, int, bool) {
+		return os.Getpid(), os.Getuid(), os.Getuid(), true
+	})
+	fakeEnt := sessionEntry{SessionID: sessionID, PID: os.Getpid(),
+		MessagingSocketPath: sock}
+	b, _ := json.Marshal(fakeEnt)
+	if err := os.WriteFile(filepath.Join(home, "sessions", "yieldpeer.json"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if e := liveSessionForSock(sock); e == nil || e.SessionID != sessionID {
+		t.Fatal("fake session entry not resolved by sock")
+	}
+
+	now := float64(time.Now().UnixMilli())
+	yid := newUUID()
+	c, err := net.Dial("unix", socketPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	writeLine(t, c, peerFrame{
+		Type: "control", Action: "yield_artifact_replies",
+		MsgID: yid, SessionID: sessionID, From: udsAddr(sock),
+		Slugs: []string{"slug-a", "slug-b"}, Reason: "claim",
+		SentAt: &now,
+	})
+	var ans peerFrame
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		select {
+		case f := <-frames:
+			if f.Action == "artifact_replies_yielded" {
+				ans = f
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("no artifact_replies_yielded answer")
+		}
+		if ans.OrigMsgID != "" || time.Now().After(deadline) {
+			break
+		}
+	}
+	if ans.OrigMsgID != yid {
+		t.Fatalf("yield answer orig_msg_id = %q, want %q", ans.OrigMsgID, yid)
+	}
+	if ans.Refused {
+		t.Fatal("verified yield request refused")
+	}
+	if len(ans.Yielded) != 0 || len(ans.NotHeld) != 2 {
+		t.Fatalf("grant = yielded %v not_held %v, want empty/2", ans.Yielded, ans.NotHeld)
+	}
+	artifactYieldGrants.mu.Lock()
+	_, granted := artifactYieldGrants.m[yid]
+	artifactYieldGrants.mu.Unlock()
+	if !granted {
+		t.Fatal("grant not recorded for unyield correlation")
+	}
+
+	// unyield correlates and clears the grant
+	writeLine(t, c, peerFrame{
+		Type: "control", Action: "unyield_artifact_replies",
+		OrigMsgID: yid, Slugs: []string{"slug-a", "slug-b"},
+	})
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		artifactYieldGrants.mu.Lock()
+		_, still := artifactYieldGrants.m[yid]
+		artifactYieldGrants.mu.Unlock()
+		if !still {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	artifactYieldGrants.mu.Lock()
+	_, still := artifactYieldGrants.m[yid]
+	artifactYieldGrants.mu.Unlock()
+	if still {
+		t.Fatal("unyield did not clear the grant")
+	}
+
+	// unverified requester (no registry session at the sock) → refused
+	sock2, frames2, inbox2Done := peerInbox(t, "99993.sock")
+	defer inbox2Done()
+	yid2, now2 := newUUID(), float64(time.Now().UnixMilli())
+	writeLine(t, c, peerFrame{
+		Type: "control", Action: "yield_artifact_replies",
+		MsgID: yid2, SessionID: sessionID, From: udsAddr(sock2),
+		Slugs: []string{"slug-c"}, SentAt: &now2,
+	})
+	for {
+		select {
+		case f := <-frames2:
+			if f.Action == "artifact_replies_yielded" && f.OrigMsgID == yid2 {
+				if !f.Refused {
+					t.Fatal("unverified yield request granted")
+				}
+				return
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("no refused answer for unverified yield request")
+		}
 	}
 }
