@@ -143,7 +143,7 @@ func execBash(c *Context, raw json.RawMessage) Result {
 		}
 	}
 	if !in.RunInBackground && sleepRe.MatchString(in.Command) {
-		return Result{Content: "Foreground `sleep` is blocked; use Monitor with an until-loop to wait on a condition.", IsError: true}
+		return Result{Content: "Blocked: foreground `sleep` is not allowed. To wait for a condition, use Monitor with an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use run_in_background: true. Do not chain shorter sleeps to work around this block.", IsError: true}
 	}
 	if c.BgTasks == nil {
 		c.BgTasks = NewBackground()

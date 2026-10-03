@@ -41,6 +41,7 @@ func (l *Loop) compactAuto(ctx context.Context) error {
 	if h := l.runHook(hooks.PreCompact, map[string]any{"trigger": "auto"}); h.Block {
 		return fmt.Errorf("compaction blocked by hook: %s", h.Reason)
 	}
+	l.pendingTrigger = "auto"
 	if s := l.takePrecomputed(); s != "" {
 		l.applySummary(s, l.Transcript, 0)
 		l.runHook(hooks.PostCompact, map[string]any{"trigger": "auto"})
@@ -70,6 +71,7 @@ func (l *Loop) compactExec(ctx context.Context, transcriptPath, trigger string, 
 	if err != nil {
 		return err
 	}
+	l.pendingTrigger = trigger
 	l.applySummary(text, transcriptPath, keepLast)
 	l.runHook(hooks.PostCompact, map[string]any{"trigger": trigger})
 	return nil
@@ -83,7 +85,11 @@ func (l *Loop) applySummary(text, transcriptPath string, keepLast int) {
 		cont += "\n\nIf you need specific details from before compaction (like exact code snippets, " +
 			"error messages, or content you generated), read the full transcript at: " + transcriptPath
 	}
-	msgs := []api.Message{api.TextMessage("user", cont)}
+
+	contMsg := api.TextMessage("user", cont)
+	contMsg.IsCompactSummary = true
+	msgs := []api.Message{contMsg}
+	l.compactSummaryPending = true // transcript marks it isCompactSummary
 	if keepLast > 0 && keepLast < len(l.Messages) {
 		msgs = append(msgs, l.Messages[keepLast:]...)
 	}

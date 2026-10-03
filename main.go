@@ -445,7 +445,8 @@ func main() {
 		defer st2.Close()
 		loop.Transcript = st2.Path
 		loop.Events.OnCompact = func() {
-			st2.LogCompactBoundary(0, len(loop.Messages))
+			_, trig := loop.CompactMeta()
+			st2.LogCompactBoundaryTrig(loop.LastInputTokens(), len(loop.Messages), trig)
 		}
 		if o.sessionName != "" {
 			st2.LogRecord(map[string]any{"type": "summary", "summary": o.sessionName})
