@@ -2,6 +2,7 @@ package agent
 
 import (
 	"claude-go/internal/config"
+	"claude-go/internal/hooks"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -363,6 +364,7 @@ type Runner struct {
 	User       UserConfig
 	PermRules  map[string][]string
 	Entrypoint string
+	Hooks      hooks.Config
 	// Parent, when set, is the spawning loop — fork subagents inherit its
 	// messages. Wired by the caller that owns the parent Loop.
 	Parent *Loop
@@ -414,6 +416,14 @@ func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, m
 		Done:    make(chan struct{}),
 	}
 	tools.RegisterAgent(rec)
+	if len(r.Hooks) > 0 {
+		payload := map[string]any{
+			"session_id": r.Client.SessionID, "cwd": c.CWD,
+			"hook_event_name": "SubagentStart", "permission_mode": r.PermMode,
+			"agent_type": def.Name, "agent_id": rec.AgentID,
+		}
+		hooks.Run(r.Hooks, hooks.SubagentStart, payload, c.CWD)
+	}
 	sub := &Loop{
 		AllowedTools: def.resolveAllowed(extraAllowed),
 		AppendSysP:   def.effectiveSystemPrompt(),
@@ -455,7 +465,7 @@ func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, m
 	if background {
 		done := make(chan tools.Result, 1)
 		go func() {
-			done <- finish(runAgentTurn(sub, prompt))
+			done <- finish(r.runAgentTurn(sub, prompt, c, rec))
 		}()
 		select {
 		case res := <-done:
@@ -467,7 +477,7 @@ func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, m
 				rec.Name, rec.AgentID, def.Name, rec.Name)}
 		}
 	}
-	res := runAgentTurn(sub, prompt)
+	res := r.runAgentTurn(sub, prompt, c, rec)
 	rec.Finish(res.Content)
 	// real wraps results with usage stats
 	out := res.Content
@@ -489,12 +499,20 @@ func firstLine(s string) string {
 	return s
 }
 
-func runAgentTurn(sub *Loop, prompt string) tools.Result {
+func (r *Runner) runAgentTurn(sub *Loop, prompt string, c *tools.Context, rec *tools.AgentRecord) tools.Result {
 	ctx := context.Background()
 	if sub.ToolCtx != nil && sub.ToolCtx.Ctx != nil {
 		ctx = sub.ToolCtx.Ctx // cancellation propagates from the parent turn
 	}
 	resp, err := sub.Ask(ctx, prompt)
+	if len(r.Hooks) > 0 {
+		hooks.Run(r.Hooks, hooks.SubagentStop, map[string]any{
+			"session_id": r.Client.SessionID, "cwd": c.CWD,
+			"hook_event_name": "SubagentStop", "permission_mode": r.PermMode,
+			"agent_type": rec.Type, "agent_id": rec.AgentID,
+			"last_assistant_message": "",
+		}, c.CWD)
+	}
 	if err != nil {
 		return tools.Result{Content: "agent error: " + err.Error(), IsError: true}
 	}

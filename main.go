@@ -395,7 +395,7 @@ func main() {
 	loop.SessionStartSource = "startup"
 	tools.RegisterSession(sessionID, cwd, "")
 	defer tools.UnregisterSession(sessionID)
-	loop.ToolCtx.Agent = &agent.Runner{
+	loop.ToolCtx.Agent = &agent.Runner{Hooks: loop.Hooks,
 		Client: client, PermMode: loop.PermMode, Model: loop.Model,
 		User: loop.User, PermRules: rules, Entrypoint: "sdk-cli",
 		Parent: loop,
@@ -417,6 +417,20 @@ func main() {
 		return out, nil
 	}
 	loop.ToolCtx.Searcher = loop.ToolCtx.Agent.(*agent.Runner).WebSearch
+	// prompt/agent-type hooks are judged by the small model
+	hooks.Judge = func(prompt, ctxJSON string) (bool, string) {
+		out, err := loop.ToolCtx.Answerer(context.Background(),
+			`You are evaluating a hook decision for Claude Code. Reply with exactly "OK" if the action should proceed, or "BLOCK: <reason>" if it should not.`+"\n\n"+prompt, ctxJSON)
+		if err != nil {
+			return true, ""
+		}
+		out = strings.TrimSpace(out)
+		if strings.HasPrefix(strings.ToUpper(out), "BLOCK") {
+			reason := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(out, "BLOCK:"), "BLOCK"))
+			return false, reason
+		}
+		return true, ""
+	}
 	if st.Model != "" && o.model == "" {
 		loop.Model = st.Model
 	}
@@ -537,7 +551,16 @@ func fireHook(l *agent.Loop, ev hooks.Event) {
 	case hooks.SessionEnd:
 		payload["reason"] = l.SessionEndReason
 	}
-	hooks.Run(l.Hooks, ev, payload, l.ToolCtx.CWD)
+	res := hooks.Run(l.Hooks, ev, payload, l.ToolCtx.CWD)
+	// SessionStart hook stdout/additionalContext injects into the session
+	if ev == hooks.SessionStart {
+		if s := res.PlainText + res.AdditionalContext; s != "" {
+			l.AppendSysP += "\n\n" + strings.TrimSpace(s)
+		}
+	}
+	if res.NonBlockErr != "" {
+		fmt.Fprintf(os.Stderr, "%s hook error: %s%s\n", "[31m", strings.TrimSpace(res.NonBlockErr), "[0m")
+	}
 }
 
 // startMCP connects configured MCP servers and registers their tools.
