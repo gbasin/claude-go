@@ -4,6 +4,7 @@ package hooks
 
 import (
 	"bytes"
+	"claude-go/internal/config"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -89,9 +90,8 @@ type Config map[string][]Matcher
 // Load reads hooks from user + project settings files.
 func Load(cwd string) Config {
 	out := Config{}
-	home, _ := os.UserHomeDir()
 	for _, p := range []string{
-		filepath.Join(home, ".claude", "settings.json"),
+		filepath.Join(config.ClaudeDir(), "settings.json"),
 		filepath.Join(cwd, ".claude", "settings.json"),
 		filepath.Join(cwd, ".claude", "settings.local.json"),
 	} {

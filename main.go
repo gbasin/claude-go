@@ -313,15 +313,38 @@ func main() {
 	loop.ThinkingDisplay = o.thinkingDisp
 	loop.ThinkingBudget = o.thinkingTok
 	st := config.Load(cwd)
+	st.ApplyEnv() // settings.env injects into the process + all children
+	// ANTHROPIC_MODEL env beats settings + flags when set
+	if em := os.Getenv("ANTHROPIC_MODEL"); em != "" && o.model == "" {
+		loop.Model = em
+	}
+	if loop.Effort == "" && st.EffortLevel != "" {
+		loop.Effort = st.EffortLevel
+	}
 	rules := map[string][]string{}
 	if st.Permissions != nil {
 		rules["allow"] = st.Permissions.Allow
-		rules["deny"] = append(st.ManagedDeny, rules["deny"]...)
-		rules["ask"] = append(st.ManagedAsk, rules["ask"]...)
-		rules["deny"] = st.Permissions.Deny
-		rules["ask"] = st.Permissions.Ask
+		// managed deny/ask rules CANNOT be overridden — prepend, never replace
+		rules["deny"] = append(append([]string{}, st.ManagedDeny...), st.Permissions.Deny...)
+		rules["ask"] = append(append([]string{}, st.ManagedAsk...), st.Permissions.Ask...)
+		rules["allow"] = append(rules["allow"], st.ManagedAllow...)
 		if st.Permissions.DefaultMode != "" {
 			loop.PermMode = st.Permissions.DefaultMode
+		}
+		if st.Permissions.DisableBypassPermissionsMode == "disable" && loop.PermMode == "bypassPermissions" {
+			loop.PermMode = "default"
+		}
+		if st.Permissions.DisableAutoMode == "disable" && loop.PermMode == "auto" {
+			loop.PermMode = "default"
+		}
+		// additionalDirectories widen the writeable workspace
+		for _, d := range st.Permissions.AdditionalDirectories {
+			if !filepath.IsAbs(d) {
+				d = filepath.Join(cwd, d)
+			}
+			d = filepath.Clean(d)
+			tools.ExtraAllowedDirs = append(tools.ExtraAllowedDirs, d)
+			perms.AdditionalDirs = append(perms.AdditionalDirs, d)
 		}
 	}
 	if o.allowTools != "" {

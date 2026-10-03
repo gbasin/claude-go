@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bytes"
+	"claude-go/internal/config"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -272,9 +273,8 @@ func dsRequiredScope(method string) string {
 // claudeAiOauth.scopes. Returns nil when no scope list is on record (the
 // call then goes out and the server's response is surfaced verbatim).
 func dsScopes() []string {
-	home, _ := os.UserHomeDir()
 	var out []string
-	if b, err := os.ReadFile(filepath.Join(home, ".claude.json")); err == nil {
+	if b, err := os.ReadFile(filepath.Join(config.Home(), ".claude.json")); err == nil {
 		var m map[string]any
 		if json.Unmarshal(b, &m) == nil {
 			if acct, ok := m["oauthAccount"].(map[string]any); ok {
@@ -282,7 +282,7 @@ func dsScopes() []string {
 			}
 		}
 	}
-	if b, err := os.ReadFile(filepath.Join(home, ".claude", ".credentials.json")); err == nil {
+	if b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), ".credentials.json")); err == nil {
 		var m map[string]any
 		if json.Unmarshal(b, &m) == nil {
 			if o, ok := m["claudeAiOauth"].(map[string]any); ok {

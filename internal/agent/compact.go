@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"claude-go/internal/config"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -198,9 +199,8 @@ func (l *Loop) precomputeOn() bool {
 // settings.json files; absent means enabled.
 func precomputeCompactionEnabled(cwd string) bool {
 	enabled := true
-	home, _ := os.UserHomeDir()
 	for _, p := range []string{
-		filepath.Join(home, ".claude", "settings.json"),
+		filepath.Join(config.ClaudeDir(), "settings.json"),
 		filepath.Join(cwd, ".claude", "settings.json"),
 		filepath.Join(cwd, ".claude", "settings.local.json"),
 	} {

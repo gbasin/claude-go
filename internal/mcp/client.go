@@ -5,6 +5,7 @@ package mcp
 
 import (
 	"bufio"
+	"claude-go/internal/config"
 	"context"
 	"encoding/json"
 	"errors"
@@ -37,9 +38,12 @@ type ServerConfig struct {
 }
 
 // LoadConfigs merges mcpServers from ~/.claude.json and <cwd>/.mcp.json.
+// Project (.mcp.json) entries are gated: enabledMcpjsonServers allows,
+// disabledMcpjsonServers removes, enableAllProjectMcpServers trusts all.
 func LoadConfigs(cwd string) map[string]ServerConfig {
 	out := map[string]ServerConfig{}
 	home, _ := os.UserHomeDir()
+	st := config.Load(cwd)
 	for _, p := range []string{
 		filepath.Join(home, ".claude.json"),
 		filepath.Join(cwd, ".mcp.json"),
@@ -52,20 +56,41 @@ func LoadConfigs(cwd string) map[string]ServerConfig {
 		if json.Unmarshal(b, &top) != nil {
 			continue
 		}
-		for _, key := range []string{"mcpServers"} {
-			raw, ok := top[key]
-			if !ok {
-				continue
-			}
-			var servers map[string]ServerConfig
-			if json.Unmarshal(raw, &servers) == nil {
-				for n, c := range servers {
-					out[n] = c
+		raw, ok := top["mcpServers"]
+		if !ok {
+			continue
+		}
+		var servers map[string]ServerConfig
+		if json.Unmarshal(raw, &servers) != nil {
+			continue
+		}
+		isProject := strings.HasSuffix(p, ".mcp.json")
+		for n, c := range servers {
+			if isProject && !st.EnableAllProjectMcpServers {
+				if sliceHas(st.DisabledMcpjsonServers, n) {
+					continue
+				}
+				if !sliceHas(st.EnabledMcpjsonServers, n) {
+					// untrusted project servers are skipped until approved
+					// (real prompts; non-interactive contexts skip)
+					if os.Getenv("CLAUDE_GO_APPROVE_MCP") == "" {
+						continue
+					}
 				}
 			}
+			out[n] = c
 		}
 	}
 	return out
+}
+
+func sliceHas(l []string, s string) bool {
+	for _, v := range l {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // expandConfig interpolates ${VAR} / $VAR environment references in
@@ -207,7 +232,7 @@ func asAuthErr(err error, out **AuthError) bool {
 
 // handshake runs initialize + notifications/initialized + tools/list.
 func (c *Client) handshake() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), mcpTimeout())
 	defer cancel()
 	var initRes struct {
 		ServerInfo struct {
@@ -709,4 +734,20 @@ func (c *Client) ReadResourceDir(ctx context.Context, uri string) (string, error
 // ListResourcesJSON returns resources as raw JSON for structured listing.
 func (c *Client) ListResourcesJSON(ctx context.Context) (json.RawMessage, error) {
 	return c.Call(ctx, "resources/list", map[string]any{})
+}
+
+// MCP_TIMEOUT (ms) bounds requests; MCP_CONNECT_TIMEOUT_MS bounds handshakes.
+func mcpTimeout() time.Duration {
+	return mcpEnvMS("MCP_TIMEOUT", 30_000)
+}
+func mcpConnectTimeout() time.Duration {
+	return mcpEnvMS("MCP_CONNECT_TIMEOUT_MS", 5_000)
+}
+func mcpEnvMS(name string, def int) time.Duration {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 2147483647 {
+			return time.Duration(n) * time.Millisecond
+		}
+	}
+	return time.Duration(def) * time.Millisecond
 }

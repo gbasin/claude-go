@@ -132,7 +132,7 @@ func TestMonitor(t *testing.T) {
 	if len(trs) == 0 {
 		t.Fatalf("no tool_result:\n%s", r.stdout)
 	}
-	contains(t, trs[0], "background", "Monitor result")
+	contains(t, trs[0], "armed", "Monitor result")
 }
 
 // TestWorkflow: named workflow resolves from .claude/workflows/ and returns

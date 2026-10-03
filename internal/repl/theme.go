@@ -1,6 +1,7 @@
 package repl
 
 import (
+	"claude-go/internal/config"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -67,11 +68,10 @@ func autoTheme() string {
 
 // themeSetting reads theme from settings.
 func themeSetting(cwd string) string {
-	home, _ := os.UserHomeDir()
 	for _, p := range []string{
 		filepath.Join(cwd, ".claude", "settings.json"),
-		filepath.Join(home, ".claude", "settings.json"),
-		filepath.Join(home, ".claude.json"),
+		filepath.Join(config.ClaudeDir(), "settings.json"),
+		filepath.Join(config.Home(), ".claude.json"),
 	} {
 		b, err := os.ReadFile(p)
 		if err != nil {
@@ -89,8 +89,7 @@ func themeSetting(cwd string) string {
 
 // loadCustomTheme reads ~/.claude/themes/<name>.json — {"dim":"\u001b[2m",...}
 func loadCustomTheme(name string) *palette {
-	home, _ := os.UserHomeDir()
-	b, err := os.ReadFile(filepath.Join(home, ".claude", "themes", name+".json"))
+	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "themes", name+".json"))
 	if err != nil {
 		return nil
 	}

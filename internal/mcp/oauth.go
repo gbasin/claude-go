@@ -11,6 +11,7 @@ package mcp
 // Tokens persist in ~/.claude/.credentials-mcp.json.
 
 import (
+	"claude-go/internal/config"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -125,8 +126,7 @@ func (s *serverAuth) refresh(ctx context.Context) error {
 // --- credential store ---
 
 func credentialsPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude", ".credentials-mcp.json")
+	return filepath.Join(config.ClaudeDir(), ".credentials-mcp.json")
 }
 
 var credMu sync.Mutex

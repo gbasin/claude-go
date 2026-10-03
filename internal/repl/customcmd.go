@@ -1,6 +1,7 @@
 package repl
 
 import (
+	"claude-go/internal/config"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,18 +33,17 @@ var hiddenCommands map[string]customCmd
 func loadCustomCommands(cwd string) {
 	customCommands = map[string]customCmd{}
 	hiddenCommands = map[string]customCmd{}
-	home, _ := os.UserHomeDir()
 	var dirs []string
 	for _, d := range []string{
 		filepath.Join(cwd, ".claude", "commands"),
-		filepath.Join(home, ".claude", "commands"),
+		filepath.Join(config.ClaudeDir(), "commands"),
 	} {
 		dirs = append(dirs, d)
 	}
 	// plugin commands
 	for _, pat := range []string{
-		filepath.Join(home, ".claude", "plugins", "synced", "*", "*", "commands"),
-		filepath.Join(home, ".claude", "plugins", "local", "*", "commands"),
+		filepath.Join(config.ClaudeDir(), "plugins", "synced", "*", "*", "commands"),
+		filepath.Join(config.ClaudeDir(), "plugins", "local", "*", "commands"),
 	} {
 		matches, _ := filepath.Glob(pat)
 		dirs = append(dirs, matches...)

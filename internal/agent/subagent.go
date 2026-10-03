@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"claude-go/internal/config"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -199,11 +200,10 @@ func parseToolList(s string) []string {
 // agentFileDirs returns (dir, source) pairs scanned for <name>.md agent defs.
 // Order matters: later dirs win on name collision (project > user > plugin).
 func agentFileDirs(cwd string) []struct{ dir, source string } {
-	home, _ := os.UserHomeDir()
 	var out []struct{ dir, source string }
 	for _, pat := range []string{
-		filepath.Join(home, ".claude", "plugins", "synced", "*", "*", "agents"),
-		filepath.Join(home, ".claude", "plugins", "local", "*", "agents"),
+		filepath.Join(config.ClaudeDir(), "plugins", "synced", "*", "*", "agents"),
+		filepath.Join(config.ClaudeDir(), "plugins", "local", "*", "agents"),
 	} {
 		if dirs, _ := filepath.Glob(pat); len(dirs) > 0 {
 			for _, d := range dirs {
@@ -215,7 +215,7 @@ func agentFileDirs(cwd string) []struct{ dir, source string } {
 		out = append(out, struct{ dir, source string }{filepath.Join(pd, "agents"), "plugin"})
 	}
 	out = append(out,
-		struct{ dir, source string }{filepath.Join(home, ".claude", "agents"), "user"},
+		struct{ dir, source string }{filepath.Join(config.ClaudeDir(), "agents"), "user"},
 		struct{ dir, source string }{filepath.Join(cwd, ".claude", "agents"), "project"},
 	)
 	return out

@@ -15,6 +15,7 @@
 package tools
 
 import (
+	"claude-go/internal/config"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -173,13 +174,12 @@ func loadSandboxSettings(cwd string) *SandboxSettings {
 		AllowUnsandboxedCommands: true,
 		locked:                   map[string]bool{},
 	}
-	home, _ := os.UserHomeDir()
 	files := []struct {
 		path   string
 		policy bool
 	}{
 		{managedSandboxSettingsPath(), true},
-		{filepath.Join(home, ".claude", "settings.json"), false},
+		{filepath.Join(config.ClaudeDir(), "settings.json"), false},
 		{filepath.Join(cwd, ".claude", "settings.json"), false},
 		{filepath.Join(cwd, ".claude", "settings.local.json"), false},
 	}
@@ -365,8 +365,7 @@ func (s *SandboxSettings) excluded(command string) bool {
 // expandSandboxPath expands ~ and resolves relative paths against cwd.
 func expandSandboxPath(p, cwd string) string {
 	if p == "~" || strings.HasPrefix(p, "~/") {
-		home, err := os.UserHomeDir()
-		if err == nil {
+		if home, err := os.UserHomeDir(); err == nil {
 			p = filepath.Join(home, p[1:])
 		}
 	}

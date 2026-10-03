@@ -10,20 +10,33 @@ import (
 )
 
 type Settings struct {
-	Permissions *Permissions      `json:"permissions"`
-	Model       string            `json:"model"`
-	Env         map[string]string `json:"env"`
+	Permissions                *Permissions      `json:"permissions"`
+	Model                      string            `json:"model"`
+	Env                        map[string]string `json:"env"`
+	EffortLevel                string            `json:"effortLevel"`
+	FastMode                   string            `json:"fastMode"`
+	AlwaysThinkingEnabled      bool              `json:"alwaysThinkingEnabled"`
+	EnableAllProjectMcpServers bool              `json:"enableAllProjectMcpServers"`
+	EnabledMcpjsonServers      []string          `json:"enabledMcpjsonServers"`
+	DisabledMcpjsonServers     []string          `json:"disabledMcpjsonServers"`
+	IncludeCoAuthoredBy        *bool             `json:"includeCoAuthoredBy"`
+	AutoCompactWindow          string            `json:"autoCompactWindow"`
 	// policy-tier rules — always evaluated, never overridden
-	ManagedDeny []string `json:"-"`
-	ManagedAsk  []string `json:"-"`
-	managedMode string   `json:"-"`
+	ManagedDeny  []string `json:"-"`
+	ManagedAsk   []string `json:"-"`
+	ManagedAllow []string `json:"-"`
+	managedMode  string   `json:"-"`
 }
 
 type Permissions struct {
-	Allow       []string `json:"allow"`
-	Deny        []string `json:"deny"`
-	Ask         []string `json:"ask"`
-	DefaultMode string   `json:"defaultMode"`
+	Allow                 []string `json:"allow"`
+	Deny                  []string `json:"deny"`
+	Ask                   []string `json:"ask"`
+	DefaultMode           string   `json:"defaultMode"`
+	AdditionalDirectories []string `json:"additionalDirectories"`
+	// managed-only gates
+	DisableBypassPermissionsMode string `json:"disableBypassPermissionsMode"`
+	DisableAutoMode              string `json:"disableAutoMode"`
 }
 
 // Load merges user + project settings (project wins).
@@ -38,13 +51,16 @@ func Load(cwd string) *Settings {
 	}
 	merged.ManagedDeny = append(merged.ManagedDeny, managedPerms(managed, "deny")...)
 	merged.ManagedAsk = append(merged.ManagedAsk, managedPerms(managed, "ask")...)
-	if managed.Permissions != nil && managed.Permissions.DefaultMode != "" {
-		merged.managedMode = managed.Permissions.DefaultMode
-		merged.Permissions = &Permissions{DefaultMode: managed.Permissions.DefaultMode}
+	// managed allow rules also apply (they can't be removed by lower tiers)
+	if managed.Permissions != nil {
+		merged.ManagedAllow = append(merged.ManagedAllow, managed.Permissions.Allow...)
+		if managed.Permissions.DefaultMode != "" {
+			merged.managedMode = managed.Permissions.DefaultMode
+			merged.Permissions = &Permissions{DefaultMode: managed.Permissions.DefaultMode}
+		}
 	}
-	home, _ := os.UserHomeDir()
 	for _, p := range []string{
-		filepath.Join(home, ".claude", "settings.json"),
+		filepath.Join(ClaudeDir(), "settings.json"),
 		filepath.Join(cwd, ".claude", "settings.json"),
 		filepath.Join(cwd, ".claude", "settings.local.json"),
 	} {
@@ -66,6 +82,29 @@ func Load(cwd string) *Settings {
 				if s.Model != "" {
 					merged.Model = s.Model
 				}
+				for k, v := range s.Env {
+					if merged.Env == nil {
+						merged.Env = map[string]string{}
+					}
+					merged.Env[k] = v // later tier wins per key
+				}
+				if s.Permissions != nil {
+					merged.Permissions.AdditionalDirectories = append(
+						merged.Permissions.AdditionalDirectories, s.Permissions.AdditionalDirectories...)
+				}
+				// other honored keys
+				if s.EffortLevel != "" {
+					merged.EffortLevel = s.EffortLevel
+				}
+				if s.FastMode != "" {
+					merged.FastMode = s.FastMode
+				}
+				if s.EnableAllProjectMcpServers {
+					merged.EnableAllProjectMcpServers = true
+				}
+				merged.EnabledMcpjsonServers = append(merged.EnabledMcpjsonServers, s.EnabledMcpjsonServers...)
+				merged.DisabledMcpjsonServers = append(merged.DisabledMcpjsonServers, s.DisabledMcpjsonServers...)
+				merged.IncludeCoAuthoredBy = s.IncludeCoAuthoredBy
 			}
 		}
 	}
@@ -120,4 +159,38 @@ func managedPerms(s *Settings, kind string) []string {
 // ManagedMode returns the policy-mandated defaultMode, if any.
 func (s *Settings) ManagedMode() string {
 	return s.managedMode
+}
+
+// ClaudeDir is the user config home — CLAUDE_CONFIG_DIR overrides ~/.claude.
+func ClaudeDir() string {
+	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
+		return d
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".claude"
+	}
+	return filepath.Join(home, ".claude")
+}
+
+// Home returns the OS home dir ("" on error).
+func Home() string {
+	h, _ := os.UserHomeDir()
+	return h
+}
+
+// ApplyEnv injects the settings env blocks into the process environment —
+// real CC sets each declared key before tools/hooks/shells run.
+func (s *Settings) ApplyEnv() {
+	for k, v := range s.Env {
+		if k == "" {
+			continue
+		}
+		os.Setenv(k, v)
+	}
+}
+
+// CoAuthoredBy reports whether the trailer should be added (default true).
+func (s *Settings) CoAuthoredBy() bool {
+	return s.IncludeCoAuthoredBy == nil || *s.IncludeCoAuthoredBy
 }
