@@ -191,7 +191,7 @@ const cwdSentinel = "__CLAUDE_GO_CWD_SENTINEL__"
 // the exec.Cmd plus a non-fatal warning note to prepend to the output.
 func (c *Context) shellCmd(ctx context.Context, command string, disableSandbox bool) (*exec.Cmd, string, error) {
 	script := command + "\nprintf '" + cwdSentinel + "%s' \"$PWD\""
-	wrapped, warn, err := c.sandboxWrap(command, script, disableSandbox)
+	wrapped, env, warn, err := c.sandboxWrap(command, script, disableSandbox)
 	if err != nil {
 		return nil, "", err
 	}
@@ -201,7 +201,8 @@ func (c *Context) shellCmd(ctx context.Context, command string, disableSandbox b
 	}
 	cmd := exec.CommandContext(ctx, shell, "-c", wrapped)
 	cmd.Dir = c.CWD
-	cmd.Env = os.Environ()
+	// env vars appended last win over duplicates in os.Environ()
+	cmd.Env = append(os.Environ(), env...)
 	return cmd, warn, nil
 }
 

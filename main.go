@@ -150,6 +150,7 @@ Subcommands:
   mcp list|add|get|remove       manage MCP servers
   plugin list|install|remove|marketplace
   purge [--dry-run] [--all]     delete local project state
+  sandbox trust                 trust the sandbox MITM CA (macOS keychain)
   setup-token                   store a long-lived token
   gateway, ssh, connect, self-hosted-runner  (stubs; not supported)
 `, version)
@@ -180,6 +181,9 @@ func main() {
 			return
 		case "auth":
 			authSub(args[1:])
+			return
+		case "sandbox":
+			sandboxSub(args[1:])
 			return
 		case "purge":
 			purgeSub(args[1:])

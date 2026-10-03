@@ -15,6 +15,7 @@ import (
 	"claude-go/internal/api"
 	"claude-go/internal/auth"
 	"claude-go/internal/mcp"
+	"claude-go/internal/netproxy"
 	"claude-go/internal/plugins"
 	"claude-go/internal/session"
 )
@@ -505,4 +506,26 @@ func setupTokenSub() {
 		fatal("setup-token: %v", err)
 	}
 	fmt.Println("stored in", p)
+}
+
+// sandboxSub: claude-go sandbox trust — install the local MITM CA into the
+// OS trust store so sandboxed commands (git/curl and friends that don't read
+// SSL_CERT_FILE) verify the minted leaf certificates.
+func sandboxSub(args []string) {
+	if len(args) == 0 {
+		fatal("usage: claude-go sandbox trust")
+	}
+	switch args[0] {
+	case "trust":
+		if _, err := netproxy.LoadOrCreateCA(netproxy.CADir()); err != nil {
+			fatal("sandbox trust: %v", err)
+		}
+		msg, err := netproxy.InstallCA()
+		if err != nil {
+			fatal("sandbox trust: %v", err)
+		}
+		fmt.Println(msg)
+	default:
+		fatal("unknown sandbox subcommand: %s (trust)", args[0])
+	}
 }

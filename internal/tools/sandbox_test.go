@@ -125,7 +125,7 @@ func withSandboxCfg(t *testing.T, s *SandboxSettings) *Context {
 
 func TestSandboxWrapDisabled(t *testing.T) {
 	c := withSandboxCfg(t, &SandboxSettings{locked: map[string]bool{}})
-	got, warn, err := c.sandboxWrap("ls", "ls\nsentinel", true)
+	got, _, warn, err := c.sandboxWrap("ls", "ls\nsentinel", true)
 	if err != nil || warn != "" || got == "" {
 		t.Fatalf("disabled sandbox should pass through: %q %q %v", got, warn, err)
 	}
@@ -138,7 +138,7 @@ func TestSandboxWrapDangerouslyDisable(t *testing.T) {
 		locked:                   map[string]bool{},
 	}
 	c := withSandboxCfg(t, s)
-	got, _, err := c.sandboxWrap("ls", "ls\nsentinel", true)
+	got, _, _, err := c.sandboxWrap("ls", "ls\nsentinel", true)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestSandboxWrapDangerouslyDisable(t *testing.T) {
 
 	// non-policy false: ignored, command still sandboxed
 	s.AllowUnsandboxedCommands = false
-	got, warn, err := c.sandboxWrap("ls", "ls\nsentinel", true)
+	got, _, warn, err := c.sandboxWrap("ls", "ls\nsentinel", true)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestSandboxWrapDangerouslyDisable(t *testing.T) {
 
 	// policy-locked false: refused
 	s.locked["allowUnsandboxedCommands"] = true
-	if _, _, err := c.sandboxWrap("ls", "s", true); err == nil {
+	if _, _, _, err := c.sandboxWrap("ls", "s", true); err == nil {
 		t.Error("policy-locked allowUnsandboxedCommands=false must refuse")
 	}
 }
@@ -171,7 +171,7 @@ func TestSandboxWrapExcluded(t *testing.T) {
 		locked:           map[string]bool{},
 	}
 	c := withSandboxCfg(t, s)
-	got, _, err := c.sandboxWrap("docker ps", "docker ps\nsentinel", false)
+	got, _, _, err := c.sandboxWrap("docker ps", "docker ps\nsentinel", false)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}

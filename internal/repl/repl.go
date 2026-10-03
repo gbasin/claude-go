@@ -771,8 +771,9 @@ func sessionGitBranch(cwd string) string {
 }
 
 func printStatus(l *agent.Loop, ed *editor) {
+	var status string
 	if out := statusLineCmd(l); out != "" {
-		fmt.Println(out)
+		status = out
 	} else {
 		w, _ := termWidth()
 		cwdDisp := l.ToolCtx.CWD
@@ -788,7 +789,12 @@ func printStatus(l *agent.Loop, ed *editor) {
 		if pad < 1 {
 			pad = 1
 		}
-		fmt.Printf("%s%s%s%s%s\n", dim, left, strings.Repeat(" ", pad), right, reset)
+		status = dim + left + strings.Repeat(" ", pad) + right + reset
+	}
+	if compActive.Load() {
+		compSetStatus(status) // pinned bottom row — real keeps it in the live region
+	} else {
+		fmt.Println(status)
 	}
 	if b := permModeBanner(l.PermMode); b != "" {
 		fmt.Println("  " + b)
@@ -815,6 +821,8 @@ func termWidth() (int, error) {
 
 // askStructured renders a numbered options menu (AskUserQuestion tool).
 func (p *promptUI) askStructured(ks *keySource, header, question string, options []string, multi bool) ([]string, error) {
+	compSuspend() // modal menu — un-pin the live zone while it owns the screen
+	defer compResume()
 	fmt.Printf("\n%s%s%s\n", bold, question, reset)
 	for i, o := range options {
 		fmt.Printf("  %s%d.%s %s\n", bold, i+1, reset, o)

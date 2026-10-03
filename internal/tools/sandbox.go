@@ -16,6 +16,7 @@ package tools
 
 import (
 	"claude-go/internal/config"
+	"claude-go/internal/netproxy"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -61,6 +62,7 @@ type SandboxNetwork struct {
 	AllowedCidrs        []string
 	AllowUnixSockets    []string // macOS only
 	AllowAllUnixSockets bool
+	AllowAllLocal       bool // claude-go extension: like real's allowLocalBinding
 }
 
 // SandboxCredentials mirrors sandbox.credentials (mod_1164.js U, files only).
@@ -97,6 +99,7 @@ type sandboxNetJSON struct {
 	AllowedCidrs        []string `json:"allowedCidrs"`
 	AllowUnixSockets    []string `json:"allowUnixSockets"`
 	AllowAllUnixSockets *bool    `json:"allowAllUnixSockets"`
+	AllowAllLocal       *bool    `json:"allowAllLocal"`
 }
 
 type sandboxCredJSON struct {
@@ -153,6 +156,7 @@ func (s *SandboxSettings) apply(f *sandboxFileJSON, policy bool) {
 		s.Network.AllowedCidrs = append(s.Network.AllowedCidrs, n.AllowedCidrs...)
 		s.Network.AllowUnixSockets = append(s.Network.AllowUnixSockets, n.AllowUnixSockets...)
 		set("network.allowAllUnixSockets", n.AllowAllUnixSockets, &s.Network.AllowAllUnixSockets)
+		set("network.allowAllLocal", n.AllowAllLocal, &s.Network.AllowAllLocal)
 	}
 	if c := f.Credentials; c != nil {
 		s.Credentials.Files = append(s.Credentials.Files, c.Files...)
@@ -226,6 +230,15 @@ func (s *SandboxSettings) networkDenied() bool {
 		}
 	}
 	return len(s.Network.AllowedDomains) == 0
+}
+
+// needsNetworkProxy reports whether egress goes through the netproxy MITM
+// proxy rather than a blunt deny-all: a network block exists and grants at
+// least one destination (real: the SRT proxy only starts when allowedDomains
+// is set — deny-only configs collapse to deny-all without it).
+func (s *SandboxSettings) needsNetworkProxy() bool {
+	n := s.Network
+	return n != nil && (len(n.AllowedDomains) > 0 || len(n.AllowedCidrs) > 0 || n.AllowAllLocal)
 }
 
 // allowRead returns the effective allowRead list, honoring
@@ -391,20 +404,22 @@ func shellQuote(s string) string {
 // ---------- dispatch ----------
 
 // sandboxWrap decides whether script runs sandboxed and returns the final
-// command string. command is the raw user command (for excludedCommands);
-// script is command plus the cwd sentinel trailer. Returns (wrapped, warn,
-// err): warn is a non-fatal note to surface; err aborts the call.
-func (c *Context) sandboxWrap(command, script string, disable bool) (string, string, error) {
+// command string plus extra env vars for the child process. command is the
+// raw user command (for excludedCommands); script is command plus the cwd
+// sentinel trailer. Returns (wrapped, env, warn, err): env is appended to
+// the command environment (proxy vars when network rules apply); warn is a
+// non-fatal note to surface; err aborts the call.
+func (c *Context) sandboxWrap(command, script string, disable bool) (string, []string, string, error) {
 	s := sandboxSettings(c.CWD)
 	if s == nil || !s.enabled() {
-		return script, "", nil
+		return script, nil, "", nil
 	}
 	if disable {
 		switch {
 		case s.AllowUnsandboxedCommands:
-			return script, "", nil // honored: run outside the sandbox
+			return script, nil, "", nil // honored: run outside the sandbox
 		case s.locked["allowUnsandboxedCommands"]:
-			return "", "", fmt.Errorf("dangerouslyDisableSandbox refused: sandbox.allowUnsandboxedCommands is false (set by managed policy)")
+			return "", nil, "", fmt.Errorf("dangerouslyDisableSandbox refused: sandbox.allowUnsandboxedCommands is false (set by managed policy)")
 		default:
 			// CC: when false, the parameter is ignored and the command
 			// still runs sandboxed.
@@ -413,34 +428,51 @@ func (c *Context) sandboxWrap(command, script string, disable bool) (string, str
 		}
 	}
 	if s.excluded(command) {
-		return script, "", nil
+		return script, nil, "", nil
 	}
 	return c.sandboxedScript(command, script, s, "")
 }
 
+// addNote folds a non-fatal note into the warn string.
+func addNote(warn, msg string) string {
+	if warn == "" {
+		return msg
+	}
+	return warn + "\n" + msg
+}
+
 // sandboxedScript wraps script for the platform sandbox, degrading per
-// failIfUnavailable when the sandbox cannot be applied.
-func (c *Context) sandboxedScript(command, script string, s *SandboxSettings, warn string) (string, string, error) {
+// failIfUnavailable when the sandbox cannot be applied. When sandbox.network
+// grants any destination, it also brings up the session MITM proxy and
+// exports its env vars; seatbelt then denies all egress except the proxy.
+func (c *Context) sandboxedScript(command, script string, s *SandboxSettings, warn string) (string, []string, string, error) {
 	if err := platformSandboxAvailable(s); err != nil {
 		if s.FailIfUnavailable {
-			return "", "", fmt.Errorf("sandbox unavailable: %v (sandbox.failIfUnavailable is set)", err)
+			return "", nil, "", fmt.Errorf("sandbox unavailable: %v (sandbox.failIfUnavailable is set)", err)
 		}
 		note := fmt.Sprintf("sandbox unavailable: %v; running unsandboxed", err)
-		if warn != "" {
-			note = warn + "\n" + note
-		}
-		return script, note, nil
+		return script, nil, addNote(warn, note), nil
 	}
-	wrapped, err := platformSandboxWrap(script, s, c.CWD)
+	var env []string
+	var px *netproxy.Proxy
+	if s.needsNetworkProxy() {
+		if p2, note, err := sharedNetProxy(s.Network); err != nil {
+			warn = addNote(warn, fmt.Sprintf("sandbox network proxy failed: %v; denying all egress", err))
+		} else {
+			px = p2
+			env = px.Env()
+			if note != "" {
+				warn = addNote(warn, note)
+			}
+		}
+	}
+	wrapped, err := platformSandboxWrap(script, s, c.CWD, px)
 	if err != nil {
 		if s.FailIfUnavailable {
-			return "", "", fmt.Errorf("sandbox failed to start: %v (sandbox.failIfUnavailable is set)", err)
+			return "", nil, "", fmt.Errorf("sandbox failed to start: %v (sandbox.failIfUnavailable is set)", err)
 		}
 		note := fmt.Sprintf("sandbox failed to start: %v; running unsandboxed", err)
-		if warn != "" {
-			note = warn + "\n" + note
-		}
-		return script, note, nil
+		return script, nil, addNote(warn, note), nil
 	}
-	return wrapped, warn, nil
+	return wrapped, env, warn, nil
 }
