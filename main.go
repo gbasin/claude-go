@@ -295,11 +295,22 @@ func runMockServer(port int) {
 
 func runPrint(l *agent.Loop, prompt, format string, st *session.Store) int {
 	var out strings.Builder
+	if format == "stream-json" {
+		fmt.Printf(`{"type":"system","subtype":"init","session_id":%q,"model":%q,"cwd":%q}`+"\n",
+			l.Client.SessionID, l.Model, l.CWD)
+	}
 	l.Events.OnTextDelta = func(t string) {
-		if format == "text" {
+		switch format {
+		case "text":
 			fmt.Print(t)
-		} else {
+		default:
 			out.WriteString(t)
+		}
+	}
+	l.Events.OnToolUse = func(name string, input json.RawMessage) {
+		if format == "stream-json" {
+			fmt.Printf(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":%q,"input":%s}]}}`+"\n",
+				name, string(input))
 		}
 	}
 	ctx := context.Background()
@@ -317,7 +328,8 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store) int {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		return 1
 	}
-	if format == "json" {
+	switch format {
+	case "json", "stream-json":
 		b, _ := json.MarshalIndent(map[string]any{
 			"type":        "result",
 			"subtype":     "success",
