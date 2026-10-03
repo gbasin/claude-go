@@ -1,7 +1,9 @@
 package tools
 
 import (
+	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -339,7 +342,394 @@ func execReportFindings(c *Context, raw json.RawMessage) Result {
 }
 
 // ---------- SendMessage / ListAgents ----------
-// Local agent bus: ~/.claude-go/bus/<channel>.jsonl
+// Addressing, per the real tool (mod_1590/mod_0308):
+//   - `to` resolves to an in-process agent (by name or agentId), "main"
+//     (the session's main conversation), or another local session registered
+//     in ~/.claude-go/agent-registry.json. A "name [ref]" form pins a session
+//     by its registry ref (sessionId prefix).
+//   - In-process sends go through AgentBus records (channel semantics).
+//   - Cross-session sends append to ~/.claude-go/mailbox/<sessionId>.jsonl;
+//     the receiving session drains its mailbox between turns.
+//   - A send to a completed agent appends to its mailbox — it is "resumed
+//     from its transcript".
+//   - notify_when_idle registers a one-shot subscription; when the target
+//     session's turn finishes it fires a notice record into the subscriber's
+//     mailbox (NotifyOnIdle / FireIdleNotifications / DrainMailbox — the
+//     turn-boundary calls are wired in repl.go, elsewhere).
+
+// ---------- in-process agent bus ----------
+
+// AgentRecord is an addressable in-process agent (spawned via the Agent tool).
+type AgentRecord struct {
+	Name    string `json:"name"`
+	AgentID string `json:"agentId"`
+	Type    string `json:"type"`    // subagent_type that spawned it
+	Session string `json:"session"` // owning session id
+	Kind    string `json:"kind"`    // "in-process"
+	Started time.Time
+
+	// Inbox carries live sends; Send falls back to queued when full.
+	Inbox chan string
+	Done  chan struct{}
+
+	mu        sync.Mutex
+	queued    []string
+	completed bool
+	result    string
+}
+
+// Send delivers a message to a live agent (channel semantics; queued if full).
+func (a *AgentRecord) Send(text string) {
+	select {
+	case a.Inbox <- text:
+	default:
+		a.mu.Lock()
+		a.queued = append(a.queued, text)
+		a.mu.Unlock()
+	}
+}
+
+// TakeInbox drains queued messages (drained by whoever resumes the agent).
+func (a *AgentRecord) TakeInbox() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := a.queued
+	a.queued = nil
+	return out
+}
+
+// Completed reports whether the agent finished its turn.
+func (a *AgentRecord) Completed() bool {
+	select {
+	case <-a.Done:
+		return true
+	default:
+		return false
+	}
+}
+
+// Result returns the agent's final text after completion.
+func (a *AgentRecord) Result() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.result
+}
+
+// Finish marks the agent completed with its final text.
+func (a *AgentRecord) Finish(result string) {
+	a.mu.Lock()
+	if a.completed {
+		a.mu.Unlock()
+		return
+	}
+	a.completed = true
+	a.result = result
+	a.mu.Unlock()
+	close(a.Done)
+}
+
+// agentBus is the per-process registry of spawned agents.
+var agentBus = struct {
+	mu sync.Mutex
+	m  map[string]*AgentRecord // keyed by AgentID
+}{m: map[string]*AgentRecord{}}
+
+// NewAgentID returns an agentId in the real "a…-…" format.
+func NewAgentID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("a%d-%d", time.Now().UnixNano()%1e8, os.Getpid())
+	}
+	return fmt.Sprintf("a%x-%x", b[:4], b[4:])
+}
+
+// RegisterAgent makes an in-process agent addressable by SendMessage.
+func RegisterAgent(a *AgentRecord) {
+	a.Kind = "in-process"
+	a.Started = time.Now()
+	agentBus.mu.Lock()
+	agentBus.m[a.AgentID] = a
+	agentBus.mu.Unlock()
+}
+
+// LookupAgent finds an in-process agent by name or agentId. A bare name that
+// collides returns the most recently registered (latest wins).
+func LookupAgent(to string) *AgentRecord {
+	agentBus.mu.Lock()
+	defer agentBus.mu.Unlock()
+	if a, ok := agentBus.m[to]; ok {
+		return a
+	}
+	var found *AgentRecord
+	for _, a := range agentBus.m {
+		if a.Name == to && (found == nil || a.Started.After(found.Started)) {
+			found = a // latest wins on name collision
+		}
+	}
+	return found
+}
+
+// ListInProcessAgents returns all registered agents, oldest first.
+func ListInProcessAgents() []*AgentRecord {
+	agentBus.mu.Lock()
+	defer agentBus.mu.Unlock()
+	var out []*AgentRecord
+	for _, a := range agentBus.m {
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Started.Before(out[j].Started) })
+	return out
+}
+
+// ---------- cross-session registry ----------
+// ~/.claude-go/agent-registry.json: [{"sessionId","cwd","name","pid","ts"}]
+// Mutations are serialized with an O_EXCL lockfile.
+
+type sessionEntry struct {
+	SessionID string    `json:"sessionId"`
+	CWD       string    `json:"cwd"`
+	Name      string    `json:"name"`
+	PID       int       `json:"pid"`
+	TS        time.Time `json:"ts"`
+}
+
+func goHome() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude-go")
+}
+
+func registryPath() string { return filepath.Join(goHome(), "agent-registry.json") }
+
+func withRegistryLock(fn func() error) error {
+	os.MkdirAll(goHome(), 0o755)
+	lock := registryPath() + ".lock"
+	var f *os.File
+	for i := 0; i < 200; i++ {
+		var err error
+		f, err = os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			break
+		}
+		if i == 199 {
+			return fmt.Errorf("could not acquire registry lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	f.Close()
+	defer os.Remove(lock)
+	return fn()
+}
+
+func readRegistry() []sessionEntry {
+	b, err := os.ReadFile(registryPath())
+	if err != nil {
+		return nil
+	}
+	var out []sessionEntry
+	json.Unmarshal(b, &out)
+	return out
+}
+
+func writeRegistry(entries []sessionEntry) error {
+	b, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(registryPath(), b, 0o644)
+}
+
+// RegisterSession publishes this session so other local claude-go sessions
+// can SendMessage to it. Call once at startup (wired elsewhere).
+func RegisterSession(sessionID, cwd, name string) error {
+	return withRegistryLock(func() error {
+		entries := readRegistry()
+		var kept []sessionEntry
+		for _, e := range entries {
+			if e.SessionID != sessionID && pidAlive(e.PID) {
+				kept = append(kept, e)
+			}
+		}
+		if name == "" {
+			name = filepath.Base(cwd)
+		}
+		kept = append(kept, sessionEntry{
+			SessionID: sessionID, CWD: cwd, Name: name,
+			PID: os.Getpid(), TS: time.Now(),
+		})
+		return writeRegistry(kept)
+	})
+}
+
+// UnregisterSession removes this session from the registry (call at exit).
+func UnregisterSession(sessionID string) {
+	_ = withRegistryLock(func() error {
+		var kept []sessionEntry
+		for _, e := range readRegistry() {
+			if e.SessionID != sessionID {
+				kept = append(kept, e)
+			}
+		}
+		return writeRegistry(kept)
+	})
+}
+
+// liveSessions returns registry entries whose process is still alive,
+// pruning dead rows in the same locked pass.
+func liveSessions() []sessionEntry {
+	var out []sessionEntry
+	_ = withRegistryLock(func() error {
+		entries := readRegistry()
+		var kept []sessionEntry
+		for _, e := range entries {
+			if pidAlive(e.PID) {
+				kept = append(kept, e)
+			}
+		}
+		if len(kept) != len(entries) {
+			writeRegistry(kept)
+		}
+		out = kept
+		return nil
+	})
+	return out
+}
+
+func pidAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = p.Signal(syscall.Signal(0))
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// ---------- per-session mailbox ----------
+// ~/.claude-go/mailbox/<sessionId>.jsonl — one mailMsg per line; the owner
+// drains it between turns.
+
+type mailMsg struct {
+	From    string    `json:"from"`
+	To      string    `json:"to"`
+	Kind    string    `json:"kind"` // message|idle|agent-done|main|resume
+	Summary string    `json:"summary,omitempty"`
+	Message string    `json:"message"`
+	TS      time.Time `json:"ts"`
+}
+
+func mailboxDir() string { return filepath.Join(goHome(), "mailbox") }
+
+func mailboxPath(sessionID string) string {
+	if sessionID == "" {
+		sessionID = "main"
+	}
+	safe := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9':
+			return r
+		case r == '-' || r == '_' || r == '.':
+			return r
+		}
+		return '_'
+	}, sessionID)
+	return filepath.Join(mailboxDir(), safe+".jsonl")
+}
+
+func mailboxAppend(sessionID string, m mailMsg) error {
+	os.MkdirAll(mailboxDir(), 0o755)
+	f, err := os.OpenFile(mailboxPath(sessionID), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if m.TS.IsZero() {
+		m.TS = time.Now()
+	}
+	b, _ := json.Marshal(m)
+	_, err = f.Write(append(b, '\n'))
+	return err
+}
+
+func renderMail(m mailMsg) string {
+	switch m.Kind {
+	case "idle":
+		return "[Cross-session idle notice] " + m.Message
+	case "agent-done":
+		return m.Message
+	case "main", "resume", "message":
+		if m.Kind == "resume" {
+			return fmt.Sprintf("<cross-session-message from=%q>[resume] %s</cross-session-message>", m.From, m.Message)
+		}
+		return fmt.Sprintf("<cross-session-message from=%q>%s</cross-session-message>", m.From, m.Message)
+	default:
+		return m.Message
+	}
+}
+
+// DrainMailbox reads and clears a session's mailbox; the REPL calls it
+// between turns and injects the returned notes (wired elsewhere).
+func DrainMailbox(sessionID string) []string {
+	p := mailboxPath(sessionID)
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil
+	}
+	os.Remove(p)
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		if line == "" {
+			continue
+		}
+		var m mailMsg
+		if json.Unmarshal([]byte(line), &m) == nil {
+			out = append(out, renderMail(m))
+		}
+	}
+	return out
+}
+
+// NotifyOnIdle appends an idle-notification record to a session's mailbox —
+// the "local push-notification" a one-shot subscription fires.
+func NotifyOnIdle(sessionID, msg string) error {
+	return mailboxAppend(sessionID, mailMsg{From: sessionID, Kind: "idle", Message: msg})
+}
+
+// ---------- one-shot idle subscriptions ----------
+
+type idleSub struct {
+	subscriber string // session that gets the notice
+	text       string
+}
+
+var idleSubs = struct {
+	mu sync.Mutex
+	m  map[string][]idleSub // target sessionID → subscriptions
+}{m: map[string][]idleSub{}}
+
+// SubscribeIdle registers a one-shot notice: when target's turn next finishes
+// (FireIdleNotifications), text lands in subscriber's mailbox.
+func SubscribeIdle(target, subscriber, text string) {
+	idleSubs.mu.Lock()
+	idleSubs.m[target] = append(idleSubs.m[target], idleSub{subscriber, text})
+	idleSubs.mu.Unlock()
+}
+
+// FireIdleNotifications delivers all one-shot subscriptions for a session
+// that just went idle (or exited). Called by the session's turn boundary
+// (wired elsewhere).
+func FireIdleNotifications(sessionID string) {
+	idleSubs.mu.Lock()
+	subs := idleSubs.m[sessionID]
+	delete(idleSubs.m, sessionID)
+	idleSubs.mu.Unlock()
+	for _, s := range subs {
+		_ = NotifyOnIdle(s.subscriber, s.text)
+	}
+}
+
+// ---------- legacy channel bus (fallback for unmatched names) ----------
 
 type busMsg struct {
 	From    string    `json:"from"`
@@ -350,10 +740,7 @@ type busMsg struct {
 	Unread  bool      `json:"unread"`
 }
 
-func busDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude-go", "bus")
-}
+func busDir() string { return filepath.Join(goHome(), "bus") }
 
 func busPath(channel string) string {
 	if channel == "" {
@@ -392,6 +779,22 @@ func busRead(channel string) []busMsg {
 	return out
 }
 
+// splitAgentRef parses "name" and "name [ref]" address forms.
+func splitAgentRef(to string) (name, ref string) {
+	if i := strings.LastIndex(to, " ["); i > 0 && strings.HasSuffix(to, "]") {
+		return to[:i], to[i+2 : len(to)-1]
+	}
+	return to, ""
+}
+
+func shortRef(id string) string {
+	id = strings.TrimPrefix(id, "a")
+	if len(id) > 6 {
+		return id[:6]
+	}
+	return id
+}
+
 func execSendMessage(c *Context, raw json.RawMessage) Result {
 	var in struct {
 		To             string `json:"to"`
@@ -402,17 +805,117 @@ func execSendMessage(c *Context, raw json.RawMessage) Result {
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return Result{Content: "invalid input: " + err.Error(), IsError: true}
 	}
-	if in.To == "" || in.Message == "" {
+	if in.To == "" {
+		return Result{Content: "to is required", IsError: true}
+	}
+	if in.Message == "" && !in.NotifyWhenIdle {
 		return Result{Content: "to and message are required", IsError: true}
 	}
-	err := busAppend("main", busMsg{
-		From: "agent", To: in.To, Summary: in.Summary,
+	name, ref := splitAgentRef(in.To)
+	sender := c.Session
+	if sender == "" {
+		sender = "session"
+	}
+	wrapped := fmt.Sprintf("<cross-session-message from=%q>%s</cross-session-message>", sender, in.Message)
+
+	// 1. in-process agent — a bare name always resolves here first.
+	rec := LookupAgent(name)
+	if rec == nil && ref != "" {
+		rec = LookupAgent(ref)
+	}
+	if rec == nil {
+		rec = LookupAgent(in.To) // raw agentId
+	}
+	if rec != nil {
+		if rec.Completed() {
+			// names keep working after completion — queue for resume
+			_ = mailboxAppend(rec.AgentID, mailMsg{
+				From: sender, Kind: "resume", Message: in.Message, Summary: in.Summary,
+			})
+			return Result{Content: fmt.Sprintf(
+				"Agent %q already completed — your message was queued and the agent will be resumed from its transcript when it is next woken.", rec.Name)}
+		}
+		if in.Message != "" {
+			rec.Send(wrapped)
+		}
+		note := ""
+		if in.NotifyWhenIdle {
+			// one-shot: first idle after this send notifies the caller
+			go func() {
+				<-rec.Done
+				_ = NotifyOnIdle(c.Session,
+					fmt.Sprintf("agent %q (%s) finished its turn.", rec.Name, rec.AgentID))
+			}()
+			note = " Subscribed for one idle notice."
+		}
+		if in.Message == "" {
+			return Result{Content: fmt.Sprintf("Subscribed — one idle notice will arrive when %s next goes idle.%s", rec.Name, note)}
+		}
+		return Result{Content: fmt.Sprintf("Message sent to %s [%s] (in-process agent).%s", rec.Name, shortRef(rec.AgentID), note)}
+	}
+
+	// 2. the main conversation of this session
+	if name == "main" || name == "main-agent" {
+		if err := mailboxAppend(c.Session, mailMsg{
+			From: sender, Kind: "main", Message: in.Message, Summary: in.Summary,
+		}); err != nil {
+			return Result{Content: "send failed: " + err.Error(), IsError: true}
+		}
+		return Result{Content: "Message sent to the main conversation."}
+	}
+
+	// 3. other local sessions via the registry file
+	var matches []sessionEntry
+	for _, e := range liveSessions() {
+		switch {
+		case e.Name == name || e.SessionID == name:
+			matches = append(matches, e)
+		case ref != "" && e.Name == name && strings.HasPrefix(e.SessionID, ref):
+			matches = append(matches, e)
+		}
+	}
+	if len(matches) > 1 {
+		var rows []string
+		for _, e := range matches {
+			rows = append(rows, fmt.Sprintf("%s [%s]", e.Name, shortRef(e.SessionID)))
+		}
+		return Result{Content: fmt.Sprintf(
+			"Ambiguous recipient %q — matches multiple local sessions: %s. Re-send with the full \"name [ref]\" form.",
+			in.To, strings.Join(rows, ", ")), IsError: true}
+	}
+	if len(matches) == 1 {
+		e := matches[0]
+		if in.Message != "" {
+			if err := mailboxAppend(e.SessionID, mailMsg{
+				From: sender, Kind: "message", Message: in.Message, Summary: in.Summary,
+			}); err != nil {
+				return Result{Content: "send failed: " + err.Error(), IsError: true}
+			}
+		}
+		note := ""
+		if in.NotifyWhenIdle {
+			SubscribeIdle(e.SessionID, sender,
+				fmt.Sprintf("session %q (%s) went idle.", e.Name, e.SessionID))
+			note = " Subscribed — one idle notice will arrive when it next goes idle."
+		}
+		if in.Message == "" {
+			return Result{Content: fmt.Sprintf("Subscribed to %s [%s].%s", e.Name, shortRef(e.SessionID), note)}
+		}
+		return Result{Content: fmt.Sprintf(
+			"Message sent to %s [%s] (local-session) — it drains its inbox at its next tool round.%s",
+			e.Name, shortRef(e.SessionID), note)}
+	}
+
+	// 4. unresolved — queue on the legacy channel bus so the message is not
+	// dropped; ListAgents surfaces it.
+	if err := busAppend("main", busMsg{
+		From: sender, To: in.To, Summary: in.Summary,
 		Message: in.Message, TS: time.Now(), Unread: true,
-	})
-	if err != nil {
+	}); err != nil {
 		return Result{Content: "send failed: " + err.Error(), IsError: true}
 	}
-	return Result{Content: fmt.Sprintf("Message sent to %s", in.To)}
+	return Result{Content: fmt.Sprintf(
+		"No live agent or local session named %q — message queued on the local bus.", in.To)}
 }
 
 func execListAgents(c *Context, raw json.RawMessage) Result {
@@ -422,6 +925,24 @@ func execListAgents(c *Context, raw json.RawMessage) Result {
 	}
 	json.Unmarshal(raw, &in)
 	var b strings.Builder
+	// in-process agents spawned this session
+	for _, a := range ListInProcessAgents() {
+		st := "running"
+		if a.Completed() {
+			st = "completed"
+		}
+		fmt.Fprintf(&b, "%s [%s]  in-process  %s  type=%s\n",
+			a.Name, shortRef(a.AgentID), st, a.Type)
+	}
+	// other live local sessions
+	for _, e := range liveSessions() {
+		label := "local-session"
+		if c.Session != "" && e.SessionID == c.Session {
+			label = "local-session (this session)"
+		}
+		fmt.Fprintf(&b, "%s [%s]  %s  cwd=%s pid=%d\n",
+			e.Name, shortRef(e.SessionID), label, e.CWD, e.PID)
+	}
 	// background tasks count as running agents
 	if c.BgTasks != nil {
 		tasks := c.BgTasks.List()
@@ -433,9 +954,10 @@ func execListAgents(c *Context, raw json.RawMessage) Result {
 				st = "exited"
 			default:
 			}
-			fmt.Fprintf(&b, "%s  [%s] %s\n", t.ID, st, t.Command)
+			fmt.Fprintf(&b, "%s  background-task  [%s] %s\n", t.ID, st, t.Command)
 		}
 	}
+	b.WriteString("cloud-sessions  [unavailable]  cloud agent listing is not available in this build\n")
 	msgs := busRead(in.Channel)
 	for _, m := range msgs {
 		if in.Q != "" && !strings.Contains(m.Message+m.To, in.Q) {

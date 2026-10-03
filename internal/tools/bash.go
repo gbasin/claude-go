@@ -7,9 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -133,51 +131,24 @@ func execBash(c *Context, raw json.RawMessage) Result {
 	}
 
 	if in.RunInBackground {
-		return c.runBackground(in.Command, timeout)
+		return c.runBackground(in.Command, timeout, in.DangerouslyDisableSandbox)
 	}
-	return c.runForeground(in.Command, timeout)
+	return c.runForeground(in.Command, timeout, in.DangerouslyDisableSandbox)
 }
 
 // shellCmd builds a command that runs in the persisted cwd and reports the
 // resulting cwd back via a sentinel so the session can track `cd`.
 const cwdSentinel = "__CLAUDE_GO_CWD_SENTINEL__"
 
-// sandboxProfile restricts writes to cwd+scratchpad and temp; network allowed.
-const sandboxProfile = `(version 1)
-(allow default)
-(deny file-write* (regex #"^/(?!private/tmp|var/folders|Users/[^/]+/Code|Users/[^/]+/claude)"))
-(allow file-write* (subpath "/private/tmp") (subpath "/tmp") (subpath "/var") (subpath (param "CWD")))`
-
-// maybeSandbox wraps a command in macOS sandbox-exec when CLAUDE_GO_SANDBOX=1.
-// Writes a seatbelt profile to the scratchpad and prefixes the command.
-func (c *Context) maybeSandbox(command string) string {
-	if os.Getenv("CLAUDE_GO_SANDBOX") != "1" || runtime.GOOS != "darwin" {
-		return command
+// shellCmd wraps command with the cwd sentinel, applies the configured
+// sandbox (seatbelt on macOS, bwrap on Linux; see sandbox*.go) and returns
+// the exec.Cmd plus a non-fatal warning note to prepend to the output.
+func (c *Context) shellCmd(ctx context.Context, command string, disableSandbox bool) (*exec.Cmd, string, error) {
+	script := command + "\nprintf '" + cwdSentinel + "%s' \"$PWD\""
+	wrapped, warn, err := c.sandboxWrap(command, script, disableSandbox)
+	if err != nil {
+		return nil, "", err
 	}
-	if _, err := exec.LookPath("sandbox-exec"); err != nil {
-		return command
-	}
-	dir := filepath.Join(os.TempDir(), "claude-go-sandbox")
-	os.MkdirAll(dir, 0o755)
-	pf := filepath.Join(dir, "profile.sb")
-	profile := fmt.Sprintf(`(version 1)
-(allow default)
-(deny file-write* (regex #"^/(?!private/tmp|var/folders|private/var)"))
-(allow file-write* (subpath "/private/tmp") (subpath "/tmp") (subpath "/var/folders") (subpath %q))
-`, c.CWD)
-	if err := os.WriteFile(pf, []byte(profile), 0o644); err != nil {
-		return command
-	}
-	sh := os.Getenv("SHELL")
-	if sh == "" {
-		sh = "/bin/bash"
-	}
-	return fmt.Sprintf("sandbox-exec -f %q %s -c %q", pf, sh, command)
-}
-
-func (c *Context) shellCmd(ctx context.Context, command string) *exec.Cmd {
-	command = c.maybeSandbox(command)
-	wrapped := command + "\nprintf '" + cwdSentinel + "%s' \"$PWD\""
 	shell := os.Getenv("SHELL")
 	if shell == "" || !strings.HasSuffix(shell, "sh") {
 		shell = "/bin/bash"
@@ -185,18 +156,25 @@ func (c *Context) shellCmd(ctx context.Context, command string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, shell, "-c", wrapped)
 	cmd.Dir = c.CWD
 	cmd.Env = os.Environ()
-	return cmd
+	return cmd, warn, nil
 }
 
-func (c *Context) runForeground(command string, timeoutMs int) Result {
+func (c *Context) runForeground(command string, timeoutMs int, disableSandbox bool) Result {
 	ctx, cancel := context.WithTimeout(c.Ctx, time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
-	cmd := c.shellCmd(ctx, command)
+	cmd, warn, err := c.shellCmd(ctx, command, disableSandbox)
+	if err != nil {
+		return Result{Content: err.Error(), IsError: true}
+	}
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
-	err := cmd.Run()
-	return c.finishBash(&out, command, err, ctx.Err() == context.DeadlineExceeded)
+	err = cmd.Run()
+	res := c.finishBash(&out, command, err, ctx.Err() == context.DeadlineExceeded)
+	if warn != "" {
+		res.Content = warn + "\n" + res.Content
+	}
+	return res
 }
 
 func (c *Context) finishBash(out *bytes.Buffer, command string, err error, timedOut bool) Result {
@@ -242,12 +220,16 @@ func (c *Context) finishBash(out *bytes.Buffer, command string, err error, timed
 	return res
 }
 
-func (c *Context) runBackground(command string, timeoutMs int) Result {
+func (c *Context) runBackground(command string, timeoutMs int, disableSandbox bool) Result {
 	id := fmt.Sprintf("b%d", c.BgTasks.seq.Add(1))
 	t := &BgTask{ID: id, Command: command, Started: time.Now(), Done: make(chan struct{})}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
 	t.cancel = cancel
-	cmd := c.shellCmd(ctx, command)
+	cmd, warn, err := c.shellCmd(ctx, command, disableSandbox)
+	if err != nil {
+		cancel()
+		return Result{Content: err.Error(), IsError: true}
+	}
 	cmd.Stdout = &t.Out
 	cmd.Stderr = &t.Out
 	if err := cmd.Start(); err != nil {
@@ -281,7 +263,11 @@ func (c *Context) runBackground(command string, timeoutMs int) Result {
 			cb(t)
 		}
 	}()
-	return Result{Content: fmt.Sprintf("Command running in background with ID %s", id)}
+	msg := fmt.Sprintf("Command running in background with ID %s", id)
+	if warn != "" {
+		msg = warn + "\n" + msg
+	}
+	return Result{Content: msg}
 }
 
 // ---------- TaskStop ----------

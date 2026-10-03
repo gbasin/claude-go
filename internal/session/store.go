@@ -5,6 +5,7 @@ package session
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,25 +24,27 @@ type Store struct {
 }
 
 type event struct {
-	Type          string          `json:"type"` // user|assistant|system|summary|attachment|progress
-	Subtype       string          `json:"subtype,omitempty"`
-	UUID          string          `json:"uuid"`
-	ParentUUID    string          `json:"parentUuid,omitempty"`
-	SessionID     string          `json:"sessionId"`
-	CWD           string          `json:"cwd"`
-	Timestamp     string          `json:"timestamp"`
-	Message       json.RawMessage `json:"message,omitempty"`
-	Version       string          `json:"version"`
-	UserType      string          `json:"userType"`
-	GitBranch     string          `json:"gitBranch,omitempty"`
-	IsSidechain   bool            `json:"isSidechain,omitempty"`
-	IsMeta        bool            `json:"isMeta,omitempty"`
-	RequestID     string          `json:"requestId,omitempty"`
-	AgentID       string          `json:"agentId,omitempty"`
-	Origin        string          `json:"origin,omitempty"`
-	Entrypoint    string          `json:"entrypoint,omitempty"`
-	ForkedFrom    *ForkedFrom     `json:"forkedFrom,omitempty"`
-	ToolUseResult json.RawMessage `json:"toolUseResult,omitempty"`
+	Type             string          `json:"type"` // user|assistant|system|summary|attachment|progress
+	Subtype          string          `json:"subtype,omitempty"`
+	UUID             string          `json:"uuid"`
+	ParentUUID       string          `json:"parentUuid,omitempty"`
+	SessionID        string          `json:"sessionId"`
+	CWD              string          `json:"cwd"`
+	Timestamp        string          `json:"timestamp"`
+	Message          json.RawMessage `json:"message,omitempty"`
+	Version          string          `json:"version"`
+	UserType         string          `json:"userType"`
+	GitBranch        string          `json:"gitBranch,omitempty"`
+	IsSidechain      bool            `json:"isSidechain,omitempty"`
+	IsMeta           bool            `json:"isMeta,omitempty"`
+	IsCompactSummary bool            `json:"isCompactSummary,omitempty"`
+	ModelOnlyText    string          `json:"modelOnlyText,omitempty"`
+	RequestID        string          `json:"requestId,omitempty"`
+	AgentID          string          `json:"agentId,omitempty"`
+	Origin           string          `json:"origin,omitempty"`
+	Entrypoint       string          `json:"entrypoint,omitempty"`
+	ForkedFrom       *ForkedFrom     `json:"forkedFrom,omitempty"`
+	ToolUseResult    json.RawMessage `json:"toolUseResult,omitempty"`
 }
 
 // ForkedFrom marks a message copied into a forked session.
@@ -111,6 +114,16 @@ func (s *Store) Log(m api.Message) error { return s.LogMessage(m) }
 
 // LogMessage appends a user/assistant message event.
 func (s *Store) LogMessage(m api.Message) error {
+	return s.logMessage(m, false, "")
+}
+
+// LogCompactSummary appends the user message carrying the post-compact
+// summary, flagged isCompactSummary with modelOnlyText like real CC.
+func (s *Store) LogCompactSummary(m api.Message, modelOnlyText string) error {
+	return s.logMessage(m, true, modelOnlyText)
+}
+
+func (s *Store) logMessage(m api.Message, compact bool, modelOnlyText string) error {
 	var raw json.RawMessage
 	role := m.Role
 	// re-encode as {role, content}
@@ -125,9 +138,11 @@ func (s *Store) LogMessage(m api.Message) error {
 		SessionID: s.SessionID, CWD: s.CWD,
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 		Message:   raw, Version: "2.1.288",
-		UserType:   "external",
-		GitBranch:  currentGitBranch(s.CWD),
-		Entrypoint: "cli",
+		UserType:         "external",
+		GitBranch:        currentGitBranch(s.CWD),
+		Entrypoint:       "cli",
+		IsCompactSummary: compact,
+		ModelOnlyText:    modelOnlyText,
 	}
 	s.lastUUID = uuid
 	b, _ := json.Marshal(e)
@@ -171,6 +186,124 @@ func (s *Store) LogCompactBoundary(preTokens, kept int) error {
 	})
 }
 
+// LogInit writes the {type:"system",subtype:"init"} record CC emits at
+// session start.
+func (s *Store) LogInit(model string) error {
+	return s.LogRecord(map[string]any{
+		"type": "system", "subtype": "init",
+		"model": model, "cwd": s.CWD,
+		"version": "2.1.288", "userType": "external",
+		"gitBranch": currentGitBranch(s.CWD), "entrypoint": "cli",
+	})
+}
+
+// LogAttachment appends an attachment record
+// ({type:"attachment",attachment:{...}}) — queued commands, file mentions,
+// relevant memories, etc.
+func (s *Store) LogAttachment(att map[string]any) error {
+	return s.LogRecord(map[string]any{
+		"type": "attachment", "attachment": att,
+	})
+}
+
+// LogProgress appends a progress record (tool progress, heartbeat, hook
+// progress). Progress records carry toolUseID/parentToolUseID and do not
+// join the parentUuid message chain.
+func (s *Store) LogProgress(toolUseID, parentToolUseID string, data map[string]any) error {
+	ev := map[string]any{"type": "progress", "data": data}
+	if toolUseID != "" {
+		ev["toolUseID"] = toolUseID
+	}
+	if parentToolUseID != "" {
+		ev["parentToolUseID"] = parentToolUseID
+	}
+	return s.LogRecord(ev)
+}
+
+// LogTitle sets the session's custom title. It writes both a transcript
+// record ({type:"custom-title"}) and <projectDir>/<sessionID>/custom-title.json
+// ({customTitle}), matching real CC. A summary record is also appended as a
+// named leaf marker.
+func (s *Store) LogTitle(title string) error {
+	if err := s.LogSummary(title, s.lastUUID); err != nil {
+		return err
+	}
+	if err := s.LogRecord(map[string]any{
+		"type": "custom-title", "customTitle": title,
+	}); err != nil {
+		return err
+	}
+	return writeTitleFile(filepath.Dir(s.Path), s.SessionID, title)
+}
+
+// writeRaw appends an already-complete record verbatim (used by Fork, which
+// controls every field including a nil parentUuid).
+func (s *Store) writeRaw(ev map[string]any) error {
+	b, _ := json.Marshal(ev)
+	_, err := s.f.Write(append(b, '\n'))
+	return err
+}
+
+// WriteTitle sets the custom title on a stored (possibly closed) transcript:
+// appends a {type:"custom-title"} record and writes custom-title.json.
+// Used by the resume picker's rename mode.
+func WriteTitle(projectDir, sessionID, title string) error {
+	p := filepath.Join(projectDir, sessionID+".jsonl")
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	e := map[string]any{
+		"type": "custom-title", "customTitle": title,
+		"sessionId": sessionID, "uuid": newUUID(),
+		"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	b, _ := json.Marshal(e)
+	_, werr := f.Write(append(b, '\n'))
+	cerr := f.Close()
+	if werr != nil {
+		return werr
+	}
+	if cerr != nil {
+		return cerr
+	}
+	return writeTitleFile(projectDir, sessionID, title)
+}
+
+// writeTitleFile writes <projectDir>/<sessionID>/custom-title.json. Real CC
+// stores {customTitle}; "title" is included for forwards compatibility.
+func writeTitleFile(projectDir, sessionID, title string) error {
+	d := filepath.Join(projectDir, sessionID)
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		return err
+	}
+	b, _ := json.Marshal(map[string]string{
+		"customTitle": title,
+		"title":       title,
+	})
+	return os.WriteFile(filepath.Join(d, "custom-title.json"), b, 0o644)
+}
+
+// ReadTitle returns the custom title for <projectDir>/<sessionID>.jsonl,
+// or "" if none.
+func ReadTitle(projectDir, sessionID string) string {
+	b, err := os.ReadFile(filepath.Join(projectDir, sessionID, "custom-title.json"))
+	if err != nil {
+		return ""
+	}
+	var v struct {
+		CustomTitle string `json:"customTitle"`
+		Title       string `json:"title"`
+	}
+	if json.Unmarshal(b, &v) != nil {
+		return ""
+	}
+	if v.CustomTitle != "" {
+		return v.CustomTitle
+	}
+	return v.Title
+}
+
 func currentGitBranch(cwd string) string {
 	out, err := execCommand("git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
@@ -186,68 +319,210 @@ func (s *Store) Close() { s.f.Close() }
 // real resume semantics where a rewound transcript keeps its tail but
 // resumes from the marked leaf.
 func Load(cwd, sessionID string) ([]api.Message, error) {
-	p := filepath.Join(dir(cwd), sessionID+".jsonl")
-	f, err := os.Open(p)
+	return LoadPath(filepath.Join(dir(cwd), sessionID+".jsonl"))
+}
+
+// LoadPath loads an arbitrary .jsonl transcript file (for `claude --resume
+// <file>`), applying the same active-branch reconstruction as Load.
+func LoadPath(path string) ([]api.Message, error) {
+	recs, err := readRecords(path)
+	if err != nil {
+		return nil, err
+	}
+	branch := activeBranch(recs)
+	if branch == nil {
+		// no uuid chain — fall back to in-order messages
+		var msgs []api.Message
+		for _, r := range recs {
+			if m, ok := recToMessage(r); ok {
+				msgs = append(msgs, m)
+			}
+		}
+		return msgs, nil
+	}
+	var msgs []api.Message
+	for _, r := range branch {
+		if m, ok := recToMessage(r); ok {
+			msgs = append(msgs, m)
+		}
+	}
+	return msgs, nil
+}
+
+// readRecords parses every JSONL record in a transcript file.
+func readRecords(path string) ([]map[string]any, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	type rec struct {
-		Type        string `json:"type"`
-		UUID        string `json:"uuid"`
-		ParentUUID  string `json:"parentUuid"`
-		IsSidechain bool   `json:"isSidechain"`
-		IsMeta      bool   `json:"isMeta"`
-		Message     struct {
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
-		} `json:"message"`
-	}
-	var records []rec
-	byUUID := map[string]*rec{}
-	var leaf *rec
+	var out []map[string]any
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 1<<20), 8<<20)
 	for sc.Scan() {
-		var r rec
-		if json.Unmarshal(sc.Bytes(), &r) != nil {
+		var m map[string]any
+		if json.Unmarshal(sc.Bytes(), &m) != nil {
 			continue
 		}
-		records = append(records, r)
-		if r.UUID != "" {
-			cp := records[len(records)-1]
-			byUUID[r.UUID] = &cp
-			if !r.IsSidechain && (r.Type == "user" || r.Type == "assistant") {
-				leaf = &records[len(records)-1]
-			}
+		out = append(out, m)
+	}
+	return out, sc.Err()
+}
+
+func truthy(v any) bool {
+	b, _ := v.(bool)
+	return b
+}
+
+// activeBranch returns the main-chain records: the parentUuid walk from the
+// last non-sidechain user/assistant record back to the root, ordered
+// oldest-first. Returns nil when no uuid chain exists.
+func activeBranch(recs []map[string]any) []map[string]any {
+	byUUID := map[string]map[string]any{}
+	leaf := -1
+	for i, r := range recs {
+		u, _ := r["uuid"].(string)
+		if u == "" {
+			continue
+		}
+		byUUID[u] = r
+		t, _ := r["type"].(string)
+		if !truthy(r["isSidechain"]) && (t == "user" || t == "assistant") {
+			leaf = i
 		}
 	}
-	if leaf == nil {
-		// no uuid chain — fall back to in-order messages
-		var msgs []api.Message
-		for _, r := range records {
-			if !r.IsSidechain && !r.IsMeta && r.Message.Role != "" {
-				msgs = append(msgs, api.Message{Role: r.Message.Role, Content: r.Message.Content})
-			}
-		}
-		return msgs, sc.Err()
+	if leaf < 0 {
+		return nil
 	}
-	var chain []rec
-	for cur := leaf; cur != nil; {
-		chain = append(chain, *cur)
-		cur = byUUID[cur.ParentUUID]
+	var chain []map[string]any
+	for cur := recs[leaf]; cur != nil; {
+		chain = append(chain, cur)
+		p, _ := cur["parentUuid"].(string)
+		cur = byUUID[p]
 	}
 	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
 		chain[i], chain[j] = chain[j], chain[i]
 	}
+	return chain
+}
+
+// recToMessage extracts an api.Message from a transcript record. Sidechain,
+// meta, and message-less records are skipped.
+func recToMessage(r map[string]any) (api.Message, bool) {
+	if truthy(r["isSidechain"]) || truthy(r["isMeta"]) {
+		return api.Message{}, false
+	}
+	raw, _ := r["message"].(map[string]any)
+	role, _ := raw["role"].(string)
+	if role == "" {
+		return api.Message{}, false
+	}
+	content, _ := json.Marshal(raw["content"])
+	return api.Message{Role: role, Content: content}, true
+}
+
+// Fork copies the active branch of session srcID into a fresh session id in
+// the same project dir, like real CC branching: copied records keep their
+// uuids, get sessionId=<new>, isSidechain=false, the parentUuid chain is
+// rebuilt across non-progress records, and every record is stamped
+// forkedFrom:{sessionId:<srcID>,messageUuid:<orig uuid>}. The returned Store
+// is open and chained so subsequent Log calls continue the branch. The fork
+// is titled "<first prompt> (Branch)" via LogTitle.
+func Fork(cwd, srcID string) (*Store, []api.Message, error) {
+	srcPath := filepath.Join(dir(cwd), srcID+".jsonl")
+	recs, err := readRecords(srcPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	branch := activeBranch(recs)
+	if len(branch) == 0 {
+		return nil, nil, errors.New("session has no message chain to fork")
+	}
+	newID := NewID()
+	st, err := Open(cwd, newID)
+	if err != nil {
+		return nil, nil, err
+	}
+	parent := ""
 	var msgs []api.Message
-	for _, r := range chain {
-		if r.IsSidechain || r.IsMeta || r.Message.Role == "" {
+	for _, r := range branch {
+		cp := make(map[string]any, len(r)+3)
+		for k, v := range r {
+			cp[k] = v
+		}
+		origUUID, _ := cp["uuid"].(string)
+		if t, _ := cp["type"].(string); t == "system" {
+			if sb, _ := cp["subtype"].(string); sb == "model_refusal_fallback" {
+				cp["neutralizedByFork"] = true
+			}
+		}
+		cp["sessionId"] = newID
+		cp["isSidechain"] = false
+		delete(cp, "sessionKind")
+		cp["forkedFrom"] = map[string]string{
+			"sessionId":   srcID,
+			"messageUuid": origUUID,
+		}
+		if parent == "" {
+			cp["parentUuid"] = nil
+		} else {
+			cp["parentUuid"] = parent
+		}
+		if err := st.writeRaw(cp); err != nil {
+			st.Close()
+			return nil, nil, err
+		}
+		if t, _ := cp["type"].(string); t != "progress" {
+			parent = origUUID
+		}
+		if m, ok := recToMessage(cp); ok {
+			msgs = append(msgs, m)
+		}
+	}
+	st.lastUUID = parent
+	if p := firstPromptText(msgs); p != "" {
+		// best-effort title, matching CC's "<prompt> (Branch)" naming
+		_ = st.LogTitle(trunc(p, 60) + " (Branch)")
+	}
+	return st, msgs, nil
+}
+
+// firstPromptText returns the first real user text in msgs (CC's
+// deriveFirstPrompt), skipping system-reminder/bash wrapper text.
+func firstPromptText(msgs []api.Message) string {
+	for _, m := range msgs {
+		if m.Role != "user" {
 			continue
 		}
-		msgs = append(msgs, api.Message{Role: r.Message.Role, Content: r.Message.Content})
+		t := contentText(m.Content)
+		if t == "" || strings.HasPrefix(t, "<") {
+			continue
+		}
+		return t
 	}
-	return msgs, sc.Err()
+	return ""
+}
+
+// contentText joins the text blocks of a message content payload.
+func contentText(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return ""
+	}
+	var parts []string
+	for _, b := range blocks {
+		if b.Type == "text" && b.Text != "" {
+			parts = append(parts, b.Text)
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // Latest returns the newest session id for cwd (for --continue).

@@ -2,7 +2,9 @@
 package repl
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,10 +56,19 @@ type editor struct {
 	lastChange     rune
 	undoStack      [][]rune
 	undoPos        []int
+	kb             map[string]string // canonical chord -> action (keybindings.go)
+	kbPrefix       map[string]bool   // canonical chord prefixes awaiting more keys
+	kbUnbound      map[string]bool   // chords explicitly unbound via keybindings.json
+	pendingChord   []string          // matched chord-prefix strokes
+	imgDir         string            // scratchpad dir for pasted images
+	imgN           int               // pasted-image counter
 }
 
 func newEditor() *editor {
-	return &editor{prompt: " > ", hIdx: -1, mode: "insert", pastes: map[string]string{}}
+	e := &editor{prompt: " > ", hIdx: -1, mode: "insert", pastes: map[string]string{}}
+	e.history = loadHistoryFile()
+	e.loadKeybindings()
+	return e
 }
 
 // redraw reprints the whole input area (multiline-safe).
@@ -165,10 +176,20 @@ func (e *editor) readLine(ks *keySource) readResult {
 
 func (e *editor) insertKey(k key) *readResult {
 	c := k.b
+	if k.mod&modCtrl != 0 && k.r >= 'a' && k.r <= 'z' {
+		c = byte(k.r) - 'a' + 1 // CSI-u ctrl+letter -> control byte
+	}
+	if e.histSearch {
+		return e.searchKey(k)
+	}
+	// keybinding layer (defaults + ~/.claude/keybindings.json), incl. chords
+	if res, done := e.bindingKey(k); done {
+		return res
+	}
 	// ctrl+x chord prefix (3s window like real CC)
 	if e.pendingX {
 		e.pendingX = false
-		if c == 'k' && time.Since(e.chordAt) < 3*time.Second {
+		if c == 'k' && time.Since(e.chordAt) < 3*time.Second && !e.kbUnbound["ctrl+x ctrl+k"] {
 			if e.actions != nil {
 				if a := e.actions[24]; a != nil { // ctrl+x ctrl+k -> killAgents
 					return a(e)
@@ -188,9 +209,6 @@ func (e *editor) insertKey(k key) *readResult {
 				return res
 			}
 		}
-	}
-	if e.histSearch {
-		return e.searchKey(k)
 	}
 	switch {
 	case k.paste != "":
@@ -218,32 +236,11 @@ func (e *editor) insertKey(k key) *readResult {
 	case k.seq == "[3~":
 		e.del(false)
 	case c == 3: // ctrl-C
-		if len(e.buf) > 0 {
-			e.buf = e.buf[:0]
-			e.pos = 0
-			e.redraw()
-		} else if time.Since(e.lastCtrlC) < 2*time.Second {
-			os.Stdout.WriteString("\n╰─╯\n")
-			return &readResult{quit: true}
-		} else {
-			e.lastCtrlC = time.Now()
-			os.Stdout.WriteString("\r\n  (ctrl-C again to exit)\r\n")
-			e.redraw()
-		}
+		return e.interruptKey()
 	case c == 4: // ctrl-D
-		if len(e.buf) == 0 {
-			os.Stdout.WriteString("\n╰─╯\n")
-			return &readResult{quit: true}
-		}
-		e.del(false)
-	case c == '\r' || c == '\n': // submit (\n submits too; multiline via \-continuation or paste)
-		if len(e.buf) > 0 && e.buf[len(e.buf)-1] == '\\' {
-			e.buf = e.buf[:len(e.buf)-1]
-			e.insert('\n')
-			return nil
-		}
-		os.Stdout.WriteString("\n╰─╯\n")
-		return &readResult{line: e.submitLine(), ok: true}
+		return e.exitKey()
+	case (c == '\r' || c == '\n') && k.r != '\n' && k.mod == 0: // submit
+		return e.submitKey()
 	case c == 0x7f || c == 8:
 		e.del(true)
 	case c == 1:
@@ -266,30 +263,15 @@ func (e *editor) insertKey(k key) *readResult {
 		for e.pos > 0 && e.buf[e.pos-1] != ' ' {
 			e.del(true)
 		}
-	case c == 0x1b && k.seq == "":
-		if e.vim {
-			e.mode = "normal"
-			if e.pos > 0 {
-				e.pos--
-			}
-			e.redraw()
-		} else {
-			if e.lastEsc > 0 && time.Since(time.Unix(0, e.lastEsc)) < 400*time.Millisecond {
-				e.lastEsc = 0
-				return &readResult{rewind: true}
-			}
-			e.lastEsc = time.Now().UnixNano()
-			e.buf = e.buf[:0]
-			e.pos = 0
-			e.redraw()
-		}
+	case c == 0x1b && k.seq == "" && k.mod == 0:
+		return e.cancelKey()
 	case c == '\t':
 		e.complete()
 	case k.seq == "[Z": // shift+tab: cycle permission mode
 		if e.cycleMode != nil {
 			e.cycleMode()
 		}
-	case k.r != 0:
+	case k.r != 0 && k.mod&^modShift == 0: // shift alone still inserts text
 		// vimInsertModeRemaps: 2-char sequence mapped to <Esc>
 		if e.vim && len(e.insertRemaps) > 0 && e.lastIns != 0 {
 			pair := string([]rune{e.lastIns, k.r})
@@ -312,7 +294,7 @@ func (e *editor) insertKey(k key) *readResult {
 		}
 		e.lastIns = k.r
 		e.insert(k.r)
-	case c >= 32 && c < 127:
+	case c >= 32 && c < 127 && k.mod&^modShift == 0:
 		e.insert(rune(c))
 	}
 	return nil
@@ -324,6 +306,9 @@ func (e *editor) insertKey(k key) *readResult {
 func (e *editor) vimKey(k key) *readResult {
 	c := k.b
 	toInsert := func() { e.mode = "insert"; e.redraw() }
+	if k.mod&(modCtrl|modAlt|modCmd) != 0 && k.r != 0 {
+		return nil // CSI-u modified keys aren't normal-mode commands
+	}
 	if k.paste != "" {
 		e.pushUndo()
 		e.insert([]rune(e.expandPaste(k.paste))...)
@@ -800,38 +785,233 @@ func (e *editor) registerDefaultActions() {
 		e.actions = map[byte]func(*editor) *readResult{}
 	}
 	e.actions[12] = func(e *editor) *readResult { // ctrl+l clear input
-		e.buf = e.buf[:0]
-		e.pos = 0
-		e.redraw()
+		e.clearInput()
 		return nil
 	}
 	e.actions[7] = func(e *editor) *readResult { // ctrl+g external editor
 		return e.externalEditor()
 	}
 	e.actions[18] = func(e *editor) *readResult { // ctrl+r history search
-		e.histSearch = true
-		e.searchBuf = e.searchBuf[:0]
-		e.redrawSearch()
+		e.startSearch()
 		return nil
 	}
 	e.actions[15] = func(e *editor) *readResult { // ctrl+o toggle expand
-		if e.onToggleExpand != nil {
-			e.onToggleExpand()
-		}
+		e.toggleExpand()
 		return nil
 	}
 	e.actions[20] = func(e *editor) *readResult { // ctrl+t toggle todos
-		if e.onToggleTodos != nil {
-			e.onToggleTodos()
-		}
+		e.toggleTodos()
 		return nil
 	}
 	e.actions[24] = func(e *editor) *readResult { // ctrl+x ctrl+k kill agents
-		if e.onKillAgents != nil {
-			e.onKillAgents()
+		e.killAgents()
+		return nil
+	}
+}
+
+// ---- shared key actions (invoked by the switch and by keybindings) ----
+
+// interruptKey is ctrl-C / app:interrupt: clear buffer; double-tap exits.
+func (e *editor) interruptKey() *readResult {
+	if len(e.buf) > 0 {
+		e.buf = e.buf[:0]
+		e.pos = 0
+		e.redraw()
+	} else if time.Since(e.lastCtrlC) < 2*time.Second {
+		os.Stdout.WriteString("\n╰─╯\n")
+		return &readResult{quit: true}
+	} else {
+		e.lastCtrlC = time.Now()
+		os.Stdout.WriteString("\r\n  (ctrl-C again to exit)\r\n")
+		e.redraw()
+	}
+	return nil
+}
+
+// exitKey is ctrl-D / app:exit: quit on empty buffer, else delete forward.
+func (e *editor) exitKey() *readResult {
+	if len(e.buf) == 0 {
+		os.Stdout.WriteString("\n╰─╯\n")
+		return &readResult{quit: true}
+	}
+	e.del(false)
+	return nil
+}
+
+// cancelKey is esc / chat:cancel: vim insert->normal; else clear buffer with
+// double-esc opening the rewind selector.
+func (e *editor) cancelKey() *readResult {
+	if e.vim {
+		e.mode = "normal"
+		if e.pos > 0 {
+			e.pos--
+		}
+		e.redraw()
+		return nil
+	}
+	if e.lastEsc > 0 && time.Since(time.Unix(0, e.lastEsc)) < 400*time.Millisecond {
+		e.lastEsc = 0
+		return &readResult{rewind: true}
+	}
+	e.lastEsc = time.Now().UnixNano()
+	e.buf = e.buf[:0]
+	e.pos = 0
+	e.redraw()
+	return nil
+}
+
+// submitKey is enter / chat:submit (with \-continuation -> newline).
+func (e *editor) submitKey() *readResult {
+	if len(e.buf) > 0 && e.buf[len(e.buf)-1] == '\\' {
+		e.buf = e.buf[:len(e.buf)-1]
+		e.insert('\n')
+		return nil
+	}
+	os.Stdout.WriteString("\n╰─╯\n")
+	return &readResult{line: e.submitLine(), ok: true}
+}
+
+// clearInput is ctrl-l / chat:clearInput.
+func (e *editor) clearInput() {
+	e.buf = e.buf[:0]
+	e.pos = 0
+	e.redraw()
+}
+
+// startSearch is ctrl-r / history:search.
+func (e *editor) startSearch() {
+	e.histSearch = true
+	e.searchBuf = e.searchBuf[:0]
+	e.redrawSearch()
+}
+
+func (e *editor) toggleExpand() {
+	if e.onToggleExpand != nil {
+		e.onToggleExpand()
+	}
+}
+
+func (e *editor) toggleTodos() {
+	if e.onToggleTodos != nil {
+		e.onToggleTodos()
+	}
+}
+
+func (e *editor) cyclePermMode() {
+	if e.cycleMode != nil {
+		e.cycleMode()
+	}
+}
+
+func (e *editor) killAgents() {
+	if e.onKillAgents != nil {
+		e.onKillAgents()
+	}
+}
+
+// imagePaste is ctrl-v / chat:imagePaste: pull an image off the clipboard
+// (macOS: pngpaste, osascript fallback), save it to a scratchpad dir and
+// insert a "[Image #N]" placeholder. On submit the placeholder expands into
+// the \x00IMAGE\x00<path>\x00<size> marker the agent loop turns into an image
+// block. Falls back to a text paste (pbpaste) when no image is present.
+func (e *editor) imagePaste() *readResult {
+	if e.imgDir == "" {
+		d, err := os.MkdirTemp("", "claude-go-images-")
+		if err != nil {
+			return nil
+		}
+		e.imgDir = d
+	}
+	e.imgN++
+	path := filepath.Join(e.imgDir, fmt.Sprintf("image-%d.png", e.imgN))
+	if !clipboardImageTo(path) {
+		e.imgN--
+		if out, err := exec.Command("pbpaste").Output(); err == nil && len(out) > 0 {
+			e.insert([]rune(e.expandPaste(string(out)))...)
 		}
 		return nil
 	}
+	b, _ := os.ReadFile(path)
+	ph := fmt.Sprintf("[Image #%d]", e.imgN)
+	e.pastes[ph] = fmt.Sprintf("\x00IMAGE\x00%s\x00%d", path, len(b))
+	e.insert([]rune(ph)...)
+	return nil
+}
+
+// clipboardImageTo writes the clipboard's image to path as PNG. Returns false
+// when the clipboard holds no image or no helper tool is available.
+func clipboardImageTo(path string) bool {
+	if _, err := exec.LookPath("pngpaste"); err == nil {
+		if exec.Command("pngpaste", path).Run() == nil && validPNG(path) {
+			return true
+		}
+		os.Remove(path)
+	}
+	// osascript fallback: write the clipboard as PNGf to the file.
+	script := `set f to open for access (POSIX file "` + path + `") with write permission
+try
+  write (the clipboard as «class PNGf») to f
+end try
+close access f`
+	if exec.Command("osascript", "-e", script).Run() == nil && validPNG(path) {
+		return true
+	}
+	os.Remove(path)
+	return false
+}
+
+func validPNG(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var hdr [8]byte
+	if _, err := io.ReadFull(f, hdr[:]); err != nil {
+		return false
+	}
+	return bytes.Equal(hdr[:], []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a})
+}
+
+// loadHistoryFile seeds the editor history from ~/.claude/history.jsonl so
+// ctrl-r search covers past sessions. Dedupes, newest last.
+func loadHistoryFile() []string {
+	home, _ := os.UserHomeDir()
+	b, err := os.ReadFile(filepath.Join(home, ".claude", "history.jsonl"))
+	if err != nil {
+		return nil
+	}
+	var disp []string
+	for _, ln := range strings.Split(string(b), "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
+			continue
+		}
+		var rec struct {
+			Display string `json:"display"`
+		}
+		if json.Unmarshal([]byte(ln), &rec) != nil || rec.Display == "" {
+			continue
+		}
+		disp = append(disp, rec.Display)
+	}
+	// dedupe keeping the newest occurrence, restore chronological order
+	seen := map[string]bool{}
+	out := make([]string, 0, len(disp))
+	for i := len(disp) - 1; i >= 0; i-- {
+		if seen[disp[i]] {
+			continue
+		}
+		seen[disp[i]] = true
+		out = append(out, disp[i])
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	if len(out) > 10000 {
+		out = out[len(out)-10000:]
+	}
+	return out
 }
 
 // externalEditor opens $VISUAL/$EDITOR with the buffer and imports the result.

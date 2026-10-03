@@ -155,7 +155,74 @@ func execSkill(c *Context, raw json.RawMessage) Result {
 	if d := fm["description"]; d != "" {
 		hdr = fmt.Sprintf("Skill %q (%s) loaded\nUser args: %s\n", display, d, args)
 	}
+	truthy := func(v string) bool {
+		return v == "true" || v == "yes" || v == "1" || v == "on"
+	}
+	// disableModelInvocation: the body is user-facing text, not a prompt —
+	// return it without ever invoking the model.
+	if truthy(fm["disableModelInvocation"]) || truthy(fm["disable-model-invocation"]) {
+		return Result{Content: hdr + "\n" + body}
+	}
+	// context: fork or agent: <name> → run the skill inside a subagent;
+	// only the agent's result (or, for background, the spawned agent's
+	// name) comes back.
+	agentType := fm["agent"]
+	fork := fm["context"] == "fork"
+	if agentType != "" || fork {
+		if c.Agent == nil {
+			return Result{Content: "skill requires a subagent but sub-agents are not available", IsError: true}
+		}
+		if agentType == "" {
+			agentType = "fork" // context: fork inherits the parent conversation
+		}
+		prompt := body
+		if in.Args != "" {
+			prompt += "\n\nArguments: " + in.Args
+		}
+		desc := "skill: " + display
+		allowed := parseCSVList(firstNonEmpty(fm["allowed-tools"], fm["allowedTools"], fm["tools"]))
+		background := truthy(fm["background"])
+		var res Result
+		if xr, ok := c.Agent.(interface {
+			RunAgentAllowed(*Context, string, string, string, string, bool, []string) Result
+		}); ok {
+			res = xr.RunAgentAllowed(c, desc, prompt, agentType, fm["model"], background, allowed)
+		} else {
+			res = c.Agent.RunAgent(c, desc, prompt, agentType, fm["model"], background)
+		}
+		if res.IsError {
+			return res
+		}
+		if background {
+			// the spawned agent's name is the whole result — its output
+			// arrives later as a task notification
+			return Result{Content: res.Content}
+		}
+		return Result{Content: fmt.Sprintf(
+			"Skill %q completed (forked execution).\n\nResult:\n%s", display, res.Content)}
+	}
 	return Result{Content: hdr + "\n" + body}
+}
+
+func firstNonEmpty(vs ...string) string {
+	for _, v := range vs {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// parseCSVList parses "a, b, c" or "[a, b]" into a string slice.
+func parseCSVList(s string) []string {
+	s = strings.TrimSpace(strings.Trim(s, "[]"))
+	var out []string
+	for _, t := range strings.Split(s, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func parseMDFrontmatter(s string) (map[string]string, string) {

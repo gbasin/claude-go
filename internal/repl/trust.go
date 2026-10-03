@@ -19,8 +19,9 @@ func TrustGate(cwd string) bool {
 		return true
 	}
 	fmt.Printf("\n%sDo you trust the files in this folder?%s\n", bold, reset)
-	fmt.Printf("  %s%s%s\n\n  1. Yes, proceed\n  2. No, exit\n  ",
-		dim, cwd, reset)
+	fmt.Printf("  %s%s%s\n", dim, cwd, reset)
+	printTrustInventory(cwd)
+	fmt.Print("\n  1. Yes, proceed\n  2. No, exit\n  ")
 	var buf [8]byte
 	n, _ := os.Stdin.Read(buf[:])
 	for i := 0; i < n; i++ {

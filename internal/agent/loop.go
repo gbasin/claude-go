@@ -59,6 +59,11 @@ type Loop struct {
 	ThinkingMode    string   // --thinking enabled|disabled
 	ThinkingDisplay string   // --thinking-display updates|omitted
 	ThinkingBudget  int      // --max-thinking-tokens
+	FastMode        bool     // fast mode: output_config.speed="fast"
+	Precompute      bool     // precomputeCompactionEnabled gate
+	RateLimitNote   string   // set once a slow-lane rate-limit note was shown
+	noThinking      bool     // thinking config dropped after a thinking 400
+	lastTotal       int      // last request's total input tokens (incl. cache)
 }
 
 func NewLoop(client *api.Client, cwd string) *Loop {
@@ -87,18 +92,55 @@ func (l *Loop) buildRequest() *api.Request {
 	if effort == "" {
 		effort = "medium"
 	}
+	oc := map[string]string{"effort": effort}
+	if l.FastMode {
+		oc["speed"] = "fast"
+	}
+	ocRaw, _ := json.Marshal(oc)
+	msgs := l.Messages
+	if l.nearContextLimit() {
+		msgs = withEphemeralBreakpoint(msgs)
+	}
 	return &api.Request{
 		Model:             l.Model,
 		MaxTokens:         l.MaxTokens,
-		Messages:          l.Messages,
+		Messages:          msgs,
 		System:            SystemBlocks(l.Entrypoint, l.CWD, l.Model, l.AppendSysP, l.ExtraSystem),
 		Tools:             tools.Defs(),
 		Metadata:          Metadata(l.Client.SessionID, l.User),
 		Thinking:          l.thinkingConfig(),
 		ContextManagement: DefaultContextManagement(),
 		Safeguards:        Safeguards(l.PermMode, l.ToolCtx.CWD, l.PermRules),
-		OutputConfig:      json.RawMessage(fmt.Sprintf(`{"effort":%q}`, effort)),
+		OutputConfig:      ocRaw,
 	}
+}
+
+// nearContextLimit: last measured input total crossed 80% of the auto-compact
+// threshold — real adds a cache breakpoint on the newest content then.
+func (l *Loop) nearContextLimit() bool {
+	return l.lastTotal > (l.contextWindow()-20000-8000-4000)*4/5
+}
+
+// withEphemeralBreakpoint returns a copy of msgs with cache_control=ephemeral
+// on the last content block of the newest user message.
+func withEphemeralBreakpoint(msgs []api.Message) []api.Message {
+	out := make([]api.Message, len(msgs))
+	copy(out, msgs)
+	for i := len(out) - 1; i >= 0; i-- {
+		if out[i].Role != "user" {
+			continue
+		}
+		var blocks []api.ContentBlock
+		if err := json.Unmarshal(out[i].Content, &blocks); err != nil || len(blocks) == 0 {
+			return out
+		}
+		blocks[len(blocks)-1].CacheControl = &api.CacheControl{Type: "ephemeral"}
+		if raw, err := json.Marshal(blocks); err == nil {
+			out[i].Content = raw
+		}
+		return out
+	}
+	return out
 }
 
 // Ask submits one user turn and runs the tool loop to completion.
@@ -121,7 +163,11 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 		msg = api.TextMessage("user", prompt)
 		l.Messages = append(l.Messages, msg)
 	}
-	return l.run(ctx, 0)
+	resp, err := l.run(ctx, 0)
+	if err != nil {
+		return resp, err
+	}
+	return l.maybeGoalCheck(ctx, resp)
 }
 
 // PushUser injects a user message built from blocks (tool results, notes).
@@ -134,49 +180,12 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		return nil, fmt.Errorf("max turns (%d) reached", l.MaxTurns)
 	}
 	l.ToolCtx.Ctx = ctx
-	var resp *api.Response
-	var err error
-	models := append([]string{l.Model}, l.fallbackModels()...)
-	for mi, m := range models {
-		if mi > 0 {
-			l.Model = m // try the next fallback
-		}
-		resp, err = l.Client.StreamMessage(ctx, l.buildRequest(), func(ev *api.StreamEvent) error {
-			if ev.Type == "content_block_delta" && ev.Delta != nil {
-				switch ev.Delta.Type {
-				case "text_delta":
-					if l.Events.OnTextDelta != nil {
-						l.Events.OnTextDelta(ev.Delta.Text)
-					}
-				case "thinking_delta":
-					if l.Events.OnThinking != nil {
-						l.Events.OnThinking(ev.Delta.Thinking)
-					}
-				}
-			}
-			if ev.Type == "message_start" && ev.Message != nil {
-				l.UsageTotal.InputTokens += ev.Message.Usage.InputTokens
-				l.UsageTotal.CacheReadInputTokens += ev.Message.Usage.CacheReadInputTokens
-				l.UsageTotal.CacheCreationInputTokens += ev.Message.Usage.CacheCreationInputTokens
-			}
-			if ev.Type == "message_delta" && ev.Usage != nil {
-				l.UsageTotal.OutputTokens += ev.Usage.OutputTokens
-				if l.Events.OnUsage != nil {
-					l.Events.OnUsage(*ev.Usage)
-				}
-			}
-			return nil
-		})
-		if err == nil {
-			break
-		}
-		if !retryableErr(err) || mi == len(models)-1 {
-			break
-		}
-	}
+	resp, err := l.streamWithSanitizeRetry(ctx)
 	if err != nil {
 		return nil, err
 	}
+	l.lastTotal = resp.Usage.InputTokens + resp.Usage.CacheReadInputTokens +
+		resp.Usage.CacheCreationInputTokens
 	l.Messages = append(l.Messages, api.BlocksMessage("assistant", resp.Content))
 
 	var results []api.ContentBlock
@@ -224,13 +233,78 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 	if len(results) == 0 {
 		if l.ShouldAutoCompact(resp.Usage) && !l.inCompact {
 			l.inCompact = true
-			_ = l.Compact(ctx, l.Transcript)
+			_ = l.compactAuto(ctx)
 			l.inCompact = false
+		} else {
+			l.maybePrecompute(resp.Usage)
 		}
 		return resp, nil
 	}
 	l.PushUser(results)
 	return l.run(ctx, depth+1)
+}
+
+// tryModels streams one request, walking the model fallback chain on
+// retryable errors (429/5xx/overloaded).
+func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
+	var resp *api.Response
+	var err error
+	models := append([]string{l.Model}, l.fallbackModels()...)
+	for mi, m := range models {
+		if mi > 0 {
+			l.Model = m // try the next fallback
+		}
+		resp, err = l.Client.StreamMessage(ctx, l.buildRequest(), func(ev *api.StreamEvent) error {
+			if ev.Type == "content_block_delta" && ev.Delta != nil {
+				switch ev.Delta.Type {
+				case "text_delta":
+					if l.Events.OnTextDelta != nil {
+						l.Events.OnTextDelta(ev.Delta.Text)
+					}
+				case "thinking_delta":
+					if l.Events.OnThinking != nil {
+						l.Events.OnThinking(ev.Delta.Thinking)
+					}
+				}
+			}
+			if ev.Type == "message_start" && ev.Message != nil {
+				l.UsageTotal.InputTokens += ev.Message.Usage.InputTokens
+				l.UsageTotal.CacheReadInputTokens += ev.Message.Usage.CacheReadInputTokens
+				l.UsageTotal.CacheCreationInputTokens += ev.Message.Usage.CacheCreationInputTokens
+			}
+			if ev.Type == "message_delta" && ev.Usage != nil {
+				l.UsageTotal.OutputTokens += ev.Usage.OutputTokens
+				if l.Events.OnUsage != nil {
+					l.Events.OnUsage(*ev.Usage)
+				}
+			}
+			return nil
+		})
+		if err == nil {
+			break
+		}
+		if !retryableErr(err) || mi == len(models)-1 {
+			break
+		}
+	}
+	return resp, err
+}
+
+// SetFastMode toggles fast mode, firing Pre/PostModelSwitch hooks; a blocking
+// PreModelSwitch declines the toggle (real model-switch semantics).
+func (l *Loop) SetFastMode(on bool) {
+	if l.FastMode == on {
+		return
+	}
+	if h := l.runHook(hooks.PreModelSwitch, map[string]any{
+		"to_model": l.Model, "fast_mode": on,
+	}); h.Block {
+		return
+	}
+	l.FastMode = on
+	l.runHook(hooks.PostModelSwitch, map[string]any{
+		"to_model": l.Model, "fast_mode": on,
+	})
 }
 
 func (l *Loop) runHook(ev hooks.Event, extra map[string]any) hooks.Result {
@@ -372,7 +446,7 @@ func (l *Loop) runAdvisor(ctx context.Context) tools.Result {
 }
 
 func (l *Loop) thinkingConfig() json.RawMessage {
-	if l.ThinkingMode == "disabled" {
+	if l.ThinkingMode == "disabled" || l.noThinking {
 		return nil
 	}
 	display := "omitted"
