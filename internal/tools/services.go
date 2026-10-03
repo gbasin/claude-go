@@ -32,6 +32,9 @@ func init() {
 // the REPL drains it after each turn and asks them as user turns.
 var SessionQueue = make(chan string, 64)
 
+// QueuePrompt injects a session prompt (Stop-hook continuation, cron, wakeup).
+func QueuePrompt(p string) { queuePrompt(p) }
+
 func queuePrompt(p string) {
 	select {
 	case SessionQueue <- p:

@@ -44,9 +44,9 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		l.SessionStartSource = "clear"
 		hooks.Run(l.Hooks, hooks.SessionStart, map[string]any{
 			"session_id": l.Client.SessionID, "transcript_path": l.Transcript,
-			"cwd": l.CWD, "hook_event_name": "SessionStart", "source": "clear",
+			"cwd": l.ToolCtx.CWD, "hook_event_name": "SessionStart", "source": "clear",
 			"permission_mode": l.PermMode,
-		}, l.CWD)
+		}, l.ToolCtx.CWD)
 		fmt.Println("  context cleared (previous session remains resumable via /resume)")
 	case "compact":
 		fmt.Println("  compacting…")

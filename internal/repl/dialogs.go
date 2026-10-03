@@ -45,18 +45,36 @@ func toggleBrief() {
 // the caller delivers it to the model as the next user turn (see
 // queuePermFeedback), which is the closest available channel to real CC's
 // "deny with feedback" tool result.
-func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, config string) (bool, string) {
+func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, config string, input json.RawMessage) (bool, string) {
 	if p.always == nil {
 		p.always = map[string]bool{}
 	}
 	if p.always[name] {
 		return true, ""
 	}
+	// PermissionRequest hook can auto-decide without prompting (real event)
+	if l.Hooks != nil {
+		pr := hooks.Run(l.Hooks, hooks.PermissionRequest, map[string]any{
+			"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+			"tool_name": name, "tool_input": json.RawMessage(input),
+			"hook_event_name": "PermissionRequest", "permission_mode": l.PermMode,
+		}, l.ToolCtx.CWD)
+		switch pr.Permission {
+		case "allow":
+			return true, ""
+		case "deny":
+			return false, pr.Reason
+		}
+	}
 	notifyAttention(l.ToolCtx.CWD)
 	if l.Hooks != nil {
 		hooks.Run(l.Hooks, hooks.Notification, map[string]any{
 			"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
-			"message": "Claude needs permission to use " + name,
+			"message":           "Claude needs permission to use " + name,
+			"notification_type": "permission_prompt", // matcher field
+			"tool_name":         name,
+			"hook_event_name":   "Notification",
+			"permission_mode":   l.PermMode,
 		}, l.ToolCtx.CWD)
 	}
 	fmt.Printf("\n%sDo you want to proceed?%s\n", bold, reset)
