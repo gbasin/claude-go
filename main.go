@@ -351,7 +351,7 @@ func main() {
 	}
 	loop.PermRules = rules
 	loop.Hooks = hooks.Load(cwd)
-	fireHook(loop, hooks.SessionStart)
+	loop.SessionStartSource = "startup"
 	tools.RegisterSession(sessionID, cwd, "")
 	defer tools.UnregisterSession(sessionID)
 	loop.ToolCtx.Agent = &agent.Runner{
@@ -397,6 +397,7 @@ func main() {
 	}
 
 	if o.cont || o.resume != "" {
+		loop.SessionStartSource = "resume"
 		id := o.resume
 		if o.cont {
 			if l2, err := session.Latest(cwd); err == nil {
@@ -477,20 +478,25 @@ func main() {
 		return
 	}
 	fireHook(loop, hooks.SessionStart)
-	tools.RegisterSession(sessionID, cwd, "")
-	defer tools.UnregisterSession(sessionID)
 	repl.RunWithStore(loop, st2)
 	fireHook(loop, hooks.SessionEnd)
 }
 
 func fireHook(l *agent.Loop, ev hooks.Event) {
-	hooks.Run(l.Hooks, ev, map[string]any{
+	payload := map[string]any{
 		"session_id":      l.Client.SessionID,
 		"transcript_path": l.Transcript,
 		"cwd":             l.ToolCtx.CWD,
 		"hook_event_name": string(ev),
 		"permission_mode": l.PermMode,
-	}, l.ToolCtx.CWD)
+	}
+	switch ev {
+	case hooks.SessionStart:
+		payload["source"] = l.SessionStartSource
+	case hooks.SessionEnd:
+		payload["reason"] = l.SessionEndReason
+	}
+	hooks.Run(l.Hooks, ev, payload, l.ToolCtx.CWD)
 }
 
 // startMCP connects configured MCP servers and registers their tools.
@@ -541,7 +547,7 @@ func startMCP(cwd, configFile string, strict bool) (clients []*mcp.Client) {
 
 func fatal(f string, a ...any) {
 	fmt.Fprintf(os.Stderr, "claude-go: "+f+"\n", a...)
-	os.Exit(2)
+	os.Exit(1) // real CC exits 1 on CLI errors (2 is hook-block)
 }
 
 func buildClient(mockMode bool, sessionID string) (*api.Client, func()) {

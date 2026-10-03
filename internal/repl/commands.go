@@ -16,6 +16,7 @@ import (
 	"claude-go/internal/agent"
 	"claude-go/internal/api"
 	"claude-go/internal/auth"
+	"claude-go/internal/hooks"
 	"claude-go/internal/session"
 	"claude-go/internal/tools"
 )
@@ -39,6 +40,12 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		fmt.Println("  ⏸ plan mode — explore read-only, then ExitPlanMode to implement")
 	case "clear", "reset", "new":
 		l.Messages = nil
+		l.SessionStartSource = "clear"
+		hooks.Run(l.Hooks, hooks.SessionStart, map[string]any{
+			"session_id": l.Client.SessionID, "transcript_path": l.Transcript,
+			"cwd": l.CWD, "hook_event_name": "SessionStart", "source": "clear",
+			"permission_mode": l.PermMode,
+		}, l.CWD)
 		fmt.Println("  context cleared (previous session remains resumable via /resume)")
 	case "compact":
 		fmt.Println("  compacting…")

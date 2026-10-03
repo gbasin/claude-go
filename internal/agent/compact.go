@@ -89,6 +89,9 @@ func (l *Loop) applySummary(text, transcriptPath string, keepLast int) {
 	l.started = true
 	// the compact_boundary transcript record is written via this callback
 	// (wired to session.Store.LogCompactBoundary by the caller)
+	// SessionStart refires with source:"compact" after compaction (real CC)
+	l.SessionStartSource = "compact"
+	l.runHook(hooks.SessionStart, map[string]any{"source": "compact"})
 	if l.Events.OnCompact != nil {
 		l.Events.OnCompact()
 	}

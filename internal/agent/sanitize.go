@@ -26,6 +26,11 @@ func classify400(err error) string {
 		return ""
 	}
 	var ae *api.ErrAPI
+	if errors.As(err, &ae) {
+		if h := ae.Sanitizable(); h != "" {
+			return string(h)
+		}
+	}
 	if !errors.As(err, &ae) && !strings.Contains(err.Error(), "400") &&
 		!strings.Contains(err.Error(), "413") {
 		return ""
@@ -99,8 +104,42 @@ func (l *Loop) applySanitize(class string) {
 				_, hasEnc := b["encrypted_content"]
 				return hasEnc
 			}, "[Redacted content removed]")
-	case "unexpected_value":
+	case "unexpected_value", "clear_at":
 		l.Messages = stripClearAt(l.Messages)
+	case "conversation_binding", "mid_conversation":
+		// drop system-role messages bound to a prior turn/env
+		l.Messages = stripBlockType(l.Messages, func(b map[string]any) bool {
+			return false // handled below at message level
+		}, "")
+		var kept []api.Message
+		for i, m := range l.Messages {
+			if m.Role == "system" && i < len(l.Messages)-1 {
+				continue
+			}
+			kept = append(kept, m)
+		}
+		l.Messages = kept
+	case "safeguards":
+		l.dropSafeguards = true
+	case "output_config":
+		l.dropOutputConfig = true
+	case "invalid_beta_flag":
+		l.dropBetas = true
+	case "media_budget", "image_block", "document_block":
+		// strip image/document blocks from oldest messages
+		l.Messages = stripBlockType(l.Messages, func(b map[string]any) bool {
+			t, _ := b["type"].(string)
+			return t == "image" || t == "document"
+		}, "[Media removed]")
+	case "max_tokens_context_overflow":
+		l.maxTokensClamp = true
+	case "effort_unsupported":
+		l.Effort = ""
+	case "thinking_type_enabled", "thinking_type_adaptive":
+		// swap thinking type
+		l.ThinkingMode = "enabled"
+	case "prompt_too_long":
+		// handled by dropOldestForRetry in the caller
 	}
 }
 

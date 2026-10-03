@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"claude-go/internal/api"
@@ -31,39 +32,45 @@ type Events struct {
 
 // Loop runs the query/tool-use cycle.
 type Loop struct {
-	Client          *api.Client
-	Model           string
-	MaxTokens       int
-	Effort          string
-	Entrypoint      string // "cli" or "sdk-cli"
-	PermMode        string
-	CWD             string
-	AppendSysP      string
-	ExtraSystem     []string
-	PermRules       map[string][]string
-	AddDirs         []string
-	User            UserConfig
-	Messages        []api.Message
-	ToolCtx         *tools.Context
-	Events          Events
-	MaxTurns        int // 0 = unlimited
-	started         bool
-	UsageTotal      api.Usage
-	Transcript      string // path to JSONL transcript (for compact notes)
-	Hooks           hooks.Config
-	inCompact       bool
-	AllowedTools    []string // nil = all
-	Goal            string   // /goal stop-condition
-	Bare            bool     // --bare: skip auto-discovery
-	FallbackModel   string   // --fallback-model retry chain
-	ThinkingMode    string   // --thinking enabled|disabled
-	ThinkingDisplay string   // --thinking-display updates|omitted
-	ThinkingBudget  int      // --max-thinking-tokens
-	FastMode        bool     // fast mode: output_config.speed="fast"
-	Precompute      bool     // precomputeCompactionEnabled gate
-	RateLimitNote   string   // set once a slow-lane rate-limit note was shown
-	noThinking      bool     // thinking config dropped after a thinking 400
-	lastTotal       int      // last request's total input tokens (incl. cache)
+	Client             *api.Client
+	Model              string
+	MaxTokens          int
+	Effort             string
+	Entrypoint         string // "cli" or "sdk-cli"
+	PermMode           string
+	CWD                string
+	AppendSysP         string
+	ExtraSystem        []string
+	PermRules          map[string][]string
+	AddDirs            []string
+	User               UserConfig
+	Messages           []api.Message
+	ToolCtx            *tools.Context
+	Events             Events
+	MaxTurns           int // 0 = unlimited
+	started            bool
+	UsageTotal         api.Usage
+	Transcript         string // path to JSONL transcript (for compact notes)
+	Hooks              hooks.Config
+	inCompact          bool
+	AllowedTools       []string // nil = all
+	Goal               string   // /goal stop-condition
+	Bare               bool     // --bare: skip auto-discovery
+	FallbackModel      string   // --fallback-model retry chain
+	ThinkingMode       string   // --thinking enabled|disabled
+	ThinkingDisplay    string   // --thinking-display updates|omitted
+	ThinkingBudget     int      // --max-thinking-tokens
+	SessionStartSource string   // startup|resume|clear|compact|fork
+	SessionEndReason   string   // clear|logout|prompt_input_exit|other
+	FastMode           bool     // fast mode: output_config.speed="fast"
+	Precompute         bool     // precomputeCompactionEnabled gate
+	RateLimitNote      string   // set once a slow-lane rate-limit note was shown
+	noThinking         bool     // thinking config dropped after a thinking 400
+	dropSafeguards     bool
+	dropOutputConfig   bool
+	dropBetas          bool
+	maxTokensClamp     bool
+	lastTotal          int // last request's total input tokens (incl. cache)
 }
 
 func NewLoop(client *api.Client, cwd string) *Loop {
@@ -101,17 +108,29 @@ func (l *Loop) buildRequest() *api.Request {
 	if l.nearContextLimit() {
 		msgs = withEphemeralBreakpoint(msgs)
 	}
+	var safeguards json.RawMessage
+	if !l.dropSafeguards {
+		safeguards = Safeguards(l.PermMode, l.ToolCtx.CWD, l.PermRules)
+	}
+	var outCfg json.RawMessage
+	if !l.dropOutputConfig {
+		outCfg = ocRaw
+	}
+	mt := l.MaxTokens
+	if l.maxTokensClamp && mt > 64000 {
+		mt = 64000
+	}
 	return &api.Request{
 		Model:             l.Model,
-		MaxTokens:         l.MaxTokens,
+		MaxTokens:         mt,
 		Messages:          msgs,
 		System:            SystemBlocks(l.Entrypoint, l.CWD, l.Model, l.AppendSysP, l.ExtraSystem),
 		Tools:             tools.Defs(),
 		Metadata:          Metadata(l.Client.SessionID, l.User),
 		Thinking:          l.thinkingConfig(),
 		ContextManagement: DefaultContextManagement(),
-		Safeguards:        Safeguards(l.PermMode, l.ToolCtx.CWD, l.PermRules),
-		OutputConfig:      ocRaw,
+		Safeguards:        safeguards,
+		OutputConfig:      outCfg,
 	}
 }
 
@@ -446,15 +465,24 @@ func (l *Loop) runAdvisor(ctx context.Context) tools.Result {
 }
 
 func (l *Loop) thinkingConfig() json.RawMessage {
-	if l.ThinkingMode == "disabled" || l.noThinking {
-		return nil
+	if l.noThinking {
+		return nil // stripped after a thinking-config 400
 	}
-	display := "omitted"
-	if l.Entrypoint == "cli" {
-		display = "updates"
+	if l.ThinkingMode == "disabled" {
+		return json.RawMessage(`{"type":"disabled"}`)
 	}
-	if l.ThinkingDisplay == "updates" || l.ThinkingDisplay == "omitted" {
-		display = l.ThinkingDisplay
+	if l.ThinkingMode == "enabled" || l.ThinkingBudget > 0 {
+		budget := l.ThinkingBudget
+		if budget <= 0 {
+			budget = 10000
+		}
+		return json.RawMessage(`{"type":"enabled","budget_tokens":` + strconv.Itoa(budget) + `}`)
 	}
+	display := l.thinkingDisplay()
 	return json.RawMessage(`{"type":"adaptive","display":"` + display + `"}`)
+}
+
+// ContextWarnThreshold is ~90% of the auto-compact window for the model.
+func (l *Loop) ContextWarnThreshold() int {
+	return (l.contextWindow() - 20000 - 8000 - 4000) * 9 / 10
 }

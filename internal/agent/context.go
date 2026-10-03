@@ -298,7 +298,10 @@ func DefaultOutputConfig() json.RawMessage {
 }
 
 func DefaultContextManagement() json.RawMessage {
-	return json.RawMessage(`{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`)
+	return json.RawMessage(`{"edits":[
+		{"type":"clear_tool_uses_20250919","trigger":{"type":"input_tokens","value":180000},"keep":{"type":"tool_uses","value":3},"clear_at_least":{"type":"input_tokens","value":40000}},
+		{"type":"clear_thinking_20251015","keep":"all"}
+	]}`)
 }
 
 func mcpInstructions() []string {

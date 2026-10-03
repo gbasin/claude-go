@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -225,6 +226,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 	}
 	var lastErr error
 	maxRetries := 2 // SDK default
+	var reqID string
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		c.RetryCount = attempt
 		var rdr io.Reader
@@ -235,6 +237,10 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 		if err != nil {
 			return nil, err
 		}
+		if reqID == "" {
+			reqID = newUUID()
+		}
+		req.Header.Set("x-client-request-id", reqID)
 		c.headers(req)
 		if err := c.applyAuth(req); err != nil {
 			return nil, err
@@ -245,7 +251,16 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 			lastErr = err
 		} else {
 			c.setRateLimit(resp)
-			if resp.StatusCode == 408 || resp.StatusCode == 409 ||
+			// x-should-retry: server-side override suppresses/forces retries
+			if sr := resp.Header.Get("x-should-retry"); sr == "false" {
+				resp.Body.Close()
+				return nil, &ErrAPI{
+					E:          &APIError{Type: errorTypeForStatus(resp.StatusCode), Message: resp.Status},
+					StatusCode: resp.StatusCode, Headers: resp.Header,
+				}
+			}
+			if sr := resp.Header.Get("x-should-retry"); sr == "true" ||
+				resp.StatusCode == 408 || resp.StatusCode == 409 ||
 				resp.StatusCode == 429 || resp.StatusCode >= 500 {
 				wait := retryDelay(resp.Header, attempt)
 				resp.Body.Close()
@@ -393,4 +408,13 @@ func (c *Client) SendMessage(ctx context.Context, req *Request) (*Response, erro
 		return nil, err
 	}
 	return &out, nil
+}
+
+func newUUID() string {
+	var b [16]byte
+	rand.Read(b[:])
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }

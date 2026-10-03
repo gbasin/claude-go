@@ -148,7 +148,12 @@ func Run(c Config, ev Event, payload map[string]any, cwd string) Result {
 	matchVal, _ := payload[field].(string)
 	stdin, _ := json.Marshal(payload)
 	for _, m := range matchers {
-		if m.Matcher != "" && m.Matcher != "*" && matchVal != "" {
+		if m.Matcher != "" && m.Matcher != "*" {
+			// a matcher that doesn't bind to this event's field must not run
+			// (matchVal "" means the field wasn't in the payload — never match)
+			if matchVal == "" {
+				continue
+			}
 			ok, err := regexp.MatchString("^("+m.Matcher+")$", matchVal)
 			if err != nil || !ok {
 				continue
