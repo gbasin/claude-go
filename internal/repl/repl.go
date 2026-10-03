@@ -38,6 +38,7 @@ var (
 type Store interface {
 	LogTitle(title string) error
 	Log(m api.Message) error
+	LogRecord(ev map[string]any) error
 }
 
 // Run drives the interactive session.
@@ -109,7 +110,14 @@ func RunWithStore(l *agent.Loop, store Store) {
 	if l.SessionEndReason == "" {
 		l.SessionEndReason = "other"
 	}
-	l.ToolCtx.SetPermMode = func(mode string) { l.PermMode = mode }
+	l.ToolCtx.SetPermMode = func(mode string) {
+		l.PermMode = mode
+		if currentStore != nil {
+			currentStore.LogRecord(map[string]any{
+				"type": "system", "subtype": "permission-mode", "mode": mode,
+			})
+		}
+	}
 	l.ToolCtx.OnCwdChanged = func(nc string) {
 		hooks.Run(l.Hooks, hooks.CwdChanged, map[string]any{
 			"session_id": l.Client.SessionID, "old_cwd": l.ToolCtx.CWD, "new_cwd": nc,
@@ -198,6 +206,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			fmt.Printf("  %s⎿%s  %s\n", dim, reset, trunc(ln, 120))
 		}
 	}
+	historySessionID = l.Client.SessionID
 	l.Events.OnUsage = func(u api.Usage) {
 		spinTokens.Store(int64(u.OutputTokens)) // spinner's ↓ token counter
 	}
@@ -515,9 +524,35 @@ var spinnerVerbs = []string{
 // claudeOrange is the brand accent (real `claude` token = rgb(215,119,87)).
 const claudeOrange = "[38;2;215;119;87m"
 
+// settingsVerbs applies settings.spinnerVerbs {mode:"replace"|"append",verbs}
+func settingsVerbs() []string {
+	for _, p := range []string{".claude/settings.json",
+		filepath.Join(config.ClaudeDir(), "settings.json")} {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var st struct {
+			SpinnerVerbs struct {
+				Mode  string   `json:"mode"`
+				Verbs []string `json:"verbs"`
+			} `json:"spinnerVerbs"`
+		}
+		if json.Unmarshal(b, &st) != nil || len(st.SpinnerVerbs.Verbs) == 0 {
+			continue
+		}
+		if st.SpinnerVerbs.Mode == "replace" {
+			return st.SpinnerVerbs.Verbs
+		}
+		return append(append([]string{}, spinnerVerbs...), st.SpinnerVerbs.Verbs...)
+	}
+	return spinnerVerbs
+}
+
 func newSpinner() *spinner {
+	verbs := settingsVerbs()
 	s := &spinner{done: make(chan struct{}),
-		verb: spinnerVerbs[time.Now().UnixNano()%int64(len(spinnerVerbs))]}
+		verb: verbs[time.Now().UnixNano()%int64(len(verbs))]}
 	spinVerb.v.Store(s.verb)
 	spinTokens.Store(0)
 	go s.run()

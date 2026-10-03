@@ -392,6 +392,9 @@ func RunOAuthFlow(ctx context.Context, serverName, serverURL string) error {
 		if err != nil {
 			return fmt.Errorf("mcp %s client registration: %w", serverName, err)
 		}
+		// real persists the dynamic client under .claude.json
+		// mcpOAuthClientConfig[serverName]
+		saveClientConfig(serverName, clientID, clientSecret)
 	}
 
 	verifier, challenge := pkcePair()
@@ -490,4 +493,17 @@ func RunOAuthFlow(ctx context.Context, serverName, serverURL string) error {
 	}
 	recordStatus(serverName, "connected", "", "")
 	return nil
+}
+
+// saveClientConfig writes the dynamic client registration into ~/.claude.json
+// mcpOAuthClientConfig[server] — where real CC keeps it.
+func saveClientConfig(server, id, secret string) {
+	cfg, p := config.ReadClaudeJSON()
+	cc, _ := cfg["mcpOAuthClientConfig"].(map[string]any)
+	if cc == nil {
+		cc = map[string]any{}
+	}
+	cc[server] = map[string]any{"clientId": id, "clientSecret": secret}
+	cfg["mcpOAuthClientConfig"] = cc
+	config.WriteClaudeJSON(p, cfg)
 }

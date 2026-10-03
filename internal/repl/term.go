@@ -1434,6 +1434,8 @@ func (e *editor) visualKey(k key) *readResult {
 	return nil
 }
 
+var historySessionID string // stamped on history records (real field)
+
 // appendHistoryFile persists prompts to ~/.claude/history.jsonl (real file).
 func appendHistoryFile(line string) {
 	dir := filepath.Join(config.ClaudeDir())
@@ -1445,10 +1447,14 @@ func appendHistoryFile(line string) {
 	}
 	defer f.Close()
 	cwd, _ := os.Getwd()
-	b, _ := json.Marshal(map[string]any{
+	rec := map[string]any{
 		"display": line, "timestamp": time.Now().UnixMilli(),
 		"project": cwd, "pastedContents": map[string]any{}, // real schema
-	})
+	}
+	if historySessionID != "" {
+		rec["sessionId"] = historySessionID
+	}
+	b, _ := json.Marshal(rec)
 	f.Write(append(b, '\n'))
 }
 
