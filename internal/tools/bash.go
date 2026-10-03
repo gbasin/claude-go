@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bytes"
+	"claude-go/internal/config"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -363,7 +364,10 @@ func (b *Background) DrainNotifications() []string {
 
 // spillOutput writes large output to a session file like real CC.
 func spillOutput(c *Context, text string) (string, error) {
-	dir := filepath.Join(os.TempDir(), "claude-go", c.Session)
+	// real writes <project-dir>/<sid>/tool-results/<rand>.txt so the
+	// transcript's persisted-output marker resolves after resume
+	slug := strings.ReplaceAll(filepath.Clean(c.CWD), "/", "-")
+	dir := filepath.Join(config.ClaudeDir(), "projects", slug, c.Session, "tool-results")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}

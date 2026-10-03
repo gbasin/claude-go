@@ -57,6 +57,16 @@ var kbActions = map[string]func(*editor) *readResult{
 	"chat:imagePaste":     func(e *editor) *readResult { return e.imagePaste() },
 	"chat:submit":         func(e *editor) *readResult { return e.submitKey() },
 	"chat:newline":        func(e *editor) *readResult { e.insert('\n'); return nil },
+	"chat:undo":           func(e *editor) *readResult { e.undo(); return nil },
+	"chat:sendNow":        func(e *editor) *readResult { return e.sendNow() },
+	"chat:queueSubmit": func(e *editor) *readResult {
+		return e.queueSubmitKey()
+	},
+	"chat:modelPicker":    func(e *editor) *readResult { return e.modelPickerKey() },
+	"chat:fastMode":       func(e *editor) *readResult { e.toggleFastMode(); return nil },
+	"chat:thinkingToggle": func(e *editor) *readResult { e.toggleThinking(); return nil },
+	"chat:stash":          func(e *editor) *readResult { e.stashLine(); return nil },
+	"app:toggleBrief":     func(e *editor) *readResult { toggleBrief(); return nil },
 }
 
 // defaultKeybindings mirrors the relevant rows of the CC binding table.
@@ -78,6 +88,18 @@ var defaultKeybindings = []struct {
 	{"Chat", "ctrl+g", "chat:externalEditor"},
 	{"Chat", "ctrl+v", "chat:imagePaste"},
 	{"Chat", "alt+v", "chat:imagePaste"},
+	// rest of the real Chat/Global table
+	{"Global", "ctrl+shift+b", "app:toggleBrief"},
+	{"Chat", "ctrl+j", "chat:newline"},
+	{"Chat", "ctrl+_", "chat:undo"},
+	{"Chat", "ctrl+-", "chat:undo"},
+	{"Chat", "ctrl+s", "chat:stash"},
+	{"Chat", "meta+p", "chat:modelPicker"},
+	{"Chat", "meta+o", "chat:fastMode"},
+	{"Chat", "meta+t", "chat:thinkingToggle"},
+	{"Chat", "ctrl+x enter", "chat:queueSubmit"},
+	{"Chat", "ctrl+x ctrl+s", "chat:sendNow"},
+	{"Chat", "ctrl+enter", "chat:sendNow"},
 }
 
 // keystroke renders a decoded key into canonical stroke form, or "" if the

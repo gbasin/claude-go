@@ -945,6 +945,7 @@ func persistOutputStyle(cwd, style string) {
 	dir := filepath.Join(cwd, ".claude")
 	os.MkdirAll(dir, 0o755)
 	p := filepath.Join(dir, "settings.local.json")
+	ensureGitignoreLocal() // real adds **/.claude/settings.local.json to excludes
 	var st map[string]any
 	if b, err := os.ReadFile(p); err == nil {
 		json.Unmarshal(b, &st)
@@ -978,3 +979,26 @@ func persistTheme(cwd, theme string) {
 }
 
 func init() { agent.StatuslineSetupPrompt = bundledStatuslineAgent }
+
+// ensureGitignoreLocal adds **/.claude/settings.local.json to the repo's
+// .git/info/exclude (real CC protects local settings the same way).
+func ensureGitignoreLocal() {
+	out, err := exec.Command("git", "rev-parse", "--git-dir").Output()
+	if err != nil {
+		return
+	}
+	ex := filepath.Join(strings.TrimSpace(string(out)), "info", "exclude")
+	b, _ := os.ReadFile(ex)
+	if strings.Contains(string(b), ".claude/settings.local.json") {
+		return
+	}
+	f, err := os.OpenFile(ex, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	if len(b) > 0 && b[len(b)-1] != '\n' {
+		f.WriteString("\n")
+	}
+	f.WriteString("**/.claude/settings.local.json\n")
+}

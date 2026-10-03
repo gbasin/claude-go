@@ -22,6 +22,7 @@ type Store struct {
 	CWD       string
 	f         *os.File
 	lastUUID  string
+	sidechain bool // subagent transcript — records get isSidechain:true
 }
 
 type event struct {
@@ -152,6 +153,7 @@ func (s *Store) logMessage(m api.Message, compact bool, modelOnlyText string) er
 		Entrypoint:       "cli",
 		IsCompactSummary: compact,
 		ModelOnlyText:    modelOnlyText,
+		IsSidechain:      s.sidechain,
 	}
 	s.lastUUID = uuid
 	b, _ := json.Marshal(e)
@@ -564,4 +566,29 @@ func Latest(cwd string) (string, error) {
 var execCommand = func(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).Output()
 	return string(out), err
+}
+
+// OpenSubagent opens a transcript for a subagent under
+// <slug>/<sid>/subagents/<agentID>.jsonl and writes the .meta.json sidecar —
+// the layout real CC uses (keeps subagent turns out of the parent file but
+// resumable). Records get isSidechain:true + agentId stamps.
+func OpenSubagent(parentPath, agentID, cwd string) (*Store, error) {
+	parentSid := strings.TrimSuffix(filepath.Base(parentPath), ".jsonl")
+	dir := filepath.Join(filepath.Dir(parentPath), parentSid, "subagents")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	st := &Store{
+		Path:      filepath.Join(dir, agentID+".jsonl"),
+		SessionID: parentSid, CWD: cwd,
+	}
+	f, err := os.OpenFile(st.Path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	st.f = f
+	meta, _ := json.Marshal(map[string]any{"agentId": agentID, "sessionId": parentSid})
+	os.WriteFile(filepath.Join(dir, agentID+".meta.json"), meta, 0o600)
+	st.sidechain = true
+	return st, nil
 }

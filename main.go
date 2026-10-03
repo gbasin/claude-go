@@ -444,6 +444,9 @@ func main() {
 	if st2 != nil {
 		defer st2.Close()
 		loop.Transcript = st2.Path
+		if ar, ok := loop.ToolCtx.Agent.(*agent.Runner); ok {
+			ar.Transcript = st2.Path
+		}
 		loop.Events.OnCompact = func() {
 			_, trig := loop.CompactMeta()
 			st2.LogCompactBoundaryTrig(loop.LastInputTokens(), len(loop.Messages), trig)
@@ -897,8 +900,15 @@ func stampProjectState(cwd, sessionID, model string, gracefulEnd bool) {
 		proj = map[string]any{}
 	}
 	proj["lastSessionId"] = sessionID
+	// real keeps per-model usage under lastModelUsage; stamp minimal + keep
+	// unknown keys untouched
 	if model != "" {
-		proj["lastUsedModel"] = model
+		lmu, _ := proj["lastModelUsage"].(map[string]any)
+		if lmu == nil {
+			lmu = map[string]any{}
+		}
+		lmu[model] = map[string]any{"lastUsed": time.Now().UTC().Format(time.RFC3339)}
+		proj["lastModelUsage"] = lmu
 	}
 	proj["lastGracefulShutdown"] = gracefulEnd
 	projs[cwd] = proj
