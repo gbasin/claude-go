@@ -72,6 +72,8 @@ func RunWithStore(l *agent.Loop, store Store) {
 	}
 	var wantQuit atomic.Bool
 	pr := &promptUI{}
+	compInit()
+	defer compClose()
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		runPipe(l)
 		return
@@ -211,6 +213,12 @@ func RunWithStore(l *agent.Loop, store Store) {
 		spinTokens.Store(int64(u.OutputTokens)) // spinner's ↓ token counter
 	}
 
+	// real welcome art: clawd starfield when tall enough, one-liner otherwise
+	rows := 24
+	if _, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
+		rows = h
+	}
+	welcomeBanner(api.Version, rows, themeSetting(l.CWD), os.Getenv("TERM_PROGRAM") == "Apple_Terminal")
 	fmt.Printf("%sclaude-go%s %s — %s\n", bold, reset, api.Version, l.CWD)
 	fmt.Printf("%smodel: %s · /help for commands · esc to interrupt · ctrl-D to exit%s\n\n", dim, l.Model, reset)
 
@@ -318,6 +326,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			}()
 			_, err := l.Ask(ctx, expandMentions(l, line))
 			spin.stop()
+			compClearFooter()
 			fmt.Fprint(os.Stderr, "\r\x1b[K")
 			fireStopHook(l)
 			if store != nil {
@@ -597,8 +606,13 @@ func (s *spinner) run() {
 			if n := spinTokens.Load(); n > 0 {
 				toks = " · ↓ " + compactTokens(int(n)) + " tokens"
 			}
-			fmt.Fprintf(os.Stderr, "\r\x1b[K%s%s %s%s…%s%s (esc to interrupt · %s%s)",
+			txt := fmt.Sprintf("%s%s %s%s…%s%s (esc to interrupt · %s%s)",
 				claudeOrange, spinnerFrames[i%len(spinnerFrames)], s.verb, reset, claudeOrange, reset, el, toks)
+			if compActive.Load() {
+				compFooter(txt) // pinned bottom row — doesn't scroll
+			} else {
+				fmt.Fprintf(os.Stderr, "\r\x1b[K%s", txt)
+			}
 			i++
 		}
 	}
