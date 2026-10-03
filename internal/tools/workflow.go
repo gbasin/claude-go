@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"claude-go/internal/config"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -128,8 +129,7 @@ func execWorkflow(c *Context, raw json.RawMessage) Result {
 			script, scriptPath = string(b), p
 		}
 		if script == "" {
-			home, _ := os.UserHomeDir()
-			p = filepath.Join(home, ".claude", "workflows", in.Name+".js")
+			p = filepath.Join(config.ClaudeDir(), "workflows", in.Name+".js")
 			if b, err := os.ReadFile(p); err == nil {
 				script, scriptPath = string(b), p
 			}

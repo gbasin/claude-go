@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"claude-go/internal/config"
 	_ "embed"
 	"encoding/base64"
 	"encoding/json"
@@ -55,8 +56,7 @@ func SystemBlocks(entrypoint string, cwd, model, appendPrompt string, extra []st
 		main += "\n\n" + txt
 	}
 	// parameterize per-session values baked into the captured prompt
-	home, _ := os.UserHomeDir()
-	memDir := filepath.Join(home, ".claude", "projects", projectSlug(cwd), "memory")
+	memDir := filepath.Join(config.ClaudeDir(), "projects", projectSlug(cwd), "memory")
 	main = strings.ReplaceAll(main,
 		"/Users/user/.claude/projects/-private-tmp/memory/", memDir+"/")
 	if appendPrompt != "" {
@@ -78,8 +78,7 @@ func FirstUserMessage(prompt, cwd, email string) api.Message {
 		if b, err := os.ReadFile(p); err == nil && len(b) > 0 {
 			label := "Contents of " + p
 			if strings.HasPrefix(p, "/") {
-				home, _ := os.UserHomeDir()
-				if strings.HasPrefix(p, filepath.Join(home, ".claude")) {
+				if strings.HasPrefix(p, filepath.Join(config.ClaudeDir())) {
 					label += " (user's private global instructions for all projects)"
 				}
 			}
@@ -165,10 +164,9 @@ func expandUserImages(prompt string) []api.ContentBlock {
 // memoryIndex loads MEMORY.md (auto-memory index) — real reads the first
 // ~25KB/200 lines and injects it as an attachment-style reminder.
 func memoryIndex(cwd string) string {
-	home, _ := os.UserHomeDir()
 	for _, p := range []string{
-		filepath.Join(home, ".claude", "memory", "MEMORY.md"),
-		filepath.Join(home, ".claude", "projects", strings.ReplaceAll(cwd, "/", "-"), "memory", "MEMORY.md"),
+		filepath.Join(config.ClaudeDir(), "memory", "MEMORY.md"),
+		filepath.Join(config.ClaudeDir(), "projects", strings.ReplaceAll(cwd, "/", "-"), "memory", "MEMORY.md"),
 	} {
 		b, err := os.ReadFile(p)
 		if err != nil || len(b) == 0 {
@@ -188,10 +186,10 @@ func memoryIndex(cwd string) string {
 }
 
 func claudeMDPaths(cwd string) []string {
-	home, _ := os.UserHomeDir()
-	paths := []string{filepath.Join(home, ".claude", "CLAUDE.md")}
+	paths := []string{filepath.Join(config.ClaudeDir(), "CLAUDE.md")}
 	// walk cwd up to root collecting CLAUDE.md (project files prepend later)
 	var chain []string
+	home, _ := os.UserHomeDir()
 	for d := filepath.Clean(cwd); ; d = filepath.Dir(d) {
 		chain = append([]string{filepath.Join(d, "CLAUDE.md")}, chain...)
 		if d == "/" || d == "." || d == home {
@@ -229,7 +227,6 @@ type UserConfig struct {
 
 // Safeguards builds the dangerous_tool_use classifier context.
 func Safeguards(permMode, cwd string, rules map[string][]string) json.RawMessage {
-	home, _ := os.UserHomeDir()
 	cwdp := filepath.Clean(cwd)
 	mkRules := func(list []string, src string) []any {
 		out := []any{}
@@ -242,9 +239,9 @@ func Safeguards(permMode, cwd string, rules map[string][]string) json.RawMessage
 		"type": "dangerous_tool_use",
 		"classifier_context": map[string]any{
 			"v": 1, "permission_mode": permMode,
-			"platform": platformName(), "live_cwd": cwdp, "home_dir": home,
+			"platform": platformName(), "live_cwd": cwdp, "home_dir": config.Home(),
 			"rule_roots": map[string]string{
-				"userSettings": filepath.Join(home, ".claude"), "projectSettings": cwdp,
+				"userSettings": filepath.Join(config.ClaudeDir()), "projectSettings": cwdp,
 				"localSettings": cwdp, "flagSettings": cwdp, "policySettings": cwdp,
 				"cliArg": cwdp, "command": cwdp, "session": cwdp,
 				"toolsNarrowing": cwdp, "mcpServerPolicy": cwdp, "hostCredential": cwdp,

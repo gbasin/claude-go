@@ -2,6 +2,7 @@ package session
 
 import (
 	"bufio"
+	"claude-go/internal/config"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -30,8 +31,7 @@ func List(cwd string) ([]Info, error) {
 // ListAll returns sessions across every project dir under
 // ~/.claude/projects, newest first (the picker's all-projects mode).
 func ListAll() ([]Info, error) {
-	home, _ := os.UserHomeDir()
-	root := filepath.Join(home, ".claude", "projects")
+	root := filepath.Join(config.ClaudeDir(), "projects")
 	ents, err := os.ReadDir(root)
 	if err != nil {
 		return nil, err

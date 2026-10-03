@@ -15,6 +15,7 @@ package repl
 // with '+' plus a key name: "ctrl+alt+shift+cmd+<name>".
 
 import (
+	"claude-go/internal/config"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -254,8 +255,7 @@ func (e *editor) loadKeybindings() {
 			e.kb[cs] = d.action
 		}
 	}
-	home, _ := os.UserHomeDir()
-	if b, err := os.ReadFile(filepath.Join(home, ".claude", "keybindings.json")); err == nil {
+	if b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "keybindings.json")); err == nil {
 		warns = append(warns, e.applyKeybindingFile(b)...)
 	}
 	for cs := range e.kb {

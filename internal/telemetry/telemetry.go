@@ -13,8 +13,26 @@ import (
 	"time"
 )
 
-var enabled = os.Getenv("CLAUDE_CODE_ENABLE_TELEMETRY") == "1" ||
-	os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != ""
+// real gate: telemetry requires the enable flag (any set value) AND
+// OTEL_LOGS_EXPORTER != "none"; the traffic-mode envs can force it off.
+var enabled = func() bool {
+	if os.Getenv("DISABLE_TELEMETRY") != "" || truthy(os.Getenv("DO_NOT_TRACK")) ||
+		os.Getenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC") != "" {
+		return false
+	}
+	if os.Getenv("CLAUDE_CODE_ENABLE_TELEMETRY") == "" {
+		return false
+	}
+	if os.Getenv("OTEL_LOGS_EXPORTER") == "none" ||
+		os.Getenv("ANT_OTEL_LOGS_EXPORTER") == "none" {
+		return false
+	}
+	return true
+}()
+
+func truthy(v string) bool {
+	return v != "" && v != "0" && v != "false" && v != "no"
+}
 
 func path() string {
 	home, _ := os.UserHomeDir()

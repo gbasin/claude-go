@@ -6,6 +6,7 @@ package main
 
 import (
 	"bufio"
+	"claude-go/internal/config"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -502,8 +503,7 @@ func setupWorktree(cwd, name, sessionID string) string {
 // uuid — session.Load always starts from the leaf; --resume-session-at
 // resumes mid-chain.
 func loadSessionAt(cwd, sessionID, atUUID string) ([]api.Message, error) {
-	home, _ := os.UserHomeDir()
-	p := filepath.Join(home, ".claude", "projects",
+	p := filepath.Join(config.ClaudeDir(), "projects",
 		strings.ReplaceAll(filepath.Clean(cwd), "/", "-"), sessionID+".jsonl")
 	f, err := os.Open(p)
 	if err != nil {

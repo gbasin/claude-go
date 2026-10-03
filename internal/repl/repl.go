@@ -2,6 +2,7 @@ package repl
 
 import (
 	"bufio"
+	"claude-go/internal/config"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -521,8 +522,7 @@ func fireStopHook(l *agent.Loop) {
 }
 
 func vimEnabled() bool {
-	home, _ := os.UserHomeDir()
-	b, err := os.ReadFile(filepath.Join(home, ".claude.json"))
+	b, err := os.ReadFile(filepath.Join(config.Home(), ".claude.json"))
 	if err != nil {
 		return false
 	}
@@ -659,8 +659,7 @@ func statusLineCmd(l *agent.Loop) string {
 }
 
 func statusLineCmdReal(l *agent.Loop) string {
-	home, _ := os.UserHomeDir()
-	b, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
 	if err != nil {
 		return ""
 	}
@@ -734,9 +733,8 @@ func expandCustomSlash(line string) string {
 
 // quickMemory: "# text" appends to the project memory index (CC's # prefix).
 func quickMemory(l *agent.Loop, text string) {
-	home, _ := os.UserHomeDir()
 	slug := strings.ReplaceAll(filepath.Clean(l.ToolCtx.CWD), "/", "-")
-	dir := filepath.Join(home, ".claude", "projects", slug, "memory")
+	dir := filepath.Join(config.ClaudeDir(), "projects", slug, "memory")
 	os.MkdirAll(dir, 0o755)
 	p := filepath.Join(dir, "MEMORY.md")
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
@@ -757,10 +755,9 @@ func vimMode(l *agent.Loop) string {
 }
 
 func outputStyle(l *agent.Loop) string {
-	home, _ := os.UserHomeDir()
 	for _, p := range []string{
 		filepath.Join(l.ToolCtx.CWD, ".claude", "settings.local.json"),
-		filepath.Join(home, ".claude", "settings.json"),
+		filepath.Join(config.ClaudeDir(), "settings.json"),
 	} {
 		b, err := os.ReadFile(p)
 		if err != nil {
@@ -930,10 +927,9 @@ func notifyAttention(cwd string) {
 }
 
 func notifChannel(cwd string) string {
-	home, _ := os.UserHomeDir()
 	for _, p := range []string{
 		filepath.Join(cwd, ".claude", "settings.json"),
-		filepath.Join(home, ".claude", "settings.json"),
+		filepath.Join(config.ClaudeDir(), "settings.json"),
 	} {
 		b, err := os.ReadFile(p)
 		if err != nil {

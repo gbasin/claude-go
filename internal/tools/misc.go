@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bufio"
+	"claude-go/internal/config"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -84,17 +85,23 @@ type skillIn struct {
 
 // skillDirs mirrors the real skill-search roots: user, agents-compat,
 // project, plugin skill dirs.
+func agentsSkillsDir() string {
+	if h, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(h, ".agents", "skills")
+	}
+	return ""
+}
+
 func skillDirs(cwd string) []string {
-	home, _ := os.UserHomeDir()
 	dirs := []string{
-		filepath.Join(home, ".claude", "skills"),
-		filepath.Join(home, ".agents", "skills"),
+		filepath.Join(config.ClaudeDir(), "skills"),
+		agentsSkillsDir(),
 		filepath.Join(cwd, ".claude", "skills"),
 		filepath.Join(cwd, ".agents", "skills"),
 	}
 	for _, pat := range []string{
-		filepath.Join(home, ".claude", "plugins", "synced", "*", "*", "skills"),
-		filepath.Join(home, ".claude", "plugins", "local", "*", "skills"),
+		filepath.Join(config.ClaudeDir(), "plugins", "synced", "*", "*", "skills"),
+		filepath.Join(config.ClaudeDir(), "plugins", "local", "*", "skills"),
 	} {
 		dirs = append(dirs, globAll(pat)...)
 	}
@@ -351,10 +358,9 @@ func execEnterWorktree(c *Context, raw json.RawMessage) Result {
 }
 
 func settingStr(cwd, key string) string {
-	home, _ := os.UserHomeDir()
 	for _, p := range []string{
 		filepath.Join(cwd, ".claude", "settings.json"),
-		filepath.Join(home, ".claude", "settings.json"),
+		filepath.Join(config.ClaudeDir(), "settings.json"),
 	} {
 		b, err := os.ReadFile(p)
 		if err != nil {

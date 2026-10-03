@@ -105,6 +105,11 @@ func Check(mode Mode, rules *Rules, toolName string, input json.RawMessage, cwd 
 	if mode == ModeAcceptEdit && isEditTool(toolName) {
 		return Allow
 	}
+	// file tools writing outside the workspace (cwd + additionalDirectories)
+	// always require an ask — real CC treats this as a separate dimension.
+	if isEditTool(toolName) && !fileInsideWorkspace(input, cwd) {
+		return Ask
+	}
 	if mode == ModeAuto {
 		// "auto" defers to the server-side dangerous_tool_use classifier
 		// (sent in the request safeguards block). Locally, only explicit
@@ -303,4 +308,38 @@ func matchGlob(pat, path string) bool {
 	}
 	ok, err := filepath.Match(pat, path)
 	return err == nil && ok
+}
+
+// AdditionalDirs is set once from settings permissions.additionalDirectories.
+var AdditionalDirs []string
+
+func fileInsideWorkspace(input json.RawMessage, cwd string) bool {
+	var in struct {
+		FilePath string `json:"file_path"`
+		Path     string `json:"path"`
+	}
+	if json.Unmarshal(input, &in) != nil {
+		return true // unparseable input: let the tool report the error
+	}
+	p := in.FilePath
+	if p == "" {
+		p = in.Path
+	}
+	if p == "" {
+		return true
+	}
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(cwd, p)
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return false
+	}
+	abs = filepath.Clean(abs)
+	for _, root := range append([]string{filepath.Clean(cwd)}, AdditionalDirs...) {
+		if abs == root || strings.HasPrefix(abs, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }

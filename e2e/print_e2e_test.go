@@ -180,7 +180,7 @@ func TestAllowedToolsRestricts(t *testing.T) {
 	if len(trs) != 2 {
 		t.Fatalf("expected 2 tool_result events, got %d:\n%s", len(trs), r.stdout)
 	}
-	contains(t, trs[0]+trs[1], "declined", "declined tool result")
+	contains(t, trs[0]+trs[1], "denied", "denied tool result")
 	notContains(t, trs[0]+trs[1], "should-be-blocked", "blocked command output")
 }
 
@@ -198,7 +198,7 @@ func TestDisallowedTools(t *testing.T) {
 	if len(trs) == 0 {
 		t.Fatalf("no tool_result event:\n%s", r.stdout)
 	}
-	contains(t, trs[0], "declined", "denied Write result")
+	contains(t, trs[0], "denied", "denied Write result")
 }
 
 // TestPlanToolsNonInteractive: EnterPlanMode/ExitPlanMode return the

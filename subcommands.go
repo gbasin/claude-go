@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"claude-go/internal/config"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -97,11 +98,10 @@ func doctorSub() {
 	if out, err := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel").Output(); err == nil {
 		fmt.Println("git root:", string(out[:len(out)-1]))
 	}
-	home, _ := os.UserHomeDir()
 	for _, p := range []string{
-		filepath.Join(home, ".claude.json"),
-		filepath.Join(home, ".claude", "settings.json"),
-		filepath.Join(home, ".claude", "CLAUDE.md"),
+		filepath.Join(config.Home(), ".claude.json"),
+		filepath.Join(config.ClaudeDir(), "settings.json"),
+		filepath.Join(config.ClaudeDir(), "CLAUDE.md"),
 	} {
 		st := "missing"
 		if _, err := os.Stat(p); err == nil {
@@ -120,8 +120,7 @@ func configSub(args []string) {
 	if len(args) < 1 {
 		fatal("usage: claude-go config get|set|list [key] [value]")
 	}
-	home, _ := os.UserHomeDir()
-	p := filepath.Join(home, ".claude", "settings.json")
+	p := filepath.Join(config.ClaudeDir(), "settings.json")
 	read := func() map[string]any {
 		var m map[string]any
 		b, _ := os.ReadFile(p)
@@ -163,8 +162,7 @@ func configSub(args []string) {
 }
 
 func editClaudeJSON(edit func(map[string]any)) {
-	home, _ := os.UserHomeDir()
-	p := filepath.Join(home, ".claude.json")
+	p := filepath.Join(config.Home(), ".claude.json")
 	var m map[string]any
 	b, _ := os.ReadFile(p)
 	json.Unmarshal(b, &m)
@@ -229,8 +227,7 @@ func purgeSub(args []string) {
 		}
 	}
 	cwd, _ := os.Getwd()
-	home, _ := os.UserHomeDir()
-	targets := []string{filepath.Join(home, ".claude", "projects", session.Slug(cwd))}
+	targets := []string{filepath.Join(config.ClaudeDir(), "projects", session.Slug(cwd))}
 	if all {
 		targets = append(targets, filepath.Join(cwd, ".claude"))
 	}
@@ -354,12 +351,11 @@ func agentsSub(args []string) {
 	} {
 		fmt.Printf("  %s (built-in)\n", n)
 	}
-	home, _ := os.UserHomeDir()
 	seen := map[string]bool{}
 	for _, dir := range []string{
-		filepath.Join(home, ".claude", "agents"),
+		filepath.Join(config.ClaudeDir(), "agents"),
 		filepath.Join(cwd, ".claude", "agents"),
-		filepath.Join(home, ".claude-go", "agents-cli"),
+		filepath.Join(config.Home(), ".claude-go", "agents-cli"),
 	} {
 		ents, err := os.ReadDir(dir)
 		if err != nil {
@@ -507,8 +503,7 @@ func setupTokenSub() {
 		}
 		fmt.Fprintln(os.Stderr, "keychain write failed; falling back to credentials file")
 	}
-	home, _ := os.UserHomeDir()
-	p := filepath.Join(home, ".claude", ".credentials.json")
+	p := filepath.Join(config.ClaudeDir(), ".credentials.json")
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		fatal("setup-token: %v", err)
 	}

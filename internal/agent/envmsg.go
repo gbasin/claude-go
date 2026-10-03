@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"claude-go/internal/config"
 	"fmt"
 	"os"
 	"os/exec"
@@ -135,16 +136,15 @@ func osVersion() string {
 // loadSkillIndex builds the "- name: description" index from skill dirs:
 // ~/.claude/skills, <cwd>/.claude/skills, <cwd>/.agents/skills, plugin dirs.
 func skillRoots(cwd string) []string {
-	home, _ := os.UserHomeDir()
 	dirs := []string{
-		filepath.Join(home, ".claude", "skills"),
-		filepath.Join(home, ".agents", "skills"),
+		filepath.Join(config.ClaudeDir(), "skills"),
+		filepath.Join(config.Home(), ".agents", "skills"),
 		filepath.Join(cwd, ".claude", "skills"),
 		filepath.Join(cwd, ".agents", "skills"),
 	}
 	for _, base := range []string{
-		filepath.Join(home, ".claude", "plugins", "synced"),
-		filepath.Join(home, ".claude", "plugins", "local"),
+		filepath.Join(config.ClaudeDir(), "plugins", "synced"),
+		filepath.Join(config.ClaudeDir(), "plugins", "local"),
 	} {
 		machines, _ := filepath.Glob(filepath.Join(base, "*", "*", "skills"))
 		dirs = append(dirs, machines...)

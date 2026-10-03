@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	"claude-go/internal/api"
@@ -184,4 +186,26 @@ func Names() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// ExtraAllowedDirs widens the writable workspace (settings
+// permissions.additionalDirectories). File tools treat these like the cwd.
+var ExtraAllowedDirs []string
+
+// DirAllowed reports whether p is inside the working dir or an additional dir.
+func DirAllowed(c *Context, p string) bool {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return false
+	}
+	abs = filepath.Clean(abs)
+	if strings.HasPrefix(abs, filepath.Clean(c.CWD)+string(filepath.Separator)) || abs == filepath.Clean(c.CWD) {
+		return true
+	}
+	for _, d := range ExtraAllowedDirs {
+		if abs == d || strings.HasPrefix(abs, d+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
