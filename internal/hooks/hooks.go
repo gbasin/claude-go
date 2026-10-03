@@ -17,16 +17,57 @@ import (
 type Event string
 
 const (
-	PreToolUse       Event = "PreToolUse"
-	PostToolUse      Event = "PostToolUse"
-	UserPromptSubmit Event = "UserPromptSubmit"
-	SessionStart     Event = "SessionStart"
-	SessionEnd       Event = "SessionEnd"
-	Notification     Event = "Notification"
-	Stop             Event = "Stop"
-	SubagentStop     Event = "SubagentStop"
-	PreCompact       Event = "PreCompact"
+	PreToolUse          Event = "PreToolUse"
+	PostToolUse         Event = "PostToolUse"
+	PostToolUseFailure  Event = "PostToolUseFailure"
+	PostToolBatch       Event = "PostToolBatch"
+	PermissionDenied    Event = "PermissionDenied"
+	PermissionRequest   Event = "PermissionRequest"
+	Notification        Event = "Notification"
+	UserPromptSubmit    Event = "UserPromptSubmit"
+	UserPromptExpansion Event = "UserPromptExpansion"
+	SessionStart        Event = "SessionStart"
+	SessionEnd          Event = "SessionEnd"
+	Stop                Event = "Stop"
+	StopFailure         Event = "StopFailure"
+	SubagentStart       Event = "SubagentStart"
+	SubagentStop        Event = "SubagentStop"
+	PreCompact          Event = "PreCompact"
+	PostCompact         Event = "PostCompact"
+	PreModelSwitch      Event = "PreModelSwitch"
+	PostModelSwitch     Event = "PostModelSwitch"
+	Setup               Event = "Setup"
+	TeammateIdle        Event = "TeammateIdle"
+	TaskCreated         Event = "TaskCreated"
+	TaskCompleted       Event = "TaskCompleted"
+	Elicitation         Event = "Elicitation"
+	ElicitationResult   Event = "ElicitationResult"
+	ConfigChange        Event = "ConfigChange"
+	InstructionsLoaded  Event = "InstructionsLoaded"
+	WorktreeCreate      Event = "WorktreeCreate"
+	WorktreeRemove      Event = "WorktreeRemove"
+	CwdChanged          Event = "CwdChanged"
+	FileChanged         Event = "FileChanged"
+	DirectoryAdded      Event = "DirectoryAdded"
+	MessageDisplay      Event = "MessageDisplay"
 )
+
+// matcherField maps an event to the payload field its matcher regex applies to.
+var matcherField = map[Event]string{
+	PreToolUse: "tool_name", PostToolUse: "tool_name",
+	PostToolUseFailure: "tool_name", PostToolBatch: "tool_name",
+	PermissionDenied: "tool_name", PermissionRequest: "tool_name",
+	UserPromptSubmit: "command_name", UserPromptExpansion: "command_name",
+	SessionStart: "source", SessionEnd: "reason",
+	PreCompact: "trigger", PostCompact: "trigger",
+	PreModelSwitch: "to_model", PostModelSwitch: "to_model",
+	Notification: "notification_type", StopFailure: "error",
+	SubagentStart: "agent_type", SubagentStop: "agent_type",
+	Setup: "trigger", TaskCreated: "task_type", TaskCompleted: "task_type",
+	ConfigChange: "source", InstructionsLoaded: "load_reason",
+	FileChanged: "file_path", CwdChanged: "cwd",
+	DirectoryAdded: "source", Elicitation: "tool_name",
+}
 
 type Command struct {
 	Type    string `json:"type"`    // "command" | "prompt"
@@ -73,7 +114,7 @@ func Load(cwd string) Config {
 
 // Output is a hook's parsed JSON stdout.
 type Output struct {
-	Continue           bool   `json:"continue"`
+	Continue           string `json:"continue"` // "true"/"false" or absent
 	Decision           string `json:"decision"` // "block" | "approve" | "allow"
 	Reason             string `json:"reason"`
 	SystemMessage      string `json:"systemMessage"`
@@ -100,11 +141,15 @@ func Run(c Config, ev Event, payload map[string]any, cwd string) Result {
 	if len(matchers) == 0 {
 		return res
 	}
-	toolName, _ := payload["tool_name"].(string)
+	field := matcherField[ev]
+	if field == "" {
+		field = "tool_name"
+	}
+	matchVal, _ := payload[field].(string)
 	stdin, _ := json.Marshal(payload)
 	for _, m := range matchers {
-		if m.Matcher != "" && m.Matcher != "*" && toolName != "" {
-			ok, err := regexp.MatchString("^("+m.Matcher+")$", toolName)
+		if m.Matcher != "" && m.Matcher != "*" && matchVal != "" {
+			ok, err := regexp.MatchString("^("+m.Matcher+")$", matchVal)
 			if err != nil || !ok {
 				continue
 			}
@@ -125,7 +170,7 @@ func Run(c Config, ev Event, payload map[string]any, cwd string) Result {
 			out, code := runCmd(h, stdin, cwd)
 			var o Output
 			if json.Unmarshal(bytes.TrimSpace(out), &o) == nil {
-				if o.Decision == "block" || (!o.Continue) {
+				if o.Decision == "block" || o.Continue == "false" {
 					res.Block = true
 					res.Reason = firstNonEmpty(o.Reason, o.SystemMessage)
 				}
@@ -136,11 +181,12 @@ func Run(c Config, ev Event, payload map[string]any, cwd string) Result {
 				if o.SystemMessage != "" {
 					res.SystemMessage += o.SystemMessage
 				}
-			} else if code != 0 {
-				// non-zero exit = block with stderr as reason
+			} else if code == 2 {
+				// exit 2 = block; stderr (here merged) becomes the reason
 				res.Block = true
 				res.Reason = string(bytes.TrimSpace(out))
 			}
+			// other non-zero exits: stderr to user only, execution continues
 		}
 	}
 	return res

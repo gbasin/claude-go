@@ -3,6 +3,8 @@ package tools
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -52,7 +54,7 @@ func execRead(c *Context, raw json.RawMessage) Result {
 	case ".png", ".jpg", ".jpeg", ".gif", ".webp":
 		return readImage(in.FilePath)
 	case ".ipynb":
-		return readNotebook(in.FilePath)
+		return readNotebook(c, in.FilePath)
 	case ".pdf":
 		return Result{Content: "PDF support requires the pages parameter; this build returns raw bytes only. Use Bash `pdftotext` if available.", IsError: true}
 	}
@@ -79,7 +81,7 @@ func execRead(c *Context, raw json.RawMessage) Result {
 	emitted := 0
 	for sc.Scan() {
 		lineNo++
-		if lineNo <= offset {
+		if lineNo < offset {
 			continue
 		}
 		if emitted >= limit {
@@ -130,7 +132,7 @@ type nbFile struct {
 	Cells []nbCell `json:"cells"`
 }
 
-func readNotebook(path string) Result {
+func readNotebook(c *Context, path string) Result {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return Result{Content: "Error: " + err.Error(), IsError: true}
@@ -141,17 +143,20 @@ func readNotebook(path string) Result {
 	}
 	var sb strings.Builder
 	for i, cell := range nb.Cells {
-		fmt.Fprintf(&sb, "─── cell %d (%s) ───\n", i, cell.CellType)
-		fmt.Fprintf(&sb, "%s\n", nbSource(cell.Source))
+		id := cell.ID
+		if id == "" {
+			id = fmt.Sprintf("cell-%d", i)
+		}
+		fmt.Fprintf(&sb, "<cell id=%q type=%q>\n%s\n", id, cell.CellType, nbSource(cell.Source))
 		if cell.Outputs != nil {
 			ob, _ := json.Marshal(cell.Outputs)
-			fmt.Fprintf(&sb, "─── outputs ───\n%s\n", string(ob))
+			fmt.Fprintf(&sb, "<outputs>\n%s\n</outputs>\n", string(ob))
 		}
+		fmt.Fprintf(&sb, "</cell>\n")
 	}
 	st, _ := os.Stat(path)
 	if st != nil {
-		// caller marks read via returned path — handled in execRead normally,
-		// but notebook path returns early, so mark here.
+		c.MarkRead(path, st.ModTime().UnixNano(), st.Size())
 	}
 	return Result{Content: sb.String()}
 }
@@ -228,6 +233,7 @@ func execEdit(c *Context, raw json.RawMessage) Result {
 	if _, ok := c.WasRead(in.FilePath); !ok {
 		return Result{Content: "Error: file has not been Read in this conversation. Read it first.", IsError: true}
 	}
+	stale := c.Stale(in.FilePath)
 	if in.OldString == in.NewString {
 		return Result{Content: "Error: new_string must be different from old_string", IsError: true}
 	}
@@ -255,7 +261,21 @@ func execEdit(c *Context, raw json.RawMessage) Result {
 	if st != nil {
 		c.MarkRead(in.FilePath, st.ModTime().UnixNano(), st.Size())
 	}
-	return Result{Content: "The file " + in.FilePath + " has been updated"}
+	msg := "The file " + in.FilePath + " has been updated successfully."
+	if stale {
+		msg += " (note: the file had been modified on disk since you last read it — the edit applied cleanly, but the file contains other changes not in your context. You may want to Read it again.)"
+	}
+	if in.ReplaceAll {
+		return Result{Content: "All occurrences were successfully replaced." + staleSuffix(stale)}
+	}
+	return Result{Content: msg}
+}
+
+func staleSuffix(stale bool) string {
+	if !stale {
+		return ""
+	}
+	return " (note: the file had been modified on disk since you last read it.)"
 }
 
 // ---------- NotebookEdit ----------
@@ -281,6 +301,9 @@ func execNotebookEdit(c *Context, raw json.RawMessage) Result {
 	if err := json.Unmarshal(b, &nb); err != nil {
 		return Result{Content: "Error: invalid notebook: " + err.Error(), IsError: true}
 	}
+	if _, ok := c.WasRead(in.NotebookPath); !ok {
+		return Result{Content: "Error: notebook has not been Read in this conversation. Read it first.", IsError: true}
+	}
 	cells, _ := nb["cells"].([]any)
 	mode := in.EditMode
 	if mode == "" {
@@ -304,9 +327,15 @@ func execNotebookEdit(c *Context, raw json.RawMessage) Result {
 			m["cell_type"] = in.CellType
 		}
 	case "insert":
-		newCell := map[string]any{"cell_type": orDefault(in.CellType, "code"), "source": in.NewSource, "metadata": map[string]any{}}
-		at := len(cells)
-		if idx >= 0 {
+		if in.CellType == "" {
+			return Result{Content: "Error: cell_type is required when inserting a cell", IsError: true}
+		}
+		newCell := map[string]any{"cell_type": in.CellType, "source": in.NewSource, "metadata": map[string]any{}}
+		at := 0 // omitted cell_id inserts at the beginning (real semantics)
+		if in.CellID != "" {
+			if idx < 0 {
+				return Result{Content: "cell not found: " + in.CellID, IsError: true}
+			}
 			at = idx + 1
 		}
 		cells = append(cells[:at], append([]any{newCell}, cells[at:]...)...)
@@ -320,6 +349,9 @@ func execNotebookEdit(c *Context, raw json.RawMessage) Result {
 	out, _ := json.MarshalIndent(nb, "", " ")
 	if err := os.WriteFile(in.NotebookPath, out, 0o644); err != nil {
 		return Result{Content: "Error: " + err.Error(), IsError: true}
+	}
+	if st, err := os.Stat(in.NotebookPath); err == nil {
+		c.MarkRead(in.NotebookPath, st.ModTime().UnixNano(), st.Size())
 	}
 	return Result{Content: "Notebook updated"}
 }
@@ -342,4 +374,14 @@ func inFilePath(c *Context, raw json.RawMessage) string {
 		in.FilePath = filepath.Join(c.CWD, in.FilePath)
 	}
 	return in.FilePath
+}
+
+// fileSHA returns the sha256 hex of a file or "".
+func fileSHA(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }

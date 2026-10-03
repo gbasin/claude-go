@@ -6,8 +6,9 @@ import (
 	"claude-go/internal/api"
 )
 
-// QuotaCheck mirrors CC's startup probe: max_tokens=1, "quota".
-// Runs in background; failure is non-fatal.
+// QuotaCheck mirrors CC's startup probe: non-streamed max_tokens=1, content
+// ".", billing+identity system blocks, metadata. Runs in background;
+// failure is non-fatal.
 func QuotaCheck(ctx context.Context, c *api.Client, model string) {
 	go func() {
 		m := model
@@ -17,9 +18,10 @@ func QuotaCheck(ctx context.Context, c *api.Client, model string) {
 		req := &api.Request{
 			Model:     m,
 			MaxTokens: 1,
-			Messages:  []api.Message{api.TextMessage("user", "quota")},
+			Messages:  []api.Message{api.TextMessage("user", ".")},
 			Metadata:  Metadata(c.SessionID, UserConfig{}),
+			System:    SystemBlocks(string(c.Entrypoint), "", m, "", nil),
 		}
-		c.StreamMessage(ctx, req, func(*api.StreamEvent) error { return nil })
+		c.SendMessage(ctx, req)
 	}()
 }

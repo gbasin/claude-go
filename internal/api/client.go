@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strconv"
+	"strings"
 	"time"
 
 	"claude-go/internal/auth"
@@ -107,6 +109,14 @@ func (c *Client) headers(req *http.Request, tok string) {
 	h.Set("anthropic-dangerous-direct-browser-access", "true")
 	h.Set("anthropic-version", "2023-06-01")
 	h.Set("x-app", "cli")
+	// ANTHROPIC_CUSTOM_HEADERS: newline-separated "Name: value" merged in.
+	if ch := os.Getenv("ANTHROPIC_CUSTOM_HEADERS"); ch != "" {
+		for _, line := range strings.Split(ch, "\n") {
+			if k, v, ok := strings.Cut(line, ":"); ok {
+				h.Set(strings.TrimSpace(k), strings.TrimSpace(v))
+			}
+		}
+	}
 }
 
 // Do executes a request, retrying on 429/5xx with backoff like the SDK.
@@ -124,7 +134,8 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 		return nil, err
 	}
 	var lastErr error
-	for attempt := 0; attempt <= 3; attempt++ {
+	maxRetries := 2 // SDK default
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		c.RetryCount = attempt
 		var rdr io.Reader
 		if raw != nil {
@@ -140,7 +151,20 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 			lastErr = err
 		} else if resp.StatusCode == 429 || resp.StatusCode >= 500 {
 			lastErr = fmt.Errorf("api %s", resp.Status)
+			// honor Retry-After (seconds) or Retry-After-Ms
+			wait := time.Duration(1<<attempt) * time.Second
+			if ra := resp.Header.Get("Retry-After"); ra != "" {
+				if s, err := strconv.Atoi(ra); err == nil {
+					wait = time.Duration(s) * time.Second
+				}
+			}
 			resp.Body.Close()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(wait):
+			}
+			continue
 		} else {
 			return resp, nil
 		}
@@ -230,4 +254,29 @@ func (c *Client) StreamMessage(ctx context.Context, req *Request, onEvent func(*
 	})
 	out.Content = curBlocks
 	return &out, err
+}
+
+// SendMessage posts a non-streamed request (used for probes/validation).
+func (c *Client) SendMessage(ctx context.Context, req *Request) (*Response, error) {
+	req.Stream = false
+	resp, err := c.Do(ctx, "POST", "/v1/messages?beta=true", req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != 200 {
+		var e struct {
+			Error APIError `json:"error"`
+		}
+		if json.Unmarshal(b, &e) == nil && e.Error.Message != "" {
+			return nil, &ErrAPI{&e.Error}
+		}
+		return nil, fmt.Errorf("api %s: %s", resp.Status, string(b))
+	}
+	var out Response
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }

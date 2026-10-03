@@ -40,6 +40,9 @@ func (l *Loop) Compact(ctx context.Context, transcriptPath string) error {
 	}
 	l.Messages = []api.Message{api.TextMessage("user", cont)}
 	l.started = true
+	if l.Events.OnCompact != nil {
+		l.Events.OnCompact()
+	}
 	return nil
 }
 

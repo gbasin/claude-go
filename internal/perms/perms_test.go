@@ -56,3 +56,41 @@ func TestFileGlob(t *testing.T) {
 		t.Error("expected deny rule to win")
 	}
 }
+
+func TestOrderAskBeatsAllow(t *testing.T) {
+	r := &Rules{Allow: []string{"Bash(ls:*)"}, Ask: []string{"Bash(ls:*)"}, Deny: []string{}}
+	if d := Check(ModeDefault, r, "Bash", bashIn("ls -la"), "/tmp"); d != Ask {
+		t.Errorf("ask rule should beat allow rule, got %v", d)
+	}
+}
+
+func TestSubcommandSplit(t *testing.T) {
+	r := &Rules{Allow: []string{"Bash(ls:*)"}, Deny: []string{"Bash(rm:*)"}}
+	// ls allowed but rm inside the chain denied
+	if d := Check(ModeDefault, r, "Bash", bashIn("ls && rm -rf /"), "/tmp"); d != Deny {
+		t.Errorf("rm in chain should deny, got %v", d)
+	}
+	// all allowed -> allow
+	r2 := &Rules{Allow: []string{"Bash(ls:*)", "Bash(cat:*)"}}
+	if d := Check(ModeDefault, r2, "Bash", bashIn("ls | cat"), "/tmp"); d != Allow {
+		t.Errorf("allowed chain got %v", d)
+	}
+}
+
+func TestDontAsk(t *testing.T) {
+	if d := Check(ModeDontAsk, nil, "Bash", bashIn("rm -rf /"), "/tmp"); d != Deny {
+		t.Errorf("dontAsk should deny, got %v", d)
+	}
+}
+
+func TestMcpServerRule(t *testing.T) {
+	r := &Rules{Allow: []string{"mcp__deepwiki"}}
+	if d := Check(ModeDefault, r, "mcp__deepwiki__search", nil, "/tmp"); d != Allow {
+		t.Errorf("server-level rule should match all tools, got %v", d)
+	}
+}
+
+func bashIn(cmd string) []byte {
+	b, _ := json.Marshal(map[string]string{"command": cmd})
+	return b
+}
