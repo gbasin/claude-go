@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"claude-go/internal/config"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,8 +13,9 @@ import (
 
 // Checkpoints keeps a per-session stack of file snapshots for /rewind.
 type CheckpointStore struct {
-	dir string
-	seq int
+	dir       string
+	legacyDir string
+	seq       int
 }
 
 var Checkpoints = &CheckpointStore{}
@@ -27,7 +29,10 @@ type ckMeta struct {
 
 func (cs *CheckpointStore) Init(sessionID string) {
 	home, _ := os.UserHomeDir()
-	cs.dir = filepath.Join(home, ".claude-go", "checkpoints", sessionID)
+	// real keeps file history under the config dir
+	cs.dir = filepath.Join(config.ClaudeDir(), "file-history", sessionID)
+	// legacy location fallback for /rewind on older sessions
+	cs.legacyDir = filepath.Join(home, ".claude-go", "checkpoints", sessionID)
 	os.MkdirAll(cs.dir, 0o755)
 }
 

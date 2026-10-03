@@ -391,6 +391,7 @@ func main() {
 		}
 	}
 	loop.PermRules = rules
+	stampProjectState(cwd, sessionID, loop.Model, false)
 	loop.Hooks = hooks.Load(cwd)
 	loop.SessionStartSource = "startup"
 	tools.RegisterSession(sessionID, cwd, "")
@@ -535,6 +536,7 @@ func main() {
 	fireHook(loop, hooks.SessionStart)
 	repl.RunWithStore(loop, st2)
 	fireHook(loop, hooks.SessionEnd)
+	stampProjectState(cwd, sessionID, loop.Model, true)
 }
 
 func fireHook(l *agent.Loop, ev hooks.Event) {
@@ -879,4 +881,30 @@ func resolveModel(m string) string {
 		return "claude-fable-5-1"
 	}
 	return m // full id or [1m] suffix passes through
+}
+
+// stampProjectState records lastSessionId/lastUsedModel/lastGracefulShutdown
+// under ~/.claude.json projects[cwd] (real fields), plus bumps numStartups.
+func stampProjectState(cwd, sessionID, model string, gracefulEnd bool) {
+	cfg, p := config.ReadClaudeJSON()
+	projs, _ := cfg["projects"].(map[string]any)
+	if projs == nil {
+		projs = map[string]any{}
+	}
+	proj, _ := projs[cwd].(map[string]any)
+	if proj == nil {
+		proj = map[string]any{}
+	}
+	proj["lastSessionId"] = sessionID
+	if model != "" {
+		proj["lastUsedModel"] = model
+	}
+	proj["lastGracefulShutdown"] = gracefulEnd
+	projs[cwd] = proj
+	cfg["projects"] = projs
+	if !gracefulEnd {
+		n, _ := cfg["numStartups"].(float64)
+		cfg["numStartups"] = n + 1
+	}
+	config.WriteClaudeJSON(p, cfg)
 }

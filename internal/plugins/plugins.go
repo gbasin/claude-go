@@ -6,6 +6,7 @@
 package plugins
 
 import (
+	"claude-go/internal/config"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -50,33 +51,120 @@ func syncedDir() string  { return filepath.Join(pluginsDir(), "synced") }
 
 func installedFile() string { return filepath.Join(pluginsDir(), "installed_plugins.json") }
 
-func marketplacesFile() string { return filepath.Join(pluginsDir(), "marketplaces.json") }
+func marketplacesFile() string { return filepath.Join(pluginsDir(), "known_marketplaces.json") }
 
+// Real schema: {"plugins": {"<name>@<marketplace>": [{version, scope, ...}]}}.
+// Load also tolerates the earlier flat array.
 func loadInstalled() []InstalledPlugin {
 	var out []InstalledPlugin
-	if b, err := os.ReadFile(installedFile()); err == nil {
-		json.Unmarshal(b, &out)
+	b, err := os.ReadFile(installedFile())
+	if err != nil {
+		return out
+	}
+	var wrap struct {
+		Plugins map[string][]struct {
+			Version     string `json:"version"`
+			Scope       string `json:"scope,omitempty"`
+			InstallPath string `json:"installPath,omitempty"`
+			Enabled     *bool  `json:"enabled,omitempty"`
+		} `json:"plugins"`
+	}
+	if json.Unmarshal(b, &wrap) == nil && wrap.Plugins != nil {
+		for key, vers := range wrap.Plugins {
+			name, mkt, _ := strings.Cut(key, "@")
+			for _, v := range vers {
+				ip := InstalledPlugin{Name: name, Marketplace: mkt,
+					Version: v.Version, Path: v.InstallPath, Enabled: true}
+				if v.Enabled != nil {
+					ip.Enabled = *v.Enabled
+				}
+				out = append(out, ip)
+			}
+		}
+		return out
+	}
+	var flat []InstalledPlugin
+	if json.Unmarshal(b, &flat) == nil {
+		return flat
 	}
 	return out
 }
 
 func saveInstalled(p []InstalledPlugin) {
 	os.MkdirAll(pluginsDir(), 0o755)
-	b, _ := json.MarshalIndent(p, "", "  ")
+	wrap := map[string]any{"plugins": map[string]any{}}
+	for _, ip := range p {
+		key := ip.Name + "@" + ip.Marketplace
+		wrap["plugins"].(map[string]any)[key] = []map[string]any{{
+			"version": ip.Version, "scope": "user",
+			"installPath": ip.Path, "installedAt": ip.InstalledAt,
+			"enabled": ip.Enabled,
+		}}
+	}
+	b, _ := json.MarshalIndent(wrap, "", "  ")
 	os.WriteFile(installedFile(), b, 0o644)
+}
+
+// known_marketplaces.json: {name: {source: {...}, autoUpdate: bool}}.
+// Reads both real objects and our older {name: path} flat map.
+type marketplaceSource struct {
+	Source string `json:"source"` // github|git|url|directory|file|pluginDirectory
+	Repo   string `json:"repo,omitempty"`
+	URL    string `json:"url,omitempty"`
+	Path   string `json:"path,omitempty"`
+}
+
+type marketplaceEntry struct {
+	Source     marketplaceSource `json:"source"`
+	AutoUpdate bool              `json:"autoUpdate"`
 }
 
 func loadMarketplaces() map[string]string {
 	out := map[string]string{}
-	if b, err := os.ReadFile(marketplacesFile()); err == nil {
-		json.Unmarshal(b, &out)
+	b, err := os.ReadFile(marketplacesFile())
+	if err != nil {
+		return out
+	}
+	var real map[string]marketplaceEntry
+	if json.Unmarshal(b, &real) == nil {
+		for n, e := range real {
+			if e.Source.Path != "" {
+				out[n] = e.Source.Path
+			} else if p := marketplacePath(n); dirExists(p) {
+				out[n] = p
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	var flat map[string]string
+	if json.Unmarshal(b, &flat) == nil {
+		return flat
 	}
 	return out
 }
 
+func marketplacePath(name string) string {
+	return filepath.Join(pluginsDir(), "marketplaces", name)
+}
+
+func dirExists(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && st.IsDir()
+}
+
 func saveMarketplaces(m map[string]string) {
 	os.MkdirAll(pluginsDir(), 0o755)
-	b, _ := json.MarshalIndent(m, "", "  ")
+	out := map[string]marketplaceEntry{}
+	for name, path := range m {
+		src := marketplaceSource{Source: "directory", Path: path}
+		if strings.HasPrefix(path, pluginsDir()) {
+			src = marketplaceSource{Source: "git", URL: path}
+		}
+		out[name] = marketplaceEntry{Source: src, AutoUpdate: true}
+	}
+	b, _ := json.MarshalIndent(out, "", "  ")
 	os.WriteFile(marketplacesFile(), b, 0o644)
 }
 
@@ -215,15 +303,53 @@ func Remove(name string) error {
 // List returns installed plugins.
 func List() []InstalledPlugin { return loadInstalled() }
 
-// EnabledPluginDirs returns paths of enabled plugins (for skill/command/agents loading).
+// EnabledPluginDirs returns paths of enabled plugins (for skill/command/agents
+// loading). The settings enabledPlugins/disabledPlugins maps override the
+// installed-file flag like real CC (keyed "name@marketplace").
 func EnabledPluginDirs() []string {
+	enabled, disabled := settingsPluginGates()
 	var out []string
 	for _, p := range loadInstalled() {
-		if p.Enabled {
+		key := p.Name + "@" + p.Marketplace
+		on := p.Enabled
+		if v, ok := enabled[key]; ok {
+			on = v
+		}
+		if disabled[key] {
+			on = false
+		}
+		if on {
 			out = append(out, p.Path)
 		}
 	}
 	return out
+}
+
+func settingsPluginGates() (map[string]bool, map[string]bool) {
+	en, dis := map[string]bool{}, map[string]bool{}
+	for _, p := range []string{
+		filepath.Join(config.ClaudeDir(), "settings.json"),
+	} {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var s struct {
+			EnabledPlugins  map[string]bool `json:"enabledPlugins"`
+			EnabledPlugins2 map[string]any  `json:"-"`
+			DisabledPlugins map[string]bool `json:"disabledPlugins"`
+		}
+		if json.Unmarshal(b, &s) != nil {
+			continue
+		}
+		for k, v := range s.EnabledPlugins {
+			en[k] = v
+		}
+		for k, v := range s.DisabledPlugins {
+			dis[k] = v
+		}
+	}
+	return en, dis
 }
 
 func keys(m map[string]string) []string {

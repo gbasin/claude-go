@@ -1436,8 +1436,10 @@ func appendHistoryFile(line string) {
 		return
 	}
 	defer f.Close()
+	cwd, _ := os.Getwd()
 	b, _ := json.Marshal(map[string]any{
 		"display": line, "timestamp": time.Now().UnixMilli(),
+		"project": cwd, "pastedContents": map[string]any{}, // real schema
 	})
 	f.Write(append(b, '\n'))
 }

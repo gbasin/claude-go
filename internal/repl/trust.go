@@ -1,10 +1,9 @@
 package repl
 
 import (
-	"encoding/json"
+	"claude-go/internal/config"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"golang.org/x/term"
 )
@@ -37,16 +36,7 @@ func TrustGate(cwd string) bool {
 }
 
 func projectsMap() (map[string]any, string) {
-	home, _ := os.UserHomeDir()
-	p := filepath.Join(home, ".claude.json")
-	var m map[string]any
-	if b, err := os.ReadFile(p); err == nil {
-		json.Unmarshal(b, &m)
-	}
-	if m == nil {
-		m = map[string]any{}
-	}
-	return m, p
+	return config.ReadClaudeJSON()
 }
 
 func accepted(cwd string) bool {
@@ -73,6 +63,5 @@ func markTrusted(cwd string) {
 	pr["hasTrustDialogAccepted"] = true
 	projs[cwd] = pr
 	m["projects"] = projs
-	b, _ := json.MarshalIndent(m, "", "  ")
-	os.WriteFile(p, b, 0o644)
+	config.WriteClaudeJSON(p, m)
 }
