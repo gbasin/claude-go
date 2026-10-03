@@ -206,9 +206,12 @@ func (c *Context) finishBash(out *bytes.Buffer, command string, err error, timed
 		newCWD = strings.TrimSpace(string(raw[i+len(cwdSentinel):]))
 		raw = raw[:i]
 	}
-	if newCWD != "" {
+	if newCWD != "" && newCWD != c.CWD {
 		if fi, err2 := os.Stat(newCWD); err2 == nil && fi.IsDir() {
 			c.CWD = newCWD
+			if c.OnCwdChanged != nil {
+				c.OnCwdChanged(newCWD)
+			}
 		}
 	}
 	text := string(bytes.TrimRight(raw, "\n"))

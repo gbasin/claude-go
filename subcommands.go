@@ -13,6 +13,7 @@ import (
 	"claude-go/internal/api"
 	"claude-go/internal/auth"
 	"claude-go/internal/mcp"
+	"claude-go/internal/plugins"
 	"claude-go/internal/session"
 )
 
@@ -242,5 +243,100 @@ func purgeSub(args []string) {
 		} else {
 			fmt.Println("removed:", t)
 		}
+	}
+}
+
+// pluginSub: claude plugin marketplace add|list | install|list|remove
+func pluginSub(args []string) {
+	if len(args) == 0 {
+		args = []string{"list"}
+	}
+	switch args[0] {
+	case "marketplace":
+		if len(args) < 3 {
+			fatal("usage: claude plugin marketplace add <repo|url|path> | list")
+		}
+		switch args[1] {
+		case "add":
+			name, err := plugins.AddMarketplace(args[2])
+			if err != nil {
+				fatal("marketplace add: %v", err)
+			}
+			fmt.Println("added marketplace", name)
+		case "list":
+			mkts := plugins.ListMarketplaces()
+			if len(mkts) == 0 {
+				fmt.Println("no marketplaces")
+				return
+			}
+			for n, p := range mkts {
+				fmt.Printf("%s: %s\n", n, p)
+			}
+		case "update":
+			for n, p := range plugins.ListMarketplaces() {
+				if strings.HasPrefix(p, plugins.SyncedBase()) || strings.Contains(p, "/marketplaces/") {
+					out, err := exec.Command("git", "-C", p, "pull", "--ff-only").CombinedOutput()
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "%s: pull failed: %s\n", n, out)
+					} else {
+						fmt.Println(n, "updated")
+					}
+				}
+			}
+		}
+	case "install", "i":
+		if len(args) < 2 {
+			fatal("usage: claude plugin install <name[@marketplace]>")
+		}
+		name, mkt := args[1], ""
+		if i := strings.Index(name, "@"); i > 0 {
+			name, mkt = name[:i], name[i+1:]
+		}
+		if mkt == "" {
+			mkts := plugins.ListMarketplaces()
+			for n := range mkts {
+				mkt = n
+				break
+			}
+		}
+		if err := plugins.Install(mkt, name); err != nil {
+			fatal("install: %v", err)
+		}
+		fmt.Println("installed", name)
+	case "list":
+		inst := plugins.List()
+		if len(inst) == 0 {
+			fmt.Println("no plugins installed")
+			return
+		}
+		for _, p := range inst {
+			state := "enabled"
+			if !p.Enabled {
+				state = "disabled"
+			}
+			fmt.Printf("%s@%s  %s  %s\n", p.Name, p.Marketplace, p.Version, state)
+		}
+	case "remove", "rm", "uninstall":
+		if len(args) < 2 {
+			fatal("usage: claude plugin remove <name>")
+		}
+		if err := plugins.Remove(args[1]); err != nil {
+			fatal("remove: %v", err)
+		}
+		fmt.Println("removed", args[1])
+	case "details":
+		if len(args) < 2 {
+			fatal("usage: claude plugin details <marketplace>")
+		}
+		m, err := plugins.Marketplace(args[1])
+		if err != nil {
+			fatal("%v", err)
+		}
+		fmt.Println("marketplace:", m.Name)
+		for _, p := range m.Plugins {
+			fmt.Printf("  %s — %s\n", p.Name, p.Description)
+		}
+	default:
+		fatal("unknown plugin subcommand: %s (list|install|remove|marketplace|details)", args[0])
 	}
 }

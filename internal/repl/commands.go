@@ -463,27 +463,69 @@ func doctorCmd(l *agent.Loop) {
 	}
 }
 
+var builtinStyles = map[string]string{
+	"Explanatory": "You are an interactive CLI agent that explains its reasoning. " +
+		"Provide insight into your decision-making process: before and after each " +
+		"action, briefly explain why you're taking it, what alternatives you " +
+		"considered, and what you learned.",
+	"Learning": "You are an interactive CLI agent in learning mode. Help the user " +
+		"learn: explain concepts, offer to let them implement pieces themselves, " +
+		"and check their understanding as you go.",
+	"Concise": "You are an interactive CLI agent. Be terse. Answer with minimal " +
+		"words; skip preamble, explanations, and restatements.",
+	"Proactive": "You are an interactive CLI agent. Anticipate the user's needs: " +
+		"offer follow-up actions, flag adjacent issues, and suggest improvements " +
+		"without being asked.",
+}
+
 func outputStyleCmd(l *agent.Loop, arg string) {
 	home, _ := os.UserHomeDir()
 	if arg == "" {
-		fmt.Println("  usage: /output-style <name|default>")
-		ents, _ := os.ReadDir(filepath.Join(home, ".claude", "output-styles"))
-		for _, e := range ents {
-			fmt.Println("   -", strings.TrimSuffix(e.Name(), ".md"))
+		fmt.Println("  usage: /output-style <name|default> — this changes how Claude communicates")
+		fmt.Println("   - default")
+		for n := range builtinStyles {
+			fmt.Println("   -", n)
+		}
+		for _, base := range []string{
+			filepath.Join(home, ".claude", "output-styles"),
+			filepath.Join(l.CWD, ".claude", "output-styles"),
+		} {
+			ents, _ := os.ReadDir(base)
+			for _, e := range ents {
+				fmt.Println("   -", strings.TrimSuffix(e.Name(), ".md"))
+			}
 		}
 		return
 	}
 	if arg == "default" {
 		l.AppendSysP = ""
+		persistOutputStyle(l.CWD, "")
 		fmt.Println("  output style reset")
 		return
 	}
-	b, err := os.ReadFile(filepath.Join(home, ".claude", "output-styles", arg+".md"))
+	if body, ok := builtinStyles[arg]; ok {
+		l.AppendSysP = body
+		persistOutputStyle(l.CWD, arg)
+		fmt.Println("  output style:", arg)
+		return
+	}
+	var b []byte
+	var err error
+	for _, base := range []string{
+		filepath.Join(l.CWD, ".claude", "output-styles"),
+		filepath.Join(home, ".claude", "output-styles"),
+	} {
+		b, err = os.ReadFile(filepath.Join(base, arg+".md"))
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
 		fmt.Println("  unknown output style:", arg)
 		return
 	}
 	l.AppendSysP = string(b)
+	persistOutputStyle(l.CWD, arg)
 	fmt.Println("  output style:", arg)
 }
 
@@ -577,4 +619,26 @@ func logoutCmd() {
 			"-s", "Claude Code-credentials", "-a", os.Getenv("USER")).Run()
 	}
 	fmt.Println("  logged out (keychain entry removed)")
+}
+
+// persistOutputStyle writes outputStyle to .claude/settings.local.json (real
+// persistence location).
+func persistOutputStyle(cwd, style string) {
+	dir := filepath.Join(cwd, ".claude")
+	os.MkdirAll(dir, 0o755)
+	p := filepath.Join(dir, "settings.local.json")
+	var st map[string]any
+	if b, err := os.ReadFile(p); err == nil {
+		json.Unmarshal(b, &st)
+	}
+	if st == nil {
+		st = map[string]any{}
+	}
+	if style == "" {
+		delete(st, "outputStyle")
+	} else {
+		st["outputStyle"] = style
+	}
+	b, _ := json.MarshalIndent(st, "", "  ")
+	os.WriteFile(p, b, 0o600)
 }
