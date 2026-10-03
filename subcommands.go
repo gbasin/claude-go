@@ -162,16 +162,9 @@ func configSub(args []string) {
 }
 
 func editClaudeJSON(edit func(map[string]any)) {
-	p := filepath.Join(config.Home(), ".claude.json")
-	var m map[string]any
-	b, _ := os.ReadFile(p)
-	json.Unmarshal(b, &m)
-	if m == nil {
-		m = map[string]any{}
-	}
+	m, p := config.ReadClaudeJSON()
 	edit(m)
-	out, _ := json.MarshalIndent(m, "", "  ")
-	os.WriteFile(p, out, 0o644)
+	config.WriteClaudeJSON(p, m)
 }
 
 func mustGetwd() string {

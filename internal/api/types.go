@@ -9,6 +9,9 @@ type Message struct {
 	Content json.RawMessage `json:"content"` // string or []ContentBlock
 	// output_config may appear on turn-scoped system messages (per-turn control).
 	OutputConfig json.RawMessage `json:"output_config,omitempty"`
+	// Raw, when set, is the full wire message (assistant records persist the
+	// whole API message: id, model, stop_reason, usage — needed for -r).
+	Raw json.RawMessage `json:"-"`
 }
 
 func TextMessage(role, text string) Message {
