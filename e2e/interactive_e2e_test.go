@@ -143,7 +143,7 @@ func TestPermissionPrompt(t *testing.T) {
 	s := newSession(t)
 	p := startREPL(t, s)
 	p.send(`tool:Bash {"command":"echo perm-ok-xyz"}` + "\r")
-	out := p.waitFor("Do you want to proceed?", 30*time.Second)
+	out := p.waitFor("─ permission", 30*time.Second)
 	contains(t, out, "1.", "numbered option")
 	contains(t, out, "Yes", "approve option")
 	// wait for the round-trip marker — "perm-ok-xyz" alone would match the
@@ -158,7 +158,7 @@ func TestPermissionDeny(t *testing.T) {
 	s := newSession(t)
 	p := startREPL(t, s)
 	p.send(`tool:Bash {"command":"echo deny-marker"}` + "\r")
-	p.waitFor("Do you want to proceed?", 30*time.Second)
+	p.waitFor("─ permission", 30*time.Second)
 	// interactive denial renders "Permission for this tool use was denied
 	// … rejected" — a different string than print mode's "declined"
 	p.sendUntil("3", "rejected", 15)

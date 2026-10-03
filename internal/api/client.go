@@ -142,6 +142,22 @@ func (c *Client) headers(req *http.Request) {
 	h.Set("anthropic-dangerous-direct-browser-access", "true")
 	h.Set("anthropic-version", "2023-06-01")
 	h.Set("x-app", "cli")
+	// provider auth: bedrock → SigV4 (in the caller — needs the body);
+	// vertex → ADC bearer; foundry → api-key or Entra token
+	switch c.Provider {
+	case ProviderVertex:
+		if h.Get("Authorization") == "" {
+			if t := gcpAccessToken(); t != "" {
+				h.Set("Authorization", "Bearer "+t)
+			}
+		}
+	case ProviderFoundry:
+		if k := os.Getenv("ANTHROPIC_FOUNDRY_API_KEY"); k != "" {
+			h.Set("x-api-key", k)
+		} else if t := azureAccessToken(); t != "" {
+			h.Set("Authorization", "Bearer "+t)
+		}
+	}
 	// Bedrock service tier passthrough (mod_0278.js).
 	if c.Provider == ProviderBedrock {
 		if st := os.Getenv("ANTHROPIC_BEDROCK_SERVICE_TIER"); st != "" {
@@ -249,6 +265,11 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 		c.headers(req)
 		if err := c.applyAuth(req); err != nil {
 			return nil, err
+		}
+		if c.Provider == ProviderBedrock {
+			if err := sigv4Sign(req, raw); err != nil {
+				return nil, err
+			}
 		}
 		applyCustomHeaders(req)
 		resp, err := c.HTTP.Do(req)
