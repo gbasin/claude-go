@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -37,84 +37,128 @@ Usage:
   claude-go -p "prompt" [flags]     print mode (non-interactive)
   claude-go -c                      continue most recent session
   claude-go -r <session-id>         resume a session
+  claude-go -w [name]               run inside a new git worktree
 
 Flags:
   -p, --print                   print response and exit
+  --exec, -m <prompt>           execute prompt non-interactively and exit
   --model <model>               model (default claude-fable-5-1)
-  --output-format text|json     print-mode output format
+  --effort <level>              reasoning effort: low|medium|high|xhigh|max|auto
+  --agent <name>                run as a named agent type
+  --agents <json>               inline agent definitions ({name:{description,prompt,tools}})
+  --output-format text|json|stream-json
+  --input-format stream-json    read JSONL messages from stdin
+  --include-partial-messages    emit partial assistant stream events (stream-json)
+  --include-hook-events         include hook events in output (accepted)
+  --replay-user-messages        echo user messages back in stream-json input mode
   --max-turns <n>               cap agent loop turns
+  --max-budget-usd <n>          cost ceiling (accepted; not enforced)
+  --max-thinking-tokens <n>     thinking budget
+  --thinking <mode>             enabled|disabled
+  --thinking-display <mode>     updates|omitted
+  --task-budget <n>             (accepted)
   --permission-mode <mode>      default|acceptEdits|plan|bypassPermissions|auto
   --dangerously-skip-permissions  bypass all permission checks
+  --allow-dangerously-skip-permissions  same
+  --enable-auto-mode            start in auto permission mode
+  --plan-mode-required          start in plan mode
+  --permission-prompt-tool <t>  (accepted)
+  --inherit-permission-mode <m> (accepted)
   --append-system-prompt <s>    append to the system prompt
+  --append-system-prompt-file <f>  append system prompt from file
+  --system-prompt <s>           extra system prompt text
+  --system-prompt-file <f>      extra system prompt from file
+  --system-prompt-snapshot <s>  (accepted)
+  --append-subagent-system-prompt(-file)  (accepted)
+  --plan-mode-instructions <s>  (accepted)
   --add-dir <dir>               grant access to an additional directory
   --allowedTools "Bash,Read"    add permission allow rules
   --disallowedTools "Bash(rm*)" add permission deny rules
-  --system-prompt <s>           extra system prompt text
-  --system-prompt-file <f>      extra system prompt from file
+  --tools "Bash,Read"           restrict the tool surface
+  --file <path>                 attach file contents to the prompt (repeatable)
+  --betas <flags>               extra anthropic-beta header flags
   --session-id <id>             use a specific session id
+  --name, -n <name>             name this session
+  -c, --continue                continue most recent session
+  -r, --resume [id]             resume a session (picker if no id)
+  --resume-session-at <uuid>    resume from a specific message
+  --resume-drops-turn <n>       (accepted)
   --fork-session                fork when resuming
+  --no-session-persistence      don't write a transcript
+  --rewind-files <mode>         (accepted)
+  -w, --worktree [name]         create .claude/worktrees/<name> and cd into it
+  --project <dir>               run in a different project directory
+  --from-pr <ref>               (accepted)
+  --tmux                        (accepted; tmux integration not supported)
+  --ide, --desktop              (accepted; IDE bridge not supported)
+  --chrome, --no-chrome         chrome tool toggle (env)
+  --teleport, --cloud, --remote, --remote-control/--rc
+                                (accepted; remote sessions not supported)
+  --environment, --pool <name>  (accepted)
   --mcp-config <file>           MCP servers config file
-  --settings <file>             additional settings file
-  --input-format stream-json    read JSONL messages from stdin
-  --output-format text|json|stream-json
-  --fallback-model <m>          model fallback (accepted, not used)
-  --debug, --verbose            debug logging
+  --strict-mcp-config           only use --mcp-config servers
+  --settings <file|json>        additional settings
+  --setting-sources <list>      (accepted)
+  --managed-settings <file>     (accepted)
+  --plugin-dir <dir>            (accepted)
+  --plugin-dir-no-mcp <dir>     (accepted)
+  --plugin-url <url>            (accepted)
+  --channels <list>             (accepted)
+  --dangerously-load-development-channels <list>  (accepted)
+  --forward-home-settings <v>   (accepted)
+  --project-config-root <dir>   (accepted)
+  --sdk-url <url>               API base URL (sets ANTHROPIC_BASE_URL)
+  --attach-serve <target>       (accepted)
+  --init-only                   run onboarding/migrations then exit
+  --autocompact <mode>          (accepted)
+  --advisor <mode>              (accepted)
+  --proactivity <level>         (accepted)
+  --prompt-suggestions [mode]   (accepted)
+  --prefill <text>              (accepted)
+  --prefill-b64 <b64>           (accepted)
+  --teammate-mode <mode>        (accepted)
+  --messaging-socket-path <p>   (accepted)
+  --team-name, --agent-id, --agent-name, --agent-color, --agent-type <v>
+                                teammate identity fields (accepted)
+  --parent-session-id <id>      (accepted)
+  --remote-control-session-name-prefix <s>  (accepted)
+  --deep-link-* <v>             deep link params (accepted)
+  --handle-uri <uri>            (accepted)
+  --watch-artifact*, --correlation-id, --ref, --on-branch, --routine <v>
+                                (accepted)
+  --workload <name>             workload tag (env CLAUDE_GO_WORKLOAD)
+  --json-schema <json>          structured output schema (print mode)
+  --fallback-model <m>          model fallback chain
+  --mcp-config, --add-dir       repeatable
+  --debug, -d, --verbose        debug logging
+  --debug-file <path>           redirect debug output to file
+  --bare                        minimal session (no auto-discovery)
   --mock                        run against the built-in mock API (no auth needed)
   --mock-port <port>            start a standalone mock server on a port and exit
-  -v, --version                 print version
+  -v, -V, --version             print version
   -h, --help                    this help
 
 Subcommands:
-  mcp list|add|remove           manage MCP servers
-  doctor                        diagnostics
+  agents                        list agent types + background tasks
+  auth login|status|logout      credential management
   config get|set|list           settings.json
-  update                        version info
+  doctor                        diagnostics
+  import <file>                 import a transcript into this project
+  install, update               version info (built from source)
+  login                         OAuth login
+  mcp list|add|get|remove       manage MCP servers
+  plugin list|install|remove|marketplace
+  purge [--dry-run] [--all]     delete local project state
+  setup-token                   store a long-lived token
+  gateway, ssh, connect, self-hosted-runner  (stubs; not supported)
 `, version)
 }
 
+// flagReplayUser / flagPartial bridge parse-time flags into the print
+// runners below.
+var flagReplayUser, flagPartial bool
+
 func main() {
-	var (
-		printMode       bool
-		mockMode        bool
-		mockPort        int
-		model           string
-		outFormat       = "text"
-		maxTurns        int
-		permMode        = "default"
-		appendSys       string
-		addDirs         []string
-		cont            bool
-		resume          string
-		prompt          []string
-		allowTools      string
-		denyTools       string
-		sysPrompt       string
-		sysPromptF      string
-		sessID          string
-		forkSess        bool
-		bareMode        bool
-		agentsJSON      string
-		toolsList       string
-		workload        string
-		fileArgs        []string
-		thinkingMode    string
-		thinkingDisplay string
-		thinkingBudget  int
-		maxBudget       float64
-		debugFile       string
-		_               = agentsJSON
-		_               = workload
-		debug           bool
-		verbose         bool
-		mcpConfig       string
-		strictMCP       bool
-		settingsF       string
-		fallback        string
-		partialMsgs     bool
-		inFormat        string
-		jsonSchema      string
-		agentName       string
-	)
 	args := os.Args[1:]
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		switch args[0] {
@@ -127,8 +171,8 @@ func main() {
 		case "config":
 			configSub(args[1:])
 			return
-		case "update":
-			fmt.Println("claude-go is built from source; update via git pull + go build")
+		case "update", "install":
+			fmt.Println("claude-go is built from source; update via git pull && go build")
 			return
 		case "login":
 			authLoginSub()
@@ -143,182 +187,131 @@ func main() {
 			pluginSub(args[1:])
 			return
 		case "setup-token":
-			fmt.Println("token: uses ANTHROPIC_API_KEY or Claude Code keychain credentials")
+			setupTokenSub()
+			return
+		case "agents":
+			agentsSub(args[1:])
+			return
+		case "import":
+			importSub(args[1:])
+			return
+		case "gateway", "ssh", "connect", "self-hosted-runner":
+			fmt.Printf("claude-go %s: not supported — %s needs hosted infrastructure claude-go doesn't have\n", args[0], args[0])
 			return
 		}
 	}
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		next := func() string {
-			i++
-			if i >= len(args) {
-				fatal("flag %s requires a value", a)
-			}
-			return args[i]
-		}
-		switch {
-		case a == "-p" || a == "--print":
-			printMode = true
-		case a == "--mock":
-			mockMode = true
-		case a == "--mock-port":
-			fmt.Sscanf(next(), "%d", &mockPort)
-		case a == "--model":
-			model = next()
-		case a == "--output-format":
-			outFormat = next()
-		case a == "--max-turns":
-			fmt.Sscanf(next(), "%d", &maxTurns)
-		case a == "--permission-mode":
-			permMode = next()
-		case a == "--dangerously-skip-permissions":
-			permMode = "bypassPermissions"
-		case a == "--append-system-prompt":
-			appendSys = next()
-		case a == "--add-dir":
-			addDirs = append(addDirs, next())
-		case a == "--allowedTools" || a == "--allowed-tools":
-			allowTools = next()
-		case a == "--disallowedTools" || a == "--disallowed-tools":
-			denyTools = next()
-		case a == "--system-prompt":
-			sysPrompt = next()
-		case a == "--system-prompt-file":
-			sysPromptF = next()
-		case a == "--session-id":
-			sessID = next()
-		case a == "--fork-session":
-			forkSess = true
-		case a == "--debug" || a == "-d":
-			debug = true
-		case a == "--verbose":
-			verbose = true
-		case a == "--mcp-config":
-			mcpConfig = next()
-		case a == "--strict-mcp-config":
-			strictMCP = true
-		case a == "--settings":
-			settingsF = next()
-		case a == "--fallback-model":
-			fallback = next()
-		case a == "--include-partial-messages":
-			partialMsgs = true
-		case a == "--input-format":
-			inFormat = next()
-		case a == "--json-schema":
-			jsonSchema = next()
-		case a == "--bare":
-			bareMode = true
-		case a == "--file":
-			fileArgs = append(fileArgs, next())
-		case a == "--tools":
-			toolsList = next()
-		case a == "--workload":
-			workload = next()
-			os.Setenv("CLAUDE_GO_WORKLOAD", workload)
-		case a == "--agents":
-			agentsJSON = next()
-		case a == "--thinking":
-			thinkingMode = next()
-		case a == "--thinking-display":
-			thinkingDisplay = next()
-		case a == "--max-thinking-tokens":
-			if n, err := strconv.Atoi(next()); err == nil {
-				thinkingBudget = n
-			}
-		case a == "--max-budget-usd":
-			maxBudget, _ = strconv.ParseFloat(next(), 64)
-		case a == "--debug-file":
-			debugFile = next()
-		case a == "--agent":
-			agentName = next()
-		case a == "-c" || a == "--continue":
-			cont = true
-		case a == "-r" || a == "--resume":
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				resume = next()
-			} else {
-				resume = "-"
-			}
-		case a == "-v" || a == "--version":
-			fmt.Println(version + " (Claude Code)")
-			return
-		case a == "-h" || a == "--help":
-			usage()
-			return
-		case strings.HasPrefix(a, "-"):
-			fatal("unknown flag: %s", a)
-		default:
-			prompt = append(prompt, a)
-		}
-	}
+	o := parseCLI(args)
 
-	if mockPort > 0 {
-		runMockServer(mockPort)
+	// env wiring that must precede client construction
+	if o.sdkURL != "" {
+		os.Setenv("ANTHROPIC_BASE_URL", o.sdkURL)
+	}
+	if o.betas != "" {
+		applyBetaFlags(o.betas)
+	}
+	if o.hookEvents {
+		os.Setenv("CLAUDE_GO_INCLUDE_HOOK_EVENTS", "1")
+	}
+	flagReplayUser = o.replayUser
+	flagPartial = o.partialMsgs
+
+	if o.mockPort > 0 {
+		runMockServer(o.mockPort)
 		return
 	}
 
 	cwd, _ := os.Getwd()
+	if o.projectDir != "" {
+		if abs, err := filepath.Abs(o.projectDir); err == nil {
+			if fi, err := os.Stat(abs); err == nil && fi.IsDir() {
+				cwd = abs
+				os.Chdir(abs)
+			} else {
+				fmt.Fprintf(os.Stderr, "--project: %s is not a directory\n", o.projectDir)
+			}
+		}
+	}
 	sessionID := newUUID()
-	if sessID != "" {
-		sessionID = sessID
+	if o.sessID != "" {
+		sessionID = o.sessID
+	}
+	if o.worktreeSet {
+		cwd = setupWorktree(cwd, o.worktreeName, sessionID)
+		os.Chdir(cwd)
 	}
 
-	client, cleanup := buildClient(mockMode, sessionID)
+	migrateClaudeJSON()
+	go checkForUpdate()
+	maybeOnboard(!o.printMode)
+	if o.initOnly {
+		fmt.Println("claude-go initialized")
+		return
+	}
+	for _, s := range o.stubs {
+		fmt.Fprintf(os.Stderr, "note: %s accepted but not supported in claude-go\n", s)
+	}
+	agentCleanup := installCLIAgents(o.agentsJSON, cwd)
+	if o.agentsJSON != "" {
+		os.Setenv("CLAUDE_GO_AGENTS_JSON", o.agentsJSON)
+	}
+	defer agentCleanup() // note: os.Exit below skips defers; print mode calls it explicitly
+
+	client, cleanup := buildClient(o.mockMode, sessionID)
 	defer cleanup()
 
 	// connect MCP servers in background (like CC's async init)
-	mcpClients := startMCP(cwd, mcpConfig, strictMCP)
+	mcpClients := startMCP(cwd, o.mcpConfig, o.strictMCP)
 	defer func() {
 		for _, c := range mcpClients {
 			c.Close()
 		}
 	}()
 
-	if bareMode {
+	if o.bareMode {
 		os.Setenv("CLAUDE_CODE_SIMPLE", "1")
 	}
 	var promptAtt string
 	loop := agent.NewLoop(client, cwd)
-	if !mockMode {
-		agent.QuotaCheck(context.Background(), client, model)
+	if !o.mockMode {
+		agent.QuotaCheck(context.Background(), client, o.model)
 	}
 	loop.Entrypoint = "sdk-cli"
-	if model != "" {
-		loop.Model = resolveModel(model)
+	if o.model != "" {
+		loop.Model = resolveModel(o.model)
 	}
-	loop.MaxTurns = maxTurns
-	loop.PermMode = permMode
-	loop.AppendSysP = appendSys
+	loop.MaxTurns = o.maxTurns
+	loop.PermMode = o.permMode
+	loop.AppendSysP = o.appendSys
 	loop.ToolCtx.Session = sessionID
 	email, acct, dev := config.Account()
 	loop.User = agent.UserConfig{Email: email, AccountUUID: acct, DeviceID: dev}
-	loop.AddDirs = addDirs
-	if sysPromptF != "" {
-		if b, err := os.ReadFile(sysPromptF); err == nil {
-			sysPrompt = string(b)
+	loop.AddDirs = o.addDirs
+	if o.sysPromptF != "" {
+		if b, err := os.ReadFile(o.sysPromptF); err == nil {
+			o.sysPrompt = string(b)
 		}
 	}
-	if sysPrompt != "" {
-		loop.AppendSysP = sysPrompt
+	if o.sysPrompt != "" {
+		loop.AppendSysP = o.sysPrompt
 	}
-	for _, fp := range fileArgs {
+	for _, fp := range o.fileArgs {
 		if b, err := os.ReadFile(fp); err == nil {
 			promptAtt += fmt.Sprintf("\n<file path=%q>\n%s\n</file>\n", fp, string(b))
 		}
 	}
 	loop.ToolCtx.OAuthToken = func() string { return clientCreds() }
-	_ = partialMsgs
-	_ = jsonSchema
-	if agentName != "" {
-		if p := agent.ResolveAgentPrompt(agentName, cwd); p != "" {
+	if o.agentName != "" {
+		if p := agent.ResolveAgentPrompt(o.agentName, cwd); p != "" {
 			loop.AppendSysP = p
 		}
 	}
-	loop.FallbackModel = fallback
-	loop.ThinkingMode = thinkingMode
-	loop.ThinkingDisplay = thinkingDisplay
-	loop.ThinkingBudget = thinkingBudget
+	loop.FallbackModel = o.fallback
+	if o.effort != "" {
+		loop.Effort = o.effort
+	}
+	loop.ThinkingMode = o.thinkingMode
+	loop.ThinkingDisplay = o.thinkingDisp
+	loop.ThinkingBudget = o.thinkingTok
 	st := config.Load(cwd)
 	rules := map[string][]string{}
 	if st.Permissions != nil {
@@ -331,21 +324,21 @@ func main() {
 			loop.PermMode = st.Permissions.DefaultMode
 		}
 	}
-	if allowTools != "" {
-		rules["allow"] = append(rules["allow"], strings.Split(allowTools, ",")...)
+	if o.allowTools != "" {
+		rules["allow"] = append(rules["allow"], strings.Split(o.allowTools, ",")...)
 	}
-	if toolsList != "" {
-		loop.AllowedTools = strings.Split(toolsList, ",")
+	if o.toolsList != "" {
+		loop.AllowedTools = strings.Split(o.toolsList, ",")
 	}
-	if denyTools != "" {
-		rules["deny"] = append(rules["deny"], strings.Split(denyTools, ",")...)
+	if o.denyTools != "" {
+		rules["deny"] = append(rules["deny"], strings.Split(o.denyTools, ",")...)
 	}
-	if settingsF != "" {
+	if o.settingsF != "" {
 		var sb []byte
-		if strings.HasPrefix(strings.TrimSpace(settingsF), "{") {
-			sb = []byte(settingsF) // --settings accepts a JSON string too
+		if strings.HasPrefix(strings.TrimSpace(o.settingsF), "{") {
+			sb = []byte(o.settingsF) // --settings accepts a JSON string too
 		} else {
-			sb, _ = os.ReadFile(settingsF)
+			sb, _ = os.ReadFile(o.settingsF)
 		}
 		if len(sb) > 0 {
 			var s2 config.Settings
@@ -359,9 +352,12 @@ func main() {
 	loop.PermRules = rules
 	loop.Hooks = hooks.Load(cwd)
 	fireHook(loop, hooks.SessionStart)
+	tools.RegisterSession(sessionID, cwd, "")
+	defer tools.UnregisterSession(sessionID)
 	loop.ToolCtx.Agent = &agent.Runner{
 		Client: client, PermMode: loop.PermMode, Model: loop.Model,
 		User: loop.User, PermRules: rules, Entrypoint: "sdk-cli",
+		Parent: loop,
 	}
 	loop.ToolCtx.Answerer = func(ctx context.Context, prompt, pageText string) (string, error) {
 		sub := agent.NewLoop(client, cwd)
@@ -380,23 +376,29 @@ func main() {
 		return out, nil
 	}
 	loop.ToolCtx.Searcher = loop.ToolCtx.Agent.(*agent.Runner).WebSearch
-	if st.Model != "" && model == "" {
+	if st.Model != "" && o.model == "" {
 		loop.Model = st.Model
 	}
 
 	// session transcript
-	st2, _ := session.Open(cwd, sessionID)
+	var st2 *session.Store
+	if !o.noPersist {
+		st2, _ = session.Open(cwd, sessionID)
+	}
 	if st2 != nil {
 		defer st2.Close()
 		loop.Transcript = st2.Path
 		loop.Events.OnCompact = func() {
 			st2.LogCompactBoundary(0, len(loop.Messages))
 		}
+		if o.sessionName != "" {
+			st2.LogRecord(map[string]any{"type": "summary", "summary": o.sessionName})
+		}
 	}
 
-	if cont || resume != "" {
-		id := resume
-		if cont {
+	if o.cont || o.resume != "" {
+		id := o.resume
+		if o.cont {
 			if l2, err := session.Latest(cwd); err == nil {
 				id = l2
 			}
@@ -409,9 +411,22 @@ func main() {
 			}
 		}
 		if id != "" {
-			if msgs, err := session.Load(cwd, id); err == nil && len(msgs) > 0 {
+			var msgs []api.Message
+			var err error
+			switch {
+			case o.resumeAt != "":
+				msgs, err = loadSessionAt(cwd, id, o.resumeAt)
+			case strings.HasSuffix(id, ".jsonl"): // resume by transcript path (pickers return paths for foreign projects)
+				msgs, err = session.LoadPath(id)
+				id = filepath.Base(id)[:len(filepath.Base(id))-6]
+			default:
+				msgs, err = session.Load(cwd, id)
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "resume %s: %v\n", id, err)
+			} else if len(msgs) > 0 {
 				loop.Messages = msgs
-				if forkSess && st2 != nil {
+				if o.forkSess && st2 != nil {
 					st2.LogRecord(map[string]any{
 						"type": "system", "subtype": "fork",
 						"forkedFrom": map[string]string{"sessionId": id},
@@ -424,30 +439,34 @@ func main() {
 		}
 	}
 
-	if debug || verbose {
+	if o.debug || o.verbose {
 		os.Setenv("CLAUDE_GO_DEBUG", "1")
 	}
-	if debugFile != "" {
-		if f, err := os.OpenFile(debugFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+	if o.debugFile != "" {
+		if f, err := os.OpenFile(o.debugFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
 			os.Stderr = f
 		}
 	}
-	if printMode {
+	if o.printMode {
 		tools.Interactive = false
-		if inFormat == "stream-json" {
+		if o.inFormat == "stream-json" {
 			runPrintStreamJSON(loop)
 			return
 		}
 		// non-interactive: honor rules, auto-deny what would need asking
 		loop.ToolCtx.Permission = func(name string, input json.RawMessage, _ string) bool {
+			if name == "Bash" && tools.SandboxAutoAllow(cwd) {
+				return true // sandboxed bash auto-allowed per settings
+			}
 			return perms.Check(perms.Mode(loop.PermMode), &perms.Rules{
 				Allow: rules["allow"], Deny: rules["deny"], Ask: rules["ask"],
 			}, name, input, loop.ToolCtx.CWD) == perms.Allow
 		}
-		code := runPrint(loop, strings.Join(prompt, " ")+promptAtt, outFormat, st2, jsonSchema)
-		if maxBudget > 0 {
-			fmt.Fprintf(os.Stderr, "note: --max-budget-usd %.2f (per-request cost tracking not yet enforced)\n", maxBudget)
+		code := runPrint(loop, strings.Join(o.prompt, " ")+promptAtt, o.outFormat, st2, o.jsonSchema)
+		if o.maxBudget > 0 {
+			fmt.Fprintf(os.Stderr, "note: --max-budget-usd %.2f (per-request cost tracking not yet enforced)\n", o.maxBudget)
 		}
+		agentCleanup() // os.Exit skips the deferred call above
 		os.Exit(code)
 	}
 	tools.Interactive = true
@@ -458,6 +477,8 @@ func main() {
 		return
 	}
 	fireHook(loop, hooks.SessionStart)
+	tools.RegisterSession(sessionID, cwd, "")
+	defer tools.UnregisterSession(sessionID)
 	repl.RunWithStore(loop, st2)
 	fireHook(loop, hooks.SessionEnd)
 }
@@ -494,7 +515,7 @@ func startMCP(cwd, configFile string, strict bool) (clients []*mcp.Client) {
 	httpMCP := map[string]*mcp.HTTPClient{}
 	_ = httpMCP
 	for name, cfg := range cfgs {
-		if cfg.Command == "" {
+		if cfg.Command == "" && cfg.URL == "" {
 			continue
 		}
 		wg.Add(1)
@@ -580,6 +601,32 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 			fmt.Print(t)
 		default:
 			out.WriteString(t)
+		}
+		if sj && flagPartial {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "stream_event",
+				"event": map[string]any{
+					"type":  "content_block_delta",
+					"index": 0,
+					"delta": map[string]any{"type": "text_delta", "text": t},
+				},
+				"session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
+	}
+	l.Events.OnThinking = func(t string) {
+		if sj && flagPartial {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "stream_event",
+				"event": map[string]any{
+					"type":  "content_block_delta",
+					"index": 0,
+					"delta": map[string]any{"type": "thinking_delta", "thinking": t},
+				},
+				"session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
 		}
 	}
 	turns := 0
@@ -685,6 +732,10 @@ func runPrintStreamJSON(l *agent.Loop) {
 		}
 		if err := json.Unmarshal(line, &m); err != nil || m.Type != "user" {
 			continue
+		}
+		if flagReplayUser {
+			// --replay-user-messages: echo input back into the output stream
+			fmt.Println(string(line))
 		}
 		text := ""
 		switch c := m.Message.Content.(type) {

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"claude-go/internal/agent"
@@ -34,6 +35,7 @@ var (
 
 // Store abstracts transcript logging.
 type Store interface {
+	LogTitle(title string) error
 	Log(m api.Message) error
 }
 
@@ -45,6 +47,7 @@ func Run(l *agent.Loop) {
 // RunWithStore is Run with session transcript logging.
 func RunWithStore(l *agent.Loop, store Store) {
 	applyTheme(themeSetting(l.CWD), l.CWD)
+	currentStore = store
 	l.Entrypoint = "cli"
 	ed := newEditor()
 	ed.vim = vimEnabled()
@@ -70,18 +73,24 @@ func RunWithStore(l *agent.Loop, store Store) {
 		runPipe(l)
 		return
 	}
-	toolExpand := false
 	ks, err := startKeys()
 	if err == nil {
 		ed.keys = ks
 		ed.registerDefaultActions()
+		ed.actions[2] = func(e *editor) *readResult { // ctrl+shift+b (app:toggleBrief)
+			toggleBrief()
+			return nil
+		}
 		ed.onKillAgents = func() {
 			fmt.Println("\r\x1b[2K  killing background tasks…")
 			n := l.ToolCtx.BgTasks.KillAll()
 			fmt.Printf("  %d background tasks stopped\n", n)
 		}
 		ed.onToggleExpand = func() {
-			toolExpand = !toolExpand
+			// ctrl+o: full transcript view; second ctrl+o (or esc/q) returns
+			showTranscript(l, ks)
+			os.Stdout.WriteString("╭─╮\n")
+			ed.redraw()
 		}
 		ed.onToggleTodos = func() {
 			if s := tools.TodosText(); s != "" {
@@ -120,6 +129,9 @@ func RunWithStore(l *agent.Loop, store Store) {
 	md := newMDRenderer()
 
 	l.ToolCtx.Permission = func(name string, input json.RawMessage, summary string) bool {
+		if name == "Bash" && tools.SandboxAutoAllow(l.ToolCtx.CWD) {
+			return true // sandboxed bash auto-allowed per settings
+		}
 		switch perms.Check(perms.Mode(l.PermMode), &perms.Rules{
 			Allow: l.PermRules["allow"], Deny: l.PermRules["deny"], Ask: l.PermRules["ask"],
 		}, name, input, l.ToolCtx.CWD) {
@@ -129,7 +141,12 @@ func RunWithStore(l *agent.Loop, store Store) {
 			fmt.Printf("  %sdenied by permission rules%s\n", dim, reset)
 			return false
 		default:
-			return pr.ask(l, ks, name, summary)
+			reason, cfg := askReason(l, name, input)
+			ok, feedback := pr.askEx(l, ks, name, summary, reason, cfg)
+			if !ok && feedback != "" {
+				queuePermFeedback(feedback)
+			}
+			return ok
 		}
 	}
 	spinRef := &spinner{}
@@ -152,6 +169,9 @@ func RunWithStore(l *agent.Loop, store Store) {
 	l.Events.OnToolResult = func(name string, r tools.Result) {
 		lines := strings.Split(strings.TrimRight(r.Content, "\n"), "\n")
 		max := 5
+		if briefMode.Load() {
+			max = 1 // brief mode: tool previews collapse to one line
+		}
 		for i, ln := range lines {
 			if i >= max {
 				fmt.Printf("  %s⎿%s  … +%d lines\n", dim, reset, len(lines)-max)
@@ -166,7 +186,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 	fmt.Printf("%smodel: %s · /help for commands · esc to interrupt · ctrl-D to exit%s\n\n", dim, l.Model, reset)
 
 	for {
-		printStatus(l)
+		printStatus(l, ed)
 		tools.UserActive.Store(true)
 		res := ed.readLine(ks)
 		if res.quit {
@@ -197,6 +217,9 @@ func RunWithStore(l *agent.Loop, store Store) {
 			if expanded := expandCustomSlash(line); expanded != "" {
 				line = expanded
 			} else {
+				if handleSlashLocal(l, line, ed, ks) {
+					continue
+				}
 				if handleSlash(l, line, ed, ks) {
 					return
 				}
@@ -216,6 +239,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			start := time.Now()
 			respDone := make(chan struct{})
 			var queueBuf []rune
+			var sawInput atomic.Bool // any keystroke during the turn = user present
 			go func() {
 				// while the agent runs: esc interrupts, other keys queue a message
 				for {
@@ -226,6 +250,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 						if !ok {
 							return
 						}
+						sawInput.Store(true)
 						if k.b == 0x1b && k.seq == "" {
 							cancel()
 							// popQueuedIntoDraft: unfinished queued text returns to the editor
@@ -235,6 +260,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 						} else if k.b == '\r' || k.b == '\n' {
 							if len(queueBuf) > 0 {
 								queued = append(queued, string(queueBuf))
+								queuedPending.Add(1)
 								queueBuf = nil
 								fmt.Fprintf(os.Stderr, "\n  %s➤ queued%s\n", dim, reset)
 							}
@@ -259,6 +285,12 @@ func RunWithStore(l *agent.Loop, store Store) {
 			close(respDone)
 			cancel()
 			fmt.Println()
+			// ping the notification channel when the turn ended with no
+			// user keystrokes — the session was unattended (UserActive is
+			// false for the whole turn, so key activity is the real signal)
+			if !sawInput.Load() {
+				notifyAttention(l.ToolCtx.CWD)
+			}
 			// context-low warning like real CC
 			tok := l.UsageTotal.InputTokens + l.UsageTotal.CacheReadInputTokens + l.UsageTotal.CacheCreationInputTokens
 			if tok > 150000 {
@@ -281,11 +313,18 @@ func RunWithStore(l *agent.Loop, store Store) {
 				select {
 				case p := <-tools.SessionQueue:
 					queued = append(queued, p)
+					queuedPending.Add(1)
 				default:
 					goto drained
 				}
 			}
 		drained:
+			for _, nm := range tools.DrainMailbox(l.Client.SessionID) {
+				fmt.Printf("%s  [message]%s %s\n", cyan, reset, nm)
+				l.Messages = append(l.Messages, api.TextMessage("user",
+					"<system-reminder>Message received while you were working:</system-reminder>\n"+nm))
+			}
+			tools.FireIdleNotifications(l.Client.SessionID)
 			if len(draftBack) > 0 {
 				ed.buf = draftBack
 				ed.pos = len(ed.buf)
@@ -296,6 +335,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			}
 			line = queued[0]
 			queued = queued[1:]
+			queuedPending.Add(-1)
 		}
 	}
 }
@@ -350,44 +390,12 @@ type promptUI struct {
 	customLine *strings.Builder
 }
 
+// ask is the simple yes/no form (plan approval, legacy call sites); the
+// full permission dialog with reason line, auto-deny and deny-with-feedback
+// is askEx in dialogs.go.
 func (p *promptUI) ask(l *agent.Loop, ks *keySource, name, summary string) bool {
-	if p.always == nil {
-		p.always = map[string]bool{}
-	}
-	if p.always[name] {
-		return true
-	}
-	notifyAttention(l.ToolCtx.CWD)
-	if l.Hooks != nil {
-		hooks.Run(l.Hooks, hooks.Notification, map[string]any{
-			"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
-			"message": "Claude needs permission to use " + name,
-		}, l.ToolCtx.CWD)
-	}
-	fmt.Printf("\n%sDo you want to proceed?%s\n  %s%s\n  %s%s%s\n",
-		bold, reset, dim, name, reset, trunc(summary, 200), reset)
-	fmt.Printf("  %s1.%s Yes\n  %s2.%s Yes, and don't ask again for %s in %s\n  %s3.%s No\n  ",
-		bold, reset, bold, reset, name, l.ToolCtx.CWD, bold, reset)
-	for k := range ks.ch {
-		switch k.b {
-		case '1', 'y', 'Y', '\r':
-			fmt.Println("1")
-			return true
-		case '2', 'a', 'A':
-			fmt.Println("2")
-			p.always[name] = true
-			// real writes a permission rule to .claude/settings.local.json
-			if rule := ruleSuggestion(name, summary); rule != "" {
-				addLocalPermissionRule(l.ToolCtx.CWD, rule)
-				fmt.Printf("  %s%s added to permission allowlist%s\n", dim, rule, reset)
-			}
-			return true
-		case '3', 'n', 'N', 0x1b, 3:
-			fmt.Println("3")
-			return false
-		}
-	}
-	return false
+	ok, _ := p.askEx(l, ks, name, summary, "", "")
+	return ok
 }
 
 // spinner shows "⠋ working… (esc to interrupt · Ns)" on stderr.
@@ -529,19 +537,25 @@ func slashCompleter(prefix string) []string {
 	return out
 }
 
-func printStatus(l *agent.Loop) {
+func printStatus(l *agent.Loop, ed *editor) {
 	if out := statusLineCmd(l); out != "" {
 		fmt.Println(out)
-		return
+	} else {
+		w, _ := termWidth()
+		left := "  " + l.ToolCtx.CWD
+		right := l.Model + " │ " + l.PermMode + " │ ? for shortcuts"
+		pad := w - len(left) - len(right)
+		if pad < 1 {
+			pad = 1
+		}
+		fmt.Printf("%s%s%s%s%s\n", dim, left, strings.Repeat(" ", pad), right, reset)
 	}
-	w, _ := termWidth()
-	left := "  " + l.ToolCtx.CWD
-	right := l.Model + " │ " + l.PermMode + " │ ? for shortcuts"
-	pad := w - len(left) - len(right)
-	if pad < 1 {
-		pad = 1
+	if b := permModeBanner(l.PermMode); b != "" {
+		fmt.Println("  " + b)
 	}
-	fmt.Printf("%s%s%s%s%s\n", dim, left, strings.Repeat(" ", pad), right, reset)
+	if hints := footerHints(l, ed); len(hints) > 0 {
+		fmt.Printf("%s  %s%s\n", dim, strings.Join(hints, " · "), reset)
+	}
 }
 
 var slashCommands = []string{
@@ -923,5 +937,8 @@ func SlashCommandNames() []string {
 }
 
 func builtinSlashCommands() []string {
-	return []string{"add-dir", "agents", "alias", "branch", "btw", "bug", "clear", "compact", "config", "context", "cost", "diff", "doctor", "effort", "exit", "export", "fast", "feedback", "files", "fork", "goal", "help", "hooks", "ide", "import", "init", "keybindings", "login", "logout", "loop", "low", "mcp", "memory", "model", "output-style", "permissions", "plan", "plugin", "privacy-settings", "release-notes", "resume", "review", "rewind", "sandbox", "skills", "status", "statusline", "subtask", "tasks", "terminal-setup", "theme", "todos", "vim"}
+	return []string{"add-dir", "agents", "alias", "allowed-tools", "auto", "batch", "branch", "btw", "bug", "checkpoint", "checkup", "clear", "code-review", "color", "compact", "config", "context", "cost", "debug", "diff", "doctor", "effort", "exit", "export", "fast", "feedback", "fewer-permission-prompts", "files", "fork", "goal", "help", "high", "hooks", "ide", "import", "init", "insights", "keybindings", "keybindings-help", "login", "logout", "loop", "low", "max", "mcp", "medium", "memory", "memory-types", "model", "new", "output-style", "permissions", "plan", "plugin", "pr", "privacy-settings", "proactive", "quit", "release-notes", "rename", "reset", "resume", "review", "rewind", "run", "sandbox", "security-review", "settings", "skills", "stats", "status", "statusline", "subtask", "tasks", "terminal-setup", "theme", "todos", "undo", "update-config", "usage", "vim", "xhigh"}
 }
+
+// currentStore is set by RunWithStore so slash commands can write records.
+var currentStore Store
