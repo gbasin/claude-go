@@ -235,14 +235,17 @@ func RunWithStore(l *agent.Loop, store Store) {
 		}
 	}
 
-	// real welcome art: clawd starfield when tall enough, one-liner otherwise
-	rows := 24
-	if _, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
-		rows = h
+	// real 2.1.289 session banner: compact 3-line mascot at every width
+	// (the tall starfield is a first-run path)
+	plan := "Claude"
+	if l.Client != nil && l.Client.Creds != nil && l.Client.Creds.SubscriptionType != "" {
+		plan = "Claude " + strings.Title(l.Client.Creds.SubscriptionType)
 	}
-	welcomeBanner(api.Version, rows, themeSetting(l.CWD), os.Getenv("TERM_PROGRAM") == "Apple_Terminal")
-	fmt.Printf("%sclaude-go%s %s — %s\n", bold, reset, api.Version, l.CWD)
-	fmt.Printf("%smodel: %s · /help for commands · esc to interrupt · ctrl-D to exit%s\n\n", dim, l.Model, reset)
+	eff := l.Effort
+	if eff == "" {
+		eff = "medium"
+	}
+	compactBanner(api.Version, agent.ModelDisplay(l.Model), eff, plan, l.CWD, l.Client.SessionID)
 
 	for {
 		printStatus(l, ed)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 // Clawd mascot + welcome banner — byte-for-byte port of the real welcome
@@ -22,7 +23,7 @@ import (
 // FUe applies color first, then backgroundColor wraps the result, so a
 // fg+bg run is bgOpen + fgOpen + text + fgClose + bgClose.
 // The planet, ground dots, haze and stars are NOT clawd_body — only the
-// clawd runs get the orange; match the JSX, not intuition.
+// clawd runs get the claudeOrange; match the JSX, not intuition.
 
 const bannerWidth = 58 // real: A=58
 const bannerMinRows = 30
@@ -296,4 +297,26 @@ func bannerRowsApple(theme, welcomeMessage, version string, p bannerPalette) []s
 func screenReaderMode() bool {
 	return os.Getenv("CLAUDE_AX_SCREEN_READER") != "" ||
 		os.Getenv("CLAUDE_CODE_ACCESSIBILITY") != ""
+}
+
+// compactBanner — real 2.1.289's session-start banner at every width
+// (captured live: 190x50 and 80x40 panes both render the 3-line mascot,
+// never the starfield — the tall art is a first-run path).
+//
+//	 ▐▛███▛█   Claude Code v2.1.289
+//	▝▜██████▀  Fable 5.1 with medium effort · Claude Max
+//	 ▝▝   ▝▝   ~/Code · /rc            (/rc is an OSC8 session link)
+func compactBanner(version, name, effort, plan, cwd, sessionID string) {
+	home, _ := os.UserHomeDir()
+	short := cwd
+	if home != "" && strings.HasPrefix(cwd, home) {
+		short = "~" + cwd[len(home):]
+	}
+	link := fmt.Sprintf("\x1b]8;id=%x;https://claude.ai/code/session_%s?from=cli\x07/rc\x1b]8;;\x07",
+		uint32(time.Now().UnixNano()&0xffffffff), sessionID)
+	// \r\n — the editor is in raw mode when the banner prints (ONLCR off,
+	// bare \n staircases)
+	fmt.Printf(" %s▐▛███▛█%s   %sClaude Code%s %sv%s%s\r\n", claudeOrange, reset, bold, reset, dim, version, reset)
+	fmt.Printf("%s▝▜██████▀%s  %s with %s effort · %s\r\n", claudeOrange, reset, name, effort, plan)
+	fmt.Printf(" %s▝▝   ▝▝%s   %s · %s\r\n", claudeOrange, reset, short, link)
 }
