@@ -688,6 +688,26 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 			cfgs[name] = c
 		}
 	}
+	// claude.ai account connectors — real's yke()/SLn() (mod_0386.js):
+	// the connector directory auto-mounts as scope:"claudeai" servers whose
+	// tools appear as mcp__claude_ai_<Connector>__<tool>. Session OAuth
+	// (user:mcp_servers scope) is the bearer for both discovery and calls.
+	if lastCreds != nil {
+		mcp.SetClaudeAICredentials(lastCreds)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		for n, c := range mcp.FetchClaudeAIConfigs(ctx, lastCreds, cwd) {
+			if _, taken := cfgs[n]; taken {
+				continue
+			}
+			// ODt(): connectors the control plane marks ineligible stay out
+			// of the connect list unless previously connected.
+			if c.Eligible != nil && !*c.Eligible && !mcp.ClaudeAIEverConnected(n) {
+				continue
+			}
+			cfgs[n] = c
+		}
+		cancel()
+	}
 	_ = strict
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -705,8 +725,11 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 				fmt.Fprintf(os.Stderr, "  [mcp] %s: %v\n", name, err)
 				return
 			}
+			// tool prefix is the normalized server name (real's vn()):
+			// "claude.ai Claude Docs" → mcp__claude_ai_Claude_Docs__<tool>
+			prefix := mcp.NormalizeServerName(name)
 			for _, t := range c.Tools {
-				tools.RegisterMCP(name, c, t.Name, t.Description, t.InputSchema)
+				tools.RegisterMCP(prefix, c, t.Name, t.Description, t.InputSchema)
 			}
 			tools.RegisterMCPServer(name, c)
 			mu.Lock()
@@ -718,7 +741,7 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 	// IDE bridge: ~/.claude/ide/*.lock → MCP-over-WS (VSCode/Cursor extension)
 	if ic, err := mcp.ConnectIDE(cwd, config.ClaudeDir()); err == nil && ic != nil {
 		for _, t := range ic.Tools {
-			tools.RegisterMCP(ic.Name, ic, t.Name, t.Description, t.InputSchema)
+			tools.RegisterMCP(mcp.NormalizeServerName(ic.Name), ic, t.Name, t.Description, t.InputSchema)
 		}
 		tools.RegisterMCPServer(ic.Name, ic)
 		clients = append(clients, ic)

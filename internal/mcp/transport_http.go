@@ -86,6 +86,17 @@ type httpTransport struct {
 	c       *Client
 	auth    *serverAuth // stored OAuth tokens, if any
 
+	// bearerFn, when set, supplies the Authorization bearer per request,
+	// overriding both configured headers and stored OAuth tokens (real's
+	// Li() wrapper for claudeai-proxy — mod_1797.js: `headers.set`).
+	bearerFn func() string
+	// noGetStream suppresses the optional standalone GET SSE stream
+	// (claude.ai connectors: the proxy answers GET locally with 405).
+	noGetStream bool
+	// authURL, when set, replaces RFC9728 discovery as the needs-auth
+	// pointer (claude.ai connectors → the start-auth URL, Yye()).
+	authURL string
+
 	mu     sync.Mutex
 	sessID string
 	getOK  atomic.Bool
@@ -114,8 +125,14 @@ func (t *httpTransport) applyHeaders(req *http.Request) {
 	for k, v := range t.headers {
 		req.Header.Set(k, v)
 	}
-	// stored OAuth bearer token, unless config already set Authorization
-	if req.Header.Get("Authorization") == "" {
+	if t.bearerFn != nil {
+		// session-credential bearer (claude.ai connectors): refreshed per
+		// request by the fn, always set — mirroring Li()'s headers.set.
+		if tok := t.bearerFn(); tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+	} else if req.Header.Get("Authorization") == "" {
+		// stored OAuth bearer token, unless config already set Authorization
 		if tok := t.auth.accessToken(); tok != "" {
 			req.Header.Set("Authorization", "Bearer "+tok)
 		}
@@ -158,7 +175,11 @@ func (t *httpTransport) sendOnce(ctx context.Context, msg []byte, retryAuth bool
 			return t.sendOnce(ctx, msg, false)
 		}
 		ae := &AuthError{Server: t.c.Name, URL: t.url, WWWAuthenticate: wwwAuth}
-		ae.AuthURL, _ = DiscoverAuthURL(ctx, t.url, wwwAuth)
+		if t.authURL != "" {
+			ae.AuthURL = t.authURL
+		} else {
+			ae.AuthURL, _ = DiscoverAuthURL(ctx, t.url, wwwAuth)
+		}
 		t.c.Status = "needs-auth"
 		t.c.AuthURL = ae.AuthURL
 		return ae
