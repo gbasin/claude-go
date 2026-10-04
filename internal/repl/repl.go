@@ -363,12 +363,18 @@ func RunWithStore(l *agent.Loop, store Store) {
 					}
 				}
 			}()
+			compStreamBegin()
 			_, err := l.Ask(ctx, expandMentions(l, line))
+			compStreamEnd()
 			spin.stop()
 			tools.SetPeerSessionBusy(false)
 			tools.FlushHeldPeerMessages() // release held peer msgs at the boundary
 			compClearFooter()
-			fmt.Fprint(os.Stderr, "\r\x1b[K")
+			if !compActive.Load() {
+				// zone mode leaves the cursor at the response row — the raw
+				// erase would wipe it (verified: streamed text vanished)
+				fmt.Fprint(os.Stderr, "\r\x1b[K")
+			}
 			fireStopHook(l)
 			if store != nil {
 				// log only NEW messages per turn (was O(n²) re-log + a git
@@ -852,7 +858,11 @@ func printStatus(l *agent.Loop, ed *editor) {
 		fmt.Println(status)
 	}
 	if b := permModeBanner(l.PermMode); b != "" {
-		fmt.Println("  " + b)
+		if compActive.Load() {
+			compInline("  " + b + "\r\n") // scroll region — raw Println lands mid-line
+		} else {
+			fmt.Println("  " + b)
+		}
 	}
 	if hints := footerHints(l, ed); len(hints) > 0 {
 		fmt.Printf("%s  %s%s\n", dim, strings.Join(hints, " · "), reset)
