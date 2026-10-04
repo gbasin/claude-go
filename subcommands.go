@@ -492,22 +492,8 @@ func setupTokenSub() {
 		AccessToken: tok,
 		IsAPIKey:    strings.HasPrefix(tok, "sk-ant-"),
 	}
-	if runtime.GOOS == "darwin" {
-		if err := auth.WriteKeychain(creds); err == nil {
-			fmt.Println("stored in macOS Keychain (Claude Code-credentials)")
-			return
-		}
-		fmt.Fprintln(os.Stderr, "keychain write failed; falling back to credentials file")
-	}
-	p := filepath.Join(config.ClaudeDir(), ".credentials.json")
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		fatal("setup-token: %v", err)
-	}
-	b, _ := json.Marshal(map[string]any{"claudeAiOauth": creds})
-	if err := os.WriteFile(p, b, 0o600); err != nil {
-		fatal("setup-token: %v", err)
-	}
-	fmt.Println("stored in", p)
+	auth.SaveOwnCreds(creds)
+	fmt.Println("stored in ~/.claude-go/.credentials.json")
 }
 
 // remoteControlSub: `claude remote-control` / `claude rc` — the Remote

@@ -2550,11 +2550,8 @@ func loginCmd() {
 		fmt.Println("  login failed:", err)
 		return
 	}
-	if err := auth.WriteKeychain(creds); err != nil {
-		fmt.Println("  token received but keychain write failed:", err)
-		return
-	}
-	fmt.Println("  logged in — credentials written to keychain")
+	auth.SaveOwnCreds(creds)
+	fmt.Println("  logged in — credentials written to ~/.claude-go/")
 }
 
 func logoutCmd() {

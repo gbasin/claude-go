@@ -1079,9 +1079,7 @@ func authLoginSub() {
 	if err != nil {
 		fatal("login failed: %v", err)
 	}
-	if err := auth.WriteKeychain(creds); err != nil {
-		fatal("keychain write failed: %v", err)
-	}
+	auth.SaveOwnCreds(creds)
 	fmt.Println("logged in")
 }
 
