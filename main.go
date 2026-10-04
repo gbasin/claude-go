@@ -395,7 +395,8 @@ func main() {
 		rules["deny"] = append(append([]string{}, st.ManagedDeny...), st.Permissions.Deny...)
 		rules["ask"] = append(append([]string{}, st.ManagedAsk...), st.Permissions.Ask...)
 		rules["allow"] = append(rules["allow"], st.ManagedAllow...)
-		if st.Permissions.DefaultMode != "" {
+		// explicit --permission-mode beats settings defaultMode
+		if st.Permissions.DefaultMode != "" && !o.permModeSet {
 			loop.PermMode = st.Permissions.DefaultMode
 		}
 		if st.Permissions.DisableBypassPermissionsMode == "disable" && loop.PermMode == "bypassPermissions" {

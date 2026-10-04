@@ -3,6 +3,7 @@ package repl
 import (
 	"encoding/json"
 	"fmt"
+	"golang.org/x/term"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -104,11 +105,34 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 		}
 	}
 	deadline := time.Now().Add(permAskTimeout)
-	// live countdown — real ticks `in M:SS`
+	// live countdown — real ticks `in M:SS`. The block is 6 lines; each is
+	// emitted with \x1b[K (clears stale text from earlier renders) and the
+	// cursor returns via a wrap-aware row count — a line that wraps would
+	// otherwise make \x1b[6A undershoot and duplicate rows every tick.
+	width, _, _ := term.GetSize(int(os.Stdout.Fd()))
+	if width <= 0 {
+		width = 120
+	}
+	rows := 6
 	printOpts := func(rem time.Duration) {
-		fmt.Printf("\r\x1b[K  %s⏵ auto-deny in %d:%02d — to avoid blocking an unattended session%s\n", dim, int(rem.Minutes()), int(rem.Seconds())%60, reset)
-		fmt.Printf("  %s1.%s Yes\n  %s2.%s Yes, and don't ask again for %s in %s\n  %s3.%s No\n  %s4.%s No, and tell Claude what to do differently\n  %s⌘ enter confirm · escape cancel%s\n\x1b[6A\r",
-			bold, reset, bold, reset, name, l.ToolCtx.CWD, bold, reset, bold, reset, dim, reset)
+		lines := []string{
+			fmt.Sprintf("  %s⏵ auto-deny in %d:%02d — to avoid blocking an unattended session%s", dim, int(rem.Minutes()), int(rem.Seconds())%60, reset),
+			fmt.Sprintf("  %s1.%s Yes", bold, reset),
+			fmt.Sprintf("  %s2.%s Yes, and don't ask again for %s in %s", bold, reset, name, l.ToolCtx.CWD),
+			fmt.Sprintf("  %s3.%s No", bold, reset),
+			fmt.Sprintf("  %s4.%s No, and tell Claude what to do differently", bold, reset),
+			fmt.Sprintf("  %s⌘ enter confirm · escape cancel%s", dim, reset),
+		}
+		var sb strings.Builder
+		rows = 0
+		for _, ln := range lines {
+			sb.WriteString("\r\x1b[K")
+			sb.WriteString(ln)
+			sb.WriteString("\r\n")
+			rows += 1 + visWidth(ln)/width // wrapped rows count extra
+		}
+		fmt.Fprintf(&sb, "\x1b[%dA\r", rows)
+		fmt.Print(sb.String())
 	}
 	printOpts(permAskTimeout)
 	timeout := time.NewTimer(permAskTimeout)
@@ -123,14 +147,14 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 				printOpts(rem)
 			}
 		case <-timeout.C:
-			fmt.Print("\x1b[6B") // below the options block
+			fmt.Printf("\x1b[%dB", rows) // below the options block
 			fmt.Printf("\n  %s⏵ auto-denied — unattended for %s%s\n", dim, permAskTimeout, reset)
 			return false, ""
 		case k, ok := <-dch:
 			if !ok {
 				return false, ""
 			}
-			fmt.Print("\x1b[6B\r") // clear the options block
+			fmt.Printf("\x1b[%dB\r", rows) // clear the options block
 			switch k.b {
 			case '1', 'y', 'Y', '\r':
 				fmt.Println("1. Yes")
@@ -151,7 +175,7 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 				fmt.Println("4. No, with feedback")
 				return false, readFeedbackLine(ks, deadline)
 			}
-			fmt.Print("\x1b[6A\r") // unrecognized — back to the block
+			fmt.Printf("\x1b[%dA\r", rows) // unrecognized — back to the block
 			printOpts(time.Until(deadline))
 		}
 	}

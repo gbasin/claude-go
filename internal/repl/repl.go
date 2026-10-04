@@ -223,7 +223,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 				streamPrint(fmt.Sprintf("  %s⎿%s  … +%d lines (ctrl+o to expand)", dim, reset, len(lines)-max))
 				break
 			}
-			streamPrint(fmt.Sprintf("  %s⎿%s  %s", dim, reset, trunc(ln, 120)))
+			streamPrint(fmt.Sprintf("  %s⎿%s  %s", dim, reset, trunc(ln, 113)))
 		}
 	}
 	historySessionID = l.Client.SessionID
