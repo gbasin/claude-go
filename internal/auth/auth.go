@@ -27,7 +27,7 @@ type Credentials struct {
 	// .credentials.json). Refreshing a borrowed refresh token rotates the
 	// shared family and can invalidate real's session — we use them
 	// read-only until expiry, then require `claude-go login`.
-	Borrowed         bool   `json:"-"`
+	Borrowed bool `json:"-"`
 	// DesignClientID is `clientId` on the designOauth slot — the design
 	// OAuth registration the token was minted against (mod_1033.js).
 	DesignClientID string `json:"clientId,omitempty"`

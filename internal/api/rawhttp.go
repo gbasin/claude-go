@@ -106,6 +106,9 @@ func (rawHTTP11RoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 		putRawConn(host, rc, true)
 		return nil, err
 	}
+	if os.Getenv("CLAUDE_GO_DEBUG_HTTP") != "" {
+		fmt.Fprintf(os.Stderr, "[debug] %s %s -> %d\n", req.Method, req.URL.String(), resp.StatusCode)
+	}
 	// return conn to pool when the body is fully consumed or closed
 	resp.Body = &rawBody{rc: rc, host: host, r: resp.Body}
 	return resp, nil

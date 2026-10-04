@@ -35,6 +35,7 @@ type Events struct {
 type Loop struct {
 	Client                *api.Client
 	Model                 string
+	Wants1m               bool // [1m] suffix → context-1m beta
 	MaxTokens             int
 	Effort                string
 	Entrypoint            string // "cli" or "sdk-cli"
@@ -102,16 +103,31 @@ func NewLoop(client *api.Client, cwd string) *Loop {
 	}
 }
 
+func isXHighModel(m string) bool {
+	return strings.Contains(m, "fable") || strings.Contains(m, "sonnet-5")
+}
+
 func (l *Loop) buildRequest() *api.Request {
 	effort := l.Effort
 	if effort == "" {
 		effort = "medium"
 	}
-	oc := map[string]string{"effort": effort}
-	if l.FastMode {
-		oc["speed"] = "fast"
+	// xhigh is fable-class only — opus rejects it ('This model does not
+	// support effort level xhigh'); map to the top supported tier.
+	if effort == "xhigh" && !isXHighModel(l.Model) {
+		effort = "max"
 	}
-	ocRaw, _ := json.Marshal(oc)
+	// output_config only exists on per-turn-effort models (verified live:
+	// opus-4-8 rejects it — 'requires a model that supports per-turn
+	// effort'). Real omits the key for those models.
+	var ocRaw json.RawMessage
+	if isXHighModel(l.Model) {
+		oc := map[string]string{"effort": effort}
+		if l.FastMode {
+			oc["speed"] = "fast"
+		}
+		ocRaw, _ = json.Marshal(oc)
+	}
 	msgs := l.Messages
 	if l.nearContextLimit() {
 		msgs = withEphemeralBreakpoint(msgs)
@@ -122,7 +138,7 @@ func (l *Loop) buildRequest() *api.Request {
 		safeguards = Safeguards(l.PermMode, l.ToolCtx.CWD, l.PermRules)
 	}
 	var outCfg json.RawMessage
-	if !l.dropOutputConfig {
+	if !l.dropOutputConfig && ocRaw != nil {
 		outCfg = ocRaw
 	}
 	mt := l.MaxTokens
@@ -130,6 +146,7 @@ func (l *Loop) buildRequest() *api.Request {
 		mt = 64000
 	}
 	l.Client.Model = l.Model // beta list is model-conditional
+	l.Client.Wants1m = l.Wants1m
 	return &api.Request{
 		Model:             l.Model,
 		MaxTokens:         mt,
@@ -233,7 +250,9 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 			Text:         EnvMessage(l.ToolCtx.CWD, l.Model, l.AddDirs, l.PermMode, l.Client.SessionID),
 			CacheControl: &api.CacheControl{Type: "ephemeral", TTL: "1h"},
 		}})
-		envBlocks.OutputConfig = DefaultOutputConfig()
+		if isXHighModel(l.Model) {
+			envBlocks.OutputConfig = DefaultOutputConfig()
+		}
 		l.Messages = append(l.Messages, msg, envBlocks)
 	} else {
 		msg = api.TextMessage("user", prompt)

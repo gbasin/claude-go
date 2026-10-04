@@ -331,6 +331,7 @@ func main() {
 	if o.model != "" {
 		loop.Model = resolveModel(o.model)
 	}
+	loop.Wants1m = wants1m
 	loop.MaxTurns = o.maxTurns
 	loop.PermMode = o.permMode
 	loop.AppendSysP = o.appendSys
@@ -375,7 +376,8 @@ func main() {
 	st.ApplyEnv() // settings.env injects into the process + all children
 	// ANTHROPIC_MODEL env beats settings + flags when set
 	if em := os.Getenv("ANTHROPIC_MODEL"); em != "" && o.model == "" {
-		loop.Model = em
+		loop.Model = resolveModel(em)
+		loop.Wants1m = wants1m
 	}
 	if loop.Effort == "" && st.EffortLevel != "" {
 		loop.Effort = st.EffortLevel
@@ -500,7 +502,8 @@ func main() {
 		return true, ""
 	}
 	if st.Model != "" && o.model == "" {
-		loop.Model = st.Model
+		loop.Model = resolveModel(st.Model)
+		loop.Wants1m = wants1m
 	}
 
 	// session transcript
@@ -1098,7 +1101,7 @@ func resolveModel(m string) string {
 		if v := os.Getenv("ANTHROPIC_DEFAULT_OPUS_MODEL"); v != "" {
 			return v
 		}
-		return "claude-opus-4-6"
+		return "claude-opus-4-8"
 	case "haiku":
 		if v := os.Getenv("ANTHROPIC_DEFAULT_HAIKU_MODEL"); v != "" {
 			return v
@@ -1113,8 +1116,19 @@ func resolveModel(m string) string {
 		}
 		return "claude-fable-5-1"
 	}
-	return m // full id or [1m] suffix passes through
+	// <alias|id>[1m] — real's 1M-context shorthand: resolves the base and
+	// marks the request for the context-1m beta (the suffix never reaches
+	// the wire — verified: claude-opus-4-8[1m] → not_found_error)
+	if strings.HasSuffix(m, "[1m]") {
+		wants1m = true
+		return resolveModel(strings.TrimSuffix(m, "[1m]"))
+	}
+	return m // full id passes through
 }
+
+// wants1m is set when the configured model used the [1m] suffix — the
+// request then carries the context-1m beta (client.go).
+var wants1m bool
 
 // stampProjectState records lastSessionId/lastUsedModel/lastGracefulShutdown
 // under ~/.claude.json projects[cwd] (real fields), plus bumps numStartups.
