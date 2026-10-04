@@ -88,7 +88,8 @@ func TestImageRead(t *testing.T) {
 func TestLSPGraceful(t *testing.T) {
 	s := newSession(t)
 	r := s.run(t, "--mock", "-p",
-		`tool:LSP {"operation":"diagnostics","filePath":"x.unknownext"}`,
+		`calls:[{"name":"ToolSearch","input":{"query":"select:LSP"}},`+
+			`{"name":"LSP","input":{"operation":"diagnostics","filePath":"x.unknownext"}}]`,
 		"--permission-mode", "bypassPermissions",
 		"--output-format", "stream-json")
 	s.mustOK(t, r)
@@ -97,33 +98,35 @@ func TestLSPGraceful(t *testing.T) {
 	if len(trs) == 0 {
 		t.Fatalf("no tool_result:\n%s", r.stdout)
 	}
-	contains(t, trs[0], "No LSP server available", "LSP result")
+	contains(t, trs[len(trs)-1], "No LSP server available", "LSP result")
 }
 
 // TestCron: CronCreate registers a session job; CronList shows it.
 func TestCron(t *testing.T) {
 	s := newSession(t)
 	r := s.run(t, "--mock", "-p",
-		`calls:[{"name":"CronCreate","input":{"cron":"*/5 * * * *","prompt":"tick-e2e"}},`+
+		`calls:[{"name":"ToolSearch","input":{"query":"select:CronCreate,CronList"}},`+
+			`{"name":"CronCreate","input":{"cron":"*/5 * * * *","prompt":"tick-e2e"}},`+
 			`{"name":"CronList","input":{}}]`,
 		"--permission-mode", "bypassPermissions",
 		"--output-format", "stream-json")
 	s.mustOK(t, r)
 	events, _ := parseStreamJSON(t, r.stdout)
 	trs := toolResultTexts(events)
-	if len(trs) != 2 {
-		t.Fatalf("expected 2 tool results, got %d:\n%s", len(trs), r.stdout)
+	if len(trs) != 3 {
+		t.Fatalf("expected 3 tool results, got %d:\n%s", len(trs), r.stdout)
 	}
-	contains(t, trs[0], "Scheduled recurring job", "CronCreate result")
-	contains(t, trs[1], "recurring", "CronList result")
-	contains(t, trs[1], "tick-e2e", "CronList prompt")
+	contains(t, trs[1], "Scheduled recurring job", "CronCreate result")
+	contains(t, trs[2], "recurring", "CronList result")
+	contains(t, trs[2], "tick-e2e", "CronList prompt")
 }
 
 // TestMonitor: Monitor launches a background task.
 func TestMonitor(t *testing.T) {
 	s := newSession(t)
 	r := s.run(t, "--mock", "-p",
-		`tool:Monitor {"command":"echo hi","description":"e2e monitor"}`,
+		`calls:[{"name":"ToolSearch","input":{"query":"select:Monitor"}},`+
+			`{"name":"Monitor","input":{"command":"echo hi","description":"e2e monitor"}}]`,
 		"--permission-mode", "bypassPermissions",
 		"--output-format", "stream-json")
 	s.mustOK(t, r)
@@ -132,7 +135,7 @@ func TestMonitor(t *testing.T) {
 	if len(trs) == 0 {
 		t.Fatalf("no tool_result:\n%s", r.stdout)
 	}
-	contains(t, trs[0], "armed", "Monitor result")
+	contains(t, trs[len(trs)-1], "armed", "Monitor result")
 }
 
 // TestWorkflow: named workflow resolves from .claude/workflows/ and returns

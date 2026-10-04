@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -64,9 +65,12 @@ type Loop struct {
 	SessionEndReason      string   // clear|logout|prompt_input_exit|other
 	FastMode              bool     // fast mode: output_config.speed="fast"
 	AutoCompactWindow     string   // settings autoCompactWindow ("auto"|"500k"|N)
+	AdvisorModel          string   // settings advisorModel — the /advisor pick
+	MemoryPaused          bool     // /pause-memory: skip MEMORY.md injection
 	AlwaysThinking        bool     // settings alwaysThinkingEnabled
 	pendingTrigger        string   // last compact trigger for the boundary record
 	compactSummaryPending bool     // next user log is the compact continuation
+	announcedDeferred     string   // last announced deferred-tool name set (sorted join)
 	Precompute            bool     // precomputeCompactionEnabled gate
 	RateLimitNote         string   // set once a slow-lane rate-limit note was shown
 	noThinking            bool     // thinking config dropped after a thinking 400
@@ -112,6 +116,7 @@ func (l *Loop) buildRequest() *api.Request {
 	if l.nearContextLimit() {
 		msgs = withEphemeralBreakpoint(msgs)
 	}
+	msgs = l.withDeferredReminder(msgs)
 	var safeguards json.RawMessage
 	if !l.dropSafeguards {
 		safeguards = Safeguards(l.PermMode, l.ToolCtx.CWD, l.PermRules)
@@ -129,13 +134,52 @@ func (l *Loop) buildRequest() *api.Request {
 		MaxTokens:         mt,
 		Messages:          msgs,
 		System:            SystemBlocks(l.Entrypoint, l.CWD, l.Model, l.AppendSysP, l.ExtraSystem),
-		Tools:             tools.Defs(),
+		Tools:             tools.RequestDefs(l.ToolCtx),
 		Metadata:          Metadata(l.Client.SessionID, l.User),
 		Thinking:          l.thinkingConfig(),
 		ContextManagement: DefaultContextManagement(),
 		Safeguards:        safeguards,
 		OutputConfig:      outCfg,
 	}
+}
+
+// withDeferredReminder prepends the deferred-tools announcement
+// (<system-reminder>, real's deferred_tools_delta attachment / MTr text)
+// to the newest user message when the still-deferred set changed since the
+// last request — first turn lists every deferred name; post-discovery the
+// shrunken pool re-announces. Returns msgs unchanged when nothing to say.
+func (l *Loop) withDeferredReminder(msgs []api.Message) []api.Message {
+	names := l.ToolCtx.DeferredNames()
+	sort.Strings(names)
+	key := strings.Join(names, "\x00")
+	if key == l.announcedDeferred {
+		return msgs
+	}
+	l.announcedDeferred = key
+	if key == "" {
+		return msgs
+	}
+	out := make([]api.Message, len(msgs))
+	copy(out, msgs)
+	for i := len(out) - 1; i >= 0; i-- {
+		if out[i].Role != "user" {
+			continue
+		}
+		var blocks []api.ContentBlock
+		if err := json.Unmarshal(out[i].Content, &blocks); err != nil {
+			return msgs
+		}
+		reminder := api.ContentBlock{
+			Type: "text",
+			Text: "<system-reminder>\n" + tools.DeferredReminder(names) + "\n</system-reminder>",
+		}
+		blocks = append([]api.ContentBlock{reminder}, blocks...)
+		if raw, err := json.Marshal(blocks); err == nil {
+			out[i].Content = raw
+		}
+		return out
+	}
+	return msgs
 }
 
 // nearContextLimit: last measured input total crossed 80% of the auto-compact
@@ -181,7 +225,7 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 	}
 	var msg api.Message
 	if !l.started {
-		msg = FirstUserMessage(prompt, l.CWD, l.User.Email)
+		msg = FirstUserMessage(prompt, l.CWD, l.User.Email, l.MemoryPaused)
 		l.started = true
 		envBlocks := api.BlocksMessage("system", []api.ContentBlock{{
 			Type:         "text",
@@ -252,7 +296,7 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 			}
 			r = tools.Result{Content: "Tool call blocked by hook: " + reason, IsError: true}
 		} else if pre.Permission == "allow" {
-			r = tools.Dispatch(l.ToolCtx, b.Name, b.Input) // hook approved — skip the prompt
+			r = l.dispatch(b.Name, b.Input) // hook approved — skip the prompt
 		} else if l.ToolCtx.Permission != nil &&
 			!l.ToolCtx.Permission(b.Name, b.Input, toolSummary(b.Name, b.Input)) {
 			if l.PermMode == "dontAsk" {
@@ -267,7 +311,7 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 				}
 			}
 		} else {
-			r = tools.Dispatch(l.ToolCtx, b.Name, b.Input)
+			r = l.dispatch(b.Name, b.Input)
 		}
 		post := l.runHook(hooks.PostToolUse, map[string]any{
 			"tool_name": b.Name, "tool_input": json.RawMessage(b.Input),
@@ -400,7 +444,35 @@ func toolSummary(name string, input json.RawMessage) string {
 	return name
 }
 
+// dispatch routes a tool call, refusing calls into still-deferred tools —
+// real's InputValidationError when the model invokes a name whose schema
+// was never loaded via ToolSearch.
+func (l *Loop) dispatch(name string, input json.RawMessage) tools.Result {
+	// refusal only when the tool is actually deferred-on-the-wire — a tool
+	// that's not offered at all (interactive-only in -p, gated-out) falls
+	// through to its own error like real.
+	for _, t := range l.ToolCtx.DeferredPool() {
+		if t.Def.Name == name {
+			return tools.Result{
+				Content: "InputValidationError: " + name + " is a deferred tool — its schema is not loaded. Fetch it with ToolSearch (query \"select:" + name + "\") before calling it.",
+				IsError: true,
+			}
+		}
+	}
+	return tools.Dispatch(l.ToolCtx, name, input)
+}
+
 func toolResultBlock(id string, r tools.Result) api.ContentBlock {
+	if len(r.Refs) > 0 {
+		// ToolSearch matches → tool_reference blocks (real's
+		// mapToolResultToToolResultBlockParam).
+		blocks := make([]api.ContentBlock, 0, len(r.Refs))
+		for _, n := range r.Refs {
+			blocks = append(blocks, api.ContentBlock{Type: "tool_reference", ToolName: n})
+		}
+		content, _ := json.Marshal(blocks)
+		return api.ContentBlock{Type: "tool_result", ToolUseID: id, Content: content}
+	}
 	content, _ := json.Marshal(resultBlocks(r))
 	if r.IsError && !strings.Contains(r.Content, "<tool_use_error>") {
 		// real wraps every error result in <tool_use_error> tags
@@ -502,6 +574,9 @@ func (l *Loop) runAdvisor(ctx context.Context) tools.Result {
 	}
 	req := l.buildRequest()
 	req.Tools = nil // advisor sees context only
+	if l.AdvisorModel != "" {
+		req.Model = l.AdvisorModel // the /advisor pick fronts the second call
+	}
 	resp, err := l.Client.StreamMessage(ctx, req, func(*api.StreamEvent) error { return nil })
 	if err != nil {
 		return tools.Result{Content: "advisor unavailable: " + err.Error(), IsError: true}

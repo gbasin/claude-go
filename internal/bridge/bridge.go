@@ -60,6 +60,16 @@ const ErrMalformedResponse = "Remote Control got an unexpected server response �
 // v_t (mod_0265.js): error.type on the 409 from POST /v1/environments/bridge.
 const ErrTypeFolderAlreadyServed = "bridge_folder_already_served"
 
+// IIe (mod_0265.js): the disconnect dialog's exit text.
+const MsgRCDisconnected = "Remote Control disconnected."
+
+// Le (mod_1980.js): connect refused because a session's Project is fixed
+// at creation — shown when /remote-control --project arrives while
+// already connected.
+const MsgRCAlreadyConnected = "Remote Control is already connected — a session's Project is " +
+	"fixed when it's created. Disconnect first, then re-run /remote-control --project " +
+	"to start a new session in the Project."
+
 // fr() (mod_1269.js): suffix appended to fatal poll-loop errors.
 func reconnectHint(msg string) string {
 	return msg + ". Re-run `claude remote-control` to reconnect."

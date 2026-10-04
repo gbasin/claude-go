@@ -21,7 +21,8 @@ func RegisterMCP(server string, caller MCPCaller, name, desc string, schema json
 		schema = json.RawMessage(`{"type":"object","properties":{}}`)
 	}
 	mcpTools = append(mcpTools, &Tool{
-		Def: api.Tool{Name: full, Description: desc, InputSchema: schema},
+		IsMCP: true, // every MCP tool defers (mod_0314.js h(): isMcp===true)
+		Def:   api.Tool{Name: full, Description: desc, InputSchema: schema},
 		Exec: func(c *Context, input json.RawMessage) Result {
 			out, isErr, err := caller.CallTool(c.Ctx, name, input)
 			if err != nil {

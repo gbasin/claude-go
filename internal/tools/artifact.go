@@ -47,6 +47,32 @@ func artSlug(raw string) (string, error) {
 	return "", fmt.Errorf("not an artifact URL: %s — pass its claude.ai link (claude.ai/artifact/{id} or claude.ai/code/artifact/{uuid})", raw)
 }
 
+// SessionArtifacts records artifact URLs published this session so
+// /artifacts can list them (real browses published+shared artifacts).
+var SessionArtifacts []string
+
+// recordArtifact scans a successful publish response for artifact URLs.
+func recordArtifact(v any) {
+	var walk func(x any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case map[string]any:
+			for k, val := range t {
+				if s, ok := val.(string); ok && (k == "url" || k == "artifact_url" || k == "share_url") &&
+					strings.Contains(s, "claude.ai") {
+					SessionArtifacts = append(SessionArtifacts, s)
+				}
+				walk(val)
+			}
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+}
+
 // artCall is the OAuth HTTP plumbing shared by all three artifact tools.
 // The response body is returned verbatim (pretty-printed when JSON).
 func artCall(c *Context, method, path string, body any) Result {
@@ -79,6 +105,9 @@ func artCall(c *Context, method, path string, body any) Result {
 	}
 	var v any
 	if json.Unmarshal(b, &v) == nil {
+		if method != "GET" && method != "DELETE" && strings.HasPrefix(path, "/v1/artifacts") {
+			recordArtifact(v)
+		}
 		pb, _ := json.MarshalIndent(v, "", "  ")
 		return Result{Content: string(pb)}
 	}

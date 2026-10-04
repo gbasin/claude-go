@@ -252,6 +252,9 @@ func (l *Loop) contextWindow() int {
 	return 200_000
 }
 
+// ParseWindow exposes parseWindow for the /autocompact validator.
+func ParseWindow(v string) int { return parseWindow(v) }
+
 func parseWindow(v string) int {
 	if v == "" || v == "auto" {
 		return 0

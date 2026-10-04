@@ -33,6 +33,9 @@ type ContentBlock struct {
 	Name      string          `json:"name,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
+	// ToolName carries tool_name on tool_reference content blocks
+	// (ToolSearch results — mod_0386.js mapToolResultToToolResultBlockParam).
+	ToolName  string          `json:"tool_name,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"` // tool_result content
 	IsError   bool            `json:"is_error,omitempty"`
 	Thinking  string          `json:"thinking,omitempty"`
@@ -66,6 +69,9 @@ type Tool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	InputSchema json.RawMessage `json:"input_schema,omitempty"`
+	// DeferLoading marks the DeferredToolPlaceholder stub
+	// (mod_0386.js CWt): {defer_loading:true}.
+	DeferLoading bool `json:"defer_loading,omitempty"`
 	// Raw, when set, is the complete wire object (server-side tools like
 	// web_search_20250305 have no input_schema and carry "type").
 	Raw json.RawMessage `json:"-"`

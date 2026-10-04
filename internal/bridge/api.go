@@ -718,6 +718,12 @@ type CreateSessionParams struct {
 	InitialMessage string            // first user event content
 	EnvVars        map[string]string // top-level environment_variables
 
+	// Ultrareview (mod_1006.js GNn): the review environment id
+	// (env_011111111111111111111113) and the git-bundle seed
+	// (seed_bundle_file_id / v1alpha2 seedBundleFileId).
+	EnvironmentID    string // → environment_id
+	SeedBundleFileID string // → config.seed_bundle_file_id
+
 	// xJt()/Mgn config fields.
 	CustomSystemPrompt         string
 	AppendSystemPrompt         string
@@ -826,6 +832,11 @@ func (c *Client) CreateCodeSession(ctx context.Context, p *CreateSessionParams) 
 	if p.CorrelationID != "" {
 		cfg["correlation_id"] = p.CorrelationID
 	}
+	// ultrareview: real's session_context.seed_bundle_file_id (v1) /
+	// seedBundleFileId (v1alpha2) — placed next to sources in our shape.
+	if p.SeedBundleFileID != "" {
+		cfg["seed_bundle_file_id"] = p.SeedBundleFileID
+	}
 	body := map[string]any{
 		"title":  p.Title,
 		"bridge": map[string]any{},
@@ -854,6 +865,9 @@ func (c *Client) CreateCodeSession(ctx context.Context, p *CreateSessionParams) 
 	}
 	if p.Source != "" {
 		body["source"] = p.Source
+	}
+	if p.EnvironmentID != "" {
+		body["environment_id"] = p.EnvironmentID // real binds via IJt/oUt
 	}
 	if p.Ultraplan {
 		body["ultraplan"] = true

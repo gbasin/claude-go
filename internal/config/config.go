@@ -23,6 +23,7 @@ type Settings struct {
 	DisabledMcpjsonServers     []string          `json:"disabledMcpjsonServers"`
 	IncludeCoAuthoredBy        *bool             `json:"includeCoAuthoredBy"`
 	AutoCompactWindow          string            `json:"autoCompactWindow"`
+	AdvisorModel               string            `json:"advisorModel"`
 	// disableRemoteControl gates `claude remote-control` / Remote Control;
 	// true in ANY tier (managed, user, project) disables it (mod_1259.js Xe()).
 	DisableRemoteControl bool `json:"disableRemoteControl"`
@@ -107,6 +108,12 @@ func Load(cwd string) *Settings {
 				if s.FastMode != "" {
 					merged.FastMode = s.FastMode
 				}
+				if s.AutoCompactWindow != "" {
+					merged.AutoCompactWindow = s.AutoCompactWindow
+				}
+				if s.AdvisorModel != "" {
+					merged.AdvisorModel = s.AdvisorModel
+				}
 				if s.EnableAllProjectMcpServers {
 					merged.EnableAllProjectMcpServers = true
 				}
@@ -144,6 +151,26 @@ func Account() (email, accountUUID, deviceID string) {
 		deviceID = v
 	}
 	return email, accountUUID, deviceID
+}
+
+// OrganizationUUID reads oauthAccount.organizationUuid from ~/.claude.json
+// (real's z2() — the org that owns :orgUUID-scoped endpoints such as
+// /api/oauth/organizations/:orgUUID/sync/github/auth, mod_0963.js).
+func OrganizationUUID() string {
+	home, _ := os.UserHomeDir()
+	b, err := os.ReadFile(filepath.Join(home, ".claude.json"))
+	if err != nil {
+		return ""
+	}
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil {
+		return ""
+	}
+	if v, ok := m["oauthAccount"].(map[string]any); ok {
+		s, _ := v["organizationUuid"].(string)
+		return s
+	}
+	return ""
 }
 
 // managedSettingsPath: enterprise-managed settings (CC reads these too).
