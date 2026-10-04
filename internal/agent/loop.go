@@ -294,6 +294,9 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		if l.Events.OnToolUse != nil {
 			l.Events.OnToolUse(b.Name, b.Input)
 		}
+		if os.Getenv("CG_DBGINPUT") != "" {
+			fmt.Fprintf(os.Stderr, "[dbginput %s] %q\n", b.Name, string(b.Input))
+		}
 		var r tools.Result
 		if len(l.AllowedTools) > 0 && !containsStr(l.AllowedTools, b.Name) {
 			r = tools.Result{Content: fmt.Sprintf("tool %s not allowed for this agent", b.Name), IsError: true}

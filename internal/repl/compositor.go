@@ -52,25 +52,25 @@ const (
 )
 
 var (
-	compActive  atomic.Bool // region installed; read lock-free by the spinner
-	compMu      sync.Mutex  // serializes every compositor frame
-	compW       int         // last measured width
-	compH       int         // last measured height
-	compFits    bool        // terminal tall enough to host the current zone
-	compSusp    int         // >0: modal dialog owns the screen (nests)
-	compZoneH   int         // zone height actually installed (0 = released)
-	compEdit    bool        // zone hosts the input box
-	compBox     []string    // edit-mode rows: box chrome + input lines
-	compDyn     string      // turn-mode top row (spinner)
-	compStatus  string      // persistent bottom row (all modes)
-	compPainted []string    // last emitted row contents (post-clamp); nil = stale
-	compCur     bool        // cursor rests inside the zone (editing)
-	compCurRow  int         // 0-based row within the zone
-	compCurCol  int         // 0-based column
-	compStreamRow int       // absolute row where turn output continues
-	compStreamCol int       // column (1-based) after last streamed char
-	compStreamOn  bool      // a turn's stream owns the scroll bottom
-	compDone    chan struct{}
+	compActive    atomic.Bool // region installed; read lock-free by the spinner
+	compMu        sync.Mutex  // serializes every compositor frame
+	compW         int         // last measured width
+	compH         int         // last measured height
+	compFits      bool        // terminal tall enough to host the current zone
+	compSusp      int         // >0: modal dialog owns the screen (nests)
+	compZoneH     int         // zone height actually installed (0 = released)
+	compEdit      bool        // zone hosts the input box
+	compBox       []string    // edit-mode rows: box chrome + input lines
+	compDyn       string      // turn-mode top row (spinner)
+	compStatus    string      // persistent bottom row (all modes)
+	compPainted   []string    // last emitted row contents (post-clamp); nil = stale
+	compCur       bool        // cursor rests inside the zone (editing)
+	compCurRow    int         // 0-based row within the zone
+	compCurCol    int         // 0-based column
+	compStreamRow int         // absolute row where turn output continues
+	compStreamCol int         // column (1-based) after last streamed char
+	compStreamOn  bool        // a turn's stream owns the scroll bottom
+	compDone      chan struct{}
 
 	// injectable for tests
 	compOut     io.Writer = os.Stdout
