@@ -26,6 +26,7 @@ type cliOpts struct {
 	outFormat    string
 	maxTurns     int
 	permMode     string
+	permModeSet  bool
 	appendSys    string
 	addDirs      []string
 	cont         bool
@@ -102,7 +103,7 @@ func parseCLI(args []string) *cliOpts {
 		"--model":           func(v string) { o.model = v },
 		"--agent":           func(v string) { o.agentName = v },
 		"--effort":          func(v string) { o.effort = v },
-		"--permission-mode": func(v string) { o.permMode = v },
+		"--permission-mode": func(v string) { o.permMode = v; o.permModeSet = true },
 		"--output-format":   func(v string) { o.outFormat = v },
 		"--input-format":    func(v string) { o.inFormat = v },
 		"--max-turns":       func(v string) { fmt.Sscanf(v, "%d", &o.maxTurns) },
