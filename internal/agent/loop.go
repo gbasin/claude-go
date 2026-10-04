@@ -134,6 +134,7 @@ func (l *Loop) buildRequest() *api.Request {
 	if l.nearContextLimit() {
 		msgs = withEphemeralBreakpoint(msgs)
 	}
+	msgs = capBreakpoints(msgs, 2) // 2 system breakpoints reserve; API max is 4 total
 	msgs = l.withDeferredReminder(msgs)
 	var safeguards json.RawMessage
 	if !l.dropSafeguards {
@@ -659,3 +660,44 @@ func (l *Loop) CompactMeta() (bool, string) { return l.compactSummaryPending, l.
 
 // LastInputTokens returns the last request's total input tokens (preTokens).
 func (l *Loop) LastInputTokens() int { return l.lastTotal }
+
+// capBreakpoints enforces the API's max-4 cache_control blocks across the
+// WHOLE request (system breakpoints reserve slots): strips the oldest
+// message breakpoints first. Verified live: resumed transcripts carry
+// stale breakpoints that 400 without this.
+func capBreakpoints(msgs []api.Message, sysReserved int) []api.Message {
+	count := 0
+	idx := make([][2]int, 0, 8) // (msg, block) of each cache_control, oldest first
+	var blocksOf = func(c json.RawMessage) []api.ContentBlock {
+		var b []api.ContentBlock
+		json.Unmarshal(c, &b)
+		return b
+	}
+	for i, m := range msgs {
+		for j, b := range blocksOf(m.Content) {
+			if b.CacheControl != nil {
+				count++
+				idx = append(idx, [2]int{i, j})
+			}
+		}
+	}
+	allowed := 4 - sysReserved
+	if count <= allowed {
+		return msgs
+	}
+	out := make([]api.Message, len(msgs))
+	copy(out, msgs)
+	dirty := map[int]bool{}
+	for _, p := range idx[:count-allowed] {
+		m := p[0]
+		blocks := blocksOf(out[m].Content)
+		if p[1] < len(blocks) {
+			blocks[p[1]].CacheControl = nil
+			if raw, err := json.Marshal(blocks); err == nil {
+				out[m].Content = raw
+				dirty[m] = true
+			}
+		}
+	}
+	return out
+}

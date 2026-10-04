@@ -413,7 +413,13 @@ func activeBranch(recs []map[string]any) []map[string]any {
 		return nil
 	}
 	var chain []map[string]any
+	seen := map[string]bool{}
 	for cur := recs[leaf]; cur != nil; {
+		u, _ := cur["uuid"].(string)
+		if seen[u] {
+			break // cyclic parentUuid chain (corrupt transcript) — stop
+		}
+		seen[u] = true
 		chain = append(chain, cur)
 		p, _ := cur["parentUuid"].(string)
 		cur = byUUID[p]
