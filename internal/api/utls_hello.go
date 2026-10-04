@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"crypto/x509"
 	"net"
@@ -67,6 +68,7 @@ func claudeHelloSpec() tlsu.ClientHelloSpec {
 			&tlsu.SupportedVersionsExtension{Versions: []uint16{ // 43
 				tlsu.VersionTLS13, tlsu.VersionTLS12,
 			}},
+			claudePSKExtension(), // 41 — emits only when resuming, like real
 		},
 	}
 
@@ -81,9 +83,11 @@ func claudeTLSDial(ctx context.Context, network, addr, serverName string, roots 
 		return nil, err
 	}
 	cfg := &tlsu.Config{
-		ServerName: serverName,
-		MinVersion: tlsu.VersionTLS12,
-		RootCAs:    roots,
+		ServerName:         serverName,
+		MinVersion:         tlsu.VersionTLS12,
+		RootCAs:            roots,
+		ClientSessionCache: claudeSessionCache,
+		OmitEmptyPsk:       true,
 	}
 	uc := tlsu.UClient(raw, cfg, tlsu.HelloCustom)
 	if err := uc.ApplyPreset(claudeHelloSpecPtr()); err != nil {
@@ -100,4 +104,39 @@ func claudeTLSDial(ctx context.Context, network, addr, serverName string, roots 
 func claudeHelloSpecPtr() *tlsu.ClientHelloSpec {
 	s := claudeHelloSpec()
 	return &s
+}
+
+// claudePSKExtension is the resumption PSK (ext 41). OmitEmptyPsk keeps
+// it off the wire on fresh handshakes; on reuse it carries the ticket
+// binder exactly like real's second-connection hello.
+func claudePSKExtension() tlsu.TLSExtension {
+	e := &tlsu.UtlsPreSharedKeyExtension{}
+	e.SetOmitEmptyPsk(true)
+	return e
+}
+
+// shared across dials so server-issued tickets resume — real reuses them.
+var claudeSessionCache = tlsu.NewLRUClientSessionCache(32)
+
+// claudeTLSHandshake wraps an existing conn (e.g. a proxy tunnel) in utls.
+func claudeTLSHandshake(ctx context.Context, conn net.Conn, serverName string, roots *x509.CertPool) (net.Conn, error) {
+	return claudeTLSHandshakeBufio(ctx, conn, nil, serverName, roots)
+}
+
+func claudeTLSHandshakeBufio(ctx context.Context, conn net.Conn, br *bufio.Reader, serverName string, roots *x509.CertPool) (net.Conn, error) {
+	cfg := &tlsu.Config{
+		ServerName:         serverName,
+		MinVersion:         tlsu.VersionTLS12,
+		RootCAs:            roots,
+		ClientSessionCache: claudeSessionCache,
+		OmitEmptyPsk:       true,
+	}
+	uc := tlsu.UClient(conn, cfg, tlsu.HelloCustom)
+	if err := uc.ApplyPreset(claudeHelloSpecPtr()); err != nil {
+		return nil, err
+	}
+	if err := uc.HandshakeContext(ctx); err != nil {
+		return nil, err
+	}
+	return uc, nil
 }
