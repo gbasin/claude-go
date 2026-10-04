@@ -5,10 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
+	"os"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
+
+	"claude-go/internal/api"
+	"claude-go/internal/auth"
+	"claude-go/internal/bridge"
 )
 
 // RemoteTrigger — real client for claude.ai's trigger service.
@@ -21,10 +29,65 @@ import (
 // Auth uses the OAuth access token (never an API key) — matching real
 // behavior where these calls go out with claude.ai creds.
 
-const remoteAPIBase = "https://api.claude.ai"
+// remoteAPIBase is pn().BASE_API_URL; remoteClaudeAIOrigin is
+// pn().CLAUDE_AI_ORIGIN — both vars so httptest can point at a stub.
+var remoteAPIBase = "https://api.claude.ai"
+var remoteClaudeAIOrigin = "https://claude.ai"
 
 func init() {
 	Register(&Tool{Def: loadSchema("RemoteTrigger"), Exec: execRemoteTrigger})
+}
+
+// remoteTriggerEnabled mirrors the real isEnabled gate (mod_1605.js):
+//
+//	Jn() && ft() && !CLAUDE_CODE_REMOTE && sn("allow_remote_sessions") && sn("allow_routines")
+//
+// Locally checkable pieces: first-party provider, a claude.ai OAuth login
+// (not an API key), the not-remote env, and the two policy gates.
+func remoteTriggerEnabled() bool {
+	cwd, _ := os.Getwd()
+	return api.DetectProvider() == api.ProviderFirstParty &&
+		claudeAIOAuthOK() &&
+		!envTruthy(os.Getenv("CLAUDE_CODE_REMOTE")) &&
+		policyGate(cwd, bridge.PolicyAllowRemoteSessions) &&
+		policyGate(cwd, bridge.PolicyAllowRoutines)
+}
+
+// RoutinesEnabled reports whether the /schedule (routines) skill is usable —
+// same gate minus allow_remote_sessions (real: Jn&&ft&&!remote&&sn(JX)).
+func RoutinesEnabled() bool {
+	cwd, _ := os.Getwd()
+	return api.DetectProvider() == api.ProviderFirstParty &&
+		claudeAIOAuthOK() &&
+		!envTruthy(os.Getenv("CLAUDE_CODE_REMOTE")) &&
+		policyGate(cwd, bridge.PolicyAllowRoutines)
+}
+
+// PolicyAllows exposes policyGate for command-level gating (e.g. /schedule's
+// policyGate: iQ → "Routines are disabled by your organization's policy.").
+func PolicyAllows(cwd, name string) bool { return policyGate(cwd, name) }
+
+// HasClaudeAIOAuth exposes the ft() login check for command gating.
+func HasClaudeAIOAuth() bool { return claudeAIOAuthOK() }
+
+// claudeAIOAuthOK mirrors ft(): a claude.ai OAuth credential is present
+// (API-key sessions don't qualify). Cached — auth.Load may hit keychain.
+var oauthCache = struct {
+	mu sync.Mutex
+	ok bool
+	at time.Time
+}{}
+
+func claudeAIOAuthOK() bool {
+	oauthCache.mu.Lock()
+	defer oauthCache.mu.Unlock()
+	if time.Since(oauthCache.at) < 60*time.Second {
+		return oauthCache.ok
+	}
+	creds, err := auth.Load()
+	oauthCache.ok = err == nil && creds != nil && !creds.IsAPIKey && creds.AccessToken != ""
+	oauthCache.at = time.Now()
+	return oauthCache.ok
 }
 
 func execRemoteTrigger(c *Context, raw json.RawMessage) Result {
@@ -37,6 +100,19 @@ func execRemoteTrigger(c *Context, raw json.RawMessage) Result {
 	}
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return Result{Content: "invalid input: " + err.Error(), IsError: true}
+	}
+	// isEnabled's sn() pair, surfaced at call time: allow_remote_sessions
+	// first, then allow_routines (real hides the tool; when it does run the
+	// gate fires in this order).
+	cwd := c.CWD
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	if r := PolicyCheck(cwd, bridge.PolicyAllowRemoteSessions); r != nil {
+		return Result{Content: *r, IsError: true}
+	}
+	if r := PolicyCheck(cwd, bridge.PolicyAllowRoutines); r != nil {
+		return Result{Content: *r, IsError: true}
 	}
 	if c.OAuthToken == nil || c.OAuthToken() == "" {
 		return Result{Content: "Not authenticated with a claude.ai account. Run /login and try again.", IsError: true}
@@ -104,10 +180,22 @@ func execRemoteTrigger(c *Context, raw json.RawMessage) Result {
 	default:
 		return Result{Content: "unknown action: " + in.Action, IsError: true}
 	}
-	return remoteCall(c, method, path, body)
+	return remoteCall(c, in.Action, in.Body, method, path, body)
 }
 
-func remoteCall(c *Context, method, path string, body any) Result {
+// remoteTriggerOut mirrors real's {status, json, summary?} data object
+// (mod_1605.js): status is the HTTP code, json is S(response), summary is
+// appended for created/updated triggers and webhook triggers.
+type remoteTriggerOut struct {
+	Status  int    `json:"status"`
+	JSON    string `json:"json"`
+	Summary string `json:"summary,omitempty"`
+}
+
+// routineIDRe is real's /^[\w-]+$/ guard on routine_trigger_id.
+var routineIDRe = regexp.MustCompile(`^[\w-]+$`)
+
+func remoteCall(c *Context, action string, reqBody json.RawMessage, method, path string, body any) Result {
 	var rdr io.Reader
 	if body != nil {
 		b, _ := json.Marshal(body)
@@ -127,22 +215,100 @@ func remoteCall(c *Context, method, path string, body any) Result {
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 100*1024))
-	if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		return Result{Content: "Not authenticated with a claude.ai account. Run /login and try again.", IsError: true}
-	}
-	if resp.StatusCode >= 400 {
-		return Result{Content: fmt.Sprintf("Remote triggers unavailable: %s — %s", resp.Status, truncStr(string(b), 500)), IsError: true}
-	}
-	// pretty-print JSON
+
+	// {status, json, summary} — real returns data for any status
+	// (validateStatus:()=>!0); the rendered block is "HTTP <status>\n<json>"
+	// plus "\n\n<summary>" when present.
+	out := remoteTriggerOut{Status: resp.StatusCode, JSON: truncStr(string(b), 100000)}
 	var v any
 	if json.Unmarshal(b, &v) == nil {
 		pb, _ := json.MarshalIndent(v, "", "  ")
-		if len(pb) > 100000 {
-			pb = append(pb[:100000], []byte("…[truncated]")...)
-		}
-		return Result{Content: string(pb)}
+		out.JSON = truncStr(string(pb), 100000)
 	}
-	return Result{Content: truncStr(string(b), 100000)}
+	ok := resp.StatusCode >= 200 && resp.StatusCode < 300
+	if ok && (action == "create" || action == "update") {
+		if m, isMap := v.(map[string]any); isMap {
+			out.Summary = routineSummary(m, time.Now())
+		}
+	}
+	if ok && action == "create_webhook_trigger" {
+		var p map[string]any
+		if json.Unmarshal(reqBody, &p) == nil {
+			if id, _ := p["routine_trigger_id"].(string); routineIDRe.MatchString(id) {
+				out.Summary = "→ Fires routine: " + remoteClaudeAIOrigin + "/code/routines/" + id
+			}
+		}
+	}
+	content := fmt.Sprintf("HTTP %d\n%s", out.Status, out.JSON)
+	if out.Summary != "" {
+		content += "\n\n" + out.Summary
+	}
+	return Result{Content: content}
+}
+
+// routineSummary is $e(trigger): the "→ Scheduled: …" / "→ Disabled (…)"
+// line plus "→ View/manage: <CLAUDE_AI_ORIGIN>/code/routines/<id>".
+func routineSummary(trig map[string]any, now time.Time) string {
+	enabled := true
+	if e, ok := trig["enabled"].(bool); ok {
+		enabled = e
+	}
+	var lines []string
+	if s, ok := trig["next_run_at"].(string); ok && s != "" {
+		if t, err := time.Parse(time.RFC3339, s); err == nil {
+			rel := relativeRunTime(t, now)
+			iso := t.UTC().Format("2006-01-02T15:04:05Z")
+			what := "next run"
+			if runOnce, _ := trig["run_once_at"].(string); runOnce != "" {
+				what = "runs once"
+			} else if cron, _ := trig["cron_expression"].(string); cron != "" {
+				what = fmt.Sprintf("next run (cron %s)", cron)
+			}
+			if enabled {
+				lines = append(lines, fmt.Sprintf("→ Scheduled: %s %s (%s UTC)", what, rel, iso))
+				if runOnce, _ := trig["run_once_at"].(string); runOnce != "" && t.Before(now) {
+					lines = append(lines, "⚠ next_run_at is in the past — confirm the date/timezone is intended.")
+				}
+			} else {
+				lines = append(lines, fmt.Sprintf("→ Disabled (next run would be %s, %s UTC)", rel, iso))
+			}
+		}
+	}
+	if id, _ := trig["id"].(string); id != "" {
+		lines = append(lines, fmt.Sprintf("→ View/manage: %s/code/routines/%s", remoteClaudeAIOrigin, id))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// relativeRunTime approximates y4(next_run_at, {now}): "in 2 hours" /
+// "3 days ago" style relative text (rounds to nearest unit, singular-aware).
+func relativeRunTime(t, now time.Time) string {
+	d := t.Sub(now)
+	past := d < 0
+	if past {
+		d = -d
+	}
+	plural := func(n int64, unit string) string {
+		if n == 1 {
+			return "1 " + unit
+		}
+		return fmt.Sprintf("%d %ss", n, unit)
+	}
+	var s string
+	switch {
+	case d < 45*time.Second:
+		s = plural(int64(math.Round(d.Seconds())), "second")
+	case d < 90*time.Minute:
+		s = plural(int64(math.Round(d.Minutes())), "minute")
+	case d < 36*time.Hour:
+		s = plural(int64(math.Round(d.Hours())), "hour")
+	default:
+		s = plural(int64(math.Round(d.Hours()/24)), "day")
+	}
+	if past {
+		return s + " ago"
+	}
+	return "in " + s
 }
 
 func truncStr(s string, n int) string {

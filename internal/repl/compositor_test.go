@@ -276,6 +276,50 @@ func TestCompClampWcwidth(t *testing.T) {
 	}
 }
 
+func TestCompGraphemeWidths(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want int
+	}{
+		{"zwj family", "👨‍👩‍👧", 2},      // one grapheme, 2 cells
+		{"zwj rainbow flag", "🏳️‍🌈", 2}, // 🏳 VS16 ZWJ 🌈
+		{"vs16 promotes", "☀️", 2},      // narrow base + FE0F → emoji
+		{"no vs16 stays text", "☀", 1},  // bare U+2600 is narrow
+		{"vs15 stays text", "☀︎", 1},    // FE0E → text presentation
+		{"skin tone joins", "👍🏽", 2},    // 👍 + 🏽
+		{"keycap", "1️⃣", 2},            // '1' + FE0F + U+20E3
+		{"flag pair", "🇫🇷", 2},          // two regional indicators
+		{"surrounding text", "a👨‍👩‍👧b", 4},
+		{"combining still attaches", "é", 1}, // e + U+0301
+		{"plain", "abc", 3},
+	}
+	for _, c := range cases {
+		if got := visWidth(c.in); got != c.want {
+			t.Errorf("%s: visWidth(%q) = %d, want %d", c.name, c.in, got, c.want)
+		}
+	}
+}
+
+func TestCompClampGraphemes(t *testing.T) {
+	// a ZWJ cluster that doesn't fit whole ends the clamp before it —
+	// never split mid-grapheme
+	fam := "👨‍👩‍👧"
+	if got := compClamp("ab"+fam+"cd", 3); got != "ab\x1b[0m" {
+		t.Fatalf("zwj split: got %q", got)
+	}
+	if got := compClamp("ab"+fam+"cd", 4); got != "ab"+fam+"\x1b[0m" {
+		t.Fatalf("zwj boundary: got %q", got)
+	}
+	// vs16 emoji counts as its 2-cell cluster, not base+selector
+	if got := compClamp("x☀️y", 2); got != "x\x1b[0m" {
+		t.Fatalf("vs16 split: got %q", got)
+	}
+	if got := compClamp("x☀️y", 3); got != "x☀️\x1b[0m" {
+		t.Fatalf("vs16 boundary: got %q", got)
+	}
+}
+
 func TestCompCloseRestores(t *testing.T) {
 	f := newFakeTerm(t, 80, 40)
 	compInit()

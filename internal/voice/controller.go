@@ -30,6 +30,19 @@ const coalesceLimit = 32000
 // is silently dropped instead of reporting a no-speech error.
 var minErrorDuration = 2000 * time.Millisecond
 
+// Circuit-breaker constants — real's L=1e4/w=3 in mod_1711: N "early
+// failures" (a session that died before any transcript data arrived)
+// inside the window suppress new sessions until one succeeds.
+var (
+	breakerWindow    = 10 * time.Second
+	breakerThreshold = 3
+)
+
+// msgStreamUnavailable surfaces when the connectivity probe (iwr) says
+// the voice stream endpoint is unreachable — reported before recording
+// starts instead of a mid-record connection failure.
+const msgStreamUnavailable = "Voice unavailable. Check your network and try again."
+
 // No-transcript error mapping — Z() in mod_1711. Selection depends on
 // whether the mic produced signal and whether the stream ever connected.
 func noTranscriptError(hadAudioSignal, wsConnected bool) string {
@@ -57,6 +70,11 @@ type Controller struct {
 	// ConnectStream mirrors connectVoiceStream (lwr). A nil return means
 	// no OAuth token → the login-required error.
 	ConnectStream func(cb *Callbacks, opts *Options) *Stream
+	// ProbeStream is the cached reachability check for the voice stream
+	// endpoint (the gating side of real's iwr). Nil disables the probe.
+	// A false verdict aborts the session pre-capture with
+	// msgStreamUnavailable.
+	ProbeStream func() bool
 	// Keyterms supplies x-config-keyterms candidates.
 	Keyterms func() []string
 	// Language is the resolved STT language code (hMe of settings.language).
@@ -81,10 +99,18 @@ type Controller struct {
 	hadAudio bool   // #k — RMS > 0.01 observed
 	wsConn   bool   // #B — stream reached onReady
 	retried  bool   // #F — early-error retry used
+	sawChunk bool   // T — capture produced at least one audio chunk
 	startAt  time.Time
 	pending  [][]byte // h — audio buffered while the ws connects
 	silenceT *time.Timer
 	maxT     *time.Timer
+
+	// circuit breaker — real's host-state class P: recent early-failure
+	// timestamps, the once-per-trip log flag, and the last actionable
+	// hint (folded into the tripped message when present).
+	earlyFailures    []time.Time
+	breakerLogged    bool
+	lastExpectedHint string
 }
 
 // CurrentState reports voiceState (uninitialized counts as idle — real's
@@ -111,6 +137,58 @@ func (c *Controller) stale(gen int) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.gen != gen
+}
+
+// recordEarlyFailure is P.recordEarlyFailure: pushes a failure timestamp
+// and keeps hint as lastExpectedHint ("" clears it).
+func (c *Controller) recordEarlyFailure(hint string) {
+	c.mu.Lock()
+	c.earlyFailures = append(c.earlyFailures, time.Now())
+	c.lastExpectedHint = hint
+	c.mu.Unlock()
+}
+
+// clearEarlyFailures is P.clearEarlyFailures — called once transcript
+// data proves a session works.
+func (c *Controller) clearEarlyFailures() {
+	c.mu.Lock()
+	c.earlyFailures = nil
+	c.breakerLogged = false
+	c.lastExpectedHint = ""
+	c.mu.Unlock()
+}
+
+// breakerTripped prunes failures older than the window and reports
+// whether new sessions are suppressed — the check at the top of #D.
+func (c *Controller) breakerTripped() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	keep := c.earlyFailures[:0]
+	for _, t := range c.earlyFailures {
+		if now.Sub(t) <= breakerWindow {
+			keep = append(keep, t)
+		}
+	}
+	c.earlyFailures = keep
+	if len(c.earlyFailures) < breakerThreshold {
+		c.breakerLogged = false
+		return false
+	}
+	c.breakerLogged = true // real gates its log/event on first trip only
+	return true
+}
+
+// breakerMessage is real's tripped text: the last actionable hint plus
+// the pause note, or the generic message.
+func (c *Controller) breakerMessage() string {
+	c.mu.Lock()
+	hint := c.lastExpectedHint
+	c.mu.Unlock()
+	if hint != "" {
+		return hint + " Voice input is paused for a moment."
+	}
+	return "Voice input is failing repeatedly and has been paused. Check your microphone and try again in a moment."
 }
 
 // Toggle is the push-to-talk action reduced to tap semantics (real hold
@@ -167,13 +245,23 @@ func (c *Controller) cleanup() {
 	}
 }
 
-// start mirrors #D (minus module-loading/breaker): availability check,
-// capture start with buffered audio, then async stream connect.
+// start mirrors #D: circuit-breaker gate, availability check,
+// connectivity probe, capture start with buffered audio, then async
+// stream connect.
 func (c *Controller) start() {
 	c.mu.Lock()
 	c.gen++
 	gen := c.gen
 	c.mu.Unlock()
+
+	// circuit breaker: >=3 early failures in the window suppress new
+	// sessions (real's recentEarlyFailures check at the top of #D)
+	if c.breakerTripped() {
+		if c.OnError != nil {
+			c.OnError(c.breakerMessage())
+		}
+		return
+	}
 
 	av := c.CheckAvailability()
 	if c.stale(gen) {
@@ -187,6 +275,20 @@ func (c *Controller) start() {
 		if c.OnError != nil {
 			c.OnError(reason)
 		}
+		c.recordEarlyFailure("")
+		c.setState(StateIdle)
+		return
+	}
+	// connectivity probe (iwr): unreachable endpoint → "voice
+	// unavailable" up front instead of a mid-record stream failure.
+	if c.ProbeStream != nil && !c.ProbeStream() {
+		if c.stale(gen) {
+			return
+		}
+		if c.OnError != nil {
+			c.OnError(msgStreamUnavailable)
+		}
+		c.recordEarlyFailure(msgStreamUnavailable)
 		c.setState(StateIdle)
 		return
 	}
@@ -198,6 +300,7 @@ func (c *Controller) start() {
 	c.hadAudio = false
 	c.wsConn = false
 	c.retried = false
+	c.sawChunk = false
 	c.pending = nil
 	c.mu.Unlock()
 
@@ -209,6 +312,7 @@ func (c *Controller) start() {
 				c.mu.Unlock()
 			}
 			c.mu.Lock()
+			c.sawChunk = true
 			s := c.stream
 			if s == nil {
 				c.pending = append(c.pending, append([]byte(nil), chunk...))
@@ -220,6 +324,14 @@ func (c *Controller) start() {
 		},
 		func() {
 			if c.CurrentState() == StateRecording {
+				// capture ended having produced no audio at all — an
+				// early failure (real's !T check before #g)
+				c.mu.Lock()
+				empty := !c.sawChunk
+				c.mu.Unlock()
+				if empty && !c.stale(gen) {
+					c.recordEarlyFailure("")
+				}
 				c.finish()
 			}
 		},
@@ -238,6 +350,12 @@ func (c *Controller) start() {
 		}
 		if c.OnError != nil {
 			c.OnError(hint)
+		}
+		// real: recordEarlyFailure(V.expected ? hint : null)
+		if res.Expected {
+			c.recordEarlyFailure(hint)
+		} else {
+			c.recordEarlyFailure("")
 		}
 		c.cleanup()
 		c.setState(StateIdle)
@@ -298,6 +416,7 @@ func (c *Controller) connect(gen int) {
 		if c.OnError != nil {
 			c.OnError("Voice mode requires a Claude.ai account. Please run /login to sign in.")
 		}
+		c.recordEarlyFailure("Voice mode could not read your Claude.ai login.")
 		c.cleanup()
 		c.setState(StateIdle)
 	}
@@ -340,6 +459,9 @@ func (c *Controller) callbacks(gen int) *Callbacks {
 			}
 			c.mu.Lock()
 			c.sawData = true
+			c.earlyFailures = nil // transcript data: session works (clearEarlyFailures)
+			c.breakerLogged = false
+			c.lastExpectedHint = ""
 			if final {
 				trimmed := strings.TrimSpace(text)
 				if trimmed != "" {
@@ -381,6 +503,7 @@ func (c *Controller) callbacks(gen int) *Callbacks {
 			if retry {
 				c.retried = true
 			}
+			sawData := c.sawData
 			c.mu.Unlock()
 			if retry {
 				// early voice_stream error (pre-transcript) — retry once
@@ -391,6 +514,11 @@ func (c *Controller) callbacks(gen int) *Callbacks {
 					}
 				}()
 				return
+			}
+			if !sawData {
+				// real: !v → recordEarlyFailure() (a session that died
+				// before any transcript data)
+				c.recordEarlyFailure("")
 			}
 			// salvage mid-stream transcript before cleanup
 			c.mu.Lock()

@@ -18,6 +18,7 @@ import (
 	"claude-go/internal/api"
 	"claude-go/internal/auth"
 	"claude-go/internal/bridge"
+	"claude-go/internal/browsermcp"
 	"claude-go/internal/config"
 	"claude-go/internal/hooks"
 	"claude-go/internal/mcp"
@@ -94,8 +95,12 @@ Flags:
   --tmux                        (accepted; tmux integration not supported)
   --ide, --desktop              (accepted; IDE bridge not supported)
   --chrome, --no-chrome         chrome tool toggle (env)
-  --teleport, --cloud, --remote, --remote-control/--rc
-                                (accepted; remote sessions not supported)
+  --claude-in-chrome-mcp        run the Claude in Chrome stdio MCP server (no REPL)
+  --chrome-native-host          run the Chrome native-messaging host (extension-facing)
+  --teleport [session]          move this session to the cloud (to-cloud flow;
+                                resume-from-cloud <session> not implemented)
+  --cloud, --remote, --remote-control/--rc
+                                (accepted; use the remote-control subcommand)
   --environment, --pool <name>  (accepted)
   --mcp-config <file>           MCP servers config file
   --strict-mcp-config           only use --mcp-config servers
@@ -164,6 +169,16 @@ var flagReplayUser, flagPartial bool
 
 func main() {
 	args := os.Args[1:]
+	// argv[1] fast-path modes (real: mod_0006.js process.argv[2] checks) —
+	// these are whole-process modes, not REPL flags.
+	if len(args) > 0 {
+		switch args[0] {
+		case "--claude-in-chrome-mcp":
+			os.Exit(browsermcp.RunServer())
+		case "--chrome-native-host":
+			os.Exit(browsermcp.RunNativeHost(os.Stdin, os.Stdout))
+		}
+	}
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		switch args[0] {
 		case "mcp":
@@ -283,7 +298,8 @@ func main() {
 	defer cleanup()
 
 	// connect MCP servers in background (like CC's async init)
-	mcpClients := startMCP(cwd, o.mcpConfig, o.strictMCP)
+	chromeSysP, chromeMCP := chromeSessionSetup(o, lastCreds)
+	mcpClients := startMCP(cwd, o.mcpConfig, o.strictMCP, chromeMCP)
 	defer func() {
 		for _, c := range mcpClients {
 			c.Close()
@@ -316,6 +332,13 @@ func main() {
 	}
 	if o.sysPrompt != "" {
 		loop.AppendSysP = o.sysPrompt
+	}
+	if chromeSysP != "" {
+		if loop.AppendSysP != "" {
+			loop.AppendSysP += "\n\n" + chromeSysP
+		} else {
+			loop.AppendSysP = chromeSysP
+		}
 	}
 	for _, fp := range o.fileArgs {
 		if b, err := os.ReadFile(fp); err == nil {
@@ -419,6 +442,10 @@ func main() {
 	loop.SessionStartSource = "startup"
 	tools.SetPeerPermMode(func() string { return loop.PermMode })
 	tools.RegisterSession(sessionID, cwd, "")
+	// durable cron (tengu_kairos_cron_durable): take the project scheduler
+	// lock, surface missed one-shots, and re-arm .claude/scheduled_tasks.json
+	tools.StartScheduledTasks(cwd, sessionID)
+	defer tools.StopScheduledTasks()
 	messengerCleanup := tools.StartMessenger(sessionID)
 	defer messengerCleanup()
 	defer tools.UnregisterSession(sessionID)
@@ -574,6 +601,17 @@ func main() {
 		return
 	}
 	fireHook(loop, hooks.SessionStart)
+	if o.teleport {
+		// claude --teleport: real's flag resumes a session FROM the cloud
+		// (`--teleport [session]`, mod_0686.js) — that direction needs the
+		// session-fetch + repo-validation pipeline in unextracted chunks.
+		// We run the sibling to-cloud flow (mod_2173.js /teleport): same
+		// preconditions, same move-to-cloud request, same outcome text.
+		if o.teleportArg != "" {
+			fmt.Fprintf(os.Stderr, "note: --teleport <session> resume-from-cloud isn't implemented in claude-go; running the to-cloud flow\n")
+		}
+		fmt.Println(repl.Teleport(loop))
+	}
 	repl.RunWithStore(loop, st2)
 	fireHook(loop, hooks.SessionEnd)
 	stampProjectState(cwd, sessionID, loop.Model, true)
@@ -606,7 +644,10 @@ func fireHook(l *agent.Loop, ev hooks.Event) {
 }
 
 // startMCP connects configured MCP servers and registers their tools.
-func startMCP(cwd, configFile string, strict bool) (clients []*mcp.Client) {
+// dynamic carries host-side additions (real's scope:"dynamic" entries —
+// gme() puts `claude-in-chrome` there), merged last so a configured server
+// of the same name wins, like real's explicit mcpConfigs beat dynamic.
+func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.ServerConfig) (clients []*mcp.Client) {
 	var cfgs map[string]mcp.ServerConfig
 	if configFile != "" {
 		cfgs = map[string]mcp.ServerConfig{}
@@ -620,6 +661,14 @@ func startMCP(cwd, configFile string, strict bool) (clients []*mcp.Client) {
 		}
 	} else {
 		cfgs = mcp.LoadConfigs(cwd)
+	}
+	if cfgs == nil {
+		cfgs = map[string]mcp.ServerConfig{}
+	}
+	for name, c := range dynamic {
+		if _, taken := cfgs[name]; !taken {
+			cfgs[name] = c
+		}
 	}
 	_ = strict
 	var wg sync.WaitGroup
@@ -707,12 +756,17 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 	sj := format == "stream-json"
 	if sj {
 		toolNames := tools.Names()
-		initEv, _ := json.Marshal(map[string]any{
+		initFields := map[string]any{
 			"type": "system", "subtype": "init",
 			"session_id": l.Client.SessionID, "model": l.Model, "cwd": l.CWD,
 			"tools": toolNames, "mcp_servers": []string{}, "permissionMode": l.PermMode,
 			"slash_commands": repl.SlashCommandNames(), "apiKeySource": "none",
-		})
+		}
+		// mod_0659.js: startup payloads carry is_coordinator only when true
+		if tools.IsCoordinatorMode() {
+			initFields["is_coordinator"] = true
+		}
+		initEv, _ := json.Marshal(initFields)
 		fmt.Println(string(initEv))
 	}
 	l.Events.OnTextDelta = func(t string) {
@@ -1012,4 +1066,121 @@ func selfUpdate() {
 		return
 	}
 	fmt.Println("updated claude-go →", exe)
+}
+
+// --- Claude in Chrome (mod_0659.js startup wiring) ------------------------------
+
+// chromeFlagState reads the --chrome/--no-chrome toggle (flags.go parks it
+// in CLAUDE_GO_CHROME). nil = not passed.
+func chromeFlagState() *bool {
+	switch os.Getenv("CLAUDE_GO_CHROME") {
+	case "1":
+		v := true
+		return &v
+	case "0":
+		v := false
+		return &v
+	}
+	return nil
+}
+
+// claudeInChromeDefault reads le().claudeInChromeDefaultEnabled.
+func claudeInChromeDefault() (set, enabled bool) {
+	home, _ := os.UserHomeDir()
+	b, err := os.ReadFile(filepath.Join(home, ".claude.json"))
+	if err != nil {
+		return false, false
+	}
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil {
+		return false, false
+	}
+	if v, ok := m["claudeInChromeDefaultEnabled"].(bool); ok {
+		return true, v
+	}
+	return false, false
+}
+
+// chromeSessionSetup mirrors the `else if(Gt)` branch of the startup block
+// in mod_0659.js: when Claude in Chrome is enabled for this session, wire
+// the dynamic stdio MCP server (gme()) and append the browser-automation
+// system prompt (W1e().systemPrompt). The entitlement gate (W()) runs only
+// when an enable signal is present — matching real's lazy evaluation —
+// and a denial on an explicit ask prints real's warning line.
+func chromeSessionSetup(o *cliOpts, creds *auth.Credentials) (sysP string, cfgs map[string]mcp.ServerConfig) {
+	chrome := chromeFlagState()
+	defSet, defEnabled := claudeInChromeDefault()
+	cfc := os.Getenv("CLAUDE_CODE_ENABLE_CFC")
+	wanted := (chrome != nil && *chrome) || cfc == "true" || (defSet && defEnabled) ||
+		(chrome == nil && cfc == "" && defSet) // let the setting decide
+	if chrome != nil && !*chrome {
+		return "", nil
+	}
+	if cfc == "false" {
+		return "", nil
+	}
+	if !wanted {
+		return "", nil
+	}
+	if o.mockMode {
+		return "", nil // no OAuth → nothing to talk to
+	}
+
+	scopes := []string(nil)
+	envTok := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN") != "" || os.Getenv("CLAUDE_GO_TOKEN") != ""
+	if creds != nil {
+		scopes = creds.Scopes
+	}
+	policyDenied := false
+	deps := browsermcp.GateDeps{
+		Provider: string(api.DetectProvider()),
+		BaseURL:  os.Getenv("ANTHROPIC_BASE_URL"),
+		OAuthToken: func() string {
+			if creds == nil || creds.IsAPIKey {
+				return ""
+			}
+			if creds.RefreshToken != "" {
+				_ = creds.Refresh()
+			}
+			t, err := creds.Token()
+			if err != nil {
+				return ""
+			}
+			return t
+		},
+	}
+	res := browsermcp.Gate(deps)
+	policyDenied = res.Denied
+	warn := func(s string) { fmt.Fprintln(os.Stderr, s) }
+	if policyDenied && (chrome != nil && *chrome || cfc == "true") {
+		// lp("allow_claude_browser_extension","Claude in Chrome","is") ?? fallback
+		warn("Warning: Claude in Chrome is disabled by your organization")
+	}
+	in := browsermcp.EnabledInput{
+		ChromeFlag:        chrome,
+		SafeMode:          os.Getenv("CLAUDE_GO_SAFE_MODE") == "1" || os.Getenv("CLAUDE_GO_RESTRICTED") == "1",
+		OAuthScopes:       scopes,
+		EnvTokenSession:   envTok,
+		PolicyDenied:      policyDenied,
+		DefaultEnabledSet: defSet,
+		DefaultEnabled:    defEnabled,
+		Warn:              warn,
+	}
+	if !browsermcp.Enabled(in) {
+		return "", nil
+	}
+	mcpCfg, _, prompt := browsermcp.SessionSetup(nil)
+	if raw, ok := mcpCfg[browsermcp.ServerName].(map[string]any); ok {
+		cmd, _ := raw["command"].(string)
+		cfg := mcp.ServerConfig{Type: "stdio", Command: cmd,
+			Args: []string{browsermcp.FlagClaudeInChromeMCP}}
+		if env, ok := raw["env"].(map[string]any); ok && len(env) > 0 {
+			cfg.Env = map[string]string{}
+			for k, v := range env {
+				cfg.Env[k], _ = v.(string)
+			}
+		}
+		cfgs = map[string]mcp.ServerConfig{browsermcp.ServerName: cfg}
+	}
+	return prompt, cfgs
 }

@@ -71,6 +71,8 @@ type cliOpts struct {
 	replayUser   bool
 	hookEvents   bool
 	execPrompt   string
+	teleport     bool
+	teleportArg  string
 	stubs        []string // feature flags accepted but not wired
 }
 
@@ -241,7 +243,7 @@ func parseCLI(args []string) *cliOpts {
 		"--worktree":       func(v string) { o.worktreeSet = true; o.worktreeName = v },
 		"--project":        func(v string) { o.projectDir = v },
 		"--from-pr":        func(v string) { o.stubs = append(o.stubs, "--from-pr") },
-		"--teleport":       func(v string) { o.stubs = append(o.stubs, "--teleport") },
+		"--teleport":       func(v string) { o.teleport = true; o.teleportArg = v },
 		"--cloud":          func(v string) { o.stubs = append(o.stubs, "--cloud") },
 		"--remote":         func(v string) { o.stubs = append(o.stubs, "--remote") },
 		"--remote-control": func(v string) { o.stubs = append(o.stubs, "--remote-control") },
