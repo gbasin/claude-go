@@ -61,6 +61,7 @@ type Client struct {
 	Entrypoint Entrypoint
 	Provider   Provider
 	Model      string // drives model-conditional betas (1m family)
+	Wants1m    bool   // [1m] suffix on configured model → context-1m beta
 	RemoteEnv  bool   // eval hasRemoteEnvironment attr
 	evalFailed bool   // eval returned empty features (fallback state)
 	RetryCount int    // exposed for x-stainless-retry-count
@@ -131,7 +132,7 @@ func (c *Client) betaHeaderValue() string {
 			"thinking-binding-controls-2026-08-01,afk-mode-2026-01-31," +
 			"extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07"
 	}
-	if is1mModel(c.Model) {
+	if is1mModel(c.Model) || c.Wants1m {
 		betas = "claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07," +
 			"interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13," +
 			"context-management-2025-06-27,prompt-caching-scope-2026-01-05," +
@@ -274,6 +275,11 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 	var err error
 	if body != nil {
 		raw, err = json.Marshal(body)
+		if os.Getenv("CLAUDE_GO_DEBUG_REQ") != "" {
+			ioutil := os.Getenv("CLAUDE_GO_DEBUG_REQ")
+			_ = ioutil
+			os.WriteFile("/tmp/last_req.json", raw, 0o600)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -371,6 +377,9 @@ func withStreamDeadline(ctx context.Context) (context.Context, context.CancelFun
 // decodeErr parses an error response body into ErrAPI.
 func decodeErr(resp *http.Response) error {
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if os.Getenv("CLAUDE_GO_DEBUG_HTTP") != "" {
+		fmt.Fprintf(os.Stderr, "[debug] %d body: %.800s\n", resp.StatusCode, string(b))
+	}
 	var e struct {
 		Error APIError `json:"error"`
 	}
