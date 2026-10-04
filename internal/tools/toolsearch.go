@@ -116,10 +116,13 @@ func toolSearchDescription() string {
 // "standard"|"tst"|"tst-auto" from ENABLE_TOOL_SEARCH + backend capability;
 // we only implement the client-side lane, so an explicit falsy value turns
 // deferral off and everything ships inline.
+// Default off: real's captured wire (2.1.289) ships every tool inline —
+// the deferred lane is flag-gated server-side. Opt in with
+// ENABLE_TOOL_SEARCH=1 for the real ToolSearch behavior.
 func toolSearchEnabled() bool {
 	v := os.Getenv("ENABLE_TOOL_SEARCH")
 	if v == "" {
-		return true
+		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "0", "false", "no", "off", "standard":

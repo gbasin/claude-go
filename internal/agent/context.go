@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	"claude-go/internal/api"
@@ -37,7 +38,7 @@ func projectSlug(cwd string) string {
 func SystemBlocks(entrypoint string, cwd, model, appendPrompt string, extra []string) []api.SystemBlock {
 	out := []api.SystemBlock{
 		{Type: "text", Text: fmt.Sprintf(
-			"x-anthropic-billing-header: cc_version=%s.f22; cc_entrypoint=%s;%s",
+			"x-anthropic-billing-header: cc_version=%s.4cb; cc_entrypoint=%s;%s",
 			version(), entrypoint, workloadTag())},
 	}
 	ident := identityCLI
@@ -200,22 +201,36 @@ func claudeMDPaths(cwd string) []string {
 	return append(paths, chain...)
 }
 
+// jq renders a Go string as a JSON string literal.
+func jq(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
 // Metadata builds metadata.user_id: a JSON string holding device/account/session.
 func Metadata(sessionID string, cfg UserConfig) json.RawMessage {
-	m := map[string]any{
-		"device_id":    cfg.DeviceID,
-		"account_uuid": cfg.AccountUUID,
-		"session_id":   sessionID,
-	}
+	// field order matters on the wire: real emits device_id, account_uuid,
+	// session_id — a struct keeps it (map marshal would sort keys).
+	var b strings.Builder
+	b.WriteString(`{"device_id":` + jq(cfg.DeviceID) +
+		`,"account_uuid":` + jq(cfg.AccountUUID) +
+		`,"session_id":` + jq(sessionID))
 	if extra := os.Getenv("CLAUDE_CODE_EXTRA_METADATA"); extra != "" {
 		var em map[string]any
 		if json.Unmarshal([]byte(extra), &em) == nil {
-			for k, v := range em {
-				m[k] = v
+			keys := make([]string, 0, len(em))
+			for k := range em {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				v, _ := json.Marshal(em[k])
+				b.WriteString("," + jq(k) + ":" + string(v))
 			}
 		}
 	}
-	inner, _ := json.Marshal(m)
+	b.WriteString("}")
+	inner := []byte(b.String())
 	outer, _ := json.Marshal(map[string]string{"user_id": string(inner)})
 	return outer
 }
@@ -229,6 +244,9 @@ type UserConfig struct {
 // Safeguards builds the dangerous_tool_use classifier context.
 func Safeguards(permMode, cwd string, rules map[string][]string) json.RawMessage {
 	cwdp := filepath.Clean(cwd)
+	if r, err := filepath.EvalSymlinks(cwdp); err == nil {
+		cwdp = r // real resolves live_cwd (/tmp -> /private/tmp)
+	}
 	mkRules := func(list []string, src string) []any {
 		out := []any{}
 		for _, r := range list {
@@ -252,16 +270,17 @@ func Safeguards(permMode, cwd string, rules map[string][]string) json.RawMessage
 				"additional": []any{}, "network": []any{},
 				"block_reads_outside_working_directories": false,
 			},
-			"rules": map[string]any{
-				"allow": append(mkRules(rules["allow"], "userSettings"), mkRules(rules["projectAllow"], "projectSettings")...),
-				"deny":  append(mkRules(rules["deny"], "userSettings"), mkRules(rules["projectDeny"], "projectSettings")...),
-				"ask":   mkRules(rules["ask"], "userSettings"),
-			},
+			"rules":              safeguardRulesMap(rules, mkRules),
+			"dropped":            safeguardDropped(rules, mkRules),
 			"auto_mode":          permMode == "auto",
 			"git_state":          gitState(cwdp),
 			"is_remote_mode":     false,
 			"restricted":         false,
 			"classify_all_shell": permMode == "auto",
+			// real's tail fields (captured 2.1.289)
+			"artifact_consent_holdback": true,
+			"case_insensitive_paths":    false,
+			"user_identity":             os.Getenv("USER"),
 		},
 	}
 	b, _ := json.Marshal([]any{s})
@@ -275,7 +294,7 @@ func platformName() string {
 	return runtime.GOOS
 }
 
-func version() string { return "2.1.288" }
+func version() string { return "2.1.289" }
 
 // DefaultThinking / OutputConfig / ContextManagement mirror the wire defaults.
 func DefaultThinking() json.RawMessage {
@@ -295,11 +314,9 @@ func DefaultOutputConfig() json.RawMessage {
 	return json.RawMessage(`{"effort":"medium"}`)
 }
 
+// real sends only the thinking clear by default (captured 2.1.289).
 func DefaultContextManagement() json.RawMessage {
-	return json.RawMessage(`{"edits":[
-		{"type":"clear_tool_uses_20250919","trigger":{"type":"input_tokens","value":180000},"keep":{"type":"tool_uses","value":3},"clear_at_least":{"type":"input_tokens","value":40000}},
-		{"type":"clear_thinking_20251015","keep":"all"}
-	]}`)
+	return json.RawMessage(`{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`)
 }
 
 func mcpInstructions() []string {
@@ -310,13 +327,34 @@ func mcpInstructions() []string {
 	return out
 }
 
+// gitState mirrors real's classifier git_state shape: fixed key set, null
+// fields when not a repo, visibility always present, error label on the
+// not-a-repo path.
 func gitState(cwd string) map[string]any {
-	g := map[string]any{}
+	g := map[string]any{
+		"cwd": cwd, "root": nil, "branch": nil, "default_branch": nil,
+		"status": nil,
+		"visibility": map[string]any{
+			"origin": nil, "push_remote": nil, "remotes": []any{},
+			"visibility_cache": []any{},
+		},
+	}
+	if _, err := exec.Command("git", "-C", cwd, "rev-parse", "--git-dir").Output(); err != nil {
+		g["error"] = "not_a_repo"
+		return g
+	}
 	if out, err := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel").Output(); err == nil {
 		g["root"] = strings.TrimSpace(string(out))
 	}
 	if out, err := exec.Command("git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
 		g["branch"] = strings.TrimSpace(string(out))
+	}
+	if out, err := exec.Command("git", "-C", cwd, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}").Output(); err == nil {
+		up := strings.TrimSpace(string(out))
+		if i := strings.Index(up, "/"); i > 0 {
+			vis := g["visibility"].(map[string]any)
+			vis["remotes"] = []any{up[:i]}
+		}
 	}
 	if out, err := exec.Command("git", "-C", cwd, "status", "--porcelain").Output(); err == nil {
 		g["status"] = strings.TrimSpace(string(out)) != ""
@@ -334,4 +372,57 @@ func workloadTag() string {
 		return " cc_workload=" + w + ";"
 	}
 	return ""
+}
+
+var srDropped map[string]int
+
+// safeguardRulesMap dedupes rules and keeps at most 64 per class — real
+// truncates and reports the remainder as dropped:{allow:N} at the
+// classifier_context level.
+func safeguardRulesMap(rules map[string][]string, mk func([]string, string) []any) map[string]any {
+	srDropped = nil
+	return safeguardRules(rules, mk)
+}
+func safeguardDropped(rules map[string][]string, mk func([]string, string) []any) any {
+	if len(srDropped) == 0 {
+		return nil
+	}
+	return srDropped
+}
+func safeguardRules(rules map[string][]string, mk func([]string, string) []any) map[string]any {
+	allow := append(mk(rules["allow"], "userSettings"), mk(rules["projectAllow"], "projectSettings")...)
+	deny := append(mk(rules["deny"], "userSettings"), mk(rules["projectDeny"], "projectSettings")...)
+	ask := mk(rules["ask"], "userSettings")
+	dedupe := func(in []any) []any {
+		seen := map[string]bool{}
+		out := in[:0]
+		for _, r := range in {
+			m := r.(map[string]string)
+			key := m["rule"] + "\x00" + m["source"]
+			if !seen[key] {
+				seen[key] = true
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+	allow, deny, ask = dedupe(allow), dedupe(deny), dedupe(ask)
+	const cap = 64
+	dropped := map[string]int{}
+	if len(allow) > cap {
+		dropped["allow"] = len(allow) - cap
+		allow = allow[:cap]
+	}
+	if len(deny) > cap {
+		dropped["deny"] = len(deny) - cap
+		deny = deny[:cap]
+	}
+	if len(ask) > cap {
+		dropped["ask"] = len(ask) - cap
+		ask = ask[:cap]
+	}
+	if len(dropped) > 0 {
+		srDropped = dropped
+	}
+	return map[string]any{"allow": allow, "deny": deny, "ask": ask}
 }

@@ -20,17 +20,16 @@ import (
 	"claude-go/internal/auth"
 )
 
-const Version = "2.1.288"
+const Version = "2.1.289"
 
+// betaFlags in real's exact wire order (captured from claude 2.1.289).
 const betaFlags = "claude-code-20250219," +
 	"oauth-2025-04-20," +
-	"context-1m-2025-08-07," +
 	"interleaved-thinking-2025-05-14," +
 	"thinking-token-count-2026-05-13," +
 	"context-management-2025-06-27," +
 	"prompt-caching-scope-2026-01-05," +
 	"mid-conversation-system-2026-04-07," +
-	"per-turn-control-2026-07-01," +
 	"mid-conversation-tool-changes-2026-07-01," +
 	"advisor-tool-2026-03-01," +
 	"effort-2025-11-24," +
@@ -115,6 +114,8 @@ func (c *Client) headers(req *http.Request) {
 	h := req.Header
 	h.Set("Accept", "application/json")
 	h.Set("Content-Type", "application/json")
+	h.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+	h.Set("Connection", "keep-alive")
 	h.Set("User-Agent", "claude-cli/"+Version+" (external, "+string(c.Entrypoint)+")")
 	h.Set("X-Claude-Code-Session-Id", c.SessionID)
 	h.Set("X-Stainless-Arch", runtime.GOARCH)
@@ -258,10 +259,12 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 		if err != nil {
 			return nil, err
 		}
-		if reqID == "" {
-			reqID = newUUID()
+		if c.RetryCount > 0 {
+			if reqID == "" {
+				reqID = newUUID()
+			}
+			req.Header.Set("x-client-request-id", reqID)
 		}
-		req.Header.Set("x-client-request-id", reqID)
 		c.headers(req)
 		if err := c.applyAuth(req); err != nil {
 			return nil, err
