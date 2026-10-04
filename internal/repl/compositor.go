@@ -251,7 +251,7 @@ func compInline(s string) {
 		return
 	}
 	compMu.Lock()
-	if compSusp > 0 || compZoneH == 0 || !compCur {
+	if compSusp > 0 || compZoneH == 0 {
 		compMu.Unlock()
 		io.WriteString(compOut, s)
 		return
@@ -261,7 +261,12 @@ func compInline(s string) {
 	fmt.Fprintf(&b, "\x1b[%d;1H", compH-compZoneH) // last scroll-region row
 	b.WriteString(s)
 	compPaintRowsLocked(&b, compRowsLocked()) // heal any clobbered zone row
-	fmt.Fprintf(&b, "\x1b[%d;%dH", compH-compZoneH+1+compCurRow, compCursorColLocked())
+	if compCur {
+		fmt.Fprintf(&b, "\x1b[%d;%dH", compH-compZoneH+1+compCurRow, compCursorColLocked())
+	} else {
+		// turn mode — streamed text owns the scroll bottom
+		fmt.Fprintf(&b, "\x1b[%d;1H", compH-compZoneH)
+	}
 	b.WriteString(compESU)
 	io.WriteString(compOut, b.String())
 	compMu.Unlock()

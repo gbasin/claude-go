@@ -160,6 +160,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 	var printedDot bool
 	var thinkingSeen bool
 	md := newMDRenderer()
+	md.out = &turnWriter{}
 
 	l.ToolCtx.Permission = func(name string, input json.RawMessage, summary string) bool {
 		if name == "Bash" && tools.SandboxAutoAllow(l.ToolCtx.CWD) {
