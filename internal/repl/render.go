@@ -347,3 +347,9 @@ func (w *turnWriter) WriteString(s string) {
 
 // finish resets per-turn state (no flush needed — writes are immediate).
 func (w *turnWriter) finish() { w.line.Reset() }
+
+// streamPrint writes a completed line into the turn's stream region —
+// compStreamWrite appends \r\n at the current stream position.
+func streamPrint(s string) {
+	(&turnWriter{}).WriteString(s + "\n")
+}

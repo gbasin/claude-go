@@ -207,7 +207,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 		if focusMode.Load() {
 			return // focus view hides tool lines (real's viewMode:"focus")
 		}
-		fmt.Printf("\r\x1b[K%s⏺%s %s%s%s\n", green, reset, bold+name+reset, summarize(name, input), "")
+		streamPrint(fmt.Sprintf("%s⏺%s %s%s%s", green, reset, bold+name+reset, summarize(name, input), ""))
 	}
 	l.Events.OnToolResult = func(name string, r tools.Result) {
 		if focusMode.Load() {
@@ -220,10 +220,10 @@ func RunWithStore(l *agent.Loop, store Store) {
 		}
 		for i, ln := range lines {
 			if i >= max {
-				fmt.Printf("  %s⎿%s  … +%d lines (ctrl+o to expand)\n", dim, reset, len(lines)-max)
+				streamPrint(fmt.Sprintf("  %s⎿%s  … +%d lines (ctrl+o to expand)", dim, reset, len(lines)-max))
 				break
 			}
-			fmt.Printf("  %s⎿%s  %s\n", dim, reset, trunc(ln, 120))
+			streamPrint(fmt.Sprintf("  %s⎿%s  %s", dim, reset, trunc(ln, 120)))
 		}
 	}
 	historySessionID = l.Client.SessionID
