@@ -140,7 +140,7 @@ func TestEphemeralBreakpoint(t *testing.T) {
 }
 
 func TestFastModeRequest(t *testing.T) {
-	l := &Loop{Model: "m", Effort: "high", FastMode: true,
+	l := &Loop{Model: "claude-sonnet-5-5", Effort: "high", FastMode: true,
 		ToolCtx: &tools.Context{Ctx: context.Background(), CWD: t.TempDir()},
 		Client:  &api.Client{}}
 	req := l.buildRequest()

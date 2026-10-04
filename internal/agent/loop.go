@@ -647,7 +647,22 @@ func (l *Loop) ContextWarnThreshold() int {
 // assistantMessage wraps the response as a full wire message for transcripts.
 func assistantMessage(resp *api.Response) api.Message {
 	b, _ := json.Marshal(resp)
-	return api.Message{Role: "assistant", Content: mustMarshalBlocks(resp.Content), Raw: b}
+	return api.Message{Role: "assistant", Content: mustMarshalBlocks(sanitizedBlocks(resp.Content)), Raw: b}
+}
+
+// sanitizedBlocks drops thinking blocks with empty thinking text — the API
+// rejects {"type":"thinking"} with "thinking.thinking: Field required"
+// (live-verified on compact replay). Signature-only thinking is never
+// replayable.
+func sanitizedBlocks(bs []api.ContentBlock) []api.ContentBlock {
+	out := bs[:0]
+	for _, b := range bs {
+		if b.Type == "thinking" && b.Thinking == "" {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out
 }
 
 func mustMarshalBlocks(bs []api.ContentBlock) json.RawMessage {

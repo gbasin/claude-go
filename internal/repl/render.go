@@ -1,6 +1,7 @@
 package repl
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"unicode/utf8"
@@ -321,30 +322,28 @@ type stringWriter interface{ WriteString(string) }
 // turnWriter routes streamed turn output through compInline so text lands
 // in the scroll region above the pinned zone (cursor rests in the input
 // box during a turn; raw writes were painted over).
+// turnWriter emits streamed turn output at the scroll-region bottom.
+// During a turn the zone rows are repaint-only (cursor save/restore), so
+// plain writes scroll correctly above the pinned zone — the earlier
+// compInline-per-write approach repositioned to row-start and wrapped
+// remnants duplicated lines.
 type turnWriter struct{ line strings.Builder }
 
 func (w *turnWriter) WriteString(s string) {
-	w.line.WriteString(s)
-	for {
-		t := w.line.String()
-		i := strings.Index(t, "\n")
-		if i < 0 {
-			if t != "" {
-				compInline("\x1b[2K" + t)
-			}
-			return
+	if f := os.Getenv("CG_TRACEF"); f != "" {
+		if fh, _ := os.OpenFile(f, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); fh != nil {
+			fmt.Fprintf(fh, "tw %q streamOn=%v row=%d col=%d\n", s, compStreamOn, compStreamRow, compStreamCol)
+			fh.Close()
 		}
-		compInline("\x1b[2K" + t[:i] + "\r\n")
-		w.line.Reset()
-		w.line.WriteString(t[i+1:])
 	}
+	// raw mode is live during a turn — bare \n moves down without
+	// returning carriage, so translate to CRLF for terminal semantics
+	if strings.Contains(s, "\n") {
+		s = strings.ReplaceAll(s, "\r\n", "\n") // normalize then expand
+		s = strings.ReplaceAll(s, "\n", "\r\n")
+	}
+	compStreamWrite(s)
 }
 
-// finish emits any partial tail and clears the accumulator — without it
-// the next turn's stream appended to this turn's line.
-func (w *turnWriter) finish() {
-	if t := w.line.String(); t != "" {
-		compInline("\x1b[2K" + t + "\r\n")
-	}
-	w.line.Reset()
-}
+// finish resets per-turn state (no flush needed — writes are immediate).
+func (w *turnWriter) finish() { w.line.Reset() }

@@ -67,6 +67,9 @@ var (
 	compCur     bool        // cursor rests inside the zone (editing)
 	compCurRow  int         // 0-based row within the zone
 	compCurCol  int         // 0-based column
+	compStreamRow int       // absolute row where turn output continues
+	compStreamCol int       // column (1-based) after last streamed char
+	compStreamOn  bool      // a turn's stream owns the scroll bottom
 	compDone    chan struct{}
 
 	// injectable for tests
@@ -782,5 +785,76 @@ func compQueueDraft(draft string) {
 		compBox = queueBoxRows(draft)
 		compFrameLocked(nil)
 	}
+	compMu.Unlock()
+}
+
+// compStreamWrite writes streamed turn output at the tracked stream
+// position — the resting cursor lives in the input box during a turn, so
+// raw writes would land inside the zone and get healed over. Positions
+// absolutely, writes, repaints the zone, restores the resting cursor.
+func compStreamWrite(s string) {
+	if s == "" {
+		return
+	}
+	if !compActive.Load() || compZoneH == 0 || compSusp > 0 || !compStreamOn {
+		io.WriteString(compOut, s)
+		return
+	}
+	compMu.Lock()
+	var b strings.Builder
+	b.WriteString(compBSU)
+	fmt.Fprintf(&b, "\x1b[%d;%dH", compStreamRow, compStreamCol)
+	b.WriteString(s)
+	// track stream position: \r\n newlines advance a row (scrolling the
+	// region at the bottom edge), printable runes advance the column with
+	// terminal wrap at compW
+	for _, r := range s {
+		switch {
+		case r == '\x1b': // ansi sequence — consume to letter
+			// already emitted; position tracking skips via byte loop below
+		case r == '\n':
+			if compStreamRow < compH-compZoneH {
+				compStreamRow++
+			} else {
+				// at scroll bottom — the newline scrolled the region
+			}
+			compStreamCol = 1
+		case r == '\r':
+			compStreamCol = 1
+		case r < 32 || r > 126:
+			// control/ansi bytes — ignore for tracking
+		default:
+			compStreamCol++
+			if compStreamCol > compW {
+				compStreamCol = 1
+				if compStreamRow < compH-compZoneH {
+					compStreamRow++
+				}
+			}
+		}
+	}
+	compPaintRowsLocked(&b, compRowsLocked())
+	if compCur {
+		fmt.Fprintf(&b, "\x1b[%d;%dH", compH-compZoneH+1+compCurRow, compCursorColLocked())
+	} else {
+		fmt.Fprintf(&b, "\x1b[%d;%dH", compStreamRow, compStreamCol)
+	}
+	b.WriteString(compESU)
+	io.WriteString(compOut, b.String())
+	compMu.Unlock()
+}
+
+// compStreamBegin marks the stream position at the scroll-region bottom —
+// call when a turn starts (after the prompt echo is emitted).
+func compStreamBegin() {
+	compMu.Lock()
+	compStreamRow, compStreamCol, compStreamOn = compH-compZoneH, 1, true
+	compMu.Unlock()
+}
+
+// compStreamEnd releases the stream position at turn end.
+func compStreamEnd() {
+	compMu.Lock()
+	compStreamOn = false
 	compMu.Unlock()
 }
