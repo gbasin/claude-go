@@ -23,8 +23,39 @@ const (
 	oauthScope    = "user:inference user:profile"
 )
 
+// Design OAuth constants (mod_1033.js): the separate Claude Design client
+// registration and its scopes. CLAUDE_CODE_DESIGN_OAUTH_CLIENT_ID overrides
+// the bundled id (hZt()); a 00000000-… prefix means unconfigured (xAe()).
+const DesignClientID = "59637612-477b-4836-a601-b0589eda7704"
+
+var DesignScopes = []string{"user:design:read", "user:design:write"}
+
+// DesignOAuthClientID mirrors hZt(): env override, else the bundled id.
+func DesignOAuthClientID() string {
+	if v := os.Getenv("CLAUDE_CODE_DESIGN_OAUTH_CLIENT_ID"); v != "" {
+		return v
+	}
+	return DesignClientID
+}
+
+// DesignOAuthConfigured mirrors xAe(): a 00000000-* client id is the
+// unconfigured placeholder.
+func DesignOAuthConfigured() bool {
+	return !strings.HasPrefix(DesignOAuthClientID(), "00000000-")
+}
+
 // LoginURL builds the OAuth authorize URL and returns (url, verifier, state).
 func LoginURL() (loginURL, verifier, state string) {
+	return loginURLFor(oauthClientID, oauthScope)
+}
+
+// DesignLoginURL is LoginURL for the Claude Design client (yZt's
+// oauthClient override — same authorize endpoint, different client/scopes).
+func DesignLoginURL() (loginURL, verifier, state string) {
+	return loginURLFor(DesignOAuthClientID(), strings.Join(DesignScopes, " "))
+}
+
+func loginURLFor(clientID, scope string) (loginURL, verifier, state string) {
 	v := randText(64)
 	s := randText(32)
 	sum := sha256.Sum256([]byte(v))
@@ -32,11 +63,11 @@ func LoginURL() (loginURL, verifier, state string) {
 	q := url.Values{
 		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
-		"client_id":             {oauthClientID},
+		"client_id":             {clientID},
 		"redirect_uri":          {oauthRedirect},
 		"response_type":         {"code"},
 		"state":                 {s},
-		"scope":                 {oauthScope},
+		"scope":                 {scope},
 	}
 	return oauthAuthURL + "?" + q.Encode(), v, s
 }
@@ -49,6 +80,21 @@ func randText(n int) string {
 
 // ExchangeCode trades the pasted "code#state" for tokens.
 func ExchangeCode(codeAndState, verifier, expectState string) (*Credentials, error) {
+	return exchangeCode(codeAndState, verifier, expectState, oauthClientID)
+}
+
+// ExchangeDesignCode is ExchangeCode for the Claude Design client (the
+// token exchange inside yZt's OAuth flow, mod_1033.js).
+func ExchangeDesignCode(codeAndState, verifier, expectState string) (*Credentials, error) {
+	c, err := exchangeCode(codeAndState, verifier, expectState, DesignOAuthClientID())
+	if err != nil {
+		return nil, err
+	}
+	c.DesignClientID = DesignOAuthClientID()
+	return c, nil
+}
+
+func exchangeCode(codeAndState, verifier, expectState, clientID string) (*Credentials, error) {
 	code, state, _ := strings.Cut(codeAndState, "#")
 	if expectState != "" && state != expectState {
 		return nil, fmt.Errorf("state mismatch")
@@ -58,7 +104,7 @@ func ExchangeCode(codeAndState, verifier, expectState string) (*Credentials, err
 		"code":          code,
 		"state":         state,
 		"redirect_uri":  oauthRedirect,
-		"client_id":     oauthClientID,
+		"client_id":     clientID,
 		"code_verifier": verifier,
 	}
 	req, _ := http.NewRequest("POST", oauthTokenURL, strings.NewReader(mustJSON(body)))

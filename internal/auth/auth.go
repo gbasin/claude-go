@@ -23,11 +23,18 @@ type Credentials struct {
 	ExpiresAt        int64    `json:"expiresAt"` // ms epoch
 	Scopes           []string `json:"scopes"`
 	SubscriptionType string   `json:"subscriptionType"`
-	IsAPIKey         bool     `json:"-"` // sk-ant-api03 style key, not OAuth
+	// DesignClientID is `clientId` on the designOauth slot — the design
+	// OAuth registration the token was minted against (mod_1033.js).
+	DesignClientID string `json:"clientId,omitempty"`
+	IsAPIKey       bool   `json:"-"` // sk-ant-api03 style key, not OAuth
 }
 
 type credFile struct {
 	ClaudeAiOauth *Credentials `json:"claudeAiOauth"`
+	// DesignOauth is the designOauth slot (xhe/gZt in mod_1033.js):
+	// Claude Design's separate OAuth credential, stored beside
+	// claudeAiOauth in .credentials.json.
+	DesignOauth *Credentials `json:"designOauth"`
 }
 
 // Load returns credentials. Order:
@@ -114,6 +121,49 @@ func fromFile(p string) (*Credentials, error) {
 		return nil, errors.New("credential file missing claudeAiOauth")
 	}
 	return cf.ClaudeAiOauth, nil
+}
+
+// credentialsFilePath is Gn()'s backing file in claude-go.
+func credentialsFilePath() string {
+	return filepath.Join(config.ClaudeDir(), ".credentials.json")
+}
+
+// LoadDesignOAuth mirrors xhe(): the designOauth slot of the credentials
+// file, or nil.
+func LoadDesignOAuth() (*Credentials, error) {
+	b, err := os.ReadFile(credentialsFilePath())
+	if err != nil {
+		return nil, err
+	}
+	var cf credFile
+	if err := json.Unmarshal(b, &cf); err != nil {
+		return nil, err
+	}
+	return cf.DesignOauth, nil
+}
+
+// SaveDesignOAuth mirrors gZt(): read-modify-write of the credentials file,
+// setting only the designOauth slot.
+func SaveDesignOAuth(creds *Credentials) error {
+	p := credentialsFilePath()
+	var cf credFile
+	if b, err := os.ReadFile(p); err == nil {
+		json.Unmarshal(b, &cf)
+	}
+	cf.DesignOauth = creds
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	b, err := json.Marshal(cf)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(p, b, 0o600)
+}
+
+// ClearDesignOAuth drops the designOauth slot (T() in mod_1033.js).
+func ClearDesignOAuth() error {
+	return SaveDesignOAuth(nil)
 }
 
 // Token returns a usable bearer token, refreshing if expired.

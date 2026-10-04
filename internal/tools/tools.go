@@ -22,12 +22,17 @@ var schemasJSON []byte
 type Result struct {
 	Content string // text result sent back as tool_result
 	IsError bool
+	// Refs, when non-empty, renders the tool_result as a list of
+	// {type:"tool_reference", tool_name} blocks instead of text — real's
+	// mapToolResultToToolResultBlockParam for ToolSearch matches.
+	Refs []string
 }
 
 // Tool is a callable builtin.
 type Tool struct {
-	Def  api.Tool
-	Exec func(ctx *Context, input json.RawMessage) Result
+	Def   api.Tool
+	Exec  func(ctx *Context, input json.RawMessage) Result
+	IsMCP bool // mcp__* tools — real defers them all (isMcp===true)
 }
 
 // Context carries per-session tool state.
@@ -51,6 +56,9 @@ type Context struct {
 	OAuthToken    func() string // claude.ai oauth access token for remote APIs
 	OnCwdChanged  func(newCWD string)
 	OnFileChanged func(path, kind string)
+	// Discovered caches deferred tools whose schemas ToolSearch has served
+	// this session (real: declared-tools latch). Guarded by mu.
+	Discovered map[string]bool
 }
 
 type readState struct {

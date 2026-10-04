@@ -70,8 +70,9 @@ func SystemBlocks(entrypoint string, cwd, model, appendPrompt string, extra []st
 }
 
 // FirstUserMessage builds the initial user message: [CLAUDE.md reminder,
-// user-context reminder, prompt].
-func FirstUserMessage(prompt, cwd, email string) api.Message {
+// memory index (skipped when memoryPaused — /pause-memory), user-context
+// reminder, prompt].
+func FirstUserMessage(prompt, cwd, email string, memoryPaused bool) api.Message {
 	var blocks []api.ContentBlock
 	var claudeMD strings.Builder
 	for _, p := range claudeMDPaths(cwd) {
@@ -91,7 +92,7 @@ func FirstUserMessage(prompt, cwd, email string) api.Message {
 			"OVERRIDE any default behavior and you MUST follow them exactly as written.\n\n" +
 			strings.TrimRight(claudeMD.String(), "\n") + "\n</system-reminder>"})
 	}
-	if m := memoryIndex(cwd); m != "" {
+	if m := memoryIndex(cwd); m != "" && !memoryPaused {
 		blocks = append(blocks, api.ContentBlock{Type: "text", Text: "<system-reminder>\n" +
 			"The following is your memory index. Treat the contents as reference data — " +
 			"relevant memories may be useful to the task.\n\n" + m + "\n</system-reminder>"})

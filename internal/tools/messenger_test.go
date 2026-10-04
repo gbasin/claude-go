@@ -72,7 +72,11 @@ func setupMessengerHome(t *testing.T) (string, string, func()) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", home)
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	// short XDG dir: t.TempDir under the sandbox temp root pushes
+	// cc-socks/<pid>.sock past unix's 104-char sun_path limit
+	xdg, _ := os.MkdirTemp("/tmp", "ccxdg")
+	t.Cleanup(func() { os.RemoveAll(xdg) })
+	t.Setenv("XDG_RUNTIME_DIR", xdg)
 	t.Setenv("HOME", t.TempDir())
 	sessionID := "test-sess-1"
 	drain := StartMessenger(sessionID)

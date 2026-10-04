@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -97,8 +98,8 @@ Flags:
   --chrome, --no-chrome         chrome tool toggle (env)
   --claude-in-chrome-mcp        run the Claude in Chrome stdio MCP server (no REPL)
   --chrome-native-host          run the Chrome native-messaging host (extension-facing)
-  --teleport [session]          move this session to the cloud (to-cloud flow;
-                                resume-from-cloud <session> not implemented)
+  --teleport [session]          resume a cloud session locally (with <session>),
+                                or move this session to the cloud via /teleport
   --cloud, --remote, --remote-control/--rc
                                 (accepted; use the remote-control subcommand)
   --environment, --pool <name>  (accepted)
@@ -368,6 +369,7 @@ func main() {
 		loop.Effort = st.EffortLevel
 	}
 	loop.AutoCompactWindow = st.AutoCompactWindow
+	loop.AdvisorModel = st.AdvisorModel
 	loop.AlwaysThinking = st.AlwaysThinkingEnabled
 	if st.FastMode == "on" || st.FastMode == "true" {
 		loop.FastMode = true
@@ -603,14 +605,31 @@ func main() {
 	fireHook(loop, hooks.SessionStart)
 	if o.teleport {
 		// claude --teleport: real's flag resumes a session FROM the cloud
-		// (`--teleport [session]`, mod_0686.js) — that direction needs the
-		// session-fetch + repo-validation pipeline in unextracted chunks.
-		// We run the sibling to-cloud flow (mod_2173.js /teleport): same
-		// preconditions, same move-to-cloud request, same outcome text.
+		// (mod_0686.js): <session> = direct resume via
+		// teleportWithProgress/cRe (Bx -> p3n -> uss -> WNt -> jNt);
+		// bare flag opens the cloud-session picker (Pi) fed by
+		// GET /v1/code/sessions.
 		if o.teleportArg != "" {
-			fmt.Fprintf(os.Stderr, "note: --teleport <session> resume-from-cloud isn't implemented in claude-go; running the to-cloud flow\n")
+			if err := teleportResume(loop, o.teleportArg); err != nil {
+				var ue *bridge.UserError
+				msg := err.Error()
+				if errors.As(err, &ue) && ue.UX != "" {
+					msg = ue.UX
+				}
+				fmt.Fprintln(os.Stderr, msg)
+				os.Exit(1)
+			}
+		} else if id := teleportPick(loop); id != "" {
+			if err := teleportResume(loop, id); err != nil {
+				var ue *bridge.UserError
+				msg := err.Error()
+				if errors.As(err, &ue) && ue.UX != "" {
+					msg = ue.UX
+				}
+				fmt.Fprintln(os.Stderr, msg)
+				os.Exit(1)
+			}
 		}
-		fmt.Println(repl.Teleport(loop))
 	}
 	repl.RunWithStore(loop, st2)
 	fireHook(loop, hooks.SessionEnd)
@@ -740,6 +759,85 @@ func clientCreds() string {
 		return lastCreds.AccessToken
 	}
 	return ""
+}
+
+// cloudSessionClient builds the OAuth-lane bridge client for the
+// --teleport resume path (same wiring as repl's codeSessionClient).
+func cloudSessionClient(l *agent.Loop) *bridge.Client {
+	return &bridge.Client{
+		BaseURL:        l.Client.BaseURL,
+		RunnerVersion:  api.Version,
+		OrgUUID:        config.OrganizationUUID(),
+		GetAccessToken: clientCreds,
+	}
+}
+
+// teleportResume runs the direct `--teleport <session>` resume
+// (teleportWithProgress → cRe in mod_0686.js/chunk-acxptg39.js): fetch the
+// cloud session, validate the repo, fetch the log, checkout the outcome
+// branch, then load the messages into this session.
+func teleportResume(l *agent.Loop, id string) error {
+	c := cloudSessionClient(l)
+	res, err := c.ResumeFromCloud(context.Background(), id, &bridge.ResumeDeps{CWD: l.ToolCtx.CWD})
+	if err != nil {
+		return err
+	}
+	l.Messages = res.Messages
+	fmt.Println(bridge.ResumeNotice(res.BranchError))
+	if res.EnvironmentKind == "bridge" {
+		// jNt's bridge-environment warning ($t(...,"warning")).
+		fmt.Println("This terminal now has its own copy of the session: new work here stays local " +
+			"and will not appear in the Claude app. To continue on your phone later, " +
+			"run /remote-control in this session.")
+	}
+	return nil
+}
+
+// teleportPick is the bare `--teleport` picker (Pi): list resumable cloud
+// sessions and read a number from stdin. Non-interactive stdin prints the
+// list plus the direct form and returns "".
+func teleportPick(l *agent.Loop) string {
+	c := cloudSessionClient(l)
+	sessions, err := c.ListCodeSessions(context.Background())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "teleport: couldn't list cloud sessions:", err)
+		return ""
+	}
+	var open []*bridge.CloudSession
+	for _, s := range sessions {
+		if s != nil && s.SessionStatus != "archived" {
+			open = append(open, s)
+		}
+	}
+	if len(open) == 0 {
+		fmt.Fprintln(os.Stderr, "teleport: no cloud sessions found")
+		return ""
+	}
+	fmt.Println("cloud sessions:")
+	for i, s := range open {
+		title := s.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		fmt.Printf("  %d. %s  %s  %s\n", i+1, title, s.ID, s.UpdatedAt)
+	}
+	st, _ := os.Stdin.Stat()
+	if st.Mode()&os.ModeCharDevice == 0 {
+		fmt.Println("run `claude --teleport <session-id>` to resume one")
+		return ""
+	}
+	fmt.Print("number to resume (blank cancels): ")
+	var pick string
+	fmt.Scanln(&pick)
+	if pick == "" {
+		return ""
+	}
+	var n int
+	if _, err := fmt.Sscanf(pick, "%d", &n); err != nil || n < 1 || n > len(open) {
+		fmt.Fprintln(os.Stderr, "teleport: cancelled")
+		return ""
+	}
+	return open[n-1].ID
 }
 
 func runMockServer(port int) {
