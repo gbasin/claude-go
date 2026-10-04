@@ -104,7 +104,9 @@ func NewLoop(client *api.Client, cwd string) *Loop {
 }
 
 func isXHighModel(m string) bool {
-	return strings.Contains(m, "fable") || strings.Contains(m, "sonnet-5")
+	// per-turn effort (xhigh/output_config) is a 5.x-class capability —
+	// live-verified: opus-4-8 rejects output_config outright
+	return strings.Contains(m, "fable") || strings.Contains(m, "-5")
 }
 
 func (l *Loop) buildRequest() *api.Request {

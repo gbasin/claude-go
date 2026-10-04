@@ -1096,12 +1096,12 @@ func resolveModel(m string) string {
 		if v := os.Getenv("ANTHROPIC_DEFAULT_SONNET_MODEL"); v != "" {
 			return v
 		}
-		return "claude-sonnet-4-6"
+		return "claude-sonnet-5-5"
 	case "opus":
 		if v := os.Getenv("ANTHROPIC_DEFAULT_OPUS_MODEL"); v != "" {
 			return v
 		}
-		return "claude-opus-4-8"
+		return "claude-opus-5-5"
 	case "haiku":
 		if v := os.Getenv("ANTHROPIC_DEFAULT_HAIKU_MODEL"); v != "" {
 			return v
