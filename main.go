@@ -436,6 +436,7 @@ func main() {
 	if o.denyTools != "" {
 		rules["deny"] = append(rules["deny"], strings.Split(o.denyTools, ",")...)
 	}
+	var sb2 []byte
 	if o.settingsF != "" {
 		var sb []byte
 		if strings.HasPrefix(strings.TrimSpace(o.settingsF), "{") {
@@ -443,6 +444,7 @@ func main() {
 		} else {
 			sb, _ = os.ReadFile(o.settingsF)
 		}
+		sb2 = sb
 		if len(sb) > 0 {
 			var s2 config.Settings
 			if json.Unmarshal(sb, &s2) == nil && s2.Permissions != nil {
@@ -455,6 +457,17 @@ func main() {
 	loop.PermRules = rules
 	stampProjectState(cwd, sessionID, loop.Model, false)
 	loop.Hooks = hooks.Load(cwd)
+	// --settings JSON also carries hooks (real applies the whole file)
+	if o.settingsF != "" && len(sb2) > 0 {
+		var top struct {
+			Hooks hooks.Config `json:"hooks"`
+		}
+		if json.Unmarshal(sb2, &top) == nil {
+			for ev, ms := range top.Hooks {
+				loop.Hooks[ev] = append(loop.Hooks[ev], ms...)
+			}
+		}
+	}
 	loop.SessionStartSource = "startup"
 	tools.SetPeerPermMode(func() string { return loop.PermMode })
 	tools.RegisterSession(sessionID, cwd, "")

@@ -265,6 +265,9 @@ func applyOutput(res *Result, o *Output) {
 		if o.HookSpecificOutput.PermissionDecision != "" {
 			res.Permission = o.HookSpecificOutput.PermissionDecision
 		}
+		if o.HookSpecificOutput.PermissionDecisionReason != "" && res.Reason == "" {
+			res.Reason = o.HookSpecificOutput.PermissionDecisionReason
+		}
 		res.AdditionalContext += o.HookSpecificOutput.AdditionalContext
 		if len(o.HookSpecificOutput.UpdatedInput) > 0 {
 			res.UpdatedInput = o.HookSpecificOutput.UpdatedInput
