@@ -30,6 +30,9 @@ var modelTable = map[string]modelInfo{
 	"claude-opus-4-5":           {"Opus 4.5", "claude-opus-4-5", "January 2025"},
 }
 
+// ModelDisplay returns real's friendly name ("Fable 5.1") for a model id.
+func ModelDisplay(model string) string { return infoFor(model).Name }
+
 func infoFor(model string) modelInfo {
 	if mi, ok := modelTable[model]; ok {
 		return mi
