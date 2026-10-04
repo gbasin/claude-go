@@ -61,6 +61,8 @@ type Client struct {
 	Entrypoint Entrypoint
 	Provider   Provider
 	Model      string // drives model-conditional betas (1m family)
+	RemoteEnv  bool   // eval hasRemoteEnvironment attr
+	evalFailed bool   // eval returned empty features (fallback state)
 	RetryCount int    // exposed for x-stainless-retry-count
 	UnixSocket string // ANTHROPIC_UNIX_SOCKET path, when set
 
@@ -68,6 +70,7 @@ type Client struct {
 	RateLimit      *RateLimit // headers from the most recent response
 	vertexToken    string
 	vertexTokenExp time.Time
+	promptID       string
 }
 
 func NewClient(creds *auth.Credentials, sessionID string, ep Entrypoint) *Client {
@@ -115,6 +118,19 @@ func NewClient(creds *auth.Credentials, sessionID string, ep Entrypoint) *Client
 // index 8; verified against live captures of both model classes.
 func (c *Client) betaHeaderValue() string {
 	betas := betaFlags
+	if c.evalFailed {
+		// eval-unreachable fallback (captured): the four default-on betas
+		// appear, context-1m is absent (needs a positive flag)
+		return "claude-code-20250219,oauth-2025-04-20," +
+			"interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13," +
+			"context-management-2025-06-27,prompt-caching-scope-2026-01-05," +
+			"mid-conversation-system-2026-04-07,per-turn-control-2026-07-01," +
+			"mid-conversation-tool-changes-2026-07-01,advisor-tool-2026-03-01," +
+			"advanced-tool-use-2025-11-20,mid-conversation-system-clear-at-2026-08-21," +
+			"effort-2025-11-24,dangerous-tool-use-2026-09-03," +
+			"thinking-binding-controls-2026-08-01,afk-mode-2026-01-31," +
+			"extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07"
+	}
 	if is1mModel(c.Model) {
 		betas = "claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07," +
 			"interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13," +
@@ -293,6 +309,15 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 			}
 		}
 		applyCustomHeaders(req)
+		if c.evalFailed {
+			req.Header.Set("anthropic-dispatch-id", "v2d")
+			req.Header.Set("x-claude-code-request-class", "main")
+			if c.promptID == "" {
+				c.promptID = newUUID()
+			}
+			req.Header.Set("x-claude-code-prompt-id", c.promptID)
+			req.Header.Set("x-client-request-id", newUUID())
+		}
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
 			lastErr = err

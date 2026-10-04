@@ -272,3 +272,84 @@ func WriteClaudeJSON(p string, m map[string]any) {
 		os.Rename(tmp, p)
 	}
 }
+
+// OAuthAccount mirrors real's oauthAccount block in .claude.json — the
+// fields the GB eval attributes payload reads.
+type OAuthAccountInfo struct {
+	OrganizationUUID          string
+	OrganizationRole          string
+	OrganizationRateLimitTier string
+	SubscriptionCreatedAt     string
+}
+
+func OAuthAccount() OAuthAccountInfo {
+	home, _ := os.UserHomeDir()
+	b, err := os.ReadFile(filepath.Join(home, ".claude.json"))
+	if err != nil {
+		return OAuthAccountInfo{}
+	}
+	var m struct {
+		OAuthAccount struct {
+			OrganizationUUID          string `json:"organizationUuid"`
+			OrganizationRole          string `json:"organizationRole"`
+			OrganizationRateLimitTier string `json:"organizationRateLimitTier"`
+			SubscriptionCreatedAt     string `json:"subscriptionCreatedAt"`
+		} `json:"oauthAccount"`
+	}
+	if json.Unmarshal(b, &m) != nil {
+		return OAuthAccountInfo{}
+	}
+	return OAuthAccountInfo{
+		OrganizationUUID:          m.OAuthAccount.OrganizationUUID,
+		OrganizationRole:          m.OAuthAccount.OrganizationRole,
+		OrganizationRateLimitTier: m.OAuthAccount.OrganizationRateLimitTier,
+		SubscriptionCreatedAt:     m.OAuthAccount.SubscriptionCreatedAt,
+	}
+}
+
+// FirstTokenTime is statsig's firstTokenTime attr — earliest userID-
+// stamped onboarding ms in .claude.json.
+func FirstTokenTime() int64 {
+	home, _ := os.UserHomeDir()
+	b, err := os.ReadFile(filepath.Join(home, ".claude.json"))
+	if err != nil {
+		return 0
+	}
+	var m struct {
+		FirstStartTime string `json:"firstStartTime"`
+		Onboarding     struct {
+			FirstTokenTime int64 `json:"firstTokenTime"`
+		} `json:"onboarding"`
+	}
+	if json.Unmarshal(b, &m) != nil {
+		return 0
+	}
+	if m.Onboarding.FirstTokenTime != 0 {
+		return m.Onboarding.FirstTokenTime
+	}
+	return 0
+}
+
+// MergeCachedGBFeatures folds an eval feature map into
+// cachedGrowthBookFeatures — real's cache write.
+func MergeCachedGBFeatures(feats map[string]any) {
+	home, _ := os.UserHomeDir()
+	p := filepath.Join(home, ".claude.json")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return
+	}
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil {
+		return
+	}
+	cur, _ := m["cachedGrowthBookFeatures"].(map[string]any)
+	if cur == nil {
+		cur = map[string]any{}
+	}
+	for k, v := range feats {
+		cur[k] = v
+	}
+	m["cachedGrowthBookFeatures"] = cur
+	WriteClaudeJSON(p, m)
+}
