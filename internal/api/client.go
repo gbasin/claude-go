@@ -77,6 +77,13 @@ func NewClient(creds *auth.Credentials, sessionID string, ep Entrypoint) *Client
 		TLSHandshakeTimeout: 10 * time.Second,
 		DisableCompression:  false,
 	}
+	// fingerprint fidelity: first-party HTTPS calls go over utls + a raw
+	// HTTP/1.1 writer so TLS ClientHello (BoringSSL-shaped) and header order
+	// match real Bun byte-for-byte. CLAUDE_GO_RAW_HTTP=0 falls back.
+	var rt http.RoundTripper = tr
+	if p == ProviderFirstParty && os.Getenv("CLAUDE_GO_RAW_HTTP") != "0" {
+		rt = routingTransport{raw: rawHTTP11RoundTripper{}, std: tr}
+	}
 	c := &Client{
 		Provider:   p,
 		BaseURL:    resolveBaseURL(p),
@@ -85,7 +92,7 @@ func NewClient(creds *auth.Credentials, sessionID string, ep Entrypoint) *Client
 		Entrypoint: ep,
 		HTTP: &http.Client{
 			Timeout:   0, // streaming: no overall timeout (deadline is per-request ctx)
-			Transport: tr,
+			Transport: rt,
 		},
 	}
 	// ANTHROPIC_UNIX_SOCKET: route every request over a local unix socket
@@ -446,4 +453,25 @@ func newUUID() string {
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// WireTransport is the first-party transport: https goes over utls + raw
+// HTTP/1.1 (real's ClientHello + header order); http stays stdlib. Used by
+// the connector/proxy MCP transports too so their fingerprint also matches.
+func WireTransport() http.RoundTripper {
+	return routingTransport{raw: rawHTTP11RoundTripper{}, std: http.DefaultTransport}
+}
+
+// routingTransport picks the utls+raw path for https requests and the std
+// transport otherwise (http capture servers, unix sockets, non-443 ports).
+type routingTransport struct {
+	raw http.RoundTripper
+	std http.RoundTripper
+}
+
+func (r routingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Scheme == "https" {
+		return r.raw.RoundTrip(req)
+	}
+	return r.std.RoundTrip(req)
 }
