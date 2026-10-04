@@ -568,12 +568,20 @@ func main() {
 		if id != "" {
 			var msgs []api.Message
 			var err error
+			// normalize: -r accepts a transcript path, not just an id —
+			// resolve it to (id, loadPath) before branching on resumeAt
+			loadPath := ""
+			if strings.HasSuffix(id, ".jsonl") {
+				loadPath = id
+				id = strings.TrimSuffix(filepath.Base(id), ".jsonl")
+			}
 			switch {
+			case o.resumeAt != "" && loadPath != "":
+				msgs, err = loadSessionAtPath(loadPath, o.resumeAt)
 			case o.resumeAt != "":
 				msgs, err = loadSessionAt(cwd, id, o.resumeAt)
-			case strings.HasSuffix(id, ".jsonl"): // resume by transcript path (pickers return paths for foreign projects)
-				msgs, err = session.LoadPath(id)
-				id = filepath.Base(id)[:len(filepath.Base(id))-6]
+			case loadPath != "":
+				msgs, err = session.LoadPath(loadPath)
 			default:
 				msgs, err = session.Load(cwd, id)
 			}
