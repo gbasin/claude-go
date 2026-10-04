@@ -23,6 +23,11 @@ type Credentials struct {
 	ExpiresAt        int64    `json:"expiresAt"` // ms epoch
 	Scopes           []string `json:"scopes"`
 	SubscriptionType string   `json:"subscriptionType"`
+	// Borrowed marks creds loaded from real's shared stores (keychain /
+	// .credentials.json). Refreshing a borrowed refresh token rotates the
+	// shared family and can invalidate real's session — we use them
+	// read-only until expiry, then require `claude-go login`.
+	Borrowed         bool   `json:"-"`
 	// DesignClientID is `clientId` on the designOauth slot — the design
 	// OAuth registration the token was minted against (mod_1033.js).
 	DesignClientID string `json:"clientId,omitempty"`
@@ -73,8 +78,14 @@ func Load() (*Credentials, error) {
 	if helper := apiKeyHelper(); helper != "" {
 		return &Credentials{AccessToken: helper}, nil
 	}
+	// our own creds store first — logins and refreshes live here, never
+	// in real's keychain/file
+	if c, err := fromFile(ownCredsPath()); err == nil {
+		return c, nil
+	}
 	if runtime.GOOS == "darwin" {
 		if c, err := fromKeychain(); err == nil {
+			c.Borrowed = true
 			return c, nil
 		}
 	}
@@ -82,11 +93,13 @@ func Load() (*Credentials, error) {
 		filepath.Join(config.ClaudeDir(), ".credentials.json"),
 	} {
 		if c, err := fromFile(p); err == nil {
+			c.Borrowed = true
 			return c, nil
 		}
 	}
 	// real also stores claudeAiOauth inside ~/.claude.json (config store)
 	if c, err := fromFile(filepath.Join(config.Home(), ".claude.json")); err == nil {
+		c.Borrowed = true
 		return c, nil
 	}
 	return nil, errors.New("no credentials found: run `claude` once to log in, or set ANTHROPIC_API_KEY")
@@ -175,6 +188,11 @@ func (c *Credentials) Token() (string, error) {
 	if c.ExpiresAt == 0 || time.Now().UnixMilli() < c.ExpiresAt-60_000 {
 		return c.AccessToken, nil
 	}
+	if c.Borrowed {
+		// never rotate a shared family — return the borrowed token until
+		// expiry; past that the API's 401 prompts a fresh claude-go login
+		return c.AccessToken, nil
+	}
 	if err := c.Refresh(); err != nil {
 		// fall back to possibly-still-valid token
 		if c.AccessToken != "" {
@@ -224,10 +242,10 @@ func (c *Credentials) Refresh() error {
 	if out.ExpiresIn > 0 {
 		c.ExpiresAt = time.Now().UnixMilli() + out.ExpiresIn*1000
 	}
-	// persist refreshed creds back to keychain — rotated refresh tokens
-	// would otherwise be lost on exit
-	if runtime.GOOS == "darwin" && out.RefreshToken != "" {
-		WriteKeychain(c)
+	// persist rotated creds to OUR store only — writing to real's
+	// keychain slot is what clobbered the shared session
+	if out.RefreshToken != "" {
+		writeOwnCreds(c)
 	}
 	return nil
 }
@@ -252,4 +270,29 @@ func apiKeyHelper() string {
 		}
 	}
 	return ""
+}
+
+// ownCredsPath is our private credentials file — defaults to
+// ~/.claude-go/.credentials.json, override with CLAUDE_GO_CREDS_FILE.
+// Keeping a separate store means our token rotation can never touch the
+// family's other consumers.
+func ownCredsPath() string {
+	if p := os.Getenv("CLAUDE_GO_CREDS_FILE"); p != "" {
+		return p
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude-go", ".credentials.json")
+}
+
+func writeOwnCreds(c *Credentials) {
+	p := ownCredsPath()
+	os.MkdirAll(filepath.Dir(p), 0o700)
+	b, _ := json.Marshal(map[string]any{"claudeAiOauth": c})
+	os.WriteFile(p, b, 0o600)
+}
+
+// SaveOwnCreds persists a freshly-logged-in credential to our store.
+func SaveOwnCreds(c *Credentials) {
+	c.Borrowed = false
+	writeOwnCreds(c)
 }
