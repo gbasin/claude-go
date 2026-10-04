@@ -299,6 +299,7 @@ func main() {
 	defer cleanup()
 
 	// connect MCP servers in background (like CC's async init)
+	mcp.SetSessionID(sessionID)
 	chromeSysP, chromeMCP := chromeSessionSetup(o, lastCreds)
 	mcpClients := startMCP(cwd, o.mcpConfig, o.strictMCP, chromeMCP)
 	defer func() {
