@@ -129,6 +129,7 @@ func (l *Loop) buildRequest() *api.Request {
 	if l.maxTokensClamp && mt > 64000 {
 		mt = 64000
 	}
+	l.Client.Model = l.Model // beta list is model-conditional
 	return &api.Request{
 		Model:             l.Model,
 		MaxTokens:         mt,

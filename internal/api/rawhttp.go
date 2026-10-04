@@ -6,10 +6,12 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/x509"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -109,6 +111,36 @@ func (rawHTTP11RoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	return resp, nil
 }
 
+// rawProxyURL mirrors node fetch's proxy env handling: HTTPS_PROXY /
+// ALL_PROXY honored, NO_PROXY CIDR/domain list bypasses. Real's proxy
+// chain is undici EnvHttpProxyAgent — same env vars.
+func rawProxyURL(serverName string) *url.URL {
+	host := strings.ToLower(serverName)
+	if noProxy := os.Getenv("NO_PROXY"); noProxy != "" {
+		if noProxy == "*" {
+			return nil
+		}
+		for _, e := range strings.Split(noProxy, ",") {
+			e = strings.ToLower(strings.TrimSpace(e))
+			if e == "" {
+				continue
+			}
+			e = strings.TrimPrefix(e, "*.")
+			if host == e || strings.HasSuffix(host, "."+e) {
+				return nil
+			}
+		}
+	}
+	for _, env := range []string{"HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"} {
+		if v := os.Getenv(env); v != "" {
+			if u, err := url.Parse(v); err == nil {
+				return u
+			}
+		}
+	}
+	return nil
+}
+
 func getRawConn(ctx context.Context, host, serverName string) (*rawConn, error) {
 	rawPool.mu.Lock()
 	if rc := rawPool.conns[host]; rc != nil && !rc.closed {
@@ -131,7 +163,7 @@ func getRawConn(ctx context.Context, host, serverName string) (*rawConn, error) 
 	if err != nil {
 		return nil, err
 	}
-	conn, err := claudeTLSDial(ctx, "tcp", host, serverName, roots)
+	conn, err := rawDial(ctx, host, serverName, roots)
 	if err != nil {
 		return nil, err
 	}
@@ -399,5 +431,162 @@ type zstdReadCloser struct{ z *zstd.Decoder }
 func (z *zstdReadCloser) Read(p []byte) (int, error) { return z.z.Read(p) }
 func (z *zstdReadCloser) Close() error {
 	z.z.Close()
+	return nil
+}
+
+// rawDial dials the target directly or tunnels through the configured
+// proxy (CONNECT for http(s) proxies, SOCKS5 for socks://), then runs the
+// utls handshake end-to-end inside the tunnel.
+func rawDial(ctx context.Context, host, serverName string, roots *x509.CertPool) (net.Conn, error) {
+	px := rawProxyURL(serverName)
+	if px == nil {
+		return claudeTLSDial(ctx, "tcp", host, serverName, roots)
+	}
+	paddr := px.Host
+	if !strings.Contains(paddr, ":") {
+		paddr += ":8080"
+	}
+	var d net.Dialer
+	raw, err := d.DialContext(ctx, "tcp", paddr)
+	if err != nil {
+		return nil, err
+	}
+	switch px.Scheme {
+	case "http", "https":
+		conn := raw
+		if px.Scheme == "https" {
+			tc, err := claudeTLSHandshake(ctx, conn, px.Hostname(), roots)
+			if err != nil {
+				raw.Close()
+				return nil, err
+			}
+			conn = tc
+		}
+		auth := ""
+		if px.User != nil {
+			pw, _ := px.User.Password()
+			auth = "Basic " + base64.StdEncoding.EncodeToString(
+				[]byte(px.User.Username()+":"+pw))
+		}
+		req := "CONNECT " + host + " HTTP/1.1\r\nHost: " + host + "\r\n"
+		if auth != "" {
+			req += "Proxy-Authorization: " + auth + "\r\n"
+		}
+		req += "\r\n"
+		if _, err := conn.Write([]byte(req)); err != nil {
+			conn.Close()
+			return nil, err
+		}
+		br := bufio.NewReader(conn)
+		line, err := br.ReadString(0x0a)
+		if err != nil {
+			conn.Close()
+			return nil, err
+		}
+		if !strings.Contains(line, " 200") {
+			conn.Close()
+			return nil, fmt.Errorf("proxy CONNECT failed: %s", strings.TrimSpace(line))
+		}
+		for { // drain proxy response headers
+			l, err := br.ReadString(0x0a)
+			if err != nil {
+				conn.Close()
+				return nil, err
+			}
+			if l == "\r\n" || l == "\n" {
+				break
+			}
+		}
+		return claudeTLSHandshakeBufio(ctx, conn, br, serverName, roots)
+	case "socks5", "socks5h", "socks":
+		if err := socks5Handshake(ctx, raw, px, host); err != nil {
+			raw.Close()
+			return nil, err
+		}
+		return claudeTLSHandshakeBufio(ctx, raw, bufio.NewReader(raw), serverName, roots)
+	}
+	raw.Close()
+	return nil, fmt.Errorf("unsupported proxy scheme %q", px.Scheme)
+}
+
+// socks5Handshake does RFC1928 CONNECT (+RFC1929 auth) through a raw conn.
+func socks5Handshake(ctx context.Context, c net.Conn, px *url.URL, target string) error {
+	methods := []byte{0}
+	user, pw := "", ""
+	if px.User != nil {
+		user = px.User.Username()
+		pw, _ = px.User.Password()
+		methods = append(methods, 2)
+	}
+	greet := append([]byte{5, byte(len(methods))}, methods...)
+	if _, err := c.Write(greet); err != nil {
+		return err
+	}
+	var resp [2]byte
+	if _, err := io.ReadFull(c, resp[:]); err != nil {
+		return err
+	}
+	if resp[1] == 0xff {
+		return fmt.Errorf("socks5: no acceptable auth methods")
+	}
+	if resp[1] == 2 {
+		auth := append([]byte{1, byte(len(user))}, user...)
+		auth = append(auth, byte(len(pw)))
+		auth = append(auth, pw...)
+		if _, err := c.Write(auth); err != nil {
+			return err
+		}
+		if _, err := io.ReadFull(c, resp[:]); err != nil {
+			return err
+		}
+		if resp[1] != 0 {
+			return fmt.Errorf("socks5: auth rejected")
+		}
+	}
+	host, portStr, _ := net.SplitHostPort(target)
+	port, _ := strconv.Atoi(portStr)
+	if port == 0 {
+		port = 443
+	}
+	req := []byte{5, 1, 0}
+	if ip := net.ParseIP(host); ip != nil {
+		if v4 := ip.To4(); v4 != nil {
+			req = append(req, 1, v4[0], v4[1], v4[2], v4[3])
+		} else {
+			v6 := ip.To16()
+			req = append(req, 4)
+			req = append(req, v6...)
+		}
+	} else {
+		req = append(req, 3, byte(len(host)))
+		req = append(req, host...)
+	}
+	req = append(req, byte(port>>8), byte(port))
+	if _, err := c.Write(req); err != nil {
+		return err
+	}
+	var head [4]byte
+	if _, err := io.ReadFull(c, head[:]); err != nil {
+		return err
+	}
+	if head[1] != 0 {
+		return fmt.Errorf("socks5: connect failed, rep=%d", head[1])
+	}
+	var skip int
+	switch head[3] {
+	case 1:
+		skip = 4 + 2
+	case 4:
+		skip = 16 + 2
+	case 3:
+		var lb [1]byte
+		if _, err := io.ReadFull(c, lb[:]); err != nil {
+			return err
+		}
+		skip = int(lb[0]) + 2
+	}
+	if skip > 0 {
+		io.ReadFull(c, make([]byte, skip))
+	}
 	return nil
 }

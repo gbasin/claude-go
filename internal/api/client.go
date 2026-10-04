@@ -60,6 +60,7 @@ type Client struct {
 	SessionID  string
 	Entrypoint Entrypoint
 	Provider   Provider
+	Model      string // drives model-conditional betas (1m family)
 	RetryCount int    // exposed for x-stainless-retry-count
 	UnixSocket string // ANTHROPIC_UNIX_SOCKET path, when set
 
@@ -108,13 +109,30 @@ func NewClient(creds *auth.Credentials, sessionID string, ep Entrypoint) *Client
 	return c
 }
 
-// betaHeaderValue is the full anthropic-beta header/body list for this client.
+// betaHeaderValue is the full anthropic-beta header/body list for this
+// client. The 1m-context family (fable/sonnet-5/opus-5 — same predicate as
+// the context window) adds context-1m at index 2 and per-turn-control at
+// index 8; verified against live captures of both model classes.
 func (c *Client) betaHeaderValue() string {
 	betas := betaFlags
+	if is1mModel(c.Model) {
+		betas = "claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07," +
+			"interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13," +
+			"context-management-2025-06-27,prompt-caching-scope-2026-01-05," +
+			"mid-conversation-system-2026-04-07,per-turn-control-2026-07-01," +
+			"mid-conversation-tool-changes-2026-07-01,advisor-tool-2026-03-01," +
+			"effort-2025-11-24,dangerous-tool-use-2026-09-03,afk-mode-2026-01-31," +
+			"extended-cache-ttl-2025-04-11"
+	}
 	if c.Entrypoint == EntryCLI {
 		betas += ",thinking-display-updates-2026-08-18"
 	}
 	return betas
+}
+
+func is1mModel(m string) bool {
+	return strings.Contains(m, "fable") || strings.Contains(m, "sonnet-5") ||
+		strings.Contains(m, "opus-5")
 }
 
 func (c *Client) headers(req *http.Request) {
@@ -255,7 +273,6 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 			maxRetries = n
 		}
 	}
-	var reqID string
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		c.RetryCount = attempt
 		var rdr io.Reader
@@ -265,12 +282,6 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 		req, err := http.NewRequestWithContext(ctx, method, url, rdr)
 		if err != nil {
 			return nil, err
-		}
-		if c.RetryCount > 0 {
-			if reqID == "" {
-				reqID = newUUID()
-			}
-			req.Header.Set("x-client-request-id", reqID)
 		}
 		c.headers(req)
 		if err := c.applyAuth(req); err != nil {
