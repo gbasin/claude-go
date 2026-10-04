@@ -26,7 +26,7 @@ const ProtocolVersion = "2025-06-18"
 
 // ServerConfig is one entry of an "mcpServers" map.
 type ServerConfig struct {
-	Type    string            `json:"type"` // "stdio" | "http" | "sse"
+	Type    string            `json:"type"` // "stdio" | "http" | "sse" | "claudeai-proxy"
 	Command string            `json:"command"`
 	Args    []string          `json:"args"`
 	Env     map[string]string `json:"env"`
@@ -35,6 +35,33 @@ type ServerConfig struct {
 	// Authorization is a convenience field: sets the Authorization request
 	// header (e.g. "Bearer ${MCP_TOKEN}") without listing it in Headers.
 	Authorization string `json:"authorization,omitempty"`
+
+	// --- claude.ai connector fields (mod_0386.js SLn) ---
+	// Populated by FetchClaudeAIConfigs for Type "claudeai-proxy"; never
+	// serialized into user mcpServers config files.
+	Scope       string `json:"-"` // "claudeai"
+	ID          string `json:"-"` // upstream server id (mcpsrv_…/mcprs_…)
+	DisplayName string `json:"-"` // connector display_name as shown on claude.ai
+	IconURL     string `json:"-"`
+	// Stateless marks connectors whose upstream cannot hold session state;
+	// real suppresses the GET notification stream for them (Yt()).
+	Stateless bool `json:"-"`
+	// Eligible is the control plane's per-connector verdict; a false verdict
+	// on a never-connected connector keeps it out of the connect list
+	// (ODt in mod_0386.js).
+	Eligible         *bool  `json:"-"`
+	IneligibleReason string `json:"-"` // eligibility_reason
+	// EnterpriseManaged marks org-pushed installs (enterprise_managed).
+	EnterpriseManaged bool `json:"-"`
+	// ToolPermissions maps upstream tool name → effective_max_permission
+	// (compacted JSON or "blocked") — _Ln() in mod_0386.js.
+	ToolPermissions map[string]string `json:"-"`
+	// CachedInitResponse / CachedDiscoverResponse are the control plane's
+	// cached projections used to skip wire initialize / server/discover
+	// (Cr()/ro() in mod_1797.js). Kept raw; consumed lazily.
+	CachedInitResponse     json.RawMessage `json:"-"`
+	DiscoverSupport        string          `json:"-"` // "supported" | "legacy"
+	CachedDiscoverResponse json.RawMessage `json:"-"`
 }
 
 // LoadConfigs merges mcpServers from ~/.claude.json and <cwd>/.mcp.json.
@@ -171,6 +198,11 @@ type Client struct {
 	mu      sync.Mutex
 	pending map[string]chan rpcResp
 	closed  atomic.Bool
+	// toolsListErr records a failed tools/list during handshake (v.toolsListError
+	// in mod_1797.js); discoveryBearerRejected marks a 401/403 there
+	// (v.discoveryBearerRejected). Both gate the ever-connected write-back.
+	toolsListErr            error
+	discoveryBearerRejected bool
 }
 
 type Tool struct {
@@ -200,6 +232,8 @@ func Connect(name string, cfg ServerConfig) (*Client, error) {
 		c, err = connectHTTP(name, cfg)
 	case "sse":
 		c, err = connectSSE(name, cfg)
+	case "claudeai-proxy":
+		c, err = connectClaudeAIProxy(name, cfg)
 	default:
 		err = fmt.Errorf("mcp transport %q unsupported", cfg.Type)
 	}
@@ -218,6 +252,12 @@ func Connect(name string, cfg ServerConfig) (*Client, error) {
 		return nil, err
 	}
 	recordStatus(name, "connected", "", "")
+	// cdt() in mod_0386.js: a successful claude.ai connector mount (no
+	// tools/list failure, no bearer rejection) marks the session set and
+	// appends the display name to claudeAiMcpEverConnected in ~/.claude.json.
+	if cfg.Type == "claudeai-proxy" && c.toolsListErr == nil && !c.discoveryBearerRejected {
+		NoteClaudeAIConnected(name)
+	}
 	return c, nil
 }
 
@@ -267,10 +307,17 @@ func (c *Client) handshake() error {
 	}
 	if err := c.call(ctx, "tools/list", nil, &listRes); err == nil {
 		c.Tools = listRes.Tools
+	} else {
+		c.toolsListErr = err
+		var ae *AuthError
+		if asAuthErr(err, &ae) {
+			c.discoveryBearerRejected = true
+		}
 	}
 	// streamable-http servers may expose a GET stream for server-initiated
-	// traffic; open it opportunistically for notifications.
-	if ht, ok := c.tr.(*httpTransport); ok {
+	// traffic; open it opportunistically for notifications. claude.ai proxy
+	// transports suppress it (the proxy answers GET with a local 405).
+	if ht, ok := c.tr.(*httpTransport); ok && !ht.noGetStream {
 		ht.openGetStream()
 	}
 	return nil

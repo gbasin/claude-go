@@ -27,6 +27,9 @@ type Settings struct {
 	// disableRemoteControl gates `claude remote-control` / Remote Control;
 	// true in ANY tier (managed, user, project) disables it (mod_1259.js Xe()).
 	DisableRemoteControl bool `json:"disableRemoteControl"`
+	// DisableClaudeAiConnectors gates claude.ai connector auto-mount
+	// (mod_0386.js SLn: yme() check — "disabled_setting" eligibility state).
+	DisableClaudeAiConnectors bool `json:"disableClaudeAiConnectors"`
 	// policy-tier rules — always evaluated, never overridden
 	ManagedDeny  []string `json:"-"`
 	ManagedAsk   []string `json:"-"`
@@ -57,6 +60,9 @@ func Load(cwd string) *Settings {
 	}
 	if managed.DisableRemoteControl {
 		merged.DisableRemoteControl = true
+	}
+	if managed.DisableClaudeAiConnectors {
+		merged.DisableClaudeAiConnectors = true
 	}
 	merged.ManagedDeny = append(merged.ManagedDeny, managedPerms(managed, "deny")...)
 	merged.ManagedAsk = append(merged.ManagedAsk, managedPerms(managed, "ask")...)
@@ -122,6 +128,9 @@ func Load(cwd string) *Settings {
 				merged.IncludeCoAuthoredBy = s.IncludeCoAuthoredBy
 				if s.DisableRemoteControl {
 					merged.DisableRemoteControl = true
+				}
+				if s.DisableClaudeAiConnectors {
+					merged.DisableClaudeAiConnectors = true
 				}
 			}
 		}

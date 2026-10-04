@@ -264,8 +264,14 @@ func TestTeleportReconnected(t *testing.T) {
 	d, cur := readyRepoDeps(t, "cse_old000001")
 	d.ReconnectWait = 2 * time.Second
 	d.PollInterval = 5 * time.Millisecond
+	// write the fresh stamp only after the move clears the claim —
+	// precondition worktree checks take variable time, so a fixed sleep
+	// raced stamp("") and could be cleared before the poll started
 	go func() {
-		time.Sleep(50 * time.Millisecond)
+		for *cur != "" {
+			time.Sleep(time.Millisecond)
+		}
+		time.Sleep(10 * time.Millisecond)
 		*cur = "cse_new000002" // remote-control loop stamped a fresh session
 	}()
 	got := TeleportToCloud(context.Background(), testClient(srv), d)
