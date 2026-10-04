@@ -7,6 +7,7 @@ import (
 )
 
 func TestDeferredExcludedAndDiscovered(t *testing.T) {
+	t.Setenv("ENABLE_TOOL_SEARCH", "1")
 	ctx := &Context{}
 	defs := RequestDefs(ctx)
 	var names []string
@@ -53,6 +54,7 @@ func TestDeferredExcludedAndDiscovered(t *testing.T) {
 }
 
 func TestToolSearchKeywordAndRequired(t *testing.T) {
+	t.Setenv("ENABLE_TOOL_SEARCH", "1")
 	ctx := &Context{}
 	r := Dispatch(ctx, "ToolSearch", json.RawMessage(`{"query":"notebook jupyter"}`))
 	if len(r.Refs) == 0 {
@@ -73,6 +75,7 @@ func TestToolSearchKeywordAndRequired(t *testing.T) {
 }
 
 func TestToolSearchMCPTools(t *testing.T) {
+	t.Setenv("ENABLE_TOOL_SEARCH", "1")
 	RegisterMCP("slack", testMCPCaller{}, "post_message", "post a slack message", nil)
 	defer func() { mcpTools = mcpTools[:len(mcpTools)-1] }()
 	ctx := &Context{}

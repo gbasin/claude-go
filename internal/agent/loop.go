@@ -90,7 +90,7 @@ func NewLoop(client *api.Client, cwd string) *Loop {
 		Client:     client,
 		Model:      defaultModel,
 		MaxTokens:  defaultMaxTokens,
-		Effort:     "medium",
+		Effort:     "",
 		Entrypoint: "sdk-cli",
 		PermMode:   "default",
 		CWD:        abs,
