@@ -298,6 +298,18 @@ func main() {
 	client, cleanup := buildClient(o.mockMode, sessionID)
 	defer cleanup()
 
+	// GB flag eval — real fires POST /api/eval/sdk-<key> near startup;
+	// the feature map merges into cachedGrowthBookFeatures. Success/fail
+	// selects real's flag-default header+beta set on later requests.
+	if !o.mockMode {
+		go func() {
+			feats, err := client.EvalCheck(context.Background(), "")
+			// empty-feature 200 => real's fallback header/beta set;
+			// transport errors keep the cached-flag production shape
+			client.MarkEvalFailed(err == nil && feats != nil && len(feats) == 0)
+		}()
+	}
+
 	// connect MCP servers in background (like CC's async init)
 	mcp.SetSessionID(sessionID)
 	chromeSysP, chromeMCP := chromeSessionSetup(o, lastCreds)
