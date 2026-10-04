@@ -276,9 +276,10 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 	if body != nil {
 		raw, err = json.Marshal(body)
 		if os.Getenv("CLAUDE_GO_DEBUG_REQ") != "" {
-			ioutil := os.Getenv("CLAUDE_GO_DEBUG_REQ")
-			_ = ioutil
-			os.WriteFile("/tmp/last_req.json", raw, 0o600)
+			if f, ferr := os.OpenFile("/tmp/reqs.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); ferr == nil {
+				f.WriteString("=== " + path + "\n" + string(raw) + "\n")
+				f.Close()
+			}
 		}
 		if err != nil {
 			return nil, err
@@ -331,11 +332,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 			c.setRateLimit(resp)
 			// x-should-retry: server-side override suppresses/forces retries
 			if sr := resp.Header.Get("x-should-retry"); sr == "false" {
-				resp.Body.Close()
-				return nil, &ErrAPI{
-					E:          &APIError{Type: errorTypeForStatus(resp.StatusCode), Message: resp.Status},
-					StatusCode: resp.StatusCode, Headers: resp.Header,
-				}
+				return nil, decodeErr(resp) // surface the real error body
 			}
 			if sr := resp.Header.Get("x-should-retry"); sr == "true" ||
 				resp.StatusCode == 408 || resp.StatusCode == 409 ||
