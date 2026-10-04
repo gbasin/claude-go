@@ -94,6 +94,12 @@ type connectorRecord struct {
 	} `json:"tools"`
 }
 
+// sessionID for X-Mcp-Client-Session-Id (real's q()).
+var sessionID string
+
+// SetSessionID records the CLI session id for proxy request headers.
+func SetSessionID(s string) { sessionID = s }
+
 // session credential for claudeai-proxy transports — SetClaudeAICredentials
 // wires the logged-in OAuth record; per-request bearer injection (Li()).
 var (
@@ -534,9 +540,16 @@ func connectClaudeAIProxy(name string, cfg ServerConfig) (*Client, error) {
 		strings.ReplaceAll(claudeAIProxyPath, "{server_id}", cfg.ID)
 	c := &Client{Name: name, pending: map[string]chan rpcResp{}}
 	t := &httpTransport{
-		url:         u,
-		client:      &http.Client{},
-		c:           c,
+		url:    u,
+		client: &http.Client{Transport: api.WireTransport()},
+		c:      c,
+		// real's requestInit headers (mod_1797.js): User-Agent,
+		// Accept-Encoding: identity, X-Mcp-Client-Session-Id: q()
+		headers: map[string]string{
+			"User-Agent":              "claude-cli/" + api.Version + " (external, cli)",
+			"Accept-Encoding":         "identity",
+			"X-Mcp-Client-Session-Id": sessionID,
+		},
 		bearerFn:    claudeAIBearer,
 		noGetStream: true,
 		authURL:     ConnectorAuthURL(cfg),
