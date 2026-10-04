@@ -207,7 +207,8 @@ func TestPlanToolsNonInteractive(t *testing.T) {
 	s := newSession(t)
 	for _, tool := range []string{"EnterPlanMode", "ExitPlanMode"} {
 		r := s.run(t, "--mock", "-p",
-			"tool:"+tool+" {}",
+			`calls:[{"name":"ToolSearch","input":{"query":"select:`+tool+`"}},`+
+				`{"name":"`+tool+`","input":{}}]`,
 			"--permission-mode", "bypassPermissions",
 			"--output-format", "stream-json")
 		s.mustOK(t, r)
@@ -216,7 +217,7 @@ func TestPlanToolsNonInteractive(t *testing.T) {
 		if len(trs) == 0 {
 			t.Fatalf("%s: no tool_result event:\n%s", tool, r.stdout)
 		}
-		contains(t, trs[0], "interactive session", tool+" result")
+		contains(t, trs[len(trs)-1], "interactive session", tool+" result")
 	}
 }
 

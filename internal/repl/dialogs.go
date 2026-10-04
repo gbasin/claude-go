@@ -36,6 +36,14 @@ func toggleBrief() {
 	compInline(fmt.Sprintf("\r\x1b[2K  %sbrief mode %s%s\r\n", dim, state, reset))
 }
 
+// focusMode is /focus — real's "focus view: just your prompt, summary, and
+// response". When set, tool-use lines and tool results don't render.
+var focusMode atomic.Bool
+
+// antTrace is /ant-trace — per-request usage trace lines after each API
+// response.
+var antTrace atomic.Bool
+
 // askEx is the full permission prompt (mod_1477): an optional
 // decision-reason line when a rule/hook/classifier forced the ask, a
 // four-option menu where option 4 captures denial feedback, and an

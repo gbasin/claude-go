@@ -203,9 +203,15 @@ func RunWithStore(l *agent.Loop, store Store) {
 	}
 	l.Events.OnToolUse = func(name string, input json.RawMessage) {
 		spinRef.stop()
+		if focusMode.Load() {
+			return // focus view hides tool lines (real's viewMode:"focus")
+		}
 		fmt.Printf("\r\x1b[K%s⏺%s %s%s%s\n", green, reset, bold+name+reset, summarize(name, input), "")
 	}
 	l.Events.OnToolResult = func(name string, r tools.Result) {
+		if focusMode.Load() {
+			return
+		}
 		lines := strings.Split(strings.TrimRight(r.Content, "\n"), "\n")
 		max := 5
 		if briefMode.Load() {
@@ -222,6 +228,10 @@ func RunWithStore(l *agent.Loop, store Store) {
 	historySessionID = l.Client.SessionID
 	l.Events.OnUsage = func(u api.Usage) {
 		spinTokens.Store(int64(u.OutputTokens)) // spinner's ↓ token counter
+		if antTrace.Load() {
+			fmt.Printf("%s  trace %s in=%d out=%d cache-r=%d cache-w=%d%s\n", dim,
+				l.Model, u.InputTokens, u.OutputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens, reset)
+		}
 	}
 
 	// real welcome art: clawd starfield when tall enough, one-liner otherwise
@@ -1260,7 +1270,7 @@ func SlashCommandNames() []string {
 }
 
 func builtinSlashCommands() []string {
-	return []string{"add-dir", "agents", "alias", "allowed-tools", "auto", "batch", "branch", "btw", "bug", "checkpoint", "checkup", "clear", "code-review", "color", "compact", "config", "context", "cost", "debug", "diff", "doctor", "effort", "exit", "export", "fast", "feedback", "fewer-permission-prompts", "files", "fork", "goal", "help", "high", "hooks", "ide", "import", "init", "insights", "keybindings", "keybindings-help", "login", "logout", "loop", "low", "max", "mcp", "medium", "memory", "memory-types", "model", "new", "output-style", "permissions", "plan", "plugin", "pr", "privacy-settings", "proactive", "quit", "release-notes", "rename", "reset", "resume", "review", "rewind", "routines", "run", "sandbox", "schedule", "security-review", "settings", "skills", "stats", "status", "statusline", "subtask", "tasks", "teleport", "terminal-setup", "theme", "todos", "ultraplan", "ultrareview", "undo", "update-config", "usage", "vim", "voice", "xhigh"}
+	return []string{"add-dir", "advisor", "agents", "alias", "allowed-tools", "ant-trace", "artifacts", "auto", "autocompact", "background", "batch", "bg", "branch", "break-reminder", "breaks", "brief", "btw", "bug", "cd", "checkpoint", "checkup", "chrome", "clear", "cloud-plugins", "code-review", "color", "compact", "config", "context", "copy", "cost", "debug", "debug-tool-call", "design-consent", "design-login", "design-revoke", "diff", "doctor", "downtime", "effort", "env", "exit", "experiments", "export", "extra-usage", "fast", "feedback", "fewer-permission-prompts", "files", "focus", "fork", "goal", "heapdump", "help", "high", "hooks", "ide", "import", "init", "insights", "install-github-app", "issue", "keybindings", "keybindings-help", "login", "logout", "loop", "low", "max", "mcp", "medium", "memory", "memory-pause", "memory-types", "model", "new", "oauth-refresh", "output-style", "pause-memory", "permissions", "plan", "plugin", "powerup", "pr", "privacy-settings", "proactive", "quit", "release-notes", "reload-plugins", "reload-skills", "remote-control", "remote-env", "rename", "reset", "restart", "resume", "review", "rewind", "routines", "run", "sandbox", "schedule", "scroll-speed", "security-review", "settings", "settings-review", "setup-bedrock", "setup-vertex", "skills", "stats", "status", "statusline", "stop", "subtask", "tasks", "teleport", "terminal-setup", "theme", "todos", "toggle-memory", "ultraplan", "ultrareview", "undo", "update-config", "usage", "usage-credits", "vim", "voice", "wellbeing", "xhigh"}
 }
 
 // currentStore is set by RunWithStore so slash commands can write records.
