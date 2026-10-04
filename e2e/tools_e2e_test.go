@@ -114,8 +114,8 @@ func TestCron(t *testing.T) {
 	if len(trs) != 2 {
 		t.Fatalf("expected 2 tool results, got %d:\n%s", len(trs), r.stdout)
 	}
-	contains(t, trs[0], "job_", "CronCreate result")
-	contains(t, trs[1], "job_", "CronList result")
+	contains(t, trs[0], "Scheduled recurring job", "CronCreate result")
+	contains(t, trs[1], "recurring", "CronList result")
 	contains(t, trs[1], "tick-e2e", "CronList prompt")
 }
 

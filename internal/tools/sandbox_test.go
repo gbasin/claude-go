@@ -424,6 +424,48 @@ func TestPrepareCredentialsExtract(t *testing.T) {
 	}
 }
 
+// Whole-value masked AWS env vars auto-pair onto the proxy's SigV4
+// registry (real's C_): the sentinel access key maps to the real
+// key/secret/token, scoped by the key-id entry's injectHosts.
+func TestPrepareCredentialsAWSPairs(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIDREAL")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secretREAL")
+	t.Setenv("AWS_SESSION_TOKEN", "tokenREAL")
+	px := netproxy.New(nil)
+	s := &SandboxSettings{
+		locked:  map[string]bool{},
+		Network: &SandboxNetwork{AllowedDomains: []string{"*.amazonaws.com"}},
+		Credentials: SandboxCredentials{
+			EnvVars: []SandboxCredVar{
+				{Name: "AWS_ACCESS_KEY_ID", Mode: "mask"},
+				{Name: "AWS_SECRET_ACCESS_KEY", Mode: "mask"},
+				{Name: "AWS_SESSION_TOKEN", Mode: "mask"},
+			},
+			SigV4: &SandboxSigV4{Streaming: "passthrough"},
+		},
+	}
+	var sentKey string
+	plan, err := s.prepareCredentials(px, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range plan.setEnv {
+		if strings.HasPrefix(e, "AWS_ACCESS_KEY_ID=") {
+			sentKey = strings.TrimPrefix(e, "AWS_ACCESS_KEY_ID=")
+		}
+	}
+	if sentKey == "" {
+		t.Fatalf("access key not masked: %v", plan.setEnv)
+	}
+	pair := px.AWSPairs.Lookup(sentKey)
+	if pair == nil {
+		t.Fatal("conventional trio not auto-paired")
+	}
+	if px.SigV4.Streaming != "passthrough" {
+		t.Fatalf("sigv4 policy not propagated: %+v", px.SigV4)
+	}
+}
+
 // Masked credential files: on darwin they degrade to denyRead (real's
 // documented limitation), on linux they produce bind pairs.
 func TestPrepareCredentialsFile(t *testing.T) {

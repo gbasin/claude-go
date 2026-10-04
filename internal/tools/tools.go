@@ -90,12 +90,59 @@ func All() []*Tool {
 		if interactiveOnly[n] && !Interactive {
 			continue
 		}
+		// real isEnabled gates: tengu_kairos_cron hides Cron*; the remote
+		// gate (Jn&&ft&&!remote&&allow_remote_sessions&&allow_routines)
+		// hides RemoteTrigger.
+		if (n == "CronCreate" || n == "CronDelete" || n == "CronList") && !cronEnabled() {
+			continue
+		}
+		if n == "RemoteTrigger" && !remoteTriggerEnabled() {
+			continue
+		}
 		if t, ok := registry[n]; ok {
+			if n == "CronCreate" || n == "CronDelete" || n == "CronList" {
+				t = cronToolDef(t)
+			}
 			out = append(out, t)
 		}
 	}
 	out = append(out, mcpTools...)
 	return out
+}
+
+// cronToolDef swaps Cron* descriptions to the durable-capable variant when
+// the tengu_kairos_cron_durable gate is on — real's X2r/J2r/Q2r/eWr/nWr(e)
+// text switch.
+func cronToolDef(t *Tool) *Tool {
+	if !cronDurableEnabled() {
+		return t
+	}
+	d := t.Def // value copy
+	switch d.Name {
+	case "CronCreate":
+		d.Description = strings.Replace(d.Description,
+			"## Session-only\n\nJobs live only in this Claude session — nothing is written to disk, and the job is gone when Claude exits.",
+			"## Durability\n\nBy default (durable: false) the job lives only in this Claude session — nothing is written to disk, and the job is gone when Claude exits. Pass durable: true to write to .claude/scheduled_tasks.json so the job survives restarts. Only use durable: true when the user explicitly asks for the task to persist (\"keep doing this every day\", \"set this up permanently\"). Most \"remind me in 5 minutes\" / \"check back in an hour\" requests should stay session-only.", 1)
+		d.Description = strings.Replace(d.Description,
+			"Jobs only fire while the REPL is idle (not mid-query). The scheduler adds",
+			"Jobs only fire while the REPL is idle (not mid-query). Durable jobs persist to .claude/scheduled_tasks.json and survive session restarts — on next launch they resume automatically. One-shot durable tasks that were missed while the REPL was closed are surfaced for catch-up. Session-only jobs die with the process. The scheduler adds", 1)
+		var schema map[string]any
+		if json.Unmarshal(d.InputSchema, &schema) == nil {
+			if props, ok := schema["properties"].(map[string]any); ok {
+				if dur, ok := props["durable"].(map[string]any); ok {
+					dur["description"] = "true = persist to .claude/scheduled_tasks.json and survive restarts. false (default) = in-memory only, dies when this Claude session ends. Use true only when the user asks the task to survive across sessions."
+					if b, err := json.Marshal(schema); err == nil {
+						d.InputSchema = b
+					}
+				}
+			}
+		}
+	case "CronDelete":
+		d.Description = "Cancel a cron job previously scheduled with CronCreate. Removes it from .claude/scheduled_tasks.json (durable jobs) or the in-memory session store (session-only jobs)."
+	case "CronList":
+		d.Description = "List all cron jobs scheduled via CronCreate, both durable (.claude/scheduled_tasks.json) and session-only."
+	}
+	return &Tool{Def: d, Exec: t.Exec}
 }
 
 // Dispatch runs a tool by name.

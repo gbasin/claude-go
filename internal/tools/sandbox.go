@@ -106,9 +106,12 @@ func (n *SandboxNetwork) effectiveAllowed() []string {
 // mode "deny" entries unshare the file/env var; mode "mask" entries replace
 // the real value inside the sandbox with a "fake_value_..." sentinel the
 // egress proxy swaps back for the real value on hosts matching injectHosts
-// (default: network.allowedDomains). AWS SigV4 re-signing (awsPairs/sigv4)
-// is parsed for schema parity but not implemented — masked AWS pairs will
-// fail upstream signing rather than being re-signed by the proxy.
+// (default: network.allowedDomains). AWS SigV4 re-signing (awsPairs) is
+// implemented on the proxy: whole-value masked AWS env vars are grouped
+// into credential pairs (explicit awsPairs plus the conventional
+// AWS_ACCESS_KEY_ID/SECRET/TOKEN auto-pair) and the MITM path re-signs
+// sentinel-credentialed requests with the real secret; sigv4 holds the
+// policies for the shapes that can't be re-signed.
 type SandboxCredentials struct {
 	Files   []SandboxCredFile
 	EnvVars []SandboxCredVar

@@ -605,6 +605,84 @@ func runeWidth(r rune) int {
 	return 1
 }
 
+// Emoji grapheme-cluster constants — the join rules visWidth/compClamp
+// apply on top of runeWidth. Hand-rolled approximation of extended
+// grapheme clusters for the common emoji cases only.
+const (
+	runeZWJ    = '\u200d' // zero-width joiner
+	runeVS16   = '\ufe0f' // variation selector-16 (emoji presentation)
+	runeVS15   = '\ufe0e' // variation selector-15 (text presentation)
+	runeKeycap = '\u20e3' // combining enclosing keycap
+	skinToneLo = 0x1f3fb  // emoji modifiers 🏻–🏿
+	skinToneHi = 0x1f3ff  //
+	regionalLo = 0x1f1e6  // regional indicators 🇦–🇿
+	regionalHi = 0x1f1ff  //
+	tagCharLo  = 0xe0020  // tag characters (subdivision flags)
+	tagCharHi  = 0xe007f  //
+)
+
+// graphemeWidth measures the next grapheme-ish cluster at s[i], returning
+// its display-cell width and byte length. Emoji-only approximation of
+// extended grapheme cluster boundaries:
+//   - ZWJ-chained sequences count as one grapheme, width = max of the
+//     chained components (min 2) — 👨‍👩‍👧 is one 2-cell grapheme;
+//   - VS16 (U+FE0F) after a base promotes it to emoji presentation
+//     (☀️ = 2 cells); VS15 stays text;
+//   - skin-tone modifiers (U+1F3FB–1F3FF) and tag characters join the
+//     base without changing width;
+//   - a regional-indicator pair forms one flag grapheme;
+//   - zero-width runes (combining marks, keycap, other selectors) attach
+//     to the cluster so truncation never splits inside it.
+func graphemeWidth(s string, i int) (cells, size int) {
+	r, sz := utf8.DecodeRuneInString(s[i:])
+	j := i + sz
+	w := runeWidth(r)
+	emoji, chained, riCount := false, false, 0
+	if r >= regionalLo && r <= regionalHi {
+		riCount = 1
+	}
+	for j < len(s) {
+		r2, sz2 := utf8.DecodeRuneInString(s[j:])
+		switch {
+		case r2 >= 0xfe00 && r2 <= 0xfe0f:
+			emoji = r2 == runeVS16 // last variation selector wins
+			j += sz2
+		case r2 >= skinToneLo && r2 <= skinToneHi:
+			j += sz2
+		case r2 >= tagCharLo && r2 <= tagCharHi:
+			j += sz2
+		case r2 == runeZWJ:
+			j += sz2
+			if j >= len(s) {
+				continue
+			}
+			r3, sz3 := utf8.DecodeRuneInString(s[j:])
+			j += sz3
+			if rw := runeWidth(r3); rw > w {
+				w = rw
+			}
+			chained = true
+		case riCount == 1 && r2 >= regionalLo && r2 <= regionalHi:
+			// second regional indicator completes the flag pair
+			riCount++
+			j += sz2
+		case runeWidth(r2) == 0:
+			// combining marks / keycap / other format chars: already
+			// zero cells — attaching keeps the cluster atomic
+			j += sz2
+		default:
+			if (chained || emoji || riCount == 2) && w < 2 {
+				w = 2
+			}
+			return w, j - i
+		}
+	}
+	if (chained || emoji || riCount == 2) && w < 2 {
+		w = 2
+	}
+	return w, j - i
+}
+
 // visWidth is the display-cell width of s, skipping ANSI escape sequences.
 func visWidth(s string) int {
 	w := 0
@@ -613,17 +691,17 @@ func visWidth(s string) int {
 			i += ansiLen(s, i)
 			continue
 		}
-		r, sz := utf8.DecodeRuneInString(s[i:])
-		w += runeWidth(r)
+		cw, sz := graphemeWidth(s, i)
+		w += cw
 		i += sz
 	}
 	return w
 }
 
 // compClamp truncates s to w visible cells, preserving escape sequences.
-// Wide runes count as 2 cells; a rune that doesn't fit whole ends the
-// string (the row is already blanked by \x1b[2K). A truncated styled
-// string gets a reset so the dangling color can't bleed.
+// Wide grapheme clusters count as 2 cells; a cluster that doesn't fit
+// whole ends the string (the row is already blanked by \x1b[2K). A
+// truncated styled string gets a reset so the dangling color can't bleed.
 func compClamp(s string, w int) string {
 	vis := 0
 	for i := 0; i < len(s); {
@@ -631,11 +709,11 @@ func compClamp(s string, w int) string {
 			i += ansiLen(s, i)
 			continue
 		}
-		r, sz := utf8.DecodeRuneInString(s[i:])
-		if vis+runeWidth(r) > w {
+		cw, sz := graphemeWidth(s, i)
+		if vis+cw > w {
 			return s[:i] + "\x1b[0m"
 		}
-		vis += runeWidth(r)
+		vis += cw
 		i += sz
 	}
 	return s

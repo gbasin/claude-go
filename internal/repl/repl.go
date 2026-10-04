@@ -283,6 +283,13 @@ func RunWithStore(l *agent.Loop, store Store) {
 			}
 		}
 
+		// dispatchedByKeyword (mod_0386.js): "ultraplan" anywhere in the
+		// prompt routes it to the cloud ultraplan flow.
+		if strings.Contains(line, "ultraplan") {
+			ultraplanCmd(l, line)
+			continue
+		}
+
 		var queued []string
 		var draftBack []rune
 		loggedTo := 0
@@ -702,6 +709,12 @@ func runPipe(l *agent.Loop) {
 		if line == "" {
 			continue
 		}
+		// dispatchedByKeyword (mod_0386.js): "ultraplan" anywhere routes to
+		// the cloud ultraplan flow — same as the interactive path.
+		if strings.Contains(line, "ultraplan") {
+			ultraplanCmd(l, line)
+			continue
+		}
 		if _, err := l.Ask(context.Background(), expandMentions(l, line)); err != nil {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 		}
@@ -805,6 +818,14 @@ func printStatus(l *agent.Loop, ed *editor) {
 			left += "  " + b // real shows the branch as text
 		}
 		right := l.Model + " │ " + l.PermMode + " │ ? for shortcuts"
+		// standaloneAgentContext (mod_0575.js): {agentName, agentColor}
+		// surfaces in the status line; coordinator mode labels the session.
+		if name := os.Getenv("CLAUDE_GO_AGENT_NAME"); name != "" {
+			right = name + " │ " + right
+		}
+		if tools.IsCoordinatorMode() {
+			right = "coordinator │ " + right
+		}
 		pad := w - len(left) - len(right)
 		if pad < 1 {
 			pad = 1
@@ -1239,7 +1260,7 @@ func SlashCommandNames() []string {
 }
 
 func builtinSlashCommands() []string {
-	return []string{"add-dir", "agents", "alias", "allowed-tools", "auto", "batch", "branch", "btw", "bug", "checkpoint", "checkup", "clear", "code-review", "color", "compact", "config", "context", "cost", "debug", "diff", "doctor", "effort", "exit", "export", "fast", "feedback", "fewer-permission-prompts", "files", "fork", "goal", "help", "high", "hooks", "ide", "import", "init", "insights", "keybindings", "keybindings-help", "login", "logout", "loop", "low", "max", "mcp", "medium", "memory", "memory-types", "model", "new", "output-style", "permissions", "plan", "plugin", "pr", "privacy-settings", "proactive", "quit", "release-notes", "rename", "reset", "resume", "review", "rewind", "run", "sandbox", "security-review", "settings", "skills", "stats", "status", "statusline", "subtask", "tasks", "terminal-setup", "theme", "todos", "undo", "update-config", "usage", "vim", "voice", "xhigh"}
+	return []string{"add-dir", "agents", "alias", "allowed-tools", "auto", "batch", "branch", "btw", "bug", "checkpoint", "checkup", "clear", "code-review", "color", "compact", "config", "context", "cost", "debug", "diff", "doctor", "effort", "exit", "export", "fast", "feedback", "fewer-permission-prompts", "files", "fork", "goal", "help", "high", "hooks", "ide", "import", "init", "insights", "keybindings", "keybindings-help", "login", "logout", "loop", "low", "max", "mcp", "medium", "memory", "memory-types", "model", "new", "output-style", "permissions", "plan", "plugin", "pr", "privacy-settings", "proactive", "quit", "release-notes", "rename", "reset", "resume", "review", "rewind", "routines", "run", "sandbox", "schedule", "security-review", "settings", "skills", "stats", "status", "statusline", "subtask", "tasks", "teleport", "terminal-setup", "theme", "todos", "ultraplan", "ultrareview", "undo", "update-config", "usage", "vim", "voice", "xhigh"}
 }
 
 // currentStore is set by RunWithStore so slash commands can write records.
