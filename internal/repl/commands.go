@@ -514,6 +514,13 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		on := !antTrace.Load()
 		antTrace.Store(on)
 		fmt.Println("  trace output", map[bool]string{true: "on", false: "off"}[on])
+	case "radio":
+		url := "https://clau.de/radio"
+		if runtime.GOOS == "darwin" && exec.Command("open", url).Start() == nil {
+			fmt.Println("  Opening Claude FM in your browser…")
+		} else {
+			fmt.Println("  Couldn't open the browser. Listen at:", url)
+		}
 	case "issue":
 		url := "https://github.com/anthropics/claude-code/issues"
 		fmt.Println("  file an issue at", url)
@@ -2194,6 +2201,7 @@ var helpTable = map[string]helpEntry{
 	"help":          {"External", "this help", false},
 	"ide":           {"External", "IDE integration", false},
 	"issue":         {"External", "file an issue", false},
+	"radio":         {"External", "listen to Claude FM", false},
 	"release-notes": {"External", "version info", false},
 	// hidden
 	"bg":             {"", "", true},
