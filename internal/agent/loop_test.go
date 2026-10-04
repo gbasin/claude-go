@@ -108,6 +108,7 @@ func TestFirstMessageShape(t *testing.T) {
 // DeferredToolPlaceholder instead) and announces names in a
 // <system-reminder>; a ToolSearch call loads them for later requests.
 func TestDeferredToolFlow(t *testing.T) {
+	t.Setenv("ENABLE_TOOL_SEARCH", "1")
 	srv, err := mock.Start()
 	if err != nil {
 		t.Fatal(err)
@@ -202,6 +203,7 @@ func TestDeferredToolFlow(t *testing.T) {
 // Calling a still-deferred tool directly fails like real's
 // InputValidationError.
 func TestDeferredCallRefused(t *testing.T) {
+	t.Setenv("ENABLE_TOOL_SEARCH", "1")
 	l := mockLoop(t)
 	l.Ask(context.Background(), "hi") // announce deferred names
 	_, err := l.Ask(context.Background(), `tool:WebFetch {"url":"https://x","prompt":"y"}`)

@@ -313,7 +313,6 @@ func main() {
 	var promptAtt string
 	loop := agent.NewLoop(client, cwd)
 	if !o.mockMode {
-		agent.QuotaCheck(context.Background(), client, o.model)
 	}
 	loop.Entrypoint = "sdk-cli"
 	if o.model != "" {
