@@ -249,6 +249,7 @@ func cronTickSession() {
 	}
 	sessJobs = keep
 	cronMu.Unlock()
+	cronTickDurable() // lock-gated durable half (mod_1918.js)
 }
 
 func ensureCronTicker() {
@@ -261,40 +262,88 @@ func ensureCronTicker() {
 	})
 }
 
-// Real Cron* tools are session-only — "nothing is written to disk, and the
-// job is gone when Claude exits". durable is a documented no-op.
+// CronCreate mirrors the real tool (mod_1601.js): session-only by default;
+// `durable: true` persists to <cwd>/.claude/scheduled_tasks.json when the
+// tengu_kairos_cron_durable gate (ope()) is on. recurring defaults true.
+// Validation and result text match real; max 50 jobs across both stores.
 func execCronCreate(c *Context, raw json.RawMessage) Result {
+	if !cronEnabled() {
+		return Result{Content: "CronCreate is disabled.", IsError: true}
+	}
 	var in struct {
 		Cron      string `json:"cron"`
 		Prompt    string `json:"prompt"`
-		Recurring bool   `json:"recurring"`
+		Recurring *bool  `json:"recurring"`
 		Durable   bool   `json:"durable"`
 	}
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return Result{Content: "invalid input: " + err.Error(), IsError: true}
 	}
-	if len(strings.Fields(in.Cron)) != 5 {
-		return Result{Content: "invalid cron expression (expected 5 fields)", IsError: true}
+	spec := parseCron(in.Cron)
+	if spec == nil {
+		return Result{Content: fmt.Sprintf("Invalid cron expression '%s'. Expected 5 fields: M H DoM Mon DoW.", in.Cron), IsError: true}
+	}
+	if nextCronTime(spec, time.Now()) == nil {
+		return Result{Content: fmt.Sprintf("Cron expression '%s' does not match any calendar date in the next year.", in.Cron), IsError: true}
+	}
+	recurring := true // real default
+	if in.Recurring != nil {
+		recurring = *in.Recurring
+	}
+	durable := in.Durable && cronDurableEnabled()
+	dir := c.CWD
+	if dir == "" {
+		dir, _ = os.Getwd()
+	}
+	total := len(loadScheduledTasks(dir))
+	cronMu.Lock()
+	total += len(sessJobs)
+	cronMu.Unlock()
+	if total >= 50 {
+		return Result{Content: "Too many scheduled jobs (max 50). Cancel one first.", IsError: true}
 	}
 	ensureCronTicker()
-	j := cronJob{
-		ID:   fmt.Sprintf("job_%d", time.Now().UnixNano()%1e8),
-		Cron: in.Cron, Prompt: in.Prompt,
-		Recurring: in.Recurring, Created: time.Now(),
+	human := humanSchedule(in.Cron)
+	var id string
+	if durable {
+		var err error
+		id, err = addScheduledTask(dir, in.Cron, in.Prompt, recurring, c.Session)
+		if err != nil {
+			return Result{Content: "failed to persist scheduled task: " + err.Error(), IsError: true}
+		}
+	} else {
+		j := cronJob{
+			ID: newTaskID(), Cron: in.Cron, Prompt: in.Prompt,
+			Recurring: recurring, Durable: false, Created: time.Now(),
+		}
+		cronMu.Lock()
+		sessJobs = append(sessJobs, j)
+		cronMu.Unlock()
+		id = j.ID
 	}
-	cronMu.Lock()
-	sessJobs = append(sessJobs, j)
-	cronMu.Unlock()
-	return Result{Content: fmt.Sprintf("Created session job %s (cron %q). Fires as a new turn in this session; gone when Claude exits.", j.ID, j.Cron)}
+	persistNote := "Session-only (not written to disk, dies when Claude exits)"
+	if durable {
+		persistNote = "Persisted to .claude/scheduled_tasks.json"
+	}
+	if recurring {
+		return Result{Content: fmt.Sprintf(
+			"Scheduled recurring job %s (%s). %s. Auto-expires after 7 days. Use CronDelete to cancel sooner.",
+			id, human, persistNote)}
+	}
+	return Result{Content: fmt.Sprintf(
+		"Scheduled one-shot task %s (%s). %s. It will fire once then auto-delete.",
+		id, human, persistNote)}
 }
 
 func execCronDelete(c *Context, raw json.RawMessage) Result {
+	if !cronEnabled() {
+		return Result{Content: "CronDelete is disabled.", IsError: true}
+	}
 	var in struct {
 		ID string `json:"id"`
 	}
 	json.Unmarshal(raw, &in)
 	cronMu.Lock()
-	defer cronMu.Unlock()
 	out := sessJobs[:0]
 	var found bool
 	for _, j := range sessJobs {
@@ -304,25 +353,59 @@ func execCronDelete(c *Context, raw json.RawMessage) Result {
 		}
 		out = append(out, j)
 	}
-	if !found {
-		return Result{Content: "no such job: " + in.ID, IsError: true}
-	}
 	sessJobs = out
-	return Result{Content: "Deleted job " + in.ID}
+	cronMu.Unlock()
+	if !found {
+		dir := c.CWD
+		if dir == "" {
+			dir, _ = os.Getwd()
+		}
+		found = removeScheduledTasks(dir, []string{in.ID})
+	}
+	if !found {
+		return Result{Content: fmt.Sprintf("No scheduled job with id '%s'", in.ID), IsError: true}
+	}
+	return Result{Content: "Cancelled job " + in.ID + "."}
 }
 
 func execCronList(c *Context, raw json.RawMessage) Result {
+	if !cronEnabled() {
+		return Result{Content: "CronList is disabled.", IsError: true}
+	}
+	dir := c.CWD
+	if dir == "" {
+		dir, _ = os.Getwd()
+	}
+	type row struct {
+		id, cron, prompt string
+		recurring        bool
+		sessionOnly      bool
+	}
+	var rows []row
+	for _, t := range loadScheduledTasks(dir) {
+		rows = append(rows, row{t.ID, t.Cron, t.Prompt, t.Recurring, false})
+	}
 	cronMu.Lock()
-	defer cronMu.Unlock()
-	if len(sessJobs) == 0 {
+	for _, j := range sessJobs {
+		rows = append(rows, row{j.ID, j.Cron, j.Prompt, j.Recurring, true})
+	}
+	cronMu.Unlock()
+	if len(rows) == 0 {
 		return Result{Content: "No scheduled jobs."}
 	}
 	var b strings.Builder
-	for _, j := range sessJobs {
-		fmt.Fprintf(&b, "%s  cron=%q  recurring=%t  prompt=%q\n",
-			j.ID, j.Cron, j.Recurring, j.Prompt)
+	for _, r := range rows {
+		kind := "one-shot"
+		if r.recurring {
+			kind = "recurring"
+		}
+		so := ""
+		if r.sessionOnly {
+			so = " [session-only]"
+		}
+		fmt.Fprintf(&b, "%s — %s (%s)%s: %s\n", r.id, humanSchedule(r.cron), kind, so, r.prompt)
 	}
-	return Result{Content: b.String()}
+	return Result{Content: strings.TrimRight(b.String(), "\n")}
 }
 
 // ---------- ReportFindings ----------
@@ -596,6 +679,11 @@ func RegisterSession(sessionID, cwd, name string) error {
 	kind, jobID := "interactive", ""
 	if jd := os.Getenv("CLAUDE_JOB_DIR"); jd != "" {
 		kind, jobID = "bg", filepath.Base(jd)
+	}
+	// U1(isCoordinatorMode()?"coordinator":"normal") — mod_0686.js gn();
+	// coordinator wins over the interactive/bg split like real's mode field.
+	if IsCoordinatorMode() {
+		kind = "coordinator"
 	}
 	now := time.Now().UnixMilli()
 	e := sessionEntry{

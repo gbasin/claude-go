@@ -156,6 +156,10 @@ func (s *SandboxSettings) prepareCredentials(px *netproxy.Proxy, cwd string) (*c
 	}
 	out := &credPlan{}
 	maskedAnyFile := false
+	// whole-value masked env vars — the only entries usable as SigV4
+	// pair members (real: extract/decode entries don't qualify, re-signing
+	// needs the whole real value).
+	maskedWhole := map[string]maskedWholeVar{}
 
 	for _, e := range s.Credentials.EnvVars {
 		if !envNameRe.MatchString(e.Name) {
@@ -213,7 +217,9 @@ func (s *SandboxSettings) prepareCredentials(px *netproxy.Proxy, cwd string) (*c
 		}
 		if e.Extract == "" {
 			// whole-value mask
-			out.setEnv = append(out.setEnv, e.Name+"="+store.Register(e.Name, val, inj))
+			sent := store.Register(e.Name, val, inj)
+			maskedWhole[e.Name] = maskedWholeVar{sentinel: sent, injectHosts: inj}
+			out.setEnv = append(out.setEnv, e.Name+"="+sent)
 			continue
 		}
 		re, err := compileExtract(e.Extract)
@@ -350,7 +356,93 @@ func (s *SandboxSettings) prepareCredentials(px *netproxy.Proxy, cwd string) (*c
 		out.warns = append(out.warns,
 			"[Sandbox macOS] file mask degrades to deny on macOS until the interposer lands")
 	}
+	s.registerAWSPairs(px, maskedWhole, defaults, out)
 	return out, nil
+}
+
+// maskedWholeVar records a whole-value masked env var for SigV4 pairing:
+// its registered sentinel (what the sandboxed SDK puts in x-amz-credential)
+// plus the resolved inject scope.
+type maskedWholeVar struct {
+	sentinel    string
+	injectHosts []string
+}
+
+// Conventional AWS env names — real's __/T_/w_. When no configured pair
+// mentions any of them, the conventional trio is auto-paired.
+const (
+	awsAccessKeyIDVar     = "AWS_ACCESS_KEY_ID"
+	awsSecretAccessKeyVar = "AWS_SECRET_ACCESS_KEY"
+	awsSessionTokenVar    = "AWS_SESSION_TOKEN"
+)
+
+// registerAWSPairs is real's C_: fold awsPairs + the conventional
+// auto-pair into the proxy's SigV4 re-sign registry. A pair registers
+// only when BOTH the key-id and secret vars are whole-value masked and
+// present in the environment; a pair whose only unusable member is the
+// session token still re-signs, without x-amz-security-token.
+func (s *SandboxSettings) registerAWSPairs(px *netproxy.Proxy, masked map[string]maskedWholeVar, defaults []string, out *credPlan) {
+	if px == nil || px.AWSPairs == nil {
+		return
+	}
+	if s.Credentials.SigV4 != nil {
+		px.SigV4 = netproxy.SigV4Policy{
+			Streaming: s.Credentials.SigV4.Streaming,
+			Presigned: s.Credentials.SigV4.Presigned,
+			SigV4a:    s.Credentials.SigV4.SigV4a,
+		}
+	}
+	pairs := append([]SandboxAWSPair(nil), s.Credentials.AWSPairs...)
+	claimed := map[string]bool{}
+	for _, pr := range pairs {
+		claimed[pr.AccessKeyIDVar] = true
+		claimed[pr.SecretAccessKeyVar] = true
+		if pr.SessionTokenVar != "" {
+			claimed[pr.SessionTokenVar] = true
+		}
+	}
+	if !claimed[awsAccessKeyIDVar] && !claimed[awsSecretAccessKeyVar] && !claimed[awsSessionTokenVar] {
+		pairs = append(pairs, SandboxAWSPair{
+			AccessKeyIDVar:     awsAccessKeyIDVar,
+			SecretAccessKeyVar: awsSecretAccessKeyVar,
+			SessionTokenVar:    awsSessionTokenVar,
+		})
+	}
+	for _, pr := range pairs {
+		km := masked[pr.AccessKeyIDVar]
+		secretMasked := masked[pr.SecretAccessKeyVar].sentinel != ""
+		realKey, keyOK := os.LookupEnv(pr.AccessKeyIDVar)
+		realSecret, secretOK := os.LookupEnv(pr.SecretAccessKeyVar)
+		if km.sentinel == "" || !secretMasked || !keyOK || !secretOK {
+			if secretMasked && km.sentinel == "" {
+				warn := fmt.Sprintf(
+					`[sandbox-runtime] WARNING: "%s" is masked but "%s" is not, so no AWS credential pair was registered. SigV4 requests will be signed with the masked placeholder secret and the proxy cannot detect or re-sign them — they will fail upstream. Mask both variables (whole-value) to enable re-signing.`,
+					pr.SecretAccessKeyVar, pr.AccessKeyIDVar)
+				out.warns = append(out.warns, warn)
+				if px.Logf != nil {
+					px.Logf("%s", warn)
+				}
+			}
+			continue
+		}
+		inj := km.injectHosts
+		if inj == nil {
+			inj = defaults
+		}
+		realToken := ""
+		if pr.SessionTokenVar != "" && masked[pr.SessionTokenVar].sentinel != "" {
+			realToken = os.Getenv(pr.SessionTokenVar)
+		}
+		px.AWSPairs.Register(km.sentinel, realKey, realSecret, realToken, inj)
+		extra := ""
+		if realToken != "" {
+			extra = " (+session token)"
+		}
+		if px.Logf != nil {
+			px.Logf("[credential-aws] registered SigV4 pair for %s/%s%s",
+				pr.AccessKeyIDVar, pr.SecretAccessKeyVar, extra)
+		}
+	}
 }
 
 // compileExtract validates a credentials extract regex — real's schema

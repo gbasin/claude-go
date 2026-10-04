@@ -696,6 +696,11 @@ func (c *Client) UnarchiveSession(ctx context.Context, sessionID string) (int, e
 // {title, bridge:{}, tags?, session_grouping_id?, config:{cwd, model?}}.
 // sources/outcomes/reuse_outcome_branches are added when a gitRepoUrl is
 // attached (buildGitSessionContext); we accept them verbatim.
+//
+// The ultraplan extension (mod_0274.js Mgn + mod_0386.js v0) adds the
+// events array — a set_permission_mode control_request followed by the
+// initial user message — plus the xJt config fields and the source/
+// ultraplan/permissionMode markers real sets on cloud plan sessions.
 type CreateSessionParams struct {
 	Title                string
 	Cwd                  string
@@ -705,6 +710,26 @@ type CreateSessionParams struct {
 	Sources              []any
 	Outcomes             []any
 	ReuseOutcomeBranches bool
+
+	// Ultraplan/ultrareview create options (v0 options, mod_0386.js).
+	Source         string            // "ultraplan" | "ultrareview" | ""
+	Ultraplan      bool              // set_permission_mode ultraplan marker
+	PermissionMode string            // control_request mode ("plan")
+	InitialMessage string            // first user event content
+	EnvVars        map[string]string // top-level environment_variables
+
+	// xJt()/Mgn config fields.
+	CustomSystemPrompt         string
+	AppendSystemPrompt         string
+	AppendSubagentSystemPrompt string
+	FallbackModel              string
+	MaxTurns                   int
+	MaxBudgetUSD               float64
+	AllowedTools               []string
+	DisallowedTools            []string
+	BuiltinTools               []string
+	OutputSchema               any
+	CorrelationID              string
 }
 
 // CreateResult reasons mirror j(): oauth_rejected (401), transient
@@ -767,6 +792,40 @@ func (c *Client) CreateCodeSession(ctx context.Context, p *CreateSessionParams) 
 		cfg["outcomes"] = p.Outcomes
 		cfg["reuse_outcome_branches"] = true
 	}
+	// xJt (mod_0386.js) + the Mgn config tail (mod_0274.js).
+	if p.AppendSystemPrompt != "" {
+		cfg["append_system_prompt"] = p.AppendSystemPrompt
+	}
+	if p.CustomSystemPrompt != "" {
+		cfg["custom_system_prompt"] = p.CustomSystemPrompt
+	}
+	if p.AppendSubagentSystemPrompt != "" {
+		cfg["append_subagent_system_prompt"] = p.AppendSubagentSystemPrompt
+	}
+	if p.FallbackModel != "" {
+		cfg["fallback_model"] = p.FallbackModel
+	}
+	if p.MaxTurns != 0 {
+		cfg["max_turns"] = p.MaxTurns
+	}
+	if p.MaxBudgetUSD > 0 {
+		cfg["max_budget_usd"] = p.MaxBudgetUSD
+	}
+	if len(p.AllowedTools) > 0 {
+		cfg["allowed_tools"] = p.AllowedTools
+	}
+	if len(p.DisallowedTools) > 0 {
+		cfg["disallowed_tools"] = p.DisallowedTools
+	}
+	if len(p.BuiltinTools) > 0 {
+		cfg["builtin_tools"] = p.BuiltinTools
+	}
+	if p.OutputSchema != nil {
+		cfg["output_schema"] = p.OutputSchema
+	}
+	if p.CorrelationID != "" {
+		cfg["correlation_id"] = p.CorrelationID
+	}
 	body := map[string]any{
 		"title":  p.Title,
 		"bridge": map[string]any{},
@@ -777,6 +836,30 @@ func (c *Client) CreateCodeSession(ctx context.Context, p *CreateSessionParams) 
 	}
 	if p.SessionGrouping != "" {
 		body["session_grouping_id"] = p.SessionGrouping
+	}
+	// events array (RJt): the set_permission_mode control_request, then
+	// the initial user message.
+	var events []any
+	if p.PermissionMode != "" || p.Ultraplan {
+		events = append(events, setPermissionModeEvent(p.PermissionMode, p.Ultraplan))
+	}
+	if p.InitialMessage != "" {
+		events = append(events, initialUserEvent(p.InitialMessage))
+	}
+	if len(events) > 0 {
+		body["events"] = events
+	}
+	if len(p.EnvVars) > 0 {
+		body["environment_variables"] = p.EnvVars
+	}
+	if p.Source != "" {
+		body["source"] = p.Source
+	}
+	if p.Ultraplan {
+		body["ultraplan"] = true
+	}
+	if p.PermissionMode != "" {
+		body["permissionMode"] = p.PermissionMode
 	}
 	h, err := c.codeSessionHeaders(tok)
 	if err != nil {

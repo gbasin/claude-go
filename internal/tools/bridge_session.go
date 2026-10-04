@@ -42,3 +42,7 @@ func currentBridgeSessionID() string {
 	}
 	return ""
 }
+
+// BridgeSessionID exposes the adopted bridge session to the /teleport
+// gate (mod_2173.js: a?.bridgeSessionId on the app-state bridge record).
+func BridgeSessionID() string { return currentBridgeSessionID() }

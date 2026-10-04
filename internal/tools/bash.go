@@ -30,6 +30,11 @@ type BgTask struct {
 	ExitCode int
 	TimedOut bool
 	cancel   context.CancelFunc
+	// Kind distinguishes remote-agent tasks ("remote_agent"): their work
+	// runs in a cloud session, and OnKill performs real's uRe.kill side
+	// effect (archive the session via tR).
+	Kind   string
+	OnKill func(t *BgTask)
 }
 
 type Background struct {
@@ -68,9 +73,35 @@ func (b *Background) KillAll() int {
 				t.cancel()
 				n++
 			}
+			if t.OnKill != nil {
+				t.OnKill(t)
+			}
 		}
 	}
 	return n
+}
+
+// AddRemote registers a cloud-session-backed remote-agent task (real's
+// RemoteAgentTask, uRe — remoteTaskType "ultraplan"|"ultrareview"). The
+// "process" lives server-side: the polling goroutine closes Done, and
+// killing the task invokes onKill (archive) rather than a local kill.
+// Returns the task plus a ctx the poller should respect (cancel fires on
+// KillAll/TaskStop).
+func (b *Background) AddRemote(command string, onKill func(ctx context.Context) error) (*BgTask, context.Context) {
+	id := fmt.Sprintf("r%d", b.seq.Add(1))
+	ctx, cancel := context.WithCancel(context.Background())
+	t := &BgTask{ID: id, Command: command, Started: time.Now(),
+		Done: make(chan struct{}), cancel: cancel, Kind: "remote_agent"}
+	t.OnKill = func(*BgTask) {
+		kctx, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		// best-effort — real logs "RemoteAgentTask archive failed" only
+		_ = onKill(kctx)
+	}
+	b.mu.Lock()
+	b.tasks[id] = t
+	b.mu.Unlock()
+	return t, ctx
 }
 
 func (b *Background) Get(id string) *BgTask {
@@ -352,6 +383,9 @@ func execTaskStop(c *Context, raw json.RawMessage) Result {
 	}
 	if t.cancel != nil {
 		t.cancel()
+	}
+	if t.OnKill != nil {
+		t.OnKill(t)
 	}
 	select {
 	case <-t.Done:

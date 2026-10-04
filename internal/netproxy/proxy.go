@@ -299,6 +299,20 @@ type Proxy struct {
 	// without TLS termination the upstream identity is unverified.
 	AllowPlaintextInject bool
 
+	// AWSPairs is the masked-AWS-credential registry for SigV4 re-signing
+	// (real's `Cp`). The tools layer populates it from
+	// sandbox.credentials.awsPairs + the conventional AWS_* auto-pair at
+	// wrap time; on the TLS-terminated path the proxy detects requests
+	// signed with a sentinel access key and re-signs them with the real
+	// secret (sigv4.go).
+	AWSPairs *AWSPairStore
+	// SigV4 is sandbox.credentials.sigv4: per-shape policies ("deny" |
+	// "passthrough") for the request shapes re-signing can't cover.
+	SigV4 SigV4Policy
+	// MaxSigV4ResignBodyBytes caps body buffering for literal-hash
+	// re-signs (real's maxSigv4ResignBodyBytes, default 64 MiB).
+	MaxSigV4ResignBodyBytes int64
+
 	// Injectable hooks (tests; production uses real dialing):
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 	Resolve     func(ctx context.Context, host string) ([]netip.Addr, error)
@@ -331,6 +345,7 @@ func New(ca *CA) *Proxy {
 		Intercept:    ca != nil,
 		AuthToken:    NewAuthToken(),
 		Creds:        NewCredStore(),
+		AWSPairs:     NewAWSPairStore(),
 		sessionAllow: map[string]bool{},
 	}
 	p.srv = &http.Server{Handler: p, ReadHeaderTimeout: 30 * time.Second}
@@ -1101,13 +1116,41 @@ func (p *Proxy) serveTLSConn(tc *tls.Conn, tag string) {
 			}
 			continue
 		}
+		// the raw origin-form target is needed for SigV4 classification and
+		// canonicalization before RequestURI is cleared
+		requestTarget := req.RequestURI
 		req.URL.Scheme = "https"
 		req.URL.Host = authority
 		req.RequestURI = ""
 		stripHopHeaders(req.Header)
+		// SigV4 plan runs BEFORE sentinel substitution (real computes
+		// planSigv4 before mutateHeaders): detection keys on the sentinel
+		// access key still sitting in the request.
+		plan := p.planSigV4(req.Method, requestTarget, req.Header, host)
+		if plan != nil && plan.deny != "" {
+			writeRawResponse(tc, http.StatusForbidden, plan.deny+"\r\n",
+				"blocked-by-allowlist", req.Close)
+			if req.Close {
+				return
+			}
+			continue
+		}
 		// TLS-terminated path: sentinel→real substitution is always on
 		// (real's mutateHeaders + getBodySubstitutions).
 		p.applyCredentialMutation(req, host)
+		if plan != nil {
+			// resign: buffer+hash the substituted body when the signature
+			// covers a literal hash, then recompute Authorization with the
+			// real secret (real's B.payloadHash/B.apply path).
+			if reason := plan.resignTo(p, req, authority); reason != "" {
+				writeRawResponse(tc, http.StatusForbidden, reason+"\r\n",
+					"blocked-by-allowlist", req.Close)
+				if req.Close {
+					return
+				}
+				continue
+			}
+		}
 		resp, err := p.upstream().RoundTrip(req)
 		if err != nil {
 			var pe *policyError

@@ -105,6 +105,34 @@ func CheckRecordingAvailability() Availability {
 	return Availability{Available: false, Reason: msgNoMic}
 }
 
+// micProbeTimeout bounds the rec spawn probe — long enough to let a
+// granted TCC prompt resolve, short enough not to wedge /voice.
+var micProbeTimeout = 1500 * time.Millisecond
+
+// micProbe is the spawn seam — `rec -q -n trim 0 0.001` records ~1ms to
+// the null device and exits; on darwin the first spawn can trigger the
+// TCC prompt, and a denial (or a hung capture) fails the probe.
+var micProbe = func() error {
+	ctx, cancel := context.WithTimeout(context.Background(), micProbeTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, "rec", "-q", "-n", "trim", "0", "0.001").Run()
+}
+
+// RequestMicrophonePermission is real's le(): on darwin the first rec
+// spawn can trigger the TCC prompt, so the enable path pre-checks capture
+// with a short spawn — false maps to the no-mic text (msgNoMic). Other
+// platforms skip the probe (real's NAPI-native path doesn't exist here).
+func RequestMicrophonePermission() bool {
+	if runtime.GOOS != "darwin" {
+		return true
+	}
+	return micProbe() == nil
+}
+
+// NoMicText is real's no-mic message — also the TCC/permission denial
+// text the /voice enable path prints when the mic probe fails.
+func NoMicText() string { return msgNoMic }
+
 // CheckVoiceDependencies mirrors ce() in mod_1739 — used by /voice before
 // enabling.
 func CheckVoiceDependencies() DependencyReport {
@@ -128,6 +156,9 @@ func CheckVoiceDependencies() DependencyReport {
 type CaptureStart struct {
 	Started bool
 	Hint    string // set when a better error than the default exists
+	// Expected marks a failure with an actionable hint (real's expected)
+	// — recorded as the circuit breaker's lastExpectedHint.
+	Expected bool
 }
 
 // Recorder is a live `rec` (SoX) subprocess streaming s16le PCM on stdout.
@@ -155,7 +186,14 @@ func StartRecorder(onChunk func([]byte), onEnd func(), silenceDetection bool) (*
 	}
 	cmd.Stderr = nil // real pipes stderr and ignores it
 	if err := cmd.Start(); err != nil {
-		return nil, CaptureStart{Started: false}
+		res := CaptureStart{Started: false}
+		if runtime.GOOS == "darwin" {
+			// a rec spawn that fails on darwin maps to real's no-mic
+			// text (the TCC-permission/no-device class — expected)
+			res.Hint = msgNoMic
+			res.Expected = true
+		}
+		return nil, res
 	}
 	r := &Recorder{cmd: cmd}
 	go func() {

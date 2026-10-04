@@ -92,7 +92,10 @@ func (e *editor) ensureVoice() *voiceUI {
 			}
 			return voice.Connect(cb, opts, tok, e.voiceBase)
 		},
-		Keyterms: func() []string { return voice.Keyterms(e.voiceCWD, nil) },
+		// cached ws connect+close probe (~5min TTL): unreachable endpoint
+		// surfaces "voice unavailable" before recording starts
+		ProbeStream: func() bool { return voice.StreamReachable(e.voiceBase) },
+		Keyterms:    func() []string { return voice.Keyterms(e.voiceCWD, nil) },
 		Language: func() string {
 			code, _ := voice.LanguageCode(vs.cfg.Load().(voice.Config).Language)
 			return code
@@ -339,8 +342,13 @@ func voiceCmd(l *agent.Loop, ed *editor, arg string) {
 		fmt.Println(" ", msg)
 		return
 	}
-	// requestMicrophonePermission: real probes the NAPI recorder; we use
-	// sox, whose spawn failure surfaces as a capture error instead
+	// requestMicrophonePermission (real's le): on darwin a quick rec
+	// spawn may trigger the TCC prompt; a probe failure maps to the
+	// no-mic text
+	if !voice.RequestMicrophonePermission() {
+		fmt.Println(" ", strings.ReplaceAll(voice.NoMicText(), "\n", "\n  "))
+		return
+	}
 	m := mode
 	if m == "" {
 		m = cfg.Mode
