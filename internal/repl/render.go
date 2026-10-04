@@ -19,11 +19,17 @@ type mdRenderer struct {
 	lang       string
 	table      []string // buffered |...| lines pending box render
 	pending    strings.Builder
+	out        stringWriter // emit sink — compInline-aware under the zone
 }
 
 func newMDRenderer() *mdRenderer {
-	return &mdRenderer{lineStart: true}
+	return &mdRenderer{lineStart: true, out: stdoutWriter{}}
 }
+
+// stdoutWriter is the non-compositor sink (plain scroll output).
+type stdoutWriter struct{}
+
+func (stdoutWriter) WriteString(s string) { os.Stdout.WriteString(s) }
 
 func (r *mdRenderer) Write(s string) {
 	r.pending.WriteString(s)
@@ -31,7 +37,12 @@ func (r *mdRenderer) Write(s string) {
 }
 
 // Close flushes any held formatting chars.
-func (r *mdRenderer) Close() { r.flush(true) }
+func (r *mdRenderer) Close() {
+	r.flush(true)
+	if tw, ok := r.out.(*turnWriter); ok {
+		tw.finish()
+	}
+}
 
 // flushTable renders buffered table lines as a box — or verbatim if it isn't
 // actually a table (no |---| separator row).
@@ -45,7 +56,7 @@ func (r *mdRenderer) flushTable() {
 	isTable := len(lines) >= 2 && isTableSep(lines[1])
 	if !isTable {
 		for _, l := range lines {
-			os.Stdout.WriteString(l + "\n")
+			r.out.WriteString(l + "\n")
 		}
 		return
 	}
@@ -80,7 +91,7 @@ func (r *mdRenderer) flushTable() {
 		b.WriteString(rt + reset)
 		return b.String()
 	}
-	os.Stdout.WriteString(border("┌", "┬", "┐") + "\n")
+	r.out.WriteString(border("┌", "┬", "┐") + "\n")
 	for ri, row := range rows {
 		var b strings.Builder
 		b.WriteString(dim + "│" + reset)
@@ -96,12 +107,12 @@ func (r *mdRenderer) flushTable() {
 			}
 			b.WriteString(" " + style + cell + reset + strings.Repeat(" ", pad) + " " + dim + "│" + reset)
 		}
-		os.Stdout.WriteString(b.String() + "\n")
+		r.out.WriteString(b.String() + "\n")
 		if ri == 0 {
-			os.Stdout.WriteString(border("├", "┼", "┤") + "\n")
+			r.out.WriteString(border("├", "┼", "┤") + "\n")
 		}
 	}
-	os.Stdout.WriteString(border("└", "┴", "┘") + "\n")
+	r.out.WriteString(border("└", "┴", "┘") + "\n")
 }
 
 func isTableSep(l string) bool {
@@ -146,7 +157,7 @@ func (r *mdRenderer) flush(eof bool) {
 	for i < len(s) {
 		c := s[i]
 		if c == '\n' {
-			os.Stdout.WriteString(reset + "\n")
+			r.out.WriteString(reset + "\n")
 			r.lineStart = true
 			r.inlineCode, r.bold, r.italic = false, false, false
 			i++
@@ -186,10 +197,10 @@ func (r *mdRenderer) flush(eof bool) {
 						langEnd++
 					}
 					r.lang = strings.TrimSpace(s[j:langEnd])
-					os.Stdout.WriteString(dim)
+					r.out.WriteString(dim)
 				} else {
 					r.lang = ""
-					os.Stdout.WriteString(reset)
+					r.out.WriteString(reset)
 				}
 				i = j
 				for j < len(s) && s[j] != '\n' {
@@ -205,20 +216,20 @@ func (r *mdRenderer) flush(eof bool) {
 						j++
 					}
 					if j < len(s) && s[j] == ' ' {
-						os.Stdout.WriteString(bold)
+						r.out.WriteString(bold)
 						i = j + 1
 						r.lineStart = false
 						continue
 					}
 				}
 				if strings.HasPrefix(rest, "- ") || strings.HasPrefix(rest, "* ") {
-					os.Stdout.WriteString("  " + cyan + "•" + reset + " ")
+					r.out.WriteString("  " + cyan + "•" + reset + " ")
 					i += 2
 					r.lineStart = false
 					continue
 				}
 				if strings.HasPrefix(rest, "> ") {
-					os.Stdout.WriteString(dim + "▎" + reset)
+					r.out.WriteString(dim + "▎" + reset)
 					i += 2
 					r.lineStart = false
 					continue
@@ -232,9 +243,9 @@ func (r *mdRenderer) flush(eof bool) {
 				j++
 			}
 			if hl := highlightLine(s[i:j], r.lang); hl != "" {
-				os.Stdout.WriteString(hl)
+				r.out.WriteString(hl)
 			} else {
-				os.Stdout.WriteString(s[i:j])
+				r.out.WriteString(s[i:j])
 			}
 			i = j
 			continue
@@ -243,9 +254,9 @@ func (r *mdRenderer) flush(eof bool) {
 		if strings.HasPrefix(s[i:], "**") {
 			r.bold = !r.bold
 			if r.bold {
-				os.Stdout.WriteString(bold)
+				r.out.WriteString(bold)
 			} else {
-				os.Stdout.WriteString(reset)
+				r.out.WriteString(reset)
 			}
 			i += 2
 			continue
@@ -258,7 +269,7 @@ func (r *mdRenderer) flush(eof bool) {
 				if end >= 0 {
 					text := s[i+1 : i+close]
 					url := s[i+close+2 : i+close+2+end]
-					os.Stdout.WriteString("\x1b]8;;" + url + "\x07" + "\x1b[4m" + cyan + text + reset + "\x1b]8;;\x07")
+					r.out.WriteString("\x1b]8;;" + url + "\x07" + "\x1b[4m" + cyan + text + reset + "\x1b]8;;\x07")
 					i += close + 2 + end + 1
 					continue
 				}
@@ -267,9 +278,9 @@ func (r *mdRenderer) flush(eof bool) {
 		if s[i] == '`' {
 			r.inlineCode = !r.inlineCode
 			if r.inlineCode {
-				os.Stdout.WriteString(cyan)
+				r.out.WriteString(cyan)
 			} else {
-				os.Stdout.WriteString(reset)
+				r.out.WriteString(reset)
 			}
 			i++
 			continue
@@ -282,14 +293,14 @@ func (r *mdRenderer) flush(eof bool) {
 			}
 			r.italic = !r.italic
 			if r.italic {
-				os.Stdout.WriteString("\x1b[3m")
+				r.out.WriteString("\x1b[3m")
 			} else {
-				os.Stdout.WriteString(reset)
+				r.out.WriteString(reset)
 			}
 			i++
 			continue
 		}
-		os.Stdout.WriteString(string(c))
+		r.out.WriteString(string(c))
 		i++
 	}
 	r.pending.Reset()
@@ -304,3 +315,36 @@ func (r *mdRenderer) lineFrom() int      { return 0 }
 func (r *mdRenderer) holdFrom(i int) int { return i }
 
 var _ = utf8.RuneCountInString // kept for future grapheme-width work
+
+type stringWriter interface{ WriteString(string) }
+
+// turnWriter routes streamed turn output through compInline so text lands
+// in the scroll region above the pinned zone (cursor rests in the input
+// box during a turn; raw writes were painted over).
+type turnWriter struct{ line strings.Builder }
+
+func (w *turnWriter) WriteString(s string) {
+	w.line.WriteString(s)
+	for {
+		t := w.line.String()
+		i := strings.Index(t, "\n")
+		if i < 0 {
+			if t != "" {
+				compInline("\x1b[2K" + t)
+			}
+			return
+		}
+		compInline("\x1b[2K" + t[:i] + "\r\n")
+		w.line.Reset()
+		w.line.WriteString(t[i+1:])
+	}
+}
+
+// finish emits any partial tail and clears the accumulator — without it
+// the next turn's stream appended to this turn's line.
+func (w *turnWriter) finish() {
+	if t := w.line.String(); t != "" {
+		compInline("\x1b[2K" + t + "\r\n")
+	}
+	w.line.Reset()
+}
