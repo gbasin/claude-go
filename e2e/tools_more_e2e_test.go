@@ -371,3 +371,167 @@ func TestAtMention(t *testing.T) {
 		t.Fatal("@mention content did not reach the wire")
 	}
 }
+
+// TestMonitorArm: the deferred Monitor tool arms a background task whose
+// stdout becomes task-notifications.
+func TestMonitorArm(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p",
+		`calls:[{"name":"ToolSearch","input":{"query":"select:Monitor"}},`+
+			`{"name":"Monitor","input":{"command":"echo mon-e2e","timeout_ms":5000}}]`,
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "armed") {
+		t.Fatalf("monitor should report armed: %s", truncStr(r.stdout, 1500))
+	}
+}
+
+// TestPushNotification: the tool dispatches (osascript path on darwin —
+// sandbox may deny, either result is a clean surface).
+func TestPushNotification(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p",
+		`calls:[{"name":"ToolSearch","input":{"query":"select:PushNotification"}},`+
+			`{"name":"PushNotification","input":{"message":"e2e ping"}}]`,
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "Notification sent") &&
+		!strings.Contains(r.stdout, "notification failed") &&
+		!strings.Contains(r.stdout, "actively at the terminal") {
+		t.Fatalf("unexpected notification result: %s", truncStr(r.stdout, 1500))
+	}
+}
+
+// TestScheduleWakeupNoop: the noop path returns without arming.
+func TestScheduleWakeupNoop(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p",
+		`tool:ScheduleWakeup {"noop":true}`,
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "No wakeup scheduled") {
+		t.Fatalf("unexpected wakeup result: %s", truncStr(r.stdout, 1500))
+	}
+}
+
+// TestReportFindings: writes a findings artifact and reports the path.
+func TestReportFindings(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p",
+		`tool:ReportFindings {"level":"info","findings":[{"title":"e2e","severity":"low"}]}`,
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "Findings recorded to") {
+		t.Fatalf("unexpected findings result: %s", truncStr(r.stdout, 1500))
+	}
+}
+
+// TestModelPicker: bare /model lists the catalog; typing the index picks
+// the model — the next request goes out on the picked model.
+func TestModelPicker(t *testing.T) {
+	s := newSession(t)
+	rec := filepath.Join(t.TempDir(), "reqs")
+	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, "--mock")
+	p.waitFor("╭─╮", 30*time.Second)
+	p.sendUntilEchoed(t, "/model\r", "> /model", 8)
+	p.waitFor("number (esc keeps", 15*time.Second)
+	p.send("4\r") // claude-sonnet-5-5
+	p.waitFor("model → claude-sonnet-5-5", 15*time.Second)
+
+	p.sendUntilEchoed(t, "hi\r", "> hi", 8)
+	p.waitFor("Mock response to: hi", 30*time.Second)
+	p.exit()
+
+	ents, _ := os.ReadDir(rec)
+	var found bool
+	for _, e := range ents {
+		b, _ := os.ReadFile(filepath.Join(rec, e.Name()))
+		var req struct {
+			Model string `json:"model"`
+		}
+		if json.Unmarshal(b, &req) == nil && req.Model == "claude-sonnet-5-5" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("picked model did not reach the wire")
+	}
+}
+
+// TestRemainingToolsDispatch: every offered tool dispatches to a clean
+// result — never "Unknown tool" — even when the backend (cloud, LSP
+// server, design service) is absent.
+func TestRemainingToolsDispatch(t *testing.T) {
+	s := newSession(t)
+	// deferred tools need select first; harmless to select all
+	r := s.run(t, "--mock", "-p",
+		`calls:[{"name":"ToolSearch","input":{"query":"select:RemoteTrigger,LSP,DesignSync,ArtifactComments,ArtifactData,SendFeedback,SendFeedback,ReadNotifications,ScheduleWakeup"}},`+
+			`{"name":"RemoteTrigger","input":{"action":"list"}},`+
+			`{"name":"LSP","input":{"operation":"start","serverName":"tsserver"}},`+
+			`{"name":"DesignSync","input":{}},`+
+			`{"name":"ArtifactComments","input":{}},`+
+			`{"name":"ArtifactData","input":{}},`+
+			`{"name":"SendFeedback","input":{"feedback":"e2e"}}]`,
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if strings.Contains(r.stdout, "Unknown tool") {
+		// surface which one
+		for _, line := range strings.Split(r.stdout, "\n") {
+			if strings.Contains(line, "Unknown tool") {
+				t.Fatalf("unregistered tool on the wire surface: %s", truncStr(line, 300))
+			}
+		}
+	}
+}
+
+// TestQuickMemory: `# note` appends to the project MEMORY.md — the memory
+// is written to the project-scoped memory dir.
+func TestQuickMemory(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.sendUntilEchoed(t, "# mem-fact-99\r", "> # mem-fact-99", 8)
+	p.waitFor("saved to memory", 15*time.Second)
+	p.exit()
+
+	// memory lives under ~/.claude/projects/<slug>/memory/MEMORY.md
+	matches, _ := filepath.Glob(filepath.Join(s.home, ".claude", "projects", "*", "memory", "MEMORY.md"))
+	var found bool
+	for _, m := range matches {
+		b, _ := os.ReadFile(m)
+		if strings.Contains(string(b), "mem-fact-99") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("quick memory not persisted — matches: %v", matches)
+	}
+}
+
+// TestClaudeMDOnWire: a project CLAUDE.md rides the first request as a
+// system-reminder context block (verified in the recorded request).
+func TestClaudeMDOnWire(t *testing.T) {
+	s := newSession(t)
+	s.writeFile("CLAUDE.md", "PROJECT-RULES-E2E: be terse")
+	rec := filepath.Join(t.TempDir(), "reqs")
+
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 60*time.Second,
+		"--mock", "-p", "hi")
+	s.mustOK(t, r)
+
+	ents, _ := os.ReadDir(rec)
+	var found bool
+	for _, e := range ents {
+		b, _ := os.ReadFile(filepath.Join(rec, e.Name()))
+		if bytes.Contains(b, []byte("PROJECT-RULES-E2E")) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("CLAUDE.md content did not reach the wire")
+	}
+}
