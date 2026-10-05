@@ -245,3 +245,83 @@ func TestAuxDisabledByEnv(t *testing.T) {
 		}
 	}
 }
+
+// TestAuxInteractiveSession: on the cli entrypoint (interactive REPL,
+// non-mock) the burst also carries the remote-control session registration
+// POST and the ultrareview quota GET, and each completed turn fires the
+// post-turn haiku calls — title (max_tokens 32000, text-block user msg,
+// temp=1) and walk-away (max_tokens 1024, bare-string user msg).
+func TestAuxInteractiveSession(t *testing.T) {
+	rec := newAuxRecorder(t)
+	s := newSession(t)
+	p := s.runPTY(t, []string{
+		"CLAUDE_CODE_OAUTH_TOKEN=e2e-fake-oauth-token",
+		"CLAUDE_GO_RAW_HTTP=0",
+	}, "--sdk-url", rec.srv.URL)
+	p.waitFor("╭─╮", 30*time.Second)
+	p.send("hi\r")
+	p.waitFor("aux-server reply", 30*time.Second)
+
+	// post-turn calls are async — poll the recorder briefly
+	deadline := time.Now().Add(15 * time.Second)
+	var sawCodeSession, sawUltrareview, sawTitle, sawWalkAway bool
+	for time.Now().Before(deadline) {
+		sawCodeSession, sawUltrareview, sawTitle, sawWalkAway = false, false, false, false
+		for _, q := range rec.list() {
+			switch {
+			case q.method == "POST" && strings.HasPrefix(q.uri, "/v1/code/sessions"):
+				sawCodeSession = true
+			case q.method == "GET" && strings.HasPrefix(q.uri, "/v1/ultrareview/quota"):
+				sawUltrareview = true
+			case q.method == "POST" && q.uri == "/v1/messages?beta=true":
+				var b struct {
+					MaxToks  int             `json:"max_tokens"`
+					Messages json.RawMessage `json:"messages"`
+				}
+				json.Unmarshal(q.body, &b)
+				switch b.MaxToks {
+				case 32000:
+					sawTitle = true
+					// title call sends a text-block user message
+					var ms []struct {
+						Content json.RawMessage `json:"content"`
+					}
+					json.Unmarshal(b.Messages, &ms)
+					var s string
+					if len(ms) == 0 || json.Unmarshal(ms[0].Content, &s) == nil {
+						t.Fatalf("title call should send a block user msg, got %s", b.Messages)
+					}
+				case 1024:
+					sawWalkAway = true
+					var ms []struct {
+						Content json.RawMessage `json:"content"`
+					}
+					json.Unmarshal(b.Messages, &ms)
+					var s string
+					if len(ms) == 0 || json.Unmarshal(ms[0].Content, &s) != nil {
+						t.Fatalf("walk-away call should send a bare-string user msg, got %s", b.Messages)
+					}
+				}
+			}
+		}
+		if sawCodeSession && sawUltrareview && sawTitle && sawWalkAway {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	for name, ok := range map[string]bool{
+		"code session registration": sawCodeSession,
+		"ultrareview quota":         sawUltrareview,
+		"title call":                sawTitle,
+		"walk-away call":            sawWalkAway,
+	} {
+		if !ok {
+			var uris []string
+			for _, q := range rec.list() {
+				uris = append(uris, q.method+" "+q.uri)
+			}
+			t.Fatalf("missing %s — requests: %v", name, uris)
+		}
+	}
+	p.exit()
+}
