@@ -1039,6 +1039,11 @@ func (e *editor) cancelKey() *readResult {
 func (e *editor) submitKey() *readResult {
 	if len(e.buf) > 0 && e.buf[len(e.buf)-1] == '\\' {
 		e.buf = e.buf[:len(e.buf)-1]
+		if e.pos > len(e.buf) {
+			// the stripped backslash was under the cursor — keep pos in
+			// bounds or insert() slices out of range (crash on \+enter)
+			e.pos = len(e.buf)
+		}
 		e.insert('\n')
 		return nil
 	}
