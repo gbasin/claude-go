@@ -54,8 +54,9 @@ const (
 var shouldDeferTools = map[string]bool{
 	"EnterPlanMode": true, "ExitPlanMode": true,
 	"ListMcpResourcesTool": true, "ReadMcpResourceTool": true,
-	"RemoteTrigger": true,
-	"WebFetch":      true, "WebSearch": true, "NotebookEdit": true, "Monitor": true,
+	"ReadMcpResourceDirTool": true,
+	"RemoteTrigger":          true,
+	"WebFetch":               true, "WebSearch": true, "NotebookEdit": true, "Monitor": true,
 	"EnterWorktree": true, "ExitWorktree": true,
 	"LSP": true, "TaskStop": true,
 	"SendMessage": true, "EndConversation": true,
@@ -88,6 +89,15 @@ var searchHints = map[string]string{
 
 func init() {
 	Register(&Tool{Def: api.Tool{
+		// advisor is a typed server-side block — {type: advisor_20260301,
+		// name, model, defer_loading}, no input_schema (verified in the
+		// real wire capture). The dispatch loop special-cases it.
+		Name: "advisor",
+		Raw:  json.RawMessage(`{"type":"advisor_20260301","name":"advisor","model":"claude-fable-5-1","defer_loading":true}`),
+	}, Exec: func(c *Context, raw json.RawMessage) Result {
+		return Result{Content: "advisor is dispatched by the agent loop", IsError: true}
+	}})
+	Register(&Tool{Def: api.Tool{
 		Name:        toolSearchName,
 		Description: toolSearchDescription(),
 		InputSchema: json.RawMessage(`{"type":"object","properties":{` +
@@ -116,13 +126,14 @@ func toolSearchDescription() string {
 // "standard"|"tst"|"tst-auto" from ENABLE_TOOL_SEARCH + backend capability;
 // we only implement the client-side lane, so an explicit falsy value turns
 // deferral off and everything ships inline.
-// Default off: real's captured wire (2.1.289) ships every tool inline —
-// the deferred lane is flag-gated server-side. Opt in with
-// ENABLE_TOOL_SEARCH=1 for the real ToolSearch behavior.
+// Default on: live wire capture (2.1.289, eval 404'd by the mock) shows
+// real shipping 12 tools — core set + ToolSearch + DeferredToolPlaceholder —
+// with MCP/extended tools deferred behind tool search. An explicit falsy
+// ENABLE_TOOL_SEARCH still disables the lane.
 func toolSearchEnabled() bool {
 	v := os.Getenv("ENABLE_TOOL_SEARCH")
 	if v == "" {
-		return false
+		return true
 	}
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "0", "false", "no", "off", "standard":
@@ -227,15 +238,21 @@ func RequestDefs(c *Context) []api.Tool {
 	if len(deferred) == 0 {
 		return out
 	}
-	// CWt(): the placeholder keeps deferred loading active; real splices it
-	// in at len-1 — second-to-last, ahead of the trailing ToolSearch def.
-	out = append(out, api.Tool{
+	// real's wire order (captured): …, Skill, ToolSearch, Workflow,
+	// DeferredToolPlaceholder, Write, advisor — the placeholder splices in
+	// before Write, advisor rides at the tail.
+	ph := api.Tool{
 		Name:         deferredPlaceholderName,
 		Description:  deferredPlaceholderDesc,
 		InputSchema:  json.RawMessage(`{"type":"object","properties":{}}`),
 		DeferLoading: true,
-	})
-	out = append(out, registry[toolSearchName].Def)
+	}
+	for i, t := range out {
+		if t.Name == "Write" {
+			out = append(out[:i], append([]api.Tool{ph}, out[i:]...)...)
+			break
+		}
+	}
 	return out
 }
 

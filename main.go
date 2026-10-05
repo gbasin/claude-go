@@ -348,11 +348,9 @@ func main() {
 		loop.AppendSysP = o.sysPrompt
 	}
 	if chromeSysP != "" {
-		if loop.AppendSysP != "" {
-			loop.AppendSysP += "\n\n" + chromeSysP
-		} else {
-			loop.AppendSysP = chromeSysP
-		}
+		// real splices the chrome/browser block into the sys[3] session
+		// block (captured: end of the session array entry), not sys[2]
+		loop.SessionExtras = append(loop.SessionExtras, chromeSysP)
 	}
 	for _, fp := range o.fileArgs {
 		if b, err := os.ReadFile(fp); err == nil {
