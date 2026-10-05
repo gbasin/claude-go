@@ -77,8 +77,8 @@ func newAuxRecorder(t *testing.T) *auxRecorder {
 			}
 			json.Unmarshal(body, &req)
 			if req.Stream {
-				if name, input, ok := auxToolDirective(req.Messages); ok {
-					writeToolUseSSE(w, name, input)
+				if calls := auxToolDirective(req.Messages); calls != nil {
+					writeToolUseSSE(w, calls)
 				} else {
 					writeSSE(w, "aux-server reply")
 				}
@@ -99,13 +99,18 @@ func newAuxRecorder(t *testing.T) *auxRecorder {
 	return r
 }
 
-// auxToolDirective extracts a `tool:Name {json}` / `tool:Name` directive
-// from the last user message — the mock's same test-control channel, so
-// the non-mock recorder can drive tool calls.
+// auxToolDirective extracts the mock's test-control directives from the
+// last user message — `tool:Name {json}` for one call or `calls:[...]`
+// for a batch — so the non-mock recorder can drive tool turns.
+type auxCall struct {
+	name  string
+	input json.RawMessage
+}
+
 func auxToolDirective(msgs []struct {
 	Role    string          `json:"role"`
 	Content json.RawMessage `json:"content"`
-}) (string, json.RawMessage, bool) {
+}) []auxCall {
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].Role != "user" {
 			continue
@@ -127,23 +132,36 @@ func auxToolDirective(msgs []struct {
 				text = s
 			}
 		}
-		if strings.HasPrefix(text, "tool:") {
-			rest := strings.TrimPrefix(text, "tool:")
-			name, js, _ := strings.Cut(rest, " ")
+		switch {
+		case strings.HasPrefix(text, "tool:"):
+			name, js, _ := strings.Cut(strings.TrimPrefix(text, "tool:"), " ")
 			input := json.RawMessage(`{}`)
 			if js != "" {
 				input = json.RawMessage(js)
 			}
-			return name, input, true
+			return []auxCall{{name, input}}
+		case strings.HasPrefix(text, "calls:"):
+			var calls []struct {
+				Name  string          `json:"name"`
+				Input json.RawMessage `json:"input"`
+			}
+			if json.Unmarshal([]byte(strings.TrimPrefix(text, "calls:")), &calls) != nil {
+				return nil
+			}
+			var out []auxCall
+			for _, c := range calls {
+				out = append(out, auxCall{c.Name, c.Input})
+			}
+			return out
 		}
-		return "", nil, false
+		return nil
 	}
-	return "", nil, false
+	return nil
 }
 
-// writeToolUseSSE emits a single tool_use block turn (stop_reason
-// tool_use) in the SSE shape the client parser expects.
-func writeToolUseSSE(w http.ResponseWriter, name string, input json.RawMessage) {
+// writeToolUseSSE emits tool_use blocks (stop_reason tool_use) in the SSE
+// shape the client parser expects.
+func writeToolUseSSE(w http.ResponseWriter, calls []auxCall) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(200)
 	fl, _ := w.(http.Flusher)
@@ -158,14 +176,16 @@ func writeToolUseSSE(w http.ResponseWriter, name string, input json.RawMessage) 
 	emit("message_start", map[string]any{"type": "message_start", "message": map[string]any{
 		"id": "msg_aux", "type": "message", "role": "assistant",
 		"model": "m", "content": []any{}, "usage": usage}})
-	emit("content_block_start", map[string]any{"type": "content_block_start",
-		"index": 0, "content_block": map[string]any{
-			"type": "tool_use", "id": "toolu_aux_0", "name": name,
-			"input": map[string]any{}}})
-	emit("content_block_delta", map[string]any{"type": "content_block_delta",
-		"index": 0, "delta": map[string]any{
-			"type": "input_json_delta", "partial_json": string(input)}})
-	emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
+	for i, c := range calls {
+		emit("content_block_start", map[string]any{"type": "content_block_start",
+			"index": i, "content_block": map[string]any{
+				"type": "tool_use", "id": fmt.Sprintf("toolu_aux_%d", i), "name": c.name,
+				"input": map[string]any{}}})
+		emit("content_block_delta", map[string]any{"type": "content_block_delta",
+			"index": i, "delta": map[string]any{
+				"type": "input_json_delta", "partial_json": string(c.input)}})
+		emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": i})
+	}
 	emit("message_delta", map[string]any{"type": "message_delta",
 		"delta": map[string]any{"stop_reason": "tool_use"}, "usage": usage})
 	emit("message_stop", map[string]any{"type": "message_stop"})
@@ -482,7 +502,7 @@ func TestSafetyEvalBlocksOnError(t *testing.T) {
 	}
 	// the command string always appears in the echoed tool_use input — the
 	// fail-closed signal is the tool_result error text instead
-	if !strings.Contains(r.stdout, "could not be evaluated") {
+	if !strings.Contains(r.stdout, "could not evaluate this action") {
 		t.Fatalf("expected the could-not-evaluate block: %s", truncStr(r.stdout, 2000))
 	}
 	if !strings.Contains(r.stdout, `"is_error":true`) {
@@ -520,8 +540,51 @@ func TestSafetyEvalBlocksHigh(t *testing.T) {
 	if _, ok := rec.sawSafetyEval(); !ok {
 		t.Fatal("safety-eval call missing")
 	}
-	if !strings.Contains(r.stdout, "safety monitor") &&
+	if !strings.Contains(r.stdout, "security monitor") &&
 		!strings.Contains(r.stdout, "Destructive Action") {
 		t.Fatalf("severity>=50 should block with the category: %s", truncStr(r.stdout, 2000))
+	}
+}
+
+// TestAutoModeEvalGating: --permission-mode auto routes NON-read-only
+// calls through the eval; read-only tools still resolve locally.
+func TestAutoModeEvalGating(t *testing.T) {
+	rec := newAuxRecorder(t)
+	rec.nonStreamText = "<severity>10</severity>" // allow
+	s := newSession(t)
+	f := s.writeFile("auto-readme.txt", "ro-content")
+	r := s.runAux(t, rec, nil, "-p",
+		`calls:[{"name":"Read","input":{"file_path":"`+f+`"}},`+
+			`{"name":"Bash","input":{"command":"echo auto-eval-marker"}}]`,
+		"--permission-mode", "auto",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+
+	evals := 0
+	for _, q := range rec.list() {
+		if q.method != "POST" || q.uri != "/v1/messages?beta=true" {
+			continue
+		}
+		var b struct {
+			Model   string `json:"model"`
+			MaxToks int    `json:"max_tokens"`
+		}
+		if json.Unmarshal(q.body, &b) == nil &&
+			b.Model == "claude-sonnet-5" && b.MaxToks == 64 {
+			evals++
+		}
+	}
+	if evals != 1 {
+		t.Fatalf("auto mode should eval exactly the non-readonly call, got %d evals", evals)
+	}
+	if !strings.Contains(r.stdout, "ro-content") ||
+		!strings.Contains(r.stdout, "auto-eval-marker") {
+		var res []string
+		for _, line := range strings.Split(r.stdout, "\n") {
+			if !strings.Contains(line, `"apiKeySource"`) {
+				res = append(res, truncStr(line, 600))
+			}
+		}
+		t.Fatalf("read + evaluated bash both should have run:\n%s", strings.Join(res, "\n"))
 	}
 }
