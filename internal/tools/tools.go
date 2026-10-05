@@ -86,7 +86,9 @@ func All() []*Tool {
 		"PushNotification", "Read", "ReadMcpResourceDirTool",
 		"ReadMcpResourceTool", "RemoteTrigger", "ReportFindings",
 		"ScheduleWakeup", "SendFeedback", "SendMessage", "Skill",
+		"ToolSearch",
 		"TaskStop", "WebFetch", "WebSearch", "Workflow", "Write",
+		"advisor",
 	}
 	interactiveOnly := map[string]bool{
 		"Artifact": true, "ArtifactComments": true, "ArtifactData": true,
@@ -105,6 +107,9 @@ func All() []*Tool {
 			continue
 		}
 		if n == "RemoteTrigger" && !remoteTriggerEnabled() {
+			continue
+		}
+		if n == "ToolSearch" && !toolSearchEnabled() {
 			continue
 		}
 		if t, ok := registry[n]; ok {

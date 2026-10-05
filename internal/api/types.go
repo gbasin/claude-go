@@ -95,8 +95,13 @@ type Request struct {
 	Thinking          json.RawMessage `json:"thinking,omitempty"`
 	ContextManagement json.RawMessage `json:"context_management,omitempty"`
 	Safeguards        json.RawMessage `json:"safeguards,omitempty"`
-	OutputConfig      json.RawMessage `json:"output_config,omitempty"`
-	Stream            bool            `json:"stream"`
+	// diagnostics.previous_message_id — real sends it on every request
+	// (null on the first turn); thread:{type:"create"} appears on
+	// thread-creating requests (verified in wire captures)
+	Diagnostics  json.RawMessage `json:"diagnostics,omitempty"`
+	Thread       json.RawMessage `json:"thread,omitempty"`
+	OutputConfig json.RawMessage `json:"output_config,omitempty"`
+	Stream       bool            `json:"stream"`
 }
 
 // SSE event types from stream=true
