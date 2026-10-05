@@ -173,3 +173,110 @@ func TestMCPSSEDeferredRefusal(t *testing.T) {
 	}
 	p.exit()
 }
+
+// httpMCPServer is a minimal streamable-HTTP MCP server: POST /mcp carries
+// JSON-RPC, responses come back as JSON bodies; Mcp-Session-Id is issued
+// on initialize and must be echoed on later requests.
+type httpMCPServer struct {
+	srv *httptest.Server
+
+	mu      sync.Mutex
+	methods []string
+	sidSeen []string // Mcp-Session-Id header per request
+}
+
+func newHTTPMCPServer(t *testing.T) *httpMCPServer {
+	t.Helper()
+	m := &httpMCPServer{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/mcp", m.handle)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404) // GET stream unsupported — client must tolerate
+	})
+	m.srv = httptest.NewServer(mux)
+	t.Cleanup(m.srv.Close)
+	return m
+}
+
+func (m *httpMCPServer) handle(w http.ResponseWriter, r *http.Request) {
+	var rpc struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+	}
+	json.NewDecoder(r.Body).Decode(&rpc)
+	m.mu.Lock()
+	m.methods = append(m.methods, rpc.Method)
+	m.sidSeen = append(m.sidSeen, r.Header.Get("Mcp-Session-Id"))
+	m.mu.Unlock()
+	if len(rpc.ID) == 0 || string(rpc.ID) == "null" {
+		w.WriteHeader(202)
+		return
+	}
+	var result any
+	switch rpc.Method {
+	case "initialize":
+		result = map[string]any{
+			"protocolVersion": "2025-03-26",
+			"capabilities":    map[string]any{"tools": map[string]any{}},
+			"serverInfo":      map[string]any{"name": "e2e-http", "version": "0.1"},
+		}
+		w.Header().Set("Mcp-Session-Id", "e2e-sess-1")
+	case "tools/list":
+		result = map[string]any{"tools": []map[string]any{{
+			"name":        "ping",
+			"description": "e2e ping tool",
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
+		}}}
+	case "tools/call":
+		result = map[string]any{"content": []map[string]any{{
+			"type": "text", "text": "PONG-HTTP-E2E"}}}
+	default:
+		result = map[string]any{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"jsonrpc": "2.0", "id": json.RawMessage(rpc.ID), "result": result})
+}
+
+// TestMCPHTTPToolCall: streamable-HTTP transport — initialize handshake,
+// session-id echo on subsequent posts, deferred ToolSearch gate, then a
+// real tools/call over HTTP.
+func TestMCPHTTPToolCall(t *testing.T) {
+	srv := newHTTPMCPServer(t)
+	s := newSession(t)
+	s.writeSettings(`{"enableAllProjectMcpServers":true}`)
+	s.writeFile(".mcp.json", fmt.Sprintf(
+		`{"mcpServers":{"httptest":{"type":"http","url":%q}}}`, srv.srv.URL+"/mcp"))
+
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p.sendUntil("/mcp\r", "connected", 20)
+
+	p.sendUntilEchoed(t,
+		`calls:[{"name":"ToolSearch","input":{"query":"select:mcp__httptest__ping"}},`+
+			`{"name":"mcp__httptest__ping","input":{}}]`+"\r",
+		`> calls:[{"name":"ToolSearch"`, 8)
+	p.waitFor("PONG-HTTP-E2E", 30*time.Second)
+
+	// session id issued at initialize must be echoed on later requests
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	var sawSid bool
+	for _, sid := range srv.sidSeen[1:] {
+		if sid == "e2e-sess-1" {
+			sawSid = true
+		}
+	}
+	if !sawSid {
+		t.Fatalf("Mcp-Session-Id not echoed after initialize: %v", srv.sidSeen)
+	}
+	var sawCall bool
+	for _, m := range srv.methods {
+		if m == "tools/call" {
+			sawCall = true
+		}
+	}
+	if !sawCall {
+		t.Fatalf("no tools/call on the wire: %v", srv.methods)
+	}
+	p.exit()
+}
