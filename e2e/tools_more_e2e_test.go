@@ -180,3 +180,94 @@ func TestAdvisorTool(t *testing.T) {
 		t.Fatalf("advisor should produce a tool_result: %s", truncStr(r.stdout, 2000))
 	}
 }
+
+// TestCronCreateList: CronCreate (deferred) schedules a session job and
+// CronList enumerates it.
+func TestCronCreateList(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p",
+		`calls:[{"name":"ToolSearch","input":{"query":"select:CronCreate,CronList"}},`+
+			`{"name":"CronCreate","input":{"cron":"0 9 * * *","prompt":"morning check"}},`+
+			`{"name":"CronList","input":{}}]`,
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "morning check") {
+		t.Fatalf("CronList should show the created job: %s", truncStr(r.stdout, 2000))
+	}
+}
+
+// TestTaskStopLive: a background Bash task (b1 — the first bg slot) is
+// stopped by TaskStop (deferred tool).
+func TestTaskStopLive(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p",
+		`calls:[{"name":"ToolSearch","input":{"query":"select:TaskStop"}},`+
+			`{"name":"Bash","input":{"command":"sleep 60","run_in_background":true}},`+
+			`{"name":"TaskStop","input":{"task_id":"b1"}}]`,
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "Task b1 stopped") {
+		t.Fatalf("expected the task-stop result: %s", truncStr(r.stdout, 2000))
+	}
+}
+
+// TestReadNotifications: the tool dispatches and reports the empty queue.
+func TestReadNotifications(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p",
+		`tool:ReadNotifications {}`,
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "No pending notifications") {
+		t.Fatalf("expected empty-notification result: %s", truncStr(r.stdout, 2000))
+	}
+}
+
+// TestPlanModeBlocksWrite: after EnterPlanMode, a Write call is denied
+// read-only-mode style and the file is never created.
+func TestPlanModeBlocksWrite(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+
+	p.sendUntilEchoed(t,
+		`calls:[{"name":"ToolSearch","input":{"query":"select:EnterPlanMode"}},`+
+			`{"name":"EnterPlanMode","input":{}}]`+"\r",
+		`> calls:[{"name":"ToolSearch"`, 8)
+	p.waitFor("plan mode", 30*time.Second)
+
+	target := filepath.Join(s.cwd, "blocked.txt")
+	p.sendUntilEchoed(t,
+		`tool:Write {"file_path":"`+target+`","content":"nope"}`+"\r",
+		"> tool:Write", 8)
+	p.waitFor("Tool results received", 30*time.Second)
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("plan mode must refuse writes — file exists: %s", target)
+	}
+	p.exit()
+}
+
+// TestBangCommand: `!cmd` runs through Bash locally and the output is
+// pushed as a bash-input message (visible to the model next turn).
+func TestBangCommand(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p.sendUntilEchoed(t, "!echo bang-marker-42\r", "> !echo", 8)
+	p.waitFor("bang-marker-42", 15*time.Second)
+	p.exit()
+}
+
+// TestCtrlCDoubleExit: ctrl+c on an empty buffer warns once; a second
+// press exits.
+func TestCtrlCDoubleExit(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.send("\x03")
+	p.waitFor("ctrl-C again to exit", 15*time.Second)
+	p.send("\x03")
+	if err := p.waitExit(15 * time.Second); err != nil {
+		t.Fatalf("double ctrl-C should exit: %v", err)
+	}
+}

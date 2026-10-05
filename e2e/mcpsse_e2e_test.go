@@ -79,9 +79,16 @@ func (m *sseMCPServer) handleMsg(w http.ResponseWriter, r *http.Request) {
 	case "initialize":
 		result = map[string]any{
 			"protocolVersion": "2024-11-05",
-			"capabilities":    map[string]any{"tools": map[string]any{}},
+			"capabilities":    map[string]any{"tools": map[string]any{}, "resources": map[string]any{}},
 			"serverInfo":      map[string]any{"name": "e2e-sse", "version": "0.1"},
 		}
+	case "resources/list":
+		result = map[string]any{"resources": []map[string]any{{
+			"uri": "mem://note1", "name": "note1", "mimeType": "text/plain",
+			"description": "e2e resource"}}}
+	case "resources/read":
+		result = map[string]any{"contents": []map[string]any{{
+			"uri": "mem://note1", "mimeType": "text/plain", "text": "RES-CONTENT-E2E"}}}
 	case "tools/list":
 		result = map[string]any{"tools": []map[string]any{{
 			"name":        "ping",
@@ -278,5 +285,28 @@ func TestMCPHTTPToolCall(t *testing.T) {
 	if !sawCall {
 		t.Fatalf("no tools/call on the wire: %v", srv.methods)
 	}
+	p.exit()
+}
+
+// TestMCPResources: the deferred resource tools list and read MCP
+// resources over the SSE transport — resources/list + resources/read on
+// the wire, content into the tool result.
+func TestMCPResources(t *testing.T) {
+	srv := newSSEMCPServer(t)
+	s := newSession(t)
+	s.writeSettings(`{"enableAllProjectMcpServers":true}`)
+	s.writeFile(".mcp.json", fmt.Sprintf(
+		`{"mcpServers":{"ssetest":{"type":"sse","url":%q}}}`, srv.srv.URL+"/sse"))
+
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p.sendUntil("/mcp\r", "connected", 20)
+
+	p.sendUntilEchoed(t,
+		`calls:[{"name":"ToolSearch","input":{"query":"select:ListMcpResourcesTool,ReadMcpResourceTool"}},`+
+			`{"name":"ListMcpResourcesTool","input":{}},`+
+			`{"name":"ReadMcpResourceTool","input":{"server":"ssetest","uri":"mem://note1"}}]`+"\r",
+		`> calls:[{"name":"ToolSearch"`, 8)
+	p.waitFor("RES-CONTENT-E2E", 30*time.Second)
+	p.waitFor("mem://note1", 5*time.Second)
 	p.exit()
 }
