@@ -123,6 +123,12 @@ func (ks *keySource) read() {
 				i += 2
 				continue
 			}
+			if c == 0x1b && i+1 < n && buf[i+1] >= 32 && buf[i+1] < 127 {
+				// ESC + printable = alt/meta+key (real treats them identically)
+				ks.ch <- key{b: buf[i+1], r: rune(buf[i+1]), mod: modAlt}
+				i++
+				continue
+			}
 			if c >= 0x80 {
 				size := utf8Len(c)
 				if i+size <= n {

@@ -8,6 +8,11 @@ package repl
 //	  {"context":"Chat","bindings":{"ctrl+e":"chat:externalEditor","ctrl+u":null}}
 //	]}
 //
+// Real validates against 27 contexts (mod_0245 KEYBINDING_CONTEXTS);
+// we accept all of them, but only Chat/Global have live handlers —
+// bindings for dialog contexts are stored (they'd consume the key in
+// that dialog, matching real's inert-on-unknown semantics) and do
+// nothing at the prompt.
 // Contexts supported here: Chat (prompt editor) and Global. A string value
 // rebinds the key to an action; null unbinds the default. Chords are
 // space-separated keystrokes ("ctrl+x ctrl+k") with a 3s timeout between
@@ -20,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -33,10 +39,39 @@ var kbModAliases = map[string]int{
 }
 
 var kbSpecialKeys = map[string]bool{
-	"escape": true, "enter": true, "tab": true, "space": true,
-	"backspace": true, "delete": true, "insert": true,
-	"up": true, "down": true, "left": true, "right": true,
+	"escape": true, "esc": true, "enter": true, "return": true, "tab": true,
+	"space": true, "backspace": true, "bksp": true, "delete": true,
+	"insert": true, "up": true, "down": true, "left": true, "right": true,
 	"home": true, "end": true, "pageup": true, "pagedown": true,
+	"wheelup": true, "wheeldown": true, "capslock": true, "clear": true,
+}
+
+// kbContexts — real's 27 valid context names (mod_0245). Bindings in
+// contexts we don't render are stored but never fire at the prompt.
+var kbContexts = map[string]bool{
+	"Global": true, "Chat": true, "Autocomplete": true,
+	"Confirmation": true, "Help": true, "Transcript": true,
+	"HistorySearch": true, "Task": true, "ThemePicker": true,
+	"Settings": true, "Tabs": true, "Attachments": true,
+	"Footer": true, "AbovePrompt": true, "AbovePromptInput": true,
+	"AbovePromptSelect": true, "Pane": true, "PaneField": true,
+	"MessageSelector": true, "DiffDialog": true, "DiffPanel": true,
+	"ModelPicker": true, "EffortSlider": true, "Select": true,
+	"Plugin": true, "Scroll": true, "Agents": true,
+}
+
+// kbReserved — non-rebindable keys (ctrl+m==enter, ctrl+[==esc,
+// ctrl+i==tab, ctrl+h==backspace are terminal aliases; ctrl+z is the
+// suspend signal the terminal driver owns).
+var kbReserved = map[string]string{
+	"ctrl+c":   "interrupts Claude",
+	"ctrl+d":   "exits Claude",
+	"ctrl+m":   "is the Enter key in terminals",
+	"ctrl+[":   "is the Escape key in terminals",
+	"ctrl+i":   "is the Tab key in terminals",
+	"ctrl+h":   "is the Backspace key in terminals",
+	"capslock": "is not a terminal key",
+	"ctrl+z":   "is terminal suspend",
 }
 
 // kbActions maps action strings to editor behavior.
@@ -59,6 +94,9 @@ var kbActions = map[string]func(*editor) *readResult{
 	"chat:newline":        func(e *editor) *readResult { e.insert('\n'); return nil },
 	"chat:undo":           func(e *editor) *readResult { e.undo(); return nil },
 	"chat:sendNow":        func(e *editor) *readResult { return e.sendNow() },
+	"history:previous":    func(e *editor) *readResult { e.histPrev(); return nil },
+	"history:next":        func(e *editor) *readResult { e.histNext(); return nil },
+	"chat:clearScreen":    func(e *editor) *readResult { fmt.Print("\x1b[2J\x1b[H"); e.redraw(); return nil },
 	"chat:queueSubmit": func(e *editor) *readResult {
 		return e.queueSubmitKey()
 	},
@@ -105,6 +143,15 @@ var defaultKeybindings = []struct {
 	{"Chat", "ctrl+x ctrl+s", "chat:sendNow"},
 	{"Chat", "ctrl+enter", "chat:sendNow"},
 	{"Chat", "space", "voice:pushToTalk"}, // real's default (mod_0245)
+	{"Chat", "up", "history:previous"},
+	{"Chat", "down", "history:next"},
+	{"Chat", "cmd+k", "chat:clearScreen"},
+	{"Chat", "meta+w", "chat:workflowKeywordToggle"}, // bound, inert for us
+	{"Global", "ctrl+]", "app:openArtifact"},         // bound, inert for us
+	{"Global", "ctrl+up", "app:diffFileListUp"},      // bound, inert for us
+	{"Global", "ctrl+down", "app:diffFileListDown"},  // bound, inert for us
+	{"Global", "meta+up", "app:diffFileListUp"},
+	{"Global", "meta+down", "app:diffFileListDown"},
 }
 
 // keystroke renders a decoded key into canonical stroke form, or "" if the
@@ -318,8 +365,13 @@ func (e *editor) applyKeybindingFile(b []byte) []string {
 		return []string{`keybindings.json must have a "bindings" array`}
 	}
 	for _, cb := range file.Bindings {
-		if cb.Context != "Chat" && cb.Context != "Global" {
-			warns = append(warns, fmt.Sprintf("Unknown context %q — Valid contexts: Global, Chat", cb.Context))
+		if !kbContexts[cb.Context] {
+			var names []string
+			for n := range kbContexts {
+				names = append(names, n)
+			}
+			sort.Strings(names)
+			warns = append(warns, fmt.Sprintf("Unknown context %q — Valid contexts: %s", cb.Context, strings.Join(names, ", ")))
 			continue
 		}
 		for kstr, act := range cb.Bindings {
@@ -328,15 +380,18 @@ func (e *editor) applyKeybindingFile(b []byte) []string {
 			if cs == "" {
 				continue
 			}
+			if first := strings.Split(cs, " ")[0]; kbReserved[first] != "" {
+				warns = append(warns, fmt.Sprintf("%q may not work: %s", kstr, kbReserved[first]))
+			}
 			if act == nil {
 				delete(e.kb, cs) // null unbinds the default
 				e.kbUnbound[cs] = true
 				continue
 			}
-			if _, ok := kbActions[*act]; !ok {
-				warns = append(warns, fmt.Sprintf("Invalid action for %q: %q", kstr, *act))
-				continue
-			}
+			// real accepts unknown action names SILENTLY — the binding is
+			// stored and resolves to no handler, consuming the key (a typo
+			// kills the key rather than warning). command:<name> executes a
+			// slash command. Both paths store the binding as-is.
 			delete(e.kbUnbound, cs)
 			e.kb[cs] = *act
 		}
@@ -375,6 +430,12 @@ func (e *editor) bindingKey(k key) (*readResult, bool) {
 		if f := kbActions[act]; f != nil {
 			return f(e), true
 		}
+		if strings.HasPrefix(act, "command:") {
+			// command:<name> executes a slash command as if typed
+			return &readResult{line: "/" + strings.TrimPrefix(act, "command:"), ok: true}, true
+		}
+		// unknown action name: real stores the binding and the key goes
+		// inert — consumed, no handler
 		return nil, true
 	}
 	if e.kbUnbound[cand] {

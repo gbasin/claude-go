@@ -86,12 +86,24 @@ func (l *Loop) applySummary(text, transcriptPath string, keepLast int) {
 			"error messages, or content you generated), read the full transcript at: " + transcriptPath
 	}
 
+	// the span being replaced — writers that persist the transcript
+	// post-hoc (print mode, subagents) would otherwise lose it
+	span := l.Messages
+	if keepLast > 0 && keepLast < len(l.Messages) {
+		span = l.Messages[:keepLast]
+	}
+	if l.Events.OnCompactSpan != nil {
+		l.Events.OnCompactSpan(span)
+	}
+
 	contMsg := api.TextMessage("user", cont)
 	contMsg.IsCompactSummary = true
 	msgs := []api.Message{contMsg}
 	l.compactSummaryPending = true // transcript marks it isCompactSummary
+	l.compactKept = 0
 	if keepLast > 0 && keepLast < len(l.Messages) {
 		msgs = append(msgs, l.Messages[keepLast:]...)
+		l.compactKept = len(msgs) - 1
 	}
 	l.Messages = msgs
 	l.started = true
@@ -109,8 +121,22 @@ func (l *Loop) applySummary(text, transcriptPath string, keepLast int) {
 func (l *Loop) summarize(ctx context.Context, msgs []api.Message) (string, error) {
 	req := l.buildRequest()
 	req.Tools = nil // summarization needs no tool surface
-	req.Messages = append(append([]api.Message{}, msgs...),
-		api.TextMessage("user", compactPrompt))
+	// the span is raw history — buildRequest's wire shaping only touched
+	// its own copy of l.Messages. Apply the same replay rules here:
+	// strip signature-only thinking blocks (API 400s on replay) and cap
+	// cache_control blocks so system+messages stay within the API's 4.
+	span := capBreakpoints(sanitizeReplayed(msgs), 2)
+	prompt := api.TextMessage("user", compactPrompt)
+	// a trailing env "system" block must stay last: mid-array system
+	// blocks are only valid before an assistant message — appending the
+	// prompt after it would 400 ("system must precede an assistant
+	// message or end the array")
+	if n := len(span); n > 0 && span[n-1].Role == "system" {
+		span = append(span[:n-1:n-1], prompt, span[n-1])
+	} else {
+		span = append(span, prompt)
+	}
+	req.Messages = span
 	resp, err := l.Client.StreamMessage(ctx, req, func(ev *api.StreamEvent) error {
 		if ev.Type == "message_delta" && ev.Usage != nil {
 			l.UsageTotal.OutputTokens += ev.Usage.OutputTokens
@@ -182,6 +208,20 @@ func (l *Loop) maybePrecompute(u api.Usage) {
 			precompCache[l] = &precomputedSummary{text: text, count: len(msgs)}
 		}
 	}()
+}
+
+// TakeCompactPending reports, once, whether a compaction replaced history
+// since the last take. It returns the number of retained tail messages
+// (index 0 is the new isCompactSummary record; indices 1..kept were
+// already logged pre-compaction), or -1 when nothing is pending. The
+// transcript writer consumes it to log the continuation record and keep
+// its append cursor aligned after history shrinks.
+func (l *Loop) TakeCompactPending() int {
+	if !l.compactSummaryPending {
+		return -1
+	}
+	l.compactSummaryPending = false
+	return l.compactKept
 }
 
 // takePrecomputed returns the cached summary if it covers current history.

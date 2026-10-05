@@ -435,6 +435,17 @@ func compFrameLocked(echo []string) {
 	case compZoneH != n:
 		echoed = compResizeRowsLocked(&b, rows, echo)
 	default:
+		// the zone can keep its height across edit→turn (a wrapped
+		// prompt makes edit-zone 5 == turn-zone 5) — the submitted box
+		// still has to scroll into the transcript or the prompt vanishes
+		if len(echo) > 0 {
+			fmt.Fprintf(&b, "\x1b[%d;1H", compH-compZoneH)
+			for _, ln := range echo {
+				b.WriteString(ln)
+				b.WriteString("\r\n")
+			}
+			echoed = true
+		}
 		compPaintRowsLocked(&b, rows)
 	}
 	if compStreamOn {
