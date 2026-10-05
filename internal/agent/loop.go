@@ -492,6 +492,25 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 					Content: "Permission to use " + b.Name + " has been denied because Claude Code is running in don't ask mode. Only use tools that are allowed in this mode via the permission settings.",
 					IsError: true,
 				}
+			} else if l.ToolCtx.PermissionAsk != nil && l.ToolCtx.PermissionAsk() &&
+				l.SafetyEval != nil {
+				// unresolved ask in a non-interactive context → real's
+				// auto-mode security monitor decides: severity <50 allows,
+				// >=50 blocks with the matched rule category, eval error
+				// blocks with the could-not-evaluate text
+				sev, cat, serr := l.SafetyEval(ctx, b.Name, b.Input)
+				switch {
+				case serr != nil:
+					r = tools.Result{Content: "Tool call could not be evaluated by the safety monitor: " + serr.Error(), IsError: true}
+				case sev < 50:
+					r = l.dispatch(b.Name, b.Input)
+				default:
+					content := "Tool call blocked by the safety monitor (severity " + strconv.Itoa(sev) + ")"
+					if cat != "" {
+						content += " — matched rule: " + cat
+					}
+					r = tools.Result{Content: content, IsError: true}
+				}
 			} else {
 				r = tools.Result{
 					Content: "Permission for this tool use was denied. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). Try a different approach or report the limitation to complete your task.",
