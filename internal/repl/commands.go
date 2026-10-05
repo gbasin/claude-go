@@ -47,6 +47,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		dprintln("  ⏸ plan mode — explore read-only, then ExitPlanMode to implement")
 	case "clear", "reset", "new":
 		l.Messages = nil
+		l.ResetForNewSession()
 		l.SessionStartSource = "clear"
 		hooks.Run(l.Hooks, hooks.SessionStart, map[string]any{
 			"session_id": l.Client.SessionID, "transcript_path": l.Transcript,
@@ -113,6 +114,8 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		if id != "" {
 			if msgs, err := session.Load(l.ToolCtx.CWD, id); err == nil {
 				l.Messages = msgs
+				l.MarkEnvSent()
+				l.MarkEnvSent()
 				dprintf("  resumed session %s (%d messages)\n", id, len(msgs))
 			}
 		}
@@ -327,6 +330,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		}
 		l.Client.SessionID = nw.SessionID
 		l.Messages = msgs
+		l.MarkEnvSent()
 		currentStore = nw
 		dprintf("  forked to session %s (%d messages carried)\n", nw.SessionID[:8], len(msgs))
 	case "rewind", "checkpoint", "undo":
