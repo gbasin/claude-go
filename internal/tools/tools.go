@@ -26,13 +26,18 @@ type Result struct {
 	// {type:"tool_reference", tool_name} blocks instead of text — real's
 	// mapToolResultToToolResultBlockParam for ToolSearch matches.
 	Refs []string
+	// Handback marks SubagentHandback's report — the runner ends the
+	// subagent's run and delivers Content as the Agent result (real's
+	// contract: only a SubagentHandback call reaches the caller).
+	Handback bool
 }
 
 // Tool is a callable builtin.
 type Tool struct {
-	Def   api.Tool
-	Exec  func(ctx *Context, input json.RawMessage) Result
-	IsMCP bool // mcp__* tools — real defers them all (isMcp===true)
+	Def      api.Tool
+	Exec     func(ctx *Context, input json.RawMessage) Result
+	IsMCP    bool // mcp__* tools — real defers them all (isMcp===true)
+	IsHidden bool // registered for dispatch but never on the wire (SubagentHandback is added per-subagent)
 }
 
 // Context carries per-session tool state.
@@ -50,6 +55,9 @@ type Context struct {
 	// auto-mode safety eval instead of flat-denying (real's behavior
 	// for unresolvable calls in non-interactive mode).
 	PermissionAsk func() bool
+	// Subagent marks Agent-spawned contexts — RequestDefs adds
+	// SubagentHandback to the wire set.
+	Subagent      bool
 	Notes         []string // queued system notes from background tasks
 	Answerer      Answerer // WebFetch page-answer model
 	Searcher      Searcher // WebSearch backend

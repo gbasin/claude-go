@@ -363,7 +363,11 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 			class_ = r.Class
 		}
 		req.Header.Set("x-claude-code-request-class", class_)
-		req.Header.Set("x-claude-code-prompt-id", c.PromptID())
+		pid := c.PromptID()
+		if r, ok := body.(*Request); ok && r.PromptID != "" {
+			pid = r.PromptID
+		}
+		req.Header.Set("x-claude-code-prompt-id", pid)
 		req.Header.Set("x-client-request-id", newUUID())
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
@@ -552,6 +556,9 @@ func (c *Client) SendMessage(ctx context.Context, req *Request) (*Response, erro
 	}
 	return &out, nil
 }
+
+// NewUUID returns a fresh uuid — the api package's uuid helper.
+func NewUUID() string { return newUUID() }
 
 func newUUID() string {
 	var b [16]byte

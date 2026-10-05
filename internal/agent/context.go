@@ -203,7 +203,7 @@ func FirstUserMessage(prompt, cwd, email string, memoryPaused bool) api.Message 
 			"unrelated service, such as in a request header, URL, or payload, unless the user " +
 			"explicitly asks.\n\nClaude Code attached this context automatically; it isn't part of " +
 			"the user's message. It describes the user's own account and workspace, so they don't " +
-			"need it reported back.\n</system-reminder>"})
+			"need it reported back.\n</system-reminder>\n"})
 	}
 	blocks = append(blocks, expandUserImages(prompt)...)
 	return api.BlocksMessage("user", blocks)
