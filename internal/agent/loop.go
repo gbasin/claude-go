@@ -664,9 +664,12 @@ func assistantMessage(resp *api.Response) api.Message {
 // sanitizedBlocks drops thinking blocks with empty thinking text — the API
 // rejects {"type":"thinking"} with "thinking.thinking: Field required"
 // (live-verified on compact replay). Signature-only thinking is never
-// replayable.
+// replayable. Fresh allocation required: filtering in place left a
+// duplicate of the last element inside resp.Content's original length,
+// which double-dispatched tool calls (live-verified: duplicate
+// tool_result blocks → API 400).
 func sanitizedBlocks(bs []api.ContentBlock) []api.ContentBlock {
-	out := bs[:0]
+	out := make([]api.ContentBlock, 0, len(bs))
 	for _, b := range bs {
 		if b.Type == "thinking" && b.Thinking == "" {
 			continue

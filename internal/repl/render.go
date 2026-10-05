@@ -349,7 +349,15 @@ func (w *turnWriter) WriteString(s string) {
 func (w *turnWriter) finish() { w.line.Reset() }
 
 // streamPrint writes a completed line into the turn's stream region —
-// compStreamWrite appends \r\n at the current stream position.
+// compStreamWrite appends \r\n at the current stream position. If the
+// streamed text ended mid-row, a newline lands the card at col 0 first
+// (real emits ⏺/⎿ on fresh rows, not mid-text).
 func streamPrint(s string) {
+	compMu.Lock()
+	midLine := compStreamOn && compStreamCol > 1
+	compMu.Unlock()
+	if midLine {
+		s = "\n" + s
+	}
 	(&turnWriter{}).WriteString(s + "\n")
 }
