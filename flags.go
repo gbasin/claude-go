@@ -63,6 +63,7 @@ type cliOpts struct {
 	resumeAt     string
 	worktreeSet  bool
 	worktreeName string
+	tmux         string // "" | "auto" | "classic"
 	projectDir   string
 	sdkURL       string
 	betas        string
@@ -211,7 +212,8 @@ func parseCLI(args []string) *cliOpts {
 		"--desktop":                            func() { o.stubEnv("--desktop", "CLAUDE_GO_DESKTOP", "1", true) },
 		"--chrome":                             func() { os.Setenv("CLAUDE_GO_CHROME", "1") },
 		"--no-chrome":                          func() { os.Setenv("CLAUDE_GO_CHROME", "0") },
-		"--tmux":                               func() { o.stubs = append(o.stubs, "--tmux") },
+		"--tmux":                               func() { o.tmux = "auto" },
+		"--tmux=classic":                       func() { o.tmux = "classic" },
 		"--init":                               func() { o.stubs = append(o.stubs, "--init") },
 	}
 	for _, f := range []string{
