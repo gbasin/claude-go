@@ -229,8 +229,12 @@ func (p *ptyProc) waitFor(substr string, timeout time.Duration) string {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	p.t.Fatalf("timed out (%s) waiting for %q\noutput:\n%s",
-		timeout, substr, truncStr(p.clean(), 4000))
+	out := p.clean()
+	if len(out) > 4000 {
+		out = "…[head truncated]…" + out[len(out)-4000:]
+	}
+	p.t.Fatalf("timed out (%s) waiting for %q\noutput tail:\n%s",
+		timeout, substr, out)
 	return ""
 }
 
@@ -251,7 +255,11 @@ func (p *ptyProc) waitCount(substr string, n int, timeout time.Duration) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	p.t.Fatalf("timed out waiting for %d x %q\noutput:\n%s", n, substr, truncStr(p.clean(), 4000))
+	out := p.clean()
+	if len(out) > 4000 {
+		out = "…[head truncated]…" + out[len(out)-4000:]
+	}
+	p.t.Fatalf("timed out waiting for %d x %q\noutput tail:\n%s", n, substr, out)
 }
 
 // waitExit waits for the child to exit, returning the error (nil = clean).
