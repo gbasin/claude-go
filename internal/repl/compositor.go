@@ -254,6 +254,17 @@ func compInline(s string) {
 		return
 	}
 	compMu.Lock()
+	midTurn := compStreamOn && compSusp == 0 && compZoneH > 0
+	compMu.Unlock()
+	if midTurn {
+		// a turn's stream owns the scroll bottom — continue at the
+		// tracked position instead of stomping the row the stream is on
+		// (an untracked inline print mid-turn also left compStreamCol
+		// stale, so the next stream write overwrote itself)
+		compStreamWrite(s)
+		return
+	}
+	compMu.Lock()
 	if compSusp > 0 || compZoneH == 0 {
 		compMu.Unlock()
 		io.WriteString(compOut, s)
@@ -425,6 +436,16 @@ func compFrameLocked(echo []string) {
 		echoed = compResizeRowsLocked(&b, rows, echo)
 	default:
 		compPaintRowsLocked(&b, rows)
+	}
+	if compStreamOn {
+		// the stream bottom is always the last scroll-region row —
+		// re-sync after install/resize so a mid-turn SIGWINCH or a
+		// zone-height change can't leave compStreamRow pointing at the
+		// old geometry (writes then land on the wrong row mid-text)
+		compStreamRow = compH - compZoneH
+		if compStreamCol > compW+1 {
+			compStreamCol = compW + 1
+		}
 	}
 	switch {
 	case compCur:
@@ -727,6 +748,36 @@ func compClamp(s string, w int) string {
 	return s
 }
 
+// softWrap splits s into rows of at most w visible cells — ANSI-aware
+// (escape sequences ride along, count zero) and grapheme-aware (a wide
+// cluster never splits). Empty input yields one empty row.
+func softWrap(s string, w int) []string {
+	if w < 1 {
+		w = 1
+	}
+	rows := []string{}
+	var b strings.Builder
+	vis := 0
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b {
+			l := ansiLen(s, i)
+			b.WriteString(s[i : i+l])
+			i += l
+			continue
+		}
+		cw, sz := graphemeWidth(s, i)
+		if cw > 0 && vis+cw > w {
+			rows = append(rows, b.String())
+			b.Reset()
+			vis = 0
+		}
+		b.WriteString(s[i : i+sz])
+		vis += cw
+		i += sz
+	}
+	return append(rows, b.String())
+}
+
 // ansiLen returns the byte length of the escape sequence starting at s[i]
 // (s[i] == 0x1b): CSI, OSC (through BEL/ST), or a two-byte sequence.
 func ansiLen(s string, i int) int {
@@ -769,7 +820,24 @@ func queueBoxRows(draft string) []string {
 	}
 	mid := "│ > " + draft
 	if visWidth(mid) > w-1 {
-		mid = "│ > …" + draft[max(0, len(draft)-(w-8)):]
+		// keep the tail that fits after "│ > …" — drop whole runes, a
+		// byte-level slice splits multi-byte runes mid-sequence
+		keep := w - 1 - visWidth("│ > …")
+		if keep < 0 {
+			keep = 0
+		}
+		cells, start := 0, len(draft)
+		for i := len(draft); i > 0; {
+			r, sz := utf8.DecodeLastRuneInString(draft[:i])
+			if cw := runeWidth(r); cells+cw > keep {
+				break
+			} else {
+				cells += cw
+			}
+			i -= sz
+			start = i
+		}
+		mid = "│ > …" + draft[start:]
 	}
 	return []string{"╭─╮", mid, "╰─╯"}
 }

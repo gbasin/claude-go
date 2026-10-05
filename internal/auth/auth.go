@@ -81,6 +81,16 @@ func Load() (*Credentials, error) {
 	// our own creds store first — logins and refreshes live here, never
 	// in real's keychain/file
 	if c, err := fromFile(ownCredsPath()); err == nil {
+		// lazily backfill subscriptionType for stores written before the
+		// profile fetch existed — the banner maps it to Claude Max/etc.
+		if c.SubscriptionType == "" || c.SubscriptionType == "oauth" {
+			if p := FetchProfile(c.AccessToken); p != nil {
+				if st := p.SubscriptionType(); st != "" {
+					c.SubscriptionType = st
+					writeOwnCreds(c) // persist so this only happens once
+				}
+			}
+		}
 		return c, nil
 	}
 	if runtime.GOOS == "darwin" {
