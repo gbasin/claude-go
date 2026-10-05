@@ -177,7 +177,7 @@ func (l *Loop) buildRequest() *api.Request {
 		Model:             l.Model,
 		MaxTokens:         mt,
 		Messages:          msgs,
-		System:            SystemBlocks(l.Entrypoint, l.CWD, l.Model, l.AppendSysP, l.ExtraSystem, l.SessionExtras, l.billingMeta(), l.tokensLeft),
+		System:            SystemBlocks(l.Entrypoint, l.CWD, l.Model, l.AppendSysP, l.ExtraSystem, l.SessionExtras, l.billingMeta(msgs), l.tokensLeft),
 		Tools:             tools.RequestDefs(l.ToolCtx),
 		Metadata:          Metadata(l.Client.SessionID, l.User),
 		Thinking:          l.thinkingConfig(),
@@ -202,13 +202,17 @@ func (l *Loop) threadField() json.RawMessage {
 	return nil
 }
 
-// billingMeta supplies prompt id + indices for the billing sys[0].
-func (l *Loop) billingMeta() BillingMeta {
+// billingMeta supplies prompt id + indices for the billing sys[0]; the
+// messages param seeds the per-request cch hash.
+func (l *Loop) billingMeta(msgs []api.Message) BillingMeta {
 	// captured: first turn emits cc_prompt_index=0, cc_turn_index=1
+	b, _ := json.Marshal(msgs)
 	return BillingMeta{
 		PromptID:    l.Client.PromptID(),
 		PromptIndex: l.turnCount - 1,
 		TurnIndex:   l.turnCount,
+		FirstPrompt: l.firstPrompt,
+		ReqSeed:     string(b),
 	}
 }
 

@@ -2,8 +2,10 @@ package agent
 
 import (
 	"claude-go/internal/config"
+	"crypto/sha256"
 	_ "embed"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -52,9 +54,9 @@ func projectSlug(cwd string) string {
 // AuxBillingLine returns real's slim billing header for aux-class calls:
 // version+hash, entrypoint, cch — no prompt/turn ids (captured on the
 // title/walk-away requests).
-func AuxBillingLine(entrypoint, cwd string) string {
+func AuxBillingLine(entrypoint, firstUserText, reqSeed string) string {
 	return fmt.Sprintf("x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s; cch=%s;",
-		version(), buildHash(), entrypoint, cchHash(cwd))
+		version(), ccVersionSuffix(firstUserText), entrypoint, cchHash(reqSeed))
 }
 
 func SystemBlocks(entrypoint string, cwd, model, appendPrompt string, extra, sessionExtras []string, bill BillingMeta, tokensLeft int64) []api.SystemBlock {
@@ -69,7 +71,7 @@ func SystemBlocks(entrypoint string, cwd, model, appendPrompt string, extra, ses
 	out := []api.SystemBlock{
 		{Type: "text", Text: fmt.Sprintf(
 			"x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s; cch=%s; cc_prompt_id=%s; cc_turn_origin=%s; cc_prompt_index=%d; cc_turn_index=%d;%s",
-			version(), buildHash(), entrypoint, cchHash(cwd), bill.PromptID, origin, bill.PromptIndex, bill.TurnIndex, workloadTag())},
+			version(), ccVersionSuffix(bill.FirstPrompt), entrypoint, cchHash(bill.ReqSeed), bill.PromptID, origin, bill.PromptIndex, bill.TurnIndex, workloadTag())},
 	}
 	ident := identityCLI
 	if entrypoint != "cli" {
@@ -374,22 +376,34 @@ type BillingMeta struct {
 	PromptID    string
 	PromptIndex int
 	TurnIndex   int
+	FirstPrompt string // cc_version suffix input (first non-meta user text)
+	ReqSeed     string // cch per-request hash seed (request body)
 }
 
-// buildHash is real's cc_version 3-hex suffix — an install-build id.
-// Stable per binary: hash our version so it doesn't float.
-func buildHash() string {
-	h := fnv.New32a()
-	h.Write([]byte(version() + "|build"))
-	return fmt.Sprintf("%05x", h.Sum32()&0xfffff)[:3]
+// ccVersionSuffix is real's cc_version 3-hex suffix — decompiled:
+//
+//	Uee(msgs)  → first non-meta user message's text content
+//	suffix     = sha256("59cf53e54c78" + text[4]+text[7]+text[20] + VERSION)[0:3]
+//
+// Verified against captures: "say one word"→4d4,
+// `tool:Bash {"command":"echo hi"}`→6ff.
+func ccVersionSuffix(firstUserText string) string {
+	at := func(i int) byte {
+		if i < len(firstUserText) {
+			return firstUserText[i]
+		}
+		return '0'
+	}
+	sum := sha256.Sum256([]byte("59cf53e54c78" + string([]byte{at(4), at(7), at(20)}) + version()))
+	return hex.EncodeToString(sum[:])[:3]
 }
 
-// cchHash approximates real's cch= field — a 5-hex tag derived per
-// session root (real's derivation is internal; observed values vary per
-// install, e.g. af1b7 / 5ba49).
-func cchHash(cwd string) string {
+// cchHash approximates real's cch= field — a 5-hex tag that varies per
+// request (captured: 01d51/22a16/9b1c9/a73fc in one session). Derivation
+// is internal; a per-request content hash matches the observed shape.
+func cchHash(seed string) string {
 	h := fnv.New32a()
-	h.Write([]byte(cwd + "|" + config.ClaudeDir()))
+	h.Write([]byte(seed))
 	return fmt.Sprintf("%05x", h.Sum32()&0xfffff)[:5]
 }
 
