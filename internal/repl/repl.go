@@ -343,6 +343,10 @@ func RunWithStore(l *agent.Loop, store Store) {
 				}
 			}
 		}
+		// real announces auto-compact inline when it fires
+		l.Events.OnAutoCompact = func(tokens int) {
+			streamPrint(dim + "Compacted · auto-compact summarized history" + reset)
+		}
 		runTurn := func(line string) {
 			tools.UserActive.Store(false)
 			defer tools.UserActive.Store(true)
