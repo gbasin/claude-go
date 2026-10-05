@@ -369,8 +369,11 @@ func execTaskStop(c *Context, raw json.RawMessage) Result {
 	if id == "" {
 		id = in.ShellID
 	}
-	if id == "" || c.BgTasks == nil {
+	if id == "" {
 		return Result{Content: "task_id or shell_id required", IsError: true}
+	}
+	if c.BgTasks == nil {
+		return Result{Content: "no such background task: " + id, IsError: true}
 	}
 	t := c.BgTasks.Get(id)
 	if t == nil {
