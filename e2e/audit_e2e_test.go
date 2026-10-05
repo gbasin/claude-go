@@ -247,3 +247,39 @@ func TestSessionStartHookOnWire(t *testing.T) {
 		t.Fatalf("req2 messages[1] should be bare-string hook ctx, got %v", req2[1]["content"])
 	}
 }
+
+// TestPluginHooksMerge: an installed+enabled plugin's hooks/hooks.json runs
+// as session hooks, with ${CLAUDE_PLUGIN_ROOT} expanded to the install path
+// (real resolves it at spawn). The hook's stdout lands as prompt context —
+// the mock echoes it back.
+func TestPluginHooksMerge(t *testing.T) {
+	s := newSession(t)
+	installPath := filepath.Join(s.home, "plugcache", "myplug", "1.0")
+	s.writeFile(filepath.Join(installPath, "hooks", "hooks.json"),
+		`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"cat ${CLAUDE_PLUGIN_ROOT}/marker.txt"}]}]}}`)
+	s.writeFile(filepath.Join(installPath, "marker.txt"), "PLUGINHOOK-7")
+	s.writeFile(filepath.Join(s.home, ".claude", "plugins", "installed_plugins.json"),
+		fmt.Sprintf(`{"plugins":{"myplug@mkt":[{"installPath":%q,"enabled":true}]}}`, installPath))
+
+	r := s.run(t, "--mock", "-p", "hi")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "PLUGINHOOK-7") {
+		t.Fatalf("plugin hook output should reach the model as context: %q", r.stdout)
+	}
+}
+
+// TestPluginHookDisabled: enabled:false plugins contribute no hooks.
+func TestPluginHookDisabled(t *testing.T) {
+	s := newSession(t)
+	installPath := filepath.Join(s.home, "plugcache", "offplug", "1.0")
+	s.writeFile(filepath.Join(installPath, "hooks", "hooks.json"),
+		`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo 'SHOULD-NOT-FIRE'"}]}]}}`)
+	s.writeFile(filepath.Join(s.home, ".claude", "plugins", "installed_plugins.json"),
+		fmt.Sprintf(`{"plugins":{"offplug@mkt":[{"installPath":%q,"enabled":false}]}}`, installPath))
+
+	r := s.run(t, "--mock", "-p", "hi")
+	s.mustOK(t, r)
+	if strings.Contains(r.stdout, "SHOULD-NOT-FIRE") {
+		t.Fatalf("disabled plugin hook fired: %q", r.stdout)
+	}
+}

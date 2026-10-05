@@ -31,10 +31,12 @@ func TestNarrowTurn50(t *testing.T) {
 		}
 	}
 
-	// permission dialog at narrow width (no bypass → dialog path). Resend
-	// until the dialog appears — a send that lands mid-turn is dropped by
-	// the REPL's key-queue goroutine before it echoes.
-	p.sendUntil(`tool:Bash {"command":"echo narrow-ok"}`+"\r", "─ permission", 15)
+	// permission dialog at narrow width (no bypass → dialog path).
+	// sendUntilEchoed, not sendUntil: retrying a submitted line would run a
+	// duplicate turn whose tool_use ids collide with the first (the mock
+	// reuses toolu_mock_N per response) → validator 400.
+	p.sendUntilEchoed(t, `tool:Bash {"command":"echo narrow-ok"}`+"\r", "> tool:Bash", 10)
+	p.waitFor("─ permission", 30*time.Second)
 	p.sendUntil("1", "Tool results received", 15)
 	out = p.clean()
 	if !strings.Contains(out, "narrow-ok") {
@@ -56,9 +58,10 @@ func TestNarrowThink40(t *testing.T) {
 	p.send("think:narrow-width-reasoning\r")
 	p.waitFor("Done thinking", 30*time.Second)
 
-	// REPL survives: next prompt answers — resend until the reply arrives
-	// (a send landing mid-turn is dropped before echo)
-	p.sendUntil("ping-narrow\r", "Mock response to: ping-narrow", 15)
+	// REPL survives: next prompt answers — retry only until the echo lands
+	// (a resend after submission would queue a duplicate turn)
+	p.sendUntilEchoed(t, "ping-narrow\r", "> ping-narrow", 8)
+	p.waitFor("Mock response to: ping-narrow", 30*time.Second)
 	if !utf8OK(p.clean()) {
 		t.Fatal("output is not valid utf8 at 40 cols")
 	}
