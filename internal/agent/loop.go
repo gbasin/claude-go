@@ -155,10 +155,10 @@ func (l *Loop) buildRequest() *api.Request {
 		}
 		ocRaw, _ = json.Marshal(oc)
 	}
+	l.syncDeferredPool()
 	msgs := withEphemeralBreakpoint(l.wireMessages())
 	msgs = capBreakpoints(msgs, 2) // 2 system breakpoints reserve; API max is 4 total
 	msgs = sanitizeReplayed(msgs)
-	msgs = l.withDeferredReminder(msgs)
 	var safeguards json.RawMessage
 	if !l.dropSafeguards {
 		safeguards = Safeguards(l.PermMode, l.ToolCtx.CWD, l.PermRules)
@@ -246,43 +246,14 @@ func (l *Loop) diagnosticsField() json.RawMessage {
 	return b
 }
 
-// withDeferredReminder prepends the deferred-tools announcement
-// (<system-reminder>, real's deferred_tools_delta attachment / MTr text)
-// to the newest user message when the still-deferred set changed since the
-// last request — first turn lists every deferred name; post-discovery the
-// shrunken pool re-announces. Returns msgs unchanged when nothing to say.
-func (l *Loop) withDeferredReminder(msgs []api.Message) []api.Message {
+// syncDeferredPool keeps announcedDeferred current so newDeferredRemovals
+// can diff the pool between requests. Real announces the pool once inside
+// the env block; later requests only get removal notices in the ambient
+// system record — there is no re-announcement in user messages (captured).
+func (l *Loop) syncDeferredPool() {
 	names := l.ToolCtx.DeferredNames()
 	sort.Strings(names)
-	key := strings.Join(names, "\x00")
-	if key == l.announcedDeferred {
-		return msgs
-	}
-	l.announcedDeferred = key
-	if key == "" {
-		return msgs
-	}
-	out := make([]api.Message, len(msgs))
-	copy(out, msgs)
-	for i := len(out) - 1; i >= 0; i-- {
-		if out[i].Role != "user" {
-			continue
-		}
-		var blocks []api.ContentBlock
-		if err := json.Unmarshal(out[i].Content, &blocks); err != nil {
-			return msgs
-		}
-		reminder := api.ContentBlock{
-			Type: "text",
-			Text: "<system-reminder>\n" + tools.DeferredReminder(names) + "\n</system-reminder>",
-		}
-		blocks = append([]api.ContentBlock{reminder}, blocks...)
-		if raw, err := json.Marshal(blocks); err == nil {
-			out[i].Content = raw
-		}
-		return out
-	}
-	return msgs
+	l.announcedDeferred = strings.Join(names, "\x00")
 }
 
 // nearContextLimit: last measured input total crossed 80% of the auto-compact
