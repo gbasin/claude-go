@@ -96,12 +96,15 @@ type Loop struct {
 	announcedDeferred     string // last announced deferred-tool name set (sorted join)
 	Precompute            bool   // precomputeCompactionEnabled gate
 	RateLimitNote         string // set once a slow-lane rate-limit note was shown
-	noThinking            bool   // thinking config dropped after a thinking 400
-	dropSafeguards        bool
-	dropOutputConfig      bool
-	dropBetas             bool
-	maxTokensClamp        bool
-	lastTotal             int // last request's total input tokens (incl. cache)
+	// SafetyEval runs real's auto-mode security-monitor call on
+	// unresolvable tool calls — <50 allows, >=50 or an eval error blocks.
+	SafetyEval       func(ctx context.Context, name string, input json.RawMessage) (int, string, error)
+	noThinking       bool // thinking config dropped after a thinking 400
+	dropSafeguards   bool
+	dropOutputConfig bool
+	dropBetas        bool
+	maxTokensClamp   bool
+	lastTotal        int // last request's total input tokens (incl. cache)
 }
 
 func NewLoop(client *api.Client, cwd string) *Loop {

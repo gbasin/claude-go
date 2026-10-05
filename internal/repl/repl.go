@@ -881,14 +881,11 @@ func vimEnabled() bool {
 	if err != nil {
 		return false
 	}
-	// parse, don't substring-scan — the startup rewrite round-trips this
-	// file through MarshalIndent, so a compact substring miss disables vim
-	// on every run after the first.
-	var m map[string]any
-	if json.Unmarshal(b, &m) != nil {
+	var st map[string]any
+	if json.Unmarshal(b, &st) != nil {
 		return false
 	}
-	return m["keybindingMode"] == "vim" || m["editorMode"] == "vim"
+	return st["keybindingMode"] == "vim" || st["editorMode"] == "vim"
 }
 
 func slashCompleter(prefix string) []string {
