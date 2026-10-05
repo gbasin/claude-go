@@ -239,7 +239,9 @@ func (c *Client) auxGet(ctx context.Context, call auxCall, org string) ([]byte, 
 // QuotaProbe is real's startup haiku probe: one auxiliary-class
 // /v1/messages POST with max_tokens=1. Non-fatal, single attempt.
 func (c *Client) QuotaProbe(ctx context.Context) {
-	if nonessentialDisabled() || !c.auxLane() || c.Creds == nil {
+	// oauth-lane only until an api-key-lane capture proves otherwise —
+	// every observed probe rode oauth creds
+	if nonessentialDisabled() || !c.auxLane() || c.Creds == nil || c.Creds.IsAPIKey {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, auxReqTimeout)
