@@ -803,34 +803,47 @@ func compStreamWrite(s string) {
 	compMu.Lock()
 	var b strings.Builder
 	b.WriteString(compBSU)
-	fmt.Fprintf(&b, "\x1b[%d;%dH", compStreamRow, compStreamCol)
-	b.WriteString(s)
-	// track stream position: \r\n newlines advance a row (scrolling the
-	// region at the bottom edge), printable runes advance the column with
-	// terminal wrap at compW
-	for _, r := range s {
-		switch {
-		case r == '\x1b': // ansi sequence — consume to letter
-			// already emitted; position tracking skips via byte loop below
-		case r == '\n':
+	// position once at the tracked stream position, then let the terminal
+	// wrap/scroll naturally — emitting \r\n at each overflow means a real
+	// newline happens at the scroll bottom (the region scrolls up, the
+	// earlier content is preserved). Absolute per-grapheme positioning
+	// skipped the terminal's scroll and overwrote row content.
+	posCol := compStreamCol
+	if posCol > compW {
+		posCol = compW // deferred-wrap position — clamp into the screen
+	}
+	fmt.Fprintf(&b, "\x1b[%d;%dH", compStreamRow, posCol)
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b {
+			l := ansiLen(s, i)
+			b.WriteString(s[i : i+l])
+			i += l
+			continue
+		}
+		switch s[i] {
+		case '\r':
+			b.WriteByte('\r')
+			compStreamCol = 1
+			i++
+		case '\n':
+			b.WriteString("\r\n")
 			if compStreamRow < compH-compZoneH {
 				compStreamRow++
-			} else {
-				// at scroll bottom — the newline scrolled the region
 			}
 			compStreamCol = 1
-		case r == '\r':
-			compStreamCol = 1
-		case r < 32 || r > 126:
-			// control/ansi bytes — ignore for tracking
+			i++
 		default:
-			compStreamCol++
-			if compStreamCol > compW {
-				compStreamCol = 1
+			cw, sz := graphemeWidth(s, i)
+			if cw > 0 && compStreamCol+cw-1 > compW {
+				b.WriteString("\r\n")
 				if compStreamRow < compH-compZoneH {
 					compStreamRow++
 				}
+				compStreamCol = 1
 			}
+			b.WriteString(s[i : i+sz])
+			compStreamCol += cw
+			i += sz
 		}
 	}
 	compPaintRowsLocked(&b, compRowsLocked())
