@@ -275,7 +275,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "rename":
 		if arg == "" {
 			dprintln("  usage: /rename <title>")
-			return true
+			return false // handled (return true exits the REPL)
 		}
 		if currentStore != nil {
 			currentStore.LogTitle(arg)
@@ -317,13 +317,13 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		}
 		if currentStore == nil {
 			dprintln("  (no transcript store — cannot fork)")
-			return true
+			return false // handled (return true exits the REPL)
 		}
 		old := l.Client.SessionID
 		nw, msgs, err := session.Fork(l.CWD, old)
 		if err != nil {
 			dprintln("  fork failed:", err)
-			return true
+			return false // handled (return true exits the REPL)
 		}
 		l.Client.SessionID = nw.SessionID
 		l.Messages = msgs
@@ -343,18 +343,18 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		if arg == "clear" || arg == "" {
 			l.Goal = ""
 			dprintln("  goal cleared")
-			return true
+			return false // handled (return true exits the REPL)
 		}
 		l.Goal = arg
 		dprintln("  goal set — I'll keep working until it holds (stop-hook semantics)")
 	case "subtask":
 		if arg == "" {
 			dprintln("  usage: /subtask <prompt> — run a subagent, result returns here")
-			return true
+			return false // handled (return true exits the REPL)
 		}
 		if l.ToolCtx.Agent == nil {
 			dprintln("  (sub-agents unavailable)")
-			return true
+			return false // handled (return true exits the REPL)
 		}
 		res := l.ToolCtx.Agent.RunAgent(l.ToolCtx, "subtask", arg, "general-purpose", "", false)
 		dprintln(" ", res.Content)
@@ -391,7 +391,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		skills := agent.SkillNames(l.ToolCtx.CWD)
 		if len(skills) == 0 {
 			dprintln("  no skills found")
-			return true
+			return false // handled (return true exits the REPL)
 		}
 		dprintln("  Skills:")
 		for _, s := range skills {
@@ -428,7 +428,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 					fmt.Print(string(k.b))
 				}
 			}
-			return true
+			return false // true = exit the REPL — /model must not quit
 		}
 		l.Model = arg
 		dprintln("  model →", l.Model)
