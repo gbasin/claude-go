@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -32,6 +33,11 @@ type Credentials struct {
 	// OAuth registration the token was minted against (mod_1033.js).
 	DesignClientID string `json:"clientId,omitempty"`
 	IsAPIKey       bool   `json:"-"` // sk-ant-api03 style key, not OAuth
+	// mu serializes token refresh. Token() is called from concurrent lanes
+	// (main request, aux traffic, MCP connectors); an expired token without
+	// this lock triggers concurrent refreshes that rotate — and lose — the
+	// shared refresh token.
+	mu sync.Mutex
 }
 
 type credFile struct {
@@ -191,7 +197,12 @@ func ClearDesignOAuth() error {
 
 // Token returns a usable bearer token, refreshing if expired.
 func (c *Credentials) Token() (string, error) {
-	if c.IsAPIKey || c.RefreshToken == "" {
+	if c.IsAPIKey {
+		return c.AccessToken, nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.RefreshToken == "" {
 		return c.AccessToken, nil
 	}
 	// refresh if expiring within 60s
@@ -203,7 +214,7 @@ func (c *Credentials) Token() (string, error) {
 		// expiry; past that the API's 401 prompts a fresh claude-go login
 		return c.AccessToken, nil
 	}
-	if err := c.Refresh(); err != nil {
+	if err := c.refreshLocked(); err != nil {
 		// fall back to possibly-still-valid token
 		if c.AccessToken != "" {
 			return c.AccessToken, nil
@@ -216,7 +227,15 @@ func (c *Credentials) Token() (string, error) {
 const tokenURL = "https://platform.claude.com/v1/oauth/token"
 const clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
+// Refresh rotates the OAuth token. Callers that already hold c.mu use
+// refreshLocked instead.
 func (c *Credentials) Refresh() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.refreshLocked()
+}
+
+func (c *Credentials) refreshLocked() error {
 	body, _ := json.Marshal(map[string]string{
 		"grant_type":    "refresh_token",
 		"refresh_token": c.RefreshToken,
