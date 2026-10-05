@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"claude-go/internal/api"
 	"claude-go/internal/plugins"
 )
 
@@ -616,4 +617,27 @@ func (c *Context) cloneForWorktree(wtPath string) *Context {
 		OnCwdChanged:  c.OnCwdChanged,
 		OnFileChanged: c.OnFileChanged,
 	}
+}
+
+// SubagentHandback delivers the spawned agent's final report — real's
+// subagent-only tool; calling it ends the subagent's run (the message
+// becomes the Agent tool's result). Hidden from the main registry's
+// request surface — subagent ToolCtx carries it.
+func init() {
+	Register(&Tool{
+		IsHidden: true,
+		Def: api.Tool{
+			Name:        "SubagentHandback",
+			Description: "Deliver your final report to the agent that spawned you (your caller). Use it once, for that hand-off only: when your work is complete, call SubagentHandback({message: <your full report>}). The call ends your run, so do everything else first and put everything your caller needs in that one report. It is not a messaging channel: do not use it for progress updates or questions.\n\nOnly a report delivered through SubagentHandback reaches your caller; plain text you write at the end of your run is NOT delivered. There is no recipient parameter: the report can only go to your caller.",
+			InputSchema: json.RawMessage(`{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"message":{"description":"Your full report for your caller","type":"string"}},"required":["message"],"additionalProperties":false}`),
+		},
+		Exec: func(c *Context, input json.RawMessage) Result {
+			var in struct {
+				Message string `json:"message"`
+			}
+			json.Unmarshal(input, &in)
+			// the runner sees the sentinel and ends the run
+			return Result{Content: in.Message, Handback: true}
+		},
+	})
 }
