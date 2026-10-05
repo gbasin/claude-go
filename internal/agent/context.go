@@ -120,10 +120,13 @@ func SystemBlocks(entrypoint string, cwd, model, appendPrompt string, extra, ses
 			sess = strings.ReplaceAll(sess, "<total_tokens>{{TOTAL_TOKENS}} tokens left</total_tokens>", "")
 		}
 		// no trailing blank lines when MCP_BLOCKS/extras are empty
-		sess = strings.ReplaceAll(sess, "{{MCP_BLOCKS}}", mcpb.String())
-		if mcpb.String() == "" {
-			sess = strings.TrimRight(sess, "\n")
-		}
+		// {{MCP_BLOCKS}} sits on its own line — the extras already carry
+		// their \n\n separators, so an empty expansion must leave no
+		// stray blank line (real's block is byte-exact here)
+		sess = strings.Replace(sess, "{{MCP_BLOCKS}}\n", "", 1)
+		sess = strings.ReplaceAll(sess, "{{MCP_BLOCKS}}", "")
+		sess = strings.TrimRight(sess, "\n")
+		sess += mcpb.String()
 		out = append(out, api.SystemBlock{Type: "text", Text: sess, CacheControl: ephemeral1h})
 	}
 	for _, s := range extra {
