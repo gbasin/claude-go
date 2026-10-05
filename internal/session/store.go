@@ -4,12 +4,14 @@ package session
 
 import (
 	"bufio"
+	"bytes"
 	"claude-go/internal/config"
 	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -56,6 +58,11 @@ type ForkedFrom struct {
 }
 
 func Slug(cwd string) string {
+	// real resolves symlinks for the project slug (/tmp → /private/tmp
+	// on macOS — captured session dirs use -private-tmp-…)
+	if r, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = r
+	}
 	return strings.ReplaceAll(filepath.Clean(cwd), "/", "-")
 }
 
@@ -549,24 +556,54 @@ func contentText(raw json.RawMessage) string {
 	return strings.Join(parts, " ")
 }
 
-// Latest returns the newest session id for cwd (for --continue).
+// Latest returns the newest session id for cwd (for --continue). Real
+// continues the most recent conversation — an empty transcript (freshly
+// created this session, or a fork with no messages) doesn't qualify.
 func Latest(cwd string) (string, error) {
 	ents, err := os.ReadDir(dir(cwd))
 	if err != nil {
 		return "", err
 	}
-	var best string
-	var bestT time.Time
+	type cand struct {
+		id string
+		t  time.Time
+	}
+	var cands []cand
 	for _, e := range ents {
 		if !strings.HasSuffix(e.Name(), ".jsonl") {
 			continue
 		}
-		if fi, err := e.Info(); err == nil && fi.ModTime().After(bestT) {
-			bestT = fi.ModTime()
-			best = strings.TrimSuffix(e.Name(), ".jsonl")
+		if fi, err := e.Info(); err == nil {
+			cands = append(cands, cand{strings.TrimSuffix(e.Name(), ".jsonl"), fi.ModTime()})
 		}
 	}
-	return best, nil
+	sort.Slice(cands, func(i, j int) bool { return cands[i].t.After(cands[j].t) })
+	for _, c := range cands {
+		if hasConversation(filepath.Join(dir(cwd), c.id+".jsonl")) {
+			return c.id, nil
+		}
+	}
+	return "", nil
+}
+
+// hasConversation reports whether a transcript holds a user or assistant
+// message record (skips init/system-only files).
+func hasConversation(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1<<20), 8<<20)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if bytes.Contains(line, []byte(`"type":"user"`)) ||
+			bytes.Contains(line, []byte(`"type":"assistant"`)) {
+			return true
+		}
+	}
+	return false
 }
 
 var execCommand = func(name string, args ...string) (string, error) {

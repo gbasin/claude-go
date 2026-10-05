@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -173,20 +174,32 @@ func TestLogSessionStart(t *testing.T) {
 	c.BaseURL = srv.URL
 	c.HTTP = srv.Client()
 
-	c.LogSessionStart(context.Background(), "claude-fable-5-1", false)
+	c.LogSessionStart(context.Background(), "claude-fable-5-1", false, api.SessionFacts{
+		Plugins: []api.PluginFact{{Name: "flopwire", Marketplace: "mkt", Scope: "local"}},
+		Skills:  []api.SkillFact{{Name: "deep-research", Source: "userSettings", LoadedFrom: "skills", ContentChars: 500}},
+		MCPOk:   []string{"docs"}, MCPFail: []string{"deepwiki"},
+		CLIFlags: []string{"continue", "print"},
+	})
 	if svc != "claude-code" {
 		t.Fatalf("x-service-name = %q", svc)
 	}
-	if len(payload.Events) < 2 {
-		t.Fatalf("events = %d", len(payload.Events))
+	if len(payload.Events) < 30 {
+		t.Fatalf("events = %d — startup burst should emit the lifecycle set", len(payload.Events))
 	}
-	if payload.Events[0].Type != "ClaudeCodeInternalEvent" {
-		t.Fatalf("event_type = %q", payload.Events[0].Type)
+	names := map[string]int{}
+	for _, e := range payload.Events {
+		if e.Type != "ClaudeCodeInternalEvent" {
+			t.Fatalf("event_type = %q", e.Type)
+		}
+		names[fmt.Sprint(e.EventData["event_name"])]++
 	}
-	if payload.Events[0].EventData["event_name"] != "tengu_started" {
-		t.Fatalf("first event = %v", payload.Events[0].EventData["event_name"])
-	}
-	if payload.Events[1].EventData["event_name"] != "tengu_feature_ok" {
-		t.Fatalf("second event = %v", payload.Events[1].EventData["event_name"])
+	for _, want := range []string{
+		"tengu_feature_ok", "tengu_feature_bad", "tengu_feature_sad",
+		"tengu_skill_loaded", "tengu_plugin_enabled_for_session",
+		"tengu_started", "tengu_cli_flags",
+	} {
+		if names[want] == 0 {
+			t.Fatalf("missing %s in %v", want, names)
+		}
 	}
 }

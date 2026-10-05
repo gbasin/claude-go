@@ -141,12 +141,9 @@ func TestResume(t *testing.T) {
 	contains(t, mustReadFile(t, s.transcriptPath(t, sid)), "seed-prompt-e2e", "source transcript")
 }
 
-// TestContinue: -c should resume the latest session — but main() opens the
-// new session's transcript BEFORE session.Latest runs, so the just-created
-// empty .jsonl always wins "latest" and -c effectively starts fresh (no
-// "resumed session" notice). This test pins that actual behavior; if the
-// ordering in main.go is fixed, flip the expectations to require
-// "resumed session <sid>".
+// TestContinue: -c resumes the latest session — session.Latest skips
+// transcripts with no conversation records, so the fresh empty .jsonl
+// created this session can't shadow the real latest.
 func TestContinue(t *testing.T) {
 	s := newSession(t)
 	sid := newUUID()
@@ -155,8 +152,7 @@ func TestContinue(t *testing.T) {
 
 	r2 := s.run(t, "--mock", "-c", "-p", "cont-follow")
 	s.mustOK(t, r2)
-	// documents the bug: the new empty transcript shadows the real latest
-	notContains(t, r2.stderr, "resumed session "+sid, "continue notice")
+	contains(t, r2.stderr, "resumed session "+sid, "continue notice")
 	contains(t, r2.stdout, "Mock response to: cont-follow", "follow-up output")
 	// the prior session file is still intact
 	contains(t, mustReadFile(t, s.transcriptPath(t, sid)), "cont-seed", "source transcript")
