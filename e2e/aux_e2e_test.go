@@ -16,6 +16,7 @@
 package e2e
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -43,6 +44,9 @@ type recReq struct {
 type auxRecorder struct {
 	srv           *httptest.Server
 	nonStreamText string
+	// nonStreamByModel overrides nonStreamText keyed on the request's model
+	// field — lets the two eval stages answer differently.
+	nonStreamByModel map[string]string
 
 	mu   sync.Mutex
 	reqs []recReq
@@ -84,7 +88,18 @@ func newAuxRecorder(t *testing.T) *auxRecorder {
 				}
 			} else {
 				w.Header().Set("Content-Type", "application/json")
-				reply, _ := json.Marshal(r.nonStreamText)
+				text := r.nonStreamText
+				if r.nonStreamByModel != nil {
+					var b struct {
+						Model string `json:"model"`
+					}
+					if json.Unmarshal(body, &b) == nil {
+						if v, ok := r.nonStreamByModel[b.Model]; ok {
+							text = v
+						}
+					}
+				}
+				reply, _ := json.Marshal(text)
 				fmt.Fprintf(w, `{"id":"m1","type":"message","role":"assistant",`+
 					`"content":[{"type":"text","text":%s}],`+
 					`"model":"m","stop_reason":"end_turn",`+
@@ -525,6 +540,21 @@ func TestSafetyEvalAllows(t *testing.T) {
 	if _, ok := rec.sawSafetyEval(); !ok {
 		t.Fatal("safety-eval call missing")
 	}
+	// severity<50 confirms with the stage-2 opus call
+	var sawStage2 bool
+	for _, q := range rec.list() {
+		var b struct {
+			Model   string `json:"model"`
+			MaxToks int    `json:"max_tokens"`
+		}
+		if json.Unmarshal(q.body, &b) == nil &&
+			b.Model == "claude-opus-5" && b.MaxToks == 64 {
+			sawStage2 = true
+		}
+	}
+	if !sawStage2 {
+		t.Fatal("stage-2 opus eval did not fire after stage-1 allow")
+	}
 	if !strings.Contains(r.stdout, "eval-allowed-marker") {
 		t.Fatalf("severity<50 should allow the tool: %s", truncStr(r.stdout, 2000))
 	}
@@ -562,7 +592,8 @@ func TestAutoModeEvalGating(t *testing.T) {
 		"--output-format", "stream-json")
 	s.mustOK(t, r)
 
-	evals := 0
+	// stage-1 sonnet + stage-2 opus, exactly once each for the Bash call
+	evalModels := map[string]int{}
 	for _, q := range rec.list() {
 		if q.method != "POST" || q.uri != "/v1/messages?beta=true" {
 			continue
@@ -571,13 +602,13 @@ func TestAutoModeEvalGating(t *testing.T) {
 			Model   string `json:"model"`
 			MaxToks int    `json:"max_tokens"`
 		}
-		if json.Unmarshal(q.body, &b) == nil &&
-			b.Model == "claude-sonnet-5" && b.MaxToks == 64 {
-			evals++
+		if json.Unmarshal(q.body, &b) == nil && b.MaxToks == 64 &&
+			(b.Model == "claude-sonnet-5" || b.Model == "claude-opus-5") {
+			evalModels[b.Model]++
 		}
 	}
-	if evals != 1 {
-		t.Fatalf("auto mode should eval exactly the non-readonly call, got %d evals", evals)
+	if evalModels["claude-sonnet-5"] != 1 || evalModels["claude-opus-5"] != 1 {
+		t.Fatalf("auto mode should fire stage-1 sonnet + stage-2 opus once each, got %v", evalModels)
 	}
 	if !strings.Contains(r.stdout, "ro-content") ||
 		!strings.Contains(r.stdout, "auto-eval-marker") {
@@ -588,5 +619,93 @@ func TestAutoModeEvalGating(t *testing.T) {
 			}
 		}
 		t.Fatalf("read + evaluated bash both should have run:\n%s", strings.Join(res, "\n"))
+	}
+}
+
+// TestSafetyEvalStage2Blocks: stage-1 allows (severity 10) but the opus
+// stage-2 confirmation blocks — captured two-call semantics.
+func TestSafetyEvalStage2Blocks(t *testing.T) {
+	rec := newAuxRecorder(t)
+	rec.nonStreamByModel = map[string]string{
+		"claude-sonnet-5": "<severity>10</severity>",
+		"claude-opus-5":   "<severity>80</severity><category>Destructive Action</category>",
+	}
+	s := newSession(t)
+	r := s.runAux(t, rec, nil, "-p",
+		`tool:Bash {"command":"echo stage2-blocked"}`,
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "Auto mode blocked") {
+		t.Fatalf("stage-2 severity>=50 should block: %s", truncStr(r.stdout, 2000))
+	}
+}
+
+// TestSubagentWire: a spawned Agent makes its own request — recorded wire
+// shows the subagent billing (cc_is_subagent + own prompt_id), the
+// Agent-SDK identity line, and real's trimmed tool surface.
+func TestSubagentWire(t *testing.T) {
+	rec := newAuxRecorder(t)
+	s := newSession(t)
+	r := s.runAux(t, rec, nil, "-p",
+		`tool:Agent {"description":"e2e-sub","prompt":"SUB-E2E-PROMPT"}`,
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+
+	var sub []byte
+	for _, q := range rec.list() {
+		if bytes.Contains(q.body, []byte("cc_is_subagent=true")) {
+			sub = q.body
+			break
+		}
+	}
+	if sub == nil {
+		var uris []string
+		for _, q := range rec.list() {
+			uris = append(uris, q.method+" "+q.uri)
+		}
+		t.Fatalf("no subagent-class request recorded: %v", uris)
+	}
+	var req struct {
+		System []struct {
+			Text string `json:"text"`
+		} `json:"system"`
+		Tools    []map[string]json.RawMessage `json:"tools"`
+		Messages []struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(sub, &req); err != nil {
+		t.Fatalf("subagent request unparseable: %s", truncStr(string(sub), 300))
+	}
+	if len(req.System) < 3 || req.System[1].Text !=
+		"You are a Claude agent, built on Anthropic's Claude Agent SDK." {
+		t.Fatalf("subagent identity line wrong: %+v", req.System)
+	}
+	if !strings.Contains(req.System[0].Text, "cc_prompt_id=") {
+		t.Fatalf("subagent billing missing its own prompt_id: %s", req.System[0].Text)
+	}
+	var names []string
+	for _, tl := range req.Tools {
+		if raw, ok := tl["name"]; ok {
+			var s string
+			json.Unmarshal(raw, &s)
+			names = append(names, s)
+		}
+	}
+	for _, want := range []string{"SubagentHandback", "ToolSearch", "DeferredToolPlaceholder"} {
+		found := false
+		for _, n := range names {
+			if n == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("subagent tool surface missing %q — got %v", want, names)
+		}
+	}
+	if !bytes.Contains(sub, []byte("SUB-E2E-PROMPT")) ||
+		!bytes.Contains(sub, []byte("SubagentHandback")) {
+		t.Fatal("subagent msg0 should carry the prompt + handback reminder")
 	}
 }
