@@ -700,7 +700,14 @@ func main() {
 				}
 				sessCtx := fmt.Sprintf("- **User identity**: `%s`. The `$USER/...` pattern in the rules above resolves to `%s/...`. Branches whose first path segment is a different person's name (`<other-user>/...`) are NOT this user's personal branches.", uname, uname)
 				tr := safetyTranscript(loop, name, input)
-				return client.SafetyEvalCall(ctx, billing, sessCtx, agent.ClaudeMDContext(cwd), tr)
+				md := agent.ClaudeMDContext(cwd)
+				sev, cat, err := client.SafetyEvalCall(ctx, billing, sessCtx, md, tr)
+				if err != nil || sev >= 50 {
+					return sev, cat, err
+				}
+				// stage-2 confirmation eval on opus (captured: same shape,
+				// fires whenever stage-1 engages)
+				return client.SafetyEvalStage2(ctx, billing, sessCtx, md, tr)
 			}
 		}
 		code := runPrint(loop, strings.Join(o.prompt, " ")+promptAtt, o.outFormat, st2, o.jsonSchema)

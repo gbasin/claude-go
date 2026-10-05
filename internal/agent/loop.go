@@ -98,7 +98,13 @@ type Loop struct {
 	RateLimitNote         string // set once a slow-lane rate-limit note was shown
 	// SafetyEval runs real's auto-mode security-monitor call on
 	// unresolvable tool calls — <50 allows, >=50 or an eval error blocks.
-	SafetyEval       func(ctx context.Context, name string, input json.RawMessage) (int, string, error)
+	SafetyEval func(ctx context.Context, name string, input json.RawMessage) (int, string, error)
+	// IsSubagent marks this loop as an Agent-spawned child — real's wire
+	// uses class subagent, the Agent-SDK identity line, cc_is_subagent
+	// in the billing header, and its own prompt-id.
+	IsSubagent       bool
+	subPID           string
+	handbackTail     bool // append the SubagentHandback reminder to msg[0]
 	noThinking       bool // thinking config dropped after a thinking 400
 	dropSafeguards   bool
 	dropOutputConfig bool
@@ -159,8 +165,12 @@ func (l *Loop) buildRequest() *api.Request {
 		ocRaw, _ = json.Marshal(oc)
 	}
 	l.syncDeferredPool()
-	msgs := withEphemeralBreakpoint(l.wireMessages())
-	msgs = capBreakpoints(msgs, 2) // 2 system breakpoints reserve; API max is 4 total
+	msgs := l.withEphemeralBreakpoint(l.wireMessages())
+	if !l.IsSubagent {
+		// real's subagent requests carry plain ephemeral blocks, no
+		// 1h normalization or breakpoint budget (captured)
+		msgs = capBreakpoints(msgs, 2) // 2 system breakpoints reserve; API max is 4 total
+	}
 	msgs = sanitizeReplayed(msgs)
 	var safeguards json.RawMessage
 	if !l.dropSafeguards {
@@ -176,11 +186,21 @@ func (l *Loop) buildRequest() *api.Request {
 	}
 	l.Client.Model = l.Model // beta list is model-conditional
 	l.Client.Wants1m = l.Wants1m
+	class_ := ""
+	if l.IsSubagent {
+		class_ = "subagent"
+	}
+	sys := SystemBlocks(l.Entrypoint, l.CWD, l.Model, l.AppendSysP, l.ExtraSystem, l.SessionExtras, l.billingMeta(msgs), l.tokensLeft)
+	if l.IsSubagent {
+		sys = l.subagentSystemBlocks(msgs)
+	}
 	return &api.Request{
 		Model:             l.Model,
 		MaxTokens:         mt,
 		Messages:          msgs,
-		System:            SystemBlocks(l.Entrypoint, l.CWD, l.Model, l.AppendSysP, l.ExtraSystem, l.SessionExtras, l.billingMeta(msgs), l.tokensLeft),
+		System:            sys,
+		Class:             class_,
+		PromptID:          l.subPromptID(),
 		Tools:             tools.RequestDefs(l.ToolCtx),
 		Metadata:          Metadata(l.Client.SessionID, l.User),
 		Thinking:          l.thinkingConfig(),
@@ -211,7 +231,7 @@ func (l *Loop) billingMeta(msgs []api.Message) BillingMeta {
 	// captured: first turn emits cc_prompt_index=0, cc_turn_index=1
 	b, _ := json.Marshal(msgs)
 	return BillingMeta{
-		PromptID:    l.Client.PromptID(),
+		PromptID:    l.subPromptID(),
 		PromptIndex: l.turnCount - 1,
 		TurnIndex:   l.turnCount,
 		FirstPrompt: l.firstPrompt,
@@ -275,9 +295,13 @@ func (l *Loop) nearContextLimit() bool {
 // puts it (captured): the last block of the LAST assistant message —
 // tool_use in a tool-loop request. On the first request (no assistant
 // yet) it lands on the env system record instead, matching req1.
-func withEphemeralBreakpoint(msgs []api.Message) []api.Message {
+func (l *Loop) withEphemeralBreakpoint(msgs []api.Message) []api.Message {
 	out := make([]api.Message, len(msgs))
 	copy(out, msgs)
+	// subagent requests carry no breakpoints at all (captured)
+	if l.IsSubagent {
+		return out
+	}
 	put := func(i int) {
 		var blocks []api.ContentBlock
 		if err := json.Unmarshal(out[i].Content, &blocks); err != nil || len(blocks) == 0 {
@@ -339,6 +363,13 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 	var msg api.Message
 	if !l.started {
 		msg = FirstUserMessage(prompt, l.CWD, l.User.Email, l.MemoryPaused)
+		if l.handbackTail {
+			var blks []api.ContentBlock
+			if json.Unmarshal(msg.Content, &blks) == nil {
+				blks = append(blks, api.ContentBlock{Type: "text", Text: handbackReminderBlock})
+				msg.Content, _ = json.Marshal(blks)
+			}
+		}
 		l.started = true
 		if l.tokensLeft == 0 {
 			l.tokensLeft = 15000000
@@ -349,10 +380,17 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 		// not as a user-message reminder — seed announcedDeferred so the
 		// first request's user message doesn't carry a duplicate
 		l.announcedDeferred = strings.Join(deferred, "\x00")
+		envCC := &api.CacheControl{Type: "ephemeral", TTL: "1h"}
+
+		if l.IsSubagent {
+			// subagent requests use plain ephemeral everywhere — no
+			// 1h ttls, no breakpoints (captured)
+			envCC = &api.CacheControl{Type: "ephemeral"}
+		}
 		envBlocks := api.BlocksMessage("system", []api.ContentBlock{{
 			Type:         "text",
 			Text:         EnvMessage(l.ToolCtx.CWD, l.Model, l.AddDirs, l.PermMode, l.Client.SessionID, l.SessionHookCtx, deferred, connectingServers(), l.tokensLeft),
-			CacheControl: &api.CacheControl{Type: "ephemeral", TTL: "1h"},
+			CacheControl: envCC,
 		}})
 		if isXHighModel(l.Model) {
 			envBlocks.OutputConfig = DefaultOutputConfig()
@@ -492,25 +530,6 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 					Content: "Permission to use " + b.Name + " has been denied because Claude Code is running in don't ask mode. Only use tools that are allowed in this mode via the permission settings.",
 					IsError: true,
 				}
-			} else if l.ToolCtx.PermissionAsk != nil && l.ToolCtx.PermissionAsk() &&
-				l.SafetyEval != nil {
-				// unresolved ask in a non-interactive context → real's
-				// auto-mode security monitor decides: severity <50 allows,
-				// >=50 blocks with the matched rule category, eval error
-				// blocks with the could-not-evaluate text
-				sev, cat, serr := l.SafetyEval(ctx, b.Name, b.Input)
-				switch {
-				case serr != nil:
-					r = tools.Result{Content: "Tool call could not be evaluated by the safety monitor: " + serr.Error(), IsError: true}
-				case sev < 50:
-					r = l.dispatch(b.Name, b.Input)
-				default:
-					content := "Tool call blocked by the safety monitor (severity " + strconv.Itoa(sev) + ")"
-					if cat != "" {
-						content += " — matched rule: " + cat
-					}
-					r = tools.Result{Content: content, IsError: true}
-				}
 			} else {
 				r = tools.Result{
 					Content: "Permission for this tool use was denied. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). Try a different approach or report the limitation to complete your task.",
@@ -541,6 +560,12 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 			l.Events.OnToolResult(b.Name, r)
 		}
 		results = append(results, toolResultBlock(b.ID, r))
+		// SubagentHandback ends the run — its message is the agent's
+		// report to the caller; no follow-up request (real's contract).
+		if r.Handback && l.IsSubagent {
+			l.PushUser(results)
+			return &api.Response{Content: []api.ContentBlock{{Type: "text", Text: r.Content}}}, nil
+		}
 	}
 	if len(results) == 0 {
 		if l.ShouldAutoCompact(resp.Usage) && !l.inCompact {
@@ -1167,4 +1192,32 @@ func mcpErrKind(err error) string {
 	default:
 		return "CONNECTION_FAILED"
 	}
+}
+
+// subagentSystemBlocks is real's subagent system array (captured): billing
+// with cc_is_subagent, the Agent-SDK identity line, then the agent def's
+// prompt — no main prompt or session block.
+func (l *Loop) subagentSystemBlocks(msgs []api.Message) []api.SystemBlock {
+	bill := l.billingMeta(msgs)
+	billing := fmt.Sprintf(
+		"x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s; cch=%s; cc_is_subagent=true; cc_prompt_id=%s;",
+		version(), ccVersionSuffix(bill.FirstPrompt), l.Entrypoint,
+		cchHash(bill.ReqSeed), bill.PromptID)
+	return []api.SystemBlock{
+		{Type: "text", Text: billing},
+		{Type: "text", Text: `You are a Claude agent, built on Anthropic's Claude Agent SDK.`, CacheControl: &api.CacheControl{Type: "ephemeral"}},
+		{Type: "text", Text: l.AppendSysP, CacheControl: &api.CacheControl{Type: "ephemeral"}},
+	}
+}
+
+// subPromptID: subagent requests carry their own prompt-id (captured —
+// differs from the parent's), main turns use the client's.
+func (l *Loop) subPromptID() string {
+	if l.IsSubagent {
+		if l.subPID == "" {
+			l.subPID = api.NewUUID()
+		}
+		return l.subPID
+	}
+	return l.Client.PromptID()
 }

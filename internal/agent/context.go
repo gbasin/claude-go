@@ -203,7 +203,7 @@ func FirstUserMessage(prompt, cwd, email string, memoryPaused bool) api.Message 
 			"***REMOVED***" +
 			"***REMOVED***" +
 			"***REMOVED***" +
-			"need it reported back.\n</system-reminder>"})
+			"need it reported back.\n</system-reminder>\n"})
 	}
 	blocks = append(blocks, expandUserImages(prompt)...)
 	return api.BlocksMessage("user", blocks)

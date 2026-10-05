@@ -482,7 +482,9 @@ func TestSafetyEvalBlocksOnError(t *testing.T) {
 	}
 	// the command string always appears in the echoed tool_use input — the
 	// fail-closed signal is the tool_result error text instead
-	if !strings.Contains(r.stdout, "could not be evaluated") {
+	// real's captured error text: "Auto mode could not evaluate this
+	// action and is blocking it for safety — run with --debug..."
+	if !strings.Contains(r.stdout, "could not evaluate this action") {
 		t.Fatalf("expected the could-not-evaluate block: %s", truncStr(r.stdout, 2000))
 	}
 	if !strings.Contains(r.stdout, `"is_error":true`) {
