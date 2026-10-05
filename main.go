@@ -299,6 +299,13 @@ func main() {
 	client, cleanup := buildClient(o.mockMode, sessionID)
 	defer cleanup()
 
+	// real's entrypoint is known at launch: interactive runs report
+	// "cli", -p reports "sdk-cli". Set it before any aux goroutine reads
+	// it (bootstrap query, code-sessions gate, beta list).
+	if !o.printMode {
+		client.Entrypoint = api.EntryCLI
+	}
+
 	// GB flag eval — real fires POST /api/eval/sdk-<key> near startup;
 	// the feature map merges into cachedGrowthBookFeatures. Success/fail
 	// selects real's flag-default header+beta set on later requests.
@@ -632,6 +639,9 @@ func main() {
 				fmt.Fprintf(os.Stderr, "resume %s: %v\n", id, err)
 			} else if len(msgs) > 0 {
 				loop.Messages = msgs
+				// resumed history already carried the env composite on
+				// the wire — real replays only the hook string
+				loop.MarkEnvSent()
 				if o.forkSess && st2 != nil {
 					st2.LogRecord(map[string]any{
 						"type": "system", "subtype": "fork",
@@ -685,7 +695,7 @@ func main() {
 		os.Exit(code)
 	}
 	tools.Interactive = true
-	loop.Client.Entrypoint = api.EntryCLI
+	// entrypoint already set to cli before the aux goroutines (above)
 	tools.Checkpoints.Init(sessionID)
 	if !repl.TrustGate(cwd) {
 		fmt.Println("not trusted — exiting")

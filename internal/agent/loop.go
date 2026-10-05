@@ -301,6 +301,21 @@ func withEphemeralBreakpoint(msgs []api.Message) []api.Message {
 }
 
 // Ask submits one user turn and runs the tool loop to completion.
+// MarkEnvSent marks the env composite as already-on-the-wire — used after
+// session resume, where real does not re-send it (hook ctx only).
+func (l *Loop) MarkEnvSent() { l.envSent = true }
+
+// ResetForNewSession clears turn-scoped wire state for /clear — the next
+// request is a fresh session: env composite is re-sent, ambient/hook
+// state resets, and the next Ask goes through the first-message path.
+func (l *Loop) ResetForNewSession() {
+	l.envSent = false
+	l.started = false
+	l.envIdx = 0
+	l.ambientPending = false
+	l.turnCount = 0
+}
+
 func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 	l.turnCount++
 	if h := l.runHook(hooks.UserPromptSubmit, map[string]any{"prompt": prompt}); h.Block {
