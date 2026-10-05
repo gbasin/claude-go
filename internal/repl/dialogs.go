@@ -54,6 +54,16 @@ var antTrace atomic.Bool
 // the caller delivers it to the model as the next user turn (see
 // queuePermFeedback), which is the closest available channel to real CC's
 // "deny with feedback" tool result.
+// dprintf/dprintln translate \n → \r\n — the editor holds raw mode for
+// the whole REPL, so bare \n never carriage-returns and dialog lines
+// land mid-row (verified: permission dialogs rendered at stale columns).
+func dprintf(format string, a ...any) {
+	fmt.Print(strings.ReplaceAll(fmt.Sprintf(format, a...), "\n", "\r\n"))
+}
+func dprintln(a ...any) {
+	dprintf("%s", fmt.Sprintln(a...))
+}
+
 func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, config string, input json.RawMessage) (bool, string) {
 	if p.always == nil {
 		p.always = map[string]bool{}
@@ -96,12 +106,12 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 	defer compResume()
 	// real dialog: titled bordered box, tool card with key:value rows (Edit
 	// gets a colored diff preview), decision-reason line, live M:SS countdown
-	fmt.Printf("\n%s╭─ %s%s%s\n", yellow, bold+name+reset, dim+" ─ permission"+reset, reset)
+	dprintf("\n%s╭─ %s%s%s\n", yellow, bold+name+reset, dim+" ─ permission"+reset, reset)
 	printToolCard(name, input, summary)
 	if reason != "" {
-		fmt.Printf("  %s%s%s\n", yellow, reason, reset)
+		dprintf("  %s%s%s\n", yellow, reason, reset)
 		if config != "" {
-			fmt.Printf("  %s%s%s\n", dim, config, reset)
+			dprintf("  %s%s%s\n", dim, config, reset)
 		}
 	}
 	deadline := time.Now().Add(permAskTimeout)
@@ -147,35 +157,35 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 				printOpts(rem)
 			}
 		case <-timeout.C:
-			fmt.Printf("\x1b[%dB", rows) // below the options block
-			fmt.Printf("\n  %s⏵ auto-denied — unattended for %s%s\n", dim, permAskTimeout, reset)
+			dprintf("\x1b[%dB", rows) // below the options block
+			dprintf("\n  %s⏵ auto-denied — unattended for %s%s\n", dim, permAskTimeout, reset)
 			return false, ""
 		case k, ok := <-dch:
 			if !ok {
 				return false, ""
 			}
-			fmt.Printf("\x1b[%dB\r", rows) // clear the options block
+			dprintf("\x1b[%dB\r", rows) // clear the options block
 			switch k.b {
 			case '1', 'y', 'Y', '\r':
-				fmt.Println("1. Yes")
+				dprintln("1. Yes")
 				return true, ""
 			case '2', 'a', 'A':
-				fmt.Println("2. Yes, always")
+				dprintln("2. Yes, always")
 				p.always[name] = true
 				// real writes a permission rule to .claude/settings.local.json
 				if rule := ruleSuggestion(name, summary); rule != "" {
 					addLocalPermissionRule(l.ToolCtx.CWD, rule)
-					fmt.Printf("  %s%s added to permission allowlist%s\n", dim, rule, reset)
+					dprintf("  %s%s added to permission allowlist%s\n", dim, rule, reset)
 				}
 				return true, ""
 			case '3', 'n', 'N', 0x1b, 3:
-				fmt.Println("3. No")
+				dprintln("3. No")
 				return false, ""
 			case '4', 'd', 'D':
-				fmt.Println("4. No, with feedback")
+				dprintln("4. No, with feedback")
 				return false, readFeedbackLine(ks, deadline)
 			}
-			fmt.Printf("\x1b[%dA\r", rows) // unrecognized — back to the block
+			dprintf("\x1b[%dA\r", rows) // unrecognized — back to the block
 			printOpts(time.Until(deadline))
 		}
 	}
@@ -185,14 +195,14 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 // differently" text for option 4. The auto-deny deadline stays armed —
 // walking away mid-capture denies with no feedback.
 func readFeedbackLine(ks *keySource, deadline time.Time) string {
-	fmt.Printf("  %stell Claude what to do differently:%s ", dim, reset)
+	dprintf("  %stell Claude what to do differently:%s ", dim, reset)
 	var buf []rune
 	t := time.NewTimer(time.Until(deadline))
 	defer t.Stop()
 	for {
 		select {
 		case <-t.C:
-			fmt.Printf("\n  %s⏵ auto-denied — unattended%s\n", dim, reset)
+			dprintf("\n  %s⏵ auto-denied — unattended%s\n", dim, reset)
 			return ""
 		case k, ok := <-ks.ch:
 			if !ok {
@@ -200,13 +210,13 @@ func readFeedbackLine(ks *keySource, deadline time.Time) string {
 			}
 			switch {
 			case k.b == '\r' || k.b == '\n':
-				fmt.Println()
+				dprintln()
 				return strings.TrimSpace(string(buf))
 			case k.b == 0x1b && k.seq == "":
-				fmt.Println()
+				dprintln()
 				return ""
 			case k.b == 3:
-				fmt.Println()
+				dprintln()
 				return ""
 			case k.b == 0x7f || k.b == 8:
 				if len(buf) > 0 {
@@ -277,7 +287,7 @@ func askSubject(name string) string {
 func queuePermFeedback(fb string) {
 	select {
 	case tools.SessionQueue <- fb:
-		fmt.Printf("  %sfeedback queued — sent when this turn ends%s\n", dim, reset)
+		dprintf("  %sfeedback queued — sent when this turn ends%s\n", dim, reset)
 	default:
 	}
 }
@@ -418,7 +428,7 @@ func trustInventory(cwd string) []string {
 // printTrustInventory renders the risk list under the trust question.
 func printTrustInventory(cwd string) {
 	for _, ln := range trustInventory(cwd) {
-		fmt.Printf("  %s!%s %s\n", yellow, reset, ln)
+		dprintf("  %s!%s %s\n", yellow, reset, ln)
 	}
 }
 
@@ -469,7 +479,7 @@ func handleSlashLocal(l *agent.Loop, line string, ed *editor, ks *keySource) boo
 // honest "unsupported".
 func terminalSetup() {
 	if runtime.GOOS != "darwin" {
-		fmt.Println("  /terminal-setup currently supports macOS terminals only")
+		dprintln("  /terminal-setup currently supports macOS terminals only")
 		return
 	}
 	home, _ := os.UserHomeDir()
@@ -481,16 +491,16 @@ func terminalSetup() {
 		kb := filepath.Join(home, "Library", "Application Support", app, "User", "keybindings.json")
 		installShiftEnterBinding(kb)
 	case "iTerm.app":
-		fmt.Println("  iTerm2: bind Shift+Enter to a newline manually —")
-		fmt.Println("    Settings → Profiles → Keys → Key Mappings → +")
-		fmt.Println("    Shortcut: ⇧↩   Action: Send Escape Sequence   Esc+: [13;2u")
+		dprintln("  iTerm2: bind Shift+Enter to a newline manually —")
+		dprintln("    Settings → Profiles → Keys → Key Mappings → +")
+		dprintln("    Shortcut: ⇧↩   Action: Send Escape Sequence   Esc+: [13;2u")
 	case "Apple_Terminal":
-		fmt.Println("  Terminal.app can't bind Shift+Enter; to make Option act as Meta:")
-		fmt.Println("    defaults write com.apple.Terminal UseOptionAsMetaKey -bool true")
-		fmt.Println("  (or Settings → Profiles → Keyboard → “Use Option as Meta key”)")
+		dprintln("  Terminal.app can't bind Shift+Enter; to make Option act as Meta:")
+		dprintln("    defaults write com.apple.Terminal UseOptionAsMetaKey -bool true")
+		dprintln("  (or Settings → Profiles → Keyboard → “Use Option as Meta key”)")
 	default:
-		fmt.Printf("  unsupported terminal (TERM_PROGRAM=%q)\n", tp)
-		fmt.Println("  supported: VS Code, Cursor, Windsurf (auto-install); iTerm2, Terminal.app (manual)")
+		dprintf("  unsupported terminal (TERM_PROGRAM=%q)\n", tp)
+		dprintln("  supported: VS Code, Cursor, Windsurf (auto-install); iTerm2, Terminal.app (manual)")
 	}
 }
 
@@ -501,8 +511,8 @@ func installShiftEnterBinding(kb string) {
 	var arr []any
 	if b, err := os.ReadFile(kb); err == nil {
 		if json.Unmarshal(b, &arr) != nil {
-			fmt.Println("  couldn't parse", kb, "(comments?) — add manually:")
-			fmt.Println(`    {"key":"shift+enter","command":"workbench.action.terminal.sendSequence","args":{"text":"\u001b\r"}}`)
+			dprintln("  couldn't parse", kb, "(comments?) — add manually:")
+			dprintln(`    {"key":"shift+enter","command":"workbench.action.terminal.sendSequence","args":{"text":"\u001b\r"}}`)
 			return
 		}
 	}
@@ -510,7 +520,7 @@ func installShiftEnterBinding(kb string) {
 		if m, ok := e.(map[string]any); ok &&
 			m["key"] == "shift+enter" &&
 			m["command"] == "workbench.action.terminal.sendSequence" {
-			fmt.Println("  shift+enter binding already present in", kb)
+			dprintln("  shift+enter binding already present in", kb)
 			return
 		}
 	}
@@ -522,11 +532,11 @@ func installShiftEnterBinding(kb string) {
 	os.MkdirAll(filepath.Dir(kb), 0o755)
 	b, _ := json.MarshalIndent(arr, "", "  ")
 	if err := os.WriteFile(kb, b, 0o644); err != nil {
-		fmt.Println("  write failed:", err)
+		dprintln("  write failed:", err)
 		return
 	}
-	fmt.Println("  installed shift+enter → newline in", kb)
-	fmt.Println("  reload the editor window to pick it up")
+	dprintln("  installed shift+enter → newline in", kb)
+	dprintln("  reload the editor window to pick it up")
 }
 
 // printToolCard renders the tool input as real's card: key: value rows for
@@ -535,7 +545,7 @@ func installShiftEnterBinding(kb string) {
 func printToolCard(name string, input json.RawMessage, summary string) {
 	var kv map[string]any
 	if len(input) == 0 || json.Unmarshal(input, &kv) != nil {
-		fmt.Printf("  %s(parameters are not an object — deny unless expected)%s\n", dim, reset)
+		dprintf("  %s(parameters are not an object — deny unless expected)%s\n", dim, reset)
 		return
 	}
 	if name == "Edit" {
@@ -545,35 +555,35 @@ func printToolCard(name string, input json.RawMessage, summary string) {
 	keys := 0
 	for _, k := range sortedKeys(kv) {
 		if keys >= 8 {
-			fmt.Printf("  %s… (+%d more parameters)%s\n", dim, len(kv)-keys, reset)
+			dprintf("  %s… (+%d more parameters)%s\n", dim, len(kv)-keys, reset)
 			break
 		}
 		v := fmt.Sprint(kv[k])
 		if len(v) > 200 {
 			v = trunc(v, 200) + dim + " …" + reset
 		}
-		fmt.Printf("  %s%-16s%s %s\n", dim, k, reset, v)
+		dprintf("  %s%-16s%s %s\n", dim, k, reset, v)
 		keys++
 	}
 	if len(kv) > 12 {
-		fmt.Printf("  %s(%d parameters — too many to show — deny unless expected)%s\n", dim, len(kv), reset)
+		dprintf("  %s(%d parameters — too many to show — deny unless expected)%s\n", dim, len(kv), reset)
 	}
 }
 
 // printEditCard shows old_string/new_string as red/green hunks (real shows a
 // colored diff preview inside the permission box).
 func printEditCard(kv map[string]any) {
-	fmt.Printf("  %s%-16s%s %s\n", dim, "file_path", reset, kv["file_path"])
+	dprintf("  %s%-16s%s %s\n", dim, "file_path", reset, kv["file_path"])
 	old, _ := kv["old_string"].(string)
 	newS, _ := kv["new_string"].(string)
 	for _, ln := range strings.Split(strings.TrimRight(old, "\n"), "\n") {
-		fmt.Printf("    %s-%s %s%s\n", red, reset, red, trunc(ln, 110)+reset)
+		dprintf("    %s-%s %s%s\n", red, reset, red, trunc(ln, 110)+reset)
 	}
 	for _, ln := range strings.Split(strings.TrimRight(newS, "\n"), "\n") {
-		fmt.Printf("    %s+%s %s%s\n", green, reset, green, trunc(ln, 110)+reset)
+		dprintf("    %s+%s %s%s\n", green, reset, green, trunc(ln, 110)+reset)
 	}
 	if len(strings.Split(old, "\n")) > 8 || len(strings.Split(newS, "\n")) > 8 {
-		fmt.Printf("    %s… (truncated diff)%s\n", dim, reset)
+		dprintf("    %s… (truncated diff)%s\n", dim, reset)
 	}
 }
 
