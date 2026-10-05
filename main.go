@@ -26,6 +26,7 @@ import (
 	"claude-go/internal/mcp"
 	"claude-go/internal/mock"
 	"claude-go/internal/perms"
+	"claude-go/internal/plugins"
 	"claude-go/internal/repl"
 	"claude-go/internal/tools"
 
@@ -327,7 +328,9 @@ func main() {
 			bg := context.Background()
 			client.StartupTraffic(bg, auxModel)
 			client.QuotaProbe(bg)
-			client.LogSessionStart(bg, auxModel, !o.printMode)
+			// real's event batch lands after MCP results settle
+			time.Sleep(1200 * time.Millisecond)
+			client.LogSessionStart(bg, auxModel, !o.printMode, startupFacts(cwd, o))
 		}()
 	}
 
@@ -1492,4 +1495,41 @@ func last30(s string) string {
 		return string(r[len(r)-30:])
 	}
 	return s
+}
+
+// startupFacts feeds the telemetry event plane real session state —
+// installed plugins, discovered skills, MCP results — so the startup
+// burst mirrors real's lifecycle markers in volume and shape.
+func startupFacts(cwd string, o *cliOpts) api.SessionFacts {
+	f := api.SessionFacts{SessionSrc: "startup"}
+	for _, p := range plugins.List() {
+		mkt := p.Marketplace
+		scope := "local"
+		if strings.Contains(mkt, "claude-code-plugins") {
+			scope = "official"
+		}
+		f.Plugins = append(f.Plugins, api.PluginFact{Name: p.Name, Marketplace: mkt, Scope: scope})
+	}
+	for _, s := range agent.SkillFacts(cwd) {
+		f.Skills = append(f.Skills, api.SkillFact{
+			Name: s.Name, Source: "userSettings", LoadedFrom: "skills", ContentChars: s.Chars})
+	}
+	for _, st := range tools.MCPServerStatus() {
+		if st.Err != nil {
+			f.MCPFail = append(f.MCPFail, st.Name)
+		} else {
+			f.MCPOk = append(f.MCPOk, st.Name)
+		}
+	}
+	if o.cont {
+		f.CLIFlags = append(f.CLIFlags, "continue")
+	}
+	if o.resume != "" {
+		f.CLIFlags = append(f.CLIFlags, "resume")
+		f.SessionSrc = "resume"
+	}
+	if o.printMode {
+		f.CLIFlags = append(f.CLIFlags, "print")
+	}
+	return f
 }
