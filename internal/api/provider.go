@@ -254,11 +254,15 @@ func (c *Client) applyAuth(req *http.Request) error {
 			req.Header.Del("X-Api-Key")
 			return nil
 		}
-		// AWS SigV4 signing (access key / provider chain) is NOT
-		// implemented — see package docs. Fail loudly rather than send
-		// an unsigned request that 401s opaquely.
-		return errors.New("bedrock: AWS SigV4 signing is not implemented; " +
-			"set AWS_BEARER_TOKEN_BEDROCK or CLAUDE_CODE_SKIP_BEDROCK_AUTH=1")
+		// SigV4 (env keys or ~/.aws/credentials profile) signs in Do()
+		// after headers are complete — nothing to set here when creds
+		// resolve; without them the request would 401 opaquely.
+		if resolveAWSCreds() == nil {
+			return errors.New("bedrock: no AWS credentials; " +
+				"set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, AWS_BEARER_TOKEN_BEDROCK, " +
+				"or CLAUDE_CODE_SKIP_BEDROCK_AUTH=1")
+		}
+		return nil
 	case ProviderVertex:
 		if envTruthy("CLAUDE_CODE_SKIP_VERTEX_AUTH") {
 			return nil

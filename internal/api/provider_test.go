@@ -87,7 +87,7 @@ func TestBedrockNoBearerErrors(t *testing.T) {
 	c := NewClient(nil, "s", EntrySDKCLI)
 	req, _ := http.NewRequest("POST", c.BaseURL+"/m", nil)
 	if err := c.applyAuth(req); err == nil {
-		t.Fatal("expected SigV4-not-implemented error")
+		t.Fatal("expected no-AWS-credentials error")
 	}
 }
 
