@@ -7,6 +7,8 @@
 package e2e
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -361,4 +363,80 @@ func TestResumePickerInteractive(t *testing.T) {
 	p.sendUntilEchoed(t, "resumed-alive\r", "> resumed-alive", 8)
 	p.waitFor("Mock response to: resumed-alive", 30*time.Second)
 	p.exit()
+}
+
+// TestWebSearchBackend: the deferred WebSearch tool dispatches through the
+// Searcher backend — a haiku request carrying the server-side
+// web_search_20250305 tool with max_uses and domain filters intact.
+func TestWebSearchBackend(t *testing.T) {
+	s := newSession(t)
+	recDir := filepath.Join(t.TempDir(), "reqs")
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + recDir},
+		60*time.Second, "--mock", "-p",
+		`calls:[{"name":"ToolSearch","input":{"query":"select:WebSearch"}},`+
+			`{"name":"WebSearch","input":{"query":"e2e query","allowed_domains":["example.com"]}}]`,
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "Mock response to: e2e query") {
+		t.Fatalf("search backend reply should surface in the tool result: %s",
+			truncStr(r.stdout, 2000))
+	}
+
+	// the search request is a second /v1/messages — find it in the recording
+	ents, err := os.ReadDir(recDir)
+	if err != nil || len(ents) < 2 {
+		t.Fatalf("expected ≥2 recorded requests (main + search), got %v err=%v", ents, err)
+	}
+	var found bool
+	for _, e := range ents {
+		raw, _ := os.ReadFile(filepath.Join(recDir, e.Name()))
+		if !bytes.Contains(raw, []byte("web_search_20250305")) {
+			continue
+		}
+		found = true
+		var req struct {
+			Model string            `json:"model"`
+			Tools []json.RawMessage `json:"tools"`
+		}
+		json.Unmarshal(raw, &req)
+		if !strings.Contains(req.Model, "haiku") {
+			t.Fatalf("search should use the haiku lane, got model %q", req.Model)
+		}
+		var ws struct {
+			MaxUses        int      `json:"max_uses"`
+			AllowedDomains []string `json:"allowed_domains"`
+		}
+		for _, tl := range req.Tools {
+			if bytes.Contains(tl, []byte("web_search_20250305")) {
+				json.Unmarshal(tl, &ws)
+			}
+		}
+		if ws.MaxUses == 0 {
+			t.Fatal("web_search tool block missing max_uses")
+		}
+		if len(ws.AllowedDomains) != 1 || ws.AllowedDomains[0] != "example.com" {
+			t.Fatalf("allowed_domains not forwarded: %v", ws.AllowedDomains)
+		}
+	}
+	if !found {
+		t.Fatal("no recorded request carried the web_search server tool")
+	}
+}
+
+// TestWebSearchBudget: CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION caps the
+// tool per session — the second call gets real's budget refusal text.
+func TestWebSearchBudget(t *testing.T) {
+	s := newSession(t)
+	r := s.runEx(t, []string{"CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION=1"},
+		60*time.Second, "--mock", "-p",
+		`calls:[{"name":"ToolSearch","input":{"query":"select:WebSearch"}},`+
+			`{"name":"WebSearch","input":{"query":"first"}},`+
+			`{"name":"WebSearch","input":{"query":"second"}}]`,
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "web search budget") {
+		t.Fatalf("second search should hit the session budget: %s", truncStr(r.stdout, 2000))
+	}
 }
