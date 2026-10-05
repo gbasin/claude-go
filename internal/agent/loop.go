@@ -135,6 +135,7 @@ func (l *Loop) buildRequest() *api.Request {
 		msgs = withEphemeralBreakpoint(msgs)
 	}
 	msgs = capBreakpoints(msgs, 2) // 2 system breakpoints reserve; API max is 4 total
+	msgs = sanitizeReplayed(msgs)
 	msgs = l.withDeferredReminder(msgs)
 	var safeguards json.RawMessage
 	if !l.dropSafeguards {
@@ -675,6 +676,35 @@ func sanitizedBlocks(bs []api.ContentBlock) []api.ContentBlock {
 			continue
 		}
 		out = append(out, b)
+	}
+	return out
+}
+
+// sanitizeReplayed strips incomplete thinking blocks from loaded history —
+// transcripts persist signature-only thinking (interrupted mid-thinking
+// streams), which the API rejects on replay ("thinking.thinking: Field
+// required"). Runs on every request so -r/--resume-session-at/fork paths
+// can't regress it.
+func sanitizeReplayed(msgs []api.Message) []api.Message {
+	var out []api.Message
+	for _, m := range msgs {
+		if m.Role != "assistant" || len(m.Content) == 0 {
+			out = append(out, m)
+			continue
+		}
+		var blocks []api.ContentBlock
+		if err := json.Unmarshal(m.Content, &blocks); err != nil {
+			out = append(out, m)
+			continue
+		}
+		kept := sanitizedBlocks(blocks)
+		if len(kept) == 0 {
+			continue // all-thinking response — an empty content array 400s
+		}
+		if len(kept) != len(blocks) {
+			m.Content = mustMarshalBlocks(kept)
+		}
+		out = append(out, m)
 	}
 	return out
 }
