@@ -217,34 +217,29 @@ func TestAutoCompactE2E(t *testing.T) {
 	}
 }
 
-// TestAutoCompactEnvLast covers the interrupted-turn edge: when l.Messages
-// ends with the env "system" block, the compact prompt must not leave that
-// block mid-array followed by a user message.
-func TestAutoCompactEnvLast(t *testing.T) {
-	t.Setenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "40000")
+// TestCompactEnvLast covers the interrupted-turn edge: when l.Messages
+// ends with the env "system" block (first Ask failed before the reply),
+// the compact prompt must not leave that block mid-array followed by a
+// user message.
+func TestCompactEnvLast(t *testing.T) {
 	srv, l, _ := compactLoop(t)
 	ctx := context.Background()
-	if _, err := l.Ask(ctx, "usage:2000"); err != nil {
-		t.Fatal(err)
-	}
-	// simulate an interrupted Ask: env system block left at the tail
-	var env api.Message
-	var rest []api.Message
-	for _, m := range l.Messages {
-		if m.Role == "system" {
-			env = m
-		} else {
-			rest = append(rest, m)
-		}
-	}
-	l.Messages = append(rest, env)
-	if _, err := l.Ask(ctx, "usage:9000"); err != nil {
-		t.Fatal(err)
-	}
+	// interrupted first turn: user message + trailing env system block,
+	// no assistant reply
+	env := api.BlocksMessage("system", []api.ContentBlock{{
+		Type: "text", Text: "env info",
+	}})
+	l.Messages = []api.Message{api.TextMessage("user", "hi"), env}
+	l.Compact(ctx, l.Transcript)
 	req := requestMessages(t, srv.LastBody)
 	last := req[len(req)-1]
 	if last.Role != "system" {
 		t.Fatalf("trailing env system block must stay last, got role %q", last.Role)
+	}
+	secondLast := blocks(t, req[len(req)-2])
+	if !strings.Contains(secondLast[len(secondLast)-1].Text,
+		"detailed summary of the conversation") {
+		t.Error("compact prompt should precede the env block")
 	}
 }
 
