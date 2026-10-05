@@ -86,6 +86,8 @@ type Loop struct {
 	turnCount             int
 	toolCallsTotal        int
 	envIdx                int
+	announcedRemoved      string // deferred removals already announced
+	ambientPending        bool   // current turn's ambient record is on the wire as tail block
 	firstPrompt           string
 	sessionStarted        time.Time
 	envSent               bool   // env composite has been on the wire once
@@ -365,15 +367,25 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 		l.Messages = append(l.Messages, msg, envBlocks)
 		l.envIdx = len(l.Messages) - 1
 	} else {
-		msg = api.TextMessage("user", prompt)
+		// real sends subsequent user prompts as bare-string content
+		// (captured); only the first message carries context blocks
+		msg = api.StringMessage("user", prompt)
 		// if the previous turn was interrupted before the assistant
-		// replied, the env system block sits mid-array with no assistant
-		// after it — the API rejects that ("system must precede an
-		// assistant message or end the array"). Keep it last.
+		// replied, a trailing system record sits mid-array with no
+		// assistant after it — the API rejects that ("system must
+		// precede an assistant message or end the array"). Keep it last.
 		if n := len(l.Messages); n > 0 && l.Messages[n-1].Role == "system" {
 			l.Messages = append(l.Messages[:n-1], msg, l.Messages[n-1])
 		} else {
 			l.Messages = append(l.Messages, msg)
+		}
+		// real persists this turn's ambient announcements (deferred
+		// removals, failed MCP servers) as a bare-string system record
+		// between the user prompt and the assistant reply (captured)
+		l.ambientPending = false
+		if d := l.deltaAnnouncements(); d != "" {
+			l.Messages = append(l.Messages, api.StringMessage("system", d))
+			l.ambientPending = true
 		}
 	}
 	if l.firstPrompt == "" {
@@ -951,8 +963,42 @@ func (l *Loop) envWireTransform() []api.Message {
 	return msgs
 }
 
+// coalesceRoles merges consecutive same-role user/assistant records into
+// one message — real flattens all same-role transcript records between
+// other-role turns into a single message's block list (captured: two
+// /compact command records + two prompts merged into one user message).
+// System records are NOT coalesced (real keeps tail system inserts
+// separate).
+func coalesceRoles(msgs []api.Message) []api.Message {
+	toBlocks := func(m api.Message) []api.ContentBlock {
+		var blocks []api.ContentBlock
+		if err := json.Unmarshal(m.Content, &blocks); err == nil {
+			return blocks
+		}
+		var s string
+		if err := json.Unmarshal(m.Content, &s); err == nil && s != "" {
+			return []api.ContentBlock{{Type: "text", Text: s}}
+		}
+		return nil
+	}
+	out := make([]api.Message, 0, len(msgs))
+	for _, m := range msgs {
+		if len(out) > 0 && (m.Role == "user" || m.Role == "assistant") && out[len(out)-1].Role == m.Role {
+			prev := out[len(out)-1]
+			blocks := append(toBlocks(prev), toBlocks(m)...)
+			if raw, err := json.Marshal(blocks); err == nil {
+				prev.Content = raw
+				out[len(out)-1] = prev
+				continue
+			}
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 func (l *Loop) wireMessages() []api.Message {
-	msgs := l.envWireTransform()
+	msgs := coalesceRoles(l.envWireTransform())
 	if l.envSent {
 		if tailEndsInToolResult(msgs) {
 			// tool-loop continuation: real appends the <total_tokens>
@@ -964,14 +1010,19 @@ func (l *Loop) wireMessages() []api.Message {
 					CacheControl: &api.CacheControl{Type: "ephemeral", TTL: "1h"},
 				}}),
 				api.StringMessage("system", "First privately list what you need next; then request every item that doesn't depend on another's result in this one response."))
-		} else if d := l.deltaAnnouncements(); d != "" {
-			// new-turn ambient block: deferred-pool removals + failed
-			// MCP servers (captured post-compact/new-turn requests)
-			msgs = append(msgs, api.BlocksMessage("system", []api.ContentBlock{{
-				Type:         "text",
-				Text:         d,
-				CacheControl: &api.CacheControl{Type: "ephemeral", TTL: "1h"},
-			}}))
+		} else if l.ambientPending {
+			// this turn's ambient record (persisted as a bare string)
+			// rides as the trailing cached block — real's exact shape
+			if n := len(msgs); n > 0 && msgs[n-1].Role == "system" {
+				var txt string
+				if json.Unmarshal(msgs[n-1].Content, &txt) == nil {
+					msgs[n-1] = api.BlocksMessage("system", []api.ContentBlock{{
+						Type:         "text",
+						Text:         txt,
+						CacheControl: &api.CacheControl{Type: "ephemeral", TTL: "1h"},
+					}})
+				}
+			}
 		}
 	}
 	l.envSent = true
@@ -1000,28 +1051,13 @@ func tailEndsInToolResult(msgs []api.Message) bool {
 	return false
 }
 
-// deltaAnnouncements builds real's ambient system block: deferred-tool
-// removals plus MCP servers that failed to connect (captured text).
+// deltaAnnouncements builds real's ambient system text: deferred-tool
+// removals (announced once) plus MCP servers that failed to connect
+// (re-announced every turn). Ends with the live token budget — captured
+// verbatim.
 func (l *Loop) deltaAnnouncements() string {
 	var b strings.Builder
-	names := l.ToolCtx.DeferredNames()
-	sort.Strings(names)
-	// names announced earlier but no longer deferred
-	var removed []string
-	if l.announcedDeferred != "" {
-		cur := map[string]bool{}
-		for _, n := range names {
-			cur[n] = true
-		}
-		for _, n := range strings.Split(l.announcedDeferred, "\x00") {
-			if !cur[n] {
-				removed = append(removed, n)
-			}
-		}
-	}
-	// newly deferred pool already handled by withDeferredReminder on the
-	// user message; here we only announce removals and failed servers
-	if len(removed) > 0 {
+	if removed := l.newDeferredRemovals(); len(removed) > 0 {
 		b.WriteString("The following deferred tools are no longer available in this session. Do not search for them — ToolSearch will return no match:\n")
 		for _, n := range removed {
 			b.WriteString(n + "\n")
@@ -1050,6 +1086,40 @@ func (l *Loop) deltaAnnouncements() string {
 	// real ends the ambient block with the live token budget
 	b.WriteString(fmt.Sprintf("\n<total_tokens>%d tokens left</total_tokens>", l.tokensLeft))
 	return b.String()
+}
+
+// newDeferredRemovals returns deferred names that vanished since the last
+// announcement — each removal is announced once (captured: the removal
+// notice appears in one ambient record, not every turn).
+func (l *Loop) newDeferredRemovals() []string {
+	if l.announcedDeferred == "" {
+		return nil
+	}
+	cur := map[string]bool{}
+	for _, n := range l.ToolCtx.DeferredNames() {
+		cur[n] = true
+	}
+	var removed []string
+	for _, n := range strings.Split(l.announcedDeferred, "\x00") {
+		if !cur[n] {
+			removed = append(removed, n)
+		}
+	}
+	if len(removed) > 0 {
+		done := map[string]bool{}
+		for _, n := range strings.Split(l.announcedRemoved, "\x00") {
+			done[n] = true
+		}
+		var fresh []string
+		for _, n := range removed {
+			if !done[n] {
+				fresh = append(fresh, n)
+			}
+		}
+		l.announcedRemoved = strings.Join(append(strings.Split(l.announcedRemoved, "\x00"), fresh...), "\x00")
+		return fresh
+	}
+	return nil
 }
 
 // mcpErrKind buckets an MCP connect error into real's parenthesized kind
