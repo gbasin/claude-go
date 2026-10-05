@@ -6,10 +6,12 @@ package e2e
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestHookContinueFalse: {"continue":false} (bool) must block like exit 2 —
@@ -186,5 +188,62 @@ func TestDontAskDenyText(t *testing.T) {
 	s.mustOK(t, r)
 	if !strings.Contains(r.stdout, "don't ask mode") {
 		t.Fatalf("expected dontAsk denial text, got %q", r.stdout)
+	}
+}
+
+// TestSessionStartHookOnWire: SessionStart hook output must reach the wire
+// the way real sends it — merged into the env composite on request 1, then
+// a bare-string system record on request 2+ (verified in 2.1.289 captures).
+func TestSessionStartHookOnWire(t *testing.T) {
+	s := newSession(t)
+	s.writeFile(".claude/settings.json",
+		`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo 'SESSHOOK-42'"}]}]}}`)
+	recDir := filepath.Join(t.TempDir(), "reqs")
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + recDir}, 60*time.Second,
+		"--mock", "-p", `tool:Bash {"command":"echo hi"}`,
+		"--permission-mode", "bypassPermissions")
+	s.mustOK(t, r)
+
+	ents, err := os.ReadDir(recDir)
+	if err != nil || len(ents) < 2 {
+		t.Fatalf("expected >=2 recorded requests, got %v err=%v", len(ents), err)
+	}
+	readReq := func(i int) []map[string]any {
+		b, _ := os.ReadFile(filepath.Join(recDir, ents[i].Name()))
+		var req struct {
+			Messages []map[string]any `json:"messages"`
+		}
+		if err := json.Unmarshal(b, &req); err != nil {
+			t.Fatalf("request %s did not parse: %v", ents[i].Name(), err)
+		}
+		return req.Messages
+	}
+
+	// req1: hook ctx merged into the env composite system block
+	req1 := readReq(0)
+	var envText string
+	for _, m := range req1 {
+		if m["role"] == "system" {
+			if blocks, ok := m["content"].([]any); ok {
+				for _, b := range blocks {
+					if bm, ok := b.(map[string]any); ok {
+						envText += fmt.Sprint(bm["text"])
+					}
+				}
+			}
+		}
+	}
+	if !strings.Contains(envText, "SESSHOOK-42") {
+		t.Fatalf("req1 env composite missing hook ctx\nsystem text: %s", truncStr(envText, 1000))
+	}
+
+	// req2: env slot shrinks to a bare-string system record
+	req2 := readReq(len(ents) - 1)
+	if len(req2) < 2 {
+		t.Fatalf("req2 too short: %d messages", len(req2))
+	}
+	raw, ok := req2[1]["content"].(string)
+	if !ok || !strings.Contains(raw, "SESSHOOK-42") {
+		t.Fatalf("req2 messages[1] should be bare-string hook ctx, got %v", req2[1]["content"])
 	}
 }
