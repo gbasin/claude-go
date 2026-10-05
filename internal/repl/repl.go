@@ -172,7 +172,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 		case perms.Allow:
 			return true
 		case perms.Deny:
-			fmt.Printf("  %sdenied by permission rules%s\n", dim, reset)
+			dprintf("  %sdenied by permission rules%s\n", dim, reset)
 			return false
 		default:
 			reason, cfg := askReason(l, name, input)
@@ -197,7 +197,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			return // meta+t collapsed (real hides thinking by default display)
 		}
 		if !thinkingSeen {
-			fmt.Printf("%s✻ Thinking…%s\n", dim, reset)
+			dprintf("%s✻ Thinking…%s\n", dim, reset)
 			thinkingSeen = true
 		}
 		fmt.Print(dim + t + reset)
@@ -230,7 +230,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 	l.Events.OnUsage = func(u api.Usage) {
 		spinTokens.Store(int64(u.OutputTokens)) // spinner's ↓ token counter
 		if antTrace.Load() {
-			fmt.Printf("%s  trace %s in=%d out=%d cache-r=%d cache-w=%d%s\n", dim,
+			dprintf("%s  trace %s in=%d out=%d cache-r=%d cache-w=%d%s\n", dim,
 				l.Model, u.InputTokens, u.OutputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens, reset)
 		}
 	}
@@ -256,7 +256,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 				ed.voice.ctl.Cancel() // drop any live capture+stream on exit
 			}
 			l.SessionEndReason = "prompt_input_exit"
-			fmt.Println()
+			dprintln()
 			fireSessionEndHook(l)
 			return
 		}
@@ -414,7 +414,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 				}
 			}
 		drained:
-			fmt.Println()
+			dprintln()
 			// ping the notification channel when the turn ended with no
 			// user keystrokes — the session was unattended (UserActive is
 			// false for the whole turn, so key activity is the real signal)
@@ -428,13 +428,13 @@ func RunWithStore(l *agent.Loop, store Store) {
 				if os.Getenv("DISABLE_COMPACT") != "" {
 					suffix = " · /clear to continue"
 				}
-				fmt.Printf("%s  Context limit reached · /compact or /clear to continue%s%s\n", red, suffix, reset)
+				dprintf("%s  Context limit reached · /compact or /clear to continue%s%s\n", red, suffix, reset)
 			}
 			if err != nil {
 				if wasCancelled {
-					fmt.Printf("%s⏺ Interrupted%s\n", yellow, reset)
+					dprintf("%s⏺ Interrupted%s\n", yellow, reset)
 				} else {
-					fmt.Printf("%sError: %v%s\n", red, err, reset)
+					dprintf("%sError: %v%s\n", red, err, reset)
 				}
 			} else if d := time.Since(start); d >= time.Second {
 				// real prints "✻ Churned for 2m 9s" (past-tense verb)
@@ -442,9 +442,9 @@ func RunWithStore(l *agent.Loop, store Store) {
 				if v == "" {
 					v = "Working"
 				}
-				fmt.Printf("%s✻ %s for %s%s\n\n", dim, pastTense(v), fmtDur(d), reset)
+				dprintf("%s✻ %s for %s%s\n\n", dim, pastTense(v), fmtDur(d), reset)
 			} else {
-				fmt.Println()
+				dprintln()
 			}
 		}
 		for {
@@ -461,7 +461,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			}
 		drained:
 			for _, nm := range tools.DrainMailbox(l.Client.SessionID) {
-				fmt.Printf("%s  [message]%s %s\n", cyan, reset, nm)
+				dprintf("%s  [message]%s %s\n", cyan, reset, nm)
 				l.Messages = append(l.Messages, api.TextMessage("user",
 					"<system-reminder>Message received while you were working:</system-reminder>\n"+nm))
 			}
@@ -741,7 +741,7 @@ func expandMentions(l *agent.Loop, line string) string {
 func runBang(l *agent.Loop, cmd string) {
 	raw, _ := json.Marshal(map[string]any{"command": cmd, "description": "run in bash mode"})
 	res := tools.Dispatch(l.ToolCtx, "Bash", raw)
-	fmt.Println("  ⎿ ", strings.TrimSpace(res.Content))
+	dprintln("  ⎿ ", strings.TrimSpace(res.Content))
 	l.PushUser([]api.ContentBlock{{Type: "text",
 		Text: "<bash-input>\n" + cmd + "\n</bash-input>\n\n<local-command-stdout>\n" + res.Content + "\n</local-command-stdout>"}})
 }
@@ -765,7 +765,7 @@ func runPipe(l *agent.Loop) {
 		if _, err := l.Ask(context.Background(), expandMentions(l, line)); err != nil {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 		}
-		fmt.Println()
+		dprintln()
 	}
 }
 
@@ -807,7 +807,7 @@ func fireStopHook(l *agent.Loop) {
 		"last_assistant_message": lastAssistantText(l),
 	}, l.ToolCtx.CWD)
 	if res.SystemMessage != "" {
-		fmt.Printf("  %s%s%s\n", dim, res.SystemMessage, reset)
+		dprintf("  %s%s%s\n", dim, res.SystemMessage, reset)
 	}
 	if res.Block && res.Reason != "" && !stopHookActive.Swap(true) {
 		// continue:false / decision:block → the model sees the reason and
@@ -882,17 +882,17 @@ func printStatus(l *agent.Loop, ed *editor) {
 	if compActive.Load() {
 		compSetStatus(status) // pinned bottom row — real keeps it in the live region
 	} else {
-		fmt.Println(status)
+		dprintln(status)
 	}
 	if b := permModeBanner(l.PermMode); b != "" {
 		if compActive.Load() {
 			compInline("  " + b + "\r\n") // scroll region — raw Println lands mid-line
 		} else {
-			fmt.Println("  " + b)
+			dprintln("  " + b)
 		}
 	}
 	if hints := footerHints(l, ed); len(hints) > 0 {
-		fmt.Printf("%s  %s%s\n", dim, strings.Join(hints, " · "), reset)
+		dprintf("%s  %s%s\n", dim, strings.Join(hints, " · "), reset)
 	}
 }
 
@@ -915,9 +915,9 @@ func termWidth() (int, error) {
 func (p *promptUI) askStructured(ks *keySource, header, question string, options []string, multi bool) ([]string, error) {
 	compSuspend() // modal menu — un-pin the live zone while it owns the screen
 	defer compResume()
-	fmt.Printf("\n%s%s%s\n", bold, question, reset)
+	dprintf("\n%s%s%s\n", bold, question, reset)
 	for i, o := range options {
-		fmt.Printf("  %s%d.%s %s\n", bold, i+1, reset, o)
+		dprintf("  %s%d.%s %s\n", bold, i+1, reset, o)
 	}
 	other := fmt.Sprintf("  %s%d.%s Other\n  ", bold, len(options)+1, reset)
 	fmt.Print(other)
@@ -933,7 +933,7 @@ func (p *promptUI) askStructured(ks *keySource, header, question string, options
 				continue
 			}
 			if idx >= 0 && idx < len(options) {
-				fmt.Println(string(c), "·", options[idx])
+				dprintln(string(c), "·", options[idx])
 				picked = append(picked, options[idx])
 				if !multi {
 					return picked, nil
@@ -1062,7 +1062,7 @@ func expandCustomSlash(line string) string {
 		return ""
 	}
 	arg := strings.TrimSpace(strings.TrimPrefix(line, "/"+name))
-	fmt.Printf("  %s/%s%s\n", dim, name, reset)
+	dprintf("  %s/%s%s\n", dim, name, reset)
 	return expandCustomCommand(c, arg)
 }
 
@@ -1074,12 +1074,12 @@ func quickMemory(l *agent.Loop, text string) {
 	p := filepath.Join(dir, "MEMORY.md")
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
-		fmt.Println("  memory write failed:", err)
+		dprintln("  memory write failed:", err)
 		return
 	}
 	defer f.Close()
 	fmt.Fprintf(f, "- %s\n", text)
-	fmt.Println("  saved to memory:", p)
+	dprintln("  saved to memory:", p)
 }
 
 func vimMode(l *agent.Loop) string {
@@ -1215,22 +1215,22 @@ func runRewindSelector(l *agent.Loop, ks *keySource, ed *editor) {
 		}
 	}
 	if len(list) == 0 {
-		fmt.Println("  (nothing to rewind to)")
+		dprintln("  (nothing to rewind to)")
 		return
 	}
-	fmt.Println("\n  Rewind to:")
+	dprintln("\n  Rewind to:")
 	for i, m := range list {
 		if i >= 12 {
-			fmt.Printf("    … %d more\n", len(list)-12)
+			dprintf("    … %d more\n", len(list)-12)
 			break
 		}
-		fmt.Printf("    %d. %s\n", i+1, trunc(strings.ReplaceAll(m.text, "\n", " "), 80))
+		dprintf("    %d. %s\n", i+1, trunc(strings.ReplaceAll(m.text, "\n", " "), 80))
 	}
 	fmt.Print("  number to restore (esc cancels): ")
 	sel := 0
 	for k := range ks.ch {
 		if k.b == 0x1b {
-			fmt.Println()
+			dprintln()
 			return
 		}
 		if k.b >= '1' && k.b <= '9' {
@@ -1239,9 +1239,9 @@ func runRewindSelector(l *agent.Loop, ks *keySource, ed *editor) {
 			continue
 		}
 		if k.b == '\r' {
-			fmt.Println()
+			dprintln()
 			if sel < 1 || sel > len(list) {
-				fmt.Println("  (invalid)")
+				dprintln("  (invalid)")
 				return
 			}
 			target := list[sel-1]
@@ -1251,11 +1251,11 @@ func runRewindSelector(l *agent.Loop, ks *keySource, ed *editor) {
 			if err == nil && p != "" {
 				restored = 1
 			}
-			fmt.Printf("  rewound to before %q (%d files restored)\n", trunc(target.text, 50), restored)
+			dprintf("  rewound to before %q (%d files restored)\n", trunc(target.text, 50), restored)
 			return
 		}
 		if k.b == 3 {
-			fmt.Println()
+			dprintln()
 			return
 		}
 	}

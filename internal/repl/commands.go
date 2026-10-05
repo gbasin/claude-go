@@ -44,7 +44,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		printHelp()
 	case "plan":
 		l.PermMode = "plan"
-		fmt.Println("  ⏸ plan mode — explore read-only, then ExitPlanMode to implement")
+		dprintln("  ⏸ plan mode — explore read-only, then ExitPlanMode to implement")
 	case "clear", "reset", "new":
 		l.Messages = nil
 		l.SessionStartSource = "clear"
@@ -53,41 +53,41 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			"cwd": l.ToolCtx.CWD, "hook_event_name": "SessionStart", "source": "clear",
 			"permission_mode": l.PermMode,
 		}, l.ToolCtx.CWD)
-		fmt.Println("  context cleared (previous session remains resumable via /resume)")
+		dprintln("  context cleared (previous session remains resumable via /resume)")
 	case "compact":
-		fmt.Println("  compacting…")
+		dprintln("  compacting…")
 		if arg != "" {
 			l.AppendSysP += "\n\n## Compact Instructions\n" + arg
 		}
 		before := len(l.Messages)
 		if err := l.Compact(context.Background(), l.Transcript); err != nil {
-			fmt.Println("  compact failed:", err)
+			dprintln("  compact failed:", err)
 		} else {
-			fmt.Printf("  Compacted · %d messages summarized (ctrl+o to see them)\n", before)
+			dprintf("  Compacted · %d messages summarized (ctrl+o to see them)\n", before)
 		}
 	case "cost", "usage", "stats":
 		u := l.UsageTotal
-		fmt.Printf("  input: %d  output: %d  cache-read: %d  cache-write: %d\n",
+		dprintf("  input: %d  output: %d  cache-read: %d  cache-write: %d\n",
 			u.InputTokens, u.OutputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens)
 	case "status":
-		fmt.Printf("  version: %s\n  model: %s\n  session: %s\n  cwd: %s\n  permission mode: %s\n  transcript: %s\n",
+		dprintf("  version: %s\n  model: %s\n  session: %s\n  cwd: %s\n  permission mode: %s\n  transcript: %s\n",
 			api.Version, l.Model, l.Client.SessionID, l.ToolCtx.CWD, l.PermMode, l.Transcript)
 	case "context":
 		u := l.UsageTotal
 		total := u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
-		fmt.Printf("  context tokens (last request): %d\n  messages: %d\n", total, len(l.Messages))
+		dprintf("  context tokens (last request): %d\n  messages: %d\n", total, len(l.Messages))
 	case "add-dir":
 		if arg == "" {
-			fmt.Println("  usage: /add-dir <path>")
+			dprintln("  usage: /add-dir <path>")
 			break
 		}
 		p, err := filepath.Abs(arg)
 		if err != nil {
-			fmt.Println("  bad path:", err)
+			dprintln("  bad path:", err)
 			break
 		}
 		l.AddDirs = append(l.AddDirs, p)
-		fmt.Println("  added", p)
+		dprintln("  added", p)
 	case "memory":
 		memoryCmd(l, arg)
 	case "mcp":
@@ -97,8 +97,8 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "config", "settings":
 		configCmd(l, arg)
 	case "agents":
-		fmt.Println("  builtin: general-purpose, Explore, Plan, claude, code-reviewer, code-simplifier, debugger, statusline-setup")
-		fmt.Println("  custom agents load from ~/.claude/agents/ and .claude/agents/")
+		dprintln("  builtin: general-purpose, Explore, Plan, claude, code-reviewer, code-simplifier, debugger, statusline-setup")
+		dprintln("  custom agents load from ~/.claude/agents/ and .claude/agents/")
 	case "hooks":
 		// hooks documentation (update-config's hooks-only branch in real CC)
 		body := bundledHooksDocs
@@ -113,13 +113,13 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		if id != "" {
 			if msgs, err := session.Load(l.ToolCtx.CWD, id); err == nil {
 				l.Messages = msgs
-				fmt.Printf("  resumed session %s (%d messages)\n", id, len(msgs))
+				dprintf("  resumed session %s (%d messages)\n", id, len(msgs))
 			}
 		}
 	case "export":
 		exportCmd(l, arg)
 	case "init":
-		fmt.Println("  analyzing codebase → CLAUDE.md …")
+		dprintln("  analyzing codebase → CLAUDE.md …")
 		body := bundledInit
 		if foreignAgentConfigExists() {
 			body = strings.Replace(body, "\n- Do not make up information",
@@ -129,26 +129,26 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "diff":
 		diffCmd(l)
 	case "review", "code-review":
-		fmt.Println("  reviewing (medium effort)…")
+		dprintln("  reviewing (medium effort)…")
 		body := bundledCodeReview
 		if arg != "" {
 			body = "Review target: `" + arg + "`\n\n" + body
 		}
 		go l.Ask(context.Background(), body)
 	case "security-review":
-		fmt.Println("  analyzing code changes for security risks…")
+		dprintln("  analyzing code changes for security risks…")
 		runBundledPrompt(l, bundledSecurityReview, arg)
 	case "doctor", "checkup":
 		// real /doctor sends the audit skill prompt; /doctor local stays as a
 		// diagnostic variant below via "status"
-		fmt.Println("  health-checking setup…")
+		dprintln("  health-checking setup…")
 		body := bundledDoctor
 		if arg != "" {
 			body += "\n\n## Additional instructions from the user\n\n" + arg
 		}
 		go l.Ask(context.Background(), body)
 	case "pr":
-		fmt.Println("  creating pull request…")
+		dprintln("  creating pull request…")
 		body := bundledPR
 		if arg == "" {
 			body = strings.ReplaceAll(body, "\nUser guidance for this PR: $ARG\n", "\n")
@@ -158,13 +158,13 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		go l.Ask(context.Background(), interpolateBang(body, l.ToolCtx.CWD))
 	case "batch":
 		if arg == "" {
-			fmt.Println("  " + bundledBatchUsage)
+			dprintln("  " + bundledBatchUsage)
 			break
 		}
-		fmt.Println("  planning batch orchestration…")
+		dprintln("  planning batch orchestration…")
 		go l.Ask(context.Background(), strings.ReplaceAll(bundledBatch, "$ARG", arg))
 	case "debug":
-		fmt.Println("  investigating…")
+		dprintln("  investigating…")
 		go l.Ask(context.Background(), debugPrompt(l, arg))
 	case "run":
 		go l.Ask(context.Background(), runPrompt(arg))
@@ -195,17 +195,17 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "memory-types":
 		go l.Ask(context.Background(), bundledMemoryTypes)
 	case "insights":
-		fmt.Println("  analyzing your sessions…")
+		dprintln("  analyzing your sessions…")
 		go l.Ask(context.Background(), insightsPrompt())
 	case "bug":
 		url := "https://github.com/anthropics/claude-code/issues"
-		fmt.Println("  report issues at", url)
+		dprintln("  report issues at", url)
 		if runtime.GOOS == "darwin" {
 			exec.Command("open", url).Start()
 		}
 	case "vim":
 		// real CC: /vim is a compat shim — editor mode moved to /config
-		fmt.Println("  editor mode moved to /config")
+		dprintln("  editor mode moved to /config")
 	case "output-style":
 		outputStyleCmd(l, arg)
 	case "statusline":
@@ -219,7 +219,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "tasks":
 		tasksCmd(l)
 	case "theme", "color":
-		fmt.Println("  themes not implemented; output uses standard ANSI")
+		dprintln("  themes not implemented; output uses standard ANSI")
 	case "alias":
 		aliasCmd(l, arg)
 	case "login":
@@ -227,30 +227,30 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "logout":
 		logoutCmd()
 	case "keybindings":
-		fmt.Println("  edit ~/.claude/keybindings.json")
+		dprintln("  edit ~/.claude/keybindings.json")
 	case "ide":
-		fmt.Println("  IDE integration not implemented")
+		dprintln("  IDE integration not implemented")
 	case "files":
 		out, _ := exec.Command("git", "-C", l.ToolCtx.CWD, "ls-files").CombinedOutput()
-		fmt.Print(string(out))
+		dprintf("%s", string(out))
 	case "todos":
-		fmt.Println("  (no todo tool in this version)")
+		dprintln("  (no todo tool in this version)")
 	case "release-notes":
-		fmt.Println("  claude-go", api.Version)
+		dprintln("  claude-go", api.Version)
 	case "terminal-setup":
-		fmt.Println("  keybindings installed: none needed (Go build)")
+		dprintln("  keybindings installed: none needed (Go build)")
 	case "privacy-settings":
-		fmt.Println("  telemetry: none in claude-go")
+		dprintln("  telemetry: none in claude-go")
 	case "plugin":
-		fmt.Println("  plugins: load skills from ~/.claude/skills and project skills dirs")
+		dprintln("  plugins: load skills from ~/.claude/skills and project skills dirs")
 	case "import":
-		fmt.Println("  /import <path> reads a file into context")
+		dprintln("  /import <path> reads a file into context")
 		if arg != "" {
 			l.Ask(context.Background(), "Please incorporate this file's contents: "+arg)
 		}
 	case "btw":
 		if arg == "" {
-			fmt.Println("  usage: /btw <side question> — answered without adding to the main context")
+			dprintln("  usage: /btw <side question> — answered without adding to the main context")
 			break
 		}
 		go func() {
@@ -259,7 +259,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			sub.ToolCtx = l.ToolCtx
 			resp, err := sub.Ask(context.Background(), arg)
 			if err != nil {
-				fmt.Printf("\n  btw failed: %s\n", err)
+				dprintf("\n  btw failed: %s\n", err)
 			} else {
 				var txt string
 				for _, b := range resp.Content {
@@ -267,20 +267,20 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 						txt += b.Text
 					}
 				}
-				fmt.Printf("\n%sbtw:%s %s\n", cyan, reset, txt)
+				dprintf("\n%sbtw:%s %s\n", cyan, reset, txt)
 			}
 		}()
 	case "feedback":
-		fmt.Println("  feedback: https://github.com/gbasin/claude-go/issues")
+		dprintln("  feedback: https://github.com/gbasin/claude-go/issues")
 	case "rename":
 		if arg == "" {
-			fmt.Println("  usage: /rename <title>")
+			dprintln("  usage: /rename <title>")
 			return true
 		}
 		if currentStore != nil {
 			currentStore.LogTitle(arg)
 		}
-		fmt.Println("  session renamed:", arg)
+		dprintln("  session renamed:", arg)
 	case "teleport":
 		teleportCmd(l)
 	case "remote-control":
@@ -301,7 +301,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		usageCreditsCmd(l, arg)
 	case "extra-usage":
 		// real's /extra-usage metadata: "Renamed to /usage-credits"
-		fmt.Println("  /extra-usage is renamed to /usage-credits")
+		dprintln("  /extra-usage is renamed to /usage-credits")
 		usageCreditsCmd(l, arg)
 	case "chrome":
 		chromeCmd(arg)
@@ -312,28 +312,28 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "fork":
 		if tools.IsCoordinatorMode() {
 			// uIn (mod_1512.js): keepParent fork refused (reason coordinator_mode)
-			fmt.Println("  " + tools.MsgForkCoordinator)
+			dprintln("  " + tools.MsgForkCoordinator)
 			return false
 		}
 		if currentStore == nil {
-			fmt.Println("  (no transcript store — cannot fork)")
+			dprintln("  (no transcript store — cannot fork)")
 			return true
 		}
 		old := l.Client.SessionID
 		nw, msgs, err := session.Fork(l.CWD, old)
 		if err != nil {
-			fmt.Println("  fork failed:", err)
+			dprintln("  fork failed:", err)
 			return true
 		}
 		l.Client.SessionID = nw.SessionID
 		l.Messages = msgs
 		currentStore = nw
-		fmt.Printf("  forked to session %s (%d messages carried)\n", nw.SessionID[:8], len(msgs))
+		dprintf("  forked to session %s (%d messages carried)\n", nw.SessionID[:8], len(msgs))
 	case "rewind", "checkpoint", "undo":
 		if p, err := tools.Checkpoints.Rewind(); err != nil {
-			fmt.Println(" ", err)
+			dprintln(" ", err)
 		} else {
-			fmt.Println("  rewound:", p)
+			dprintln("  rewound:", p)
 		}
 	case "schedule", "routines":
 		scheduleCmd(l, arg)
@@ -342,22 +342,22 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "goal":
 		if arg == "clear" || arg == "" {
 			l.Goal = ""
-			fmt.Println("  goal cleared")
+			dprintln("  goal cleared")
 			return true
 		}
 		l.Goal = arg
-		fmt.Println("  goal set — I'll keep working until it holds (stop-hook semantics)")
+		dprintln("  goal set — I'll keep working until it holds (stop-hook semantics)")
 	case "subtask":
 		if arg == "" {
-			fmt.Println("  usage: /subtask <prompt> — run a subagent, result returns here")
+			dprintln("  usage: /subtask <prompt> — run a subagent, result returns here")
 			return true
 		}
 		if l.ToolCtx.Agent == nil {
-			fmt.Println("  (sub-agents unavailable)")
+			dprintln("  (sub-agents unavailable)")
 			return true
 		}
 		res := l.ToolCtx.Agent.RunAgent(l.ToolCtx, "subtask", arg, "general-purpose", "", false)
-		fmt.Println(" ", res.Content)
+		dprintln(" ", res.Content)
 	case "branch":
 		// fork conversation onto a new session branch
 		old := l.Client.SessionID
@@ -369,57 +369,57 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		if len(o) > 8 {
 			o = o[:8]
 		}
-		fmt.Printf("  branched session → %s (original %s resumable via /resume)\n", n, o)
+		dprintf("  branched session → %s (original %s resumable via /resume)\n", n, o)
 	case "sandbox":
 		if strings.HasPrefix(arg, "allow ") {
 			host := strings.TrimSpace(arg[len("allow"):])
 			if host == "" {
-				fmt.Println("  usage: /sandbox allow <host>")
+				dprintln("  usage: /sandbox allow <host>")
 				break
 			}
-			fmt.Println("  " + tools.SandboxAllowHost(host))
+			dprintln("  " + tools.SandboxAllowHost(host))
 			break
 		}
 		if os.Getenv("CLAUDE_GO_SANDBOX") == "1" {
 			os.Unsetenv("CLAUDE_GO_SANDBOX")
-			fmt.Println("  sandbox off")
+			dprintln("  sandbox off")
 		} else {
 			os.Setenv("CLAUDE_GO_SANDBOX", "1")
-			fmt.Println("  sandbox on (bash commands run under sandbox-exec)")
+			dprintln("  sandbox on (bash commands run under sandbox-exec)")
 		}
 	case "skills":
 		skills := agent.SkillNames(l.ToolCtx.CWD)
 		if len(skills) == 0 {
-			fmt.Println("  no skills found")
+			dprintln("  no skills found")
 			return true
 		}
-		fmt.Println("  Skills:")
+		dprintln("  Skills:")
 		for _, s := range skills {
-			fmt.Printf("    /%s\n", s)
+			dprintf("    /%s\n", s)
 		}
 	case "model":
 		if arg == "" {
-			// interactive picker
-			models := []string{"claude-fable-5-1", "claude-fable-5-1[1m]", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"}
+			// interactive picker — real's current catalog (mod_0068)
+			models := []string{"claude-fable-5-1", "claude-fable-5-1[1m]", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"}
 			for i, m := range models {
 				mark := "  "
 				if l.Model == m {
 					mark = "● "
 				}
-				fmt.Printf("%s%d. %s\n", mark, i+1, m)
+				dprintf("%s%d. %s\n", mark, i+1, m)
 			}
-			fmt.Print("  number (esc keeps " + l.Model + "): ")
+			dprintf("  number (esc keeps %s): ", l.Model)
 			var pick strings.Builder
 			for k := range ks.ch {
 				if k.b == 0x1b || k.b == 3 {
-					fmt.Println()
+					dprintln()
 					break
 				}
 				if k.b == '\r' {
-					fmt.Println()
+					dprintln()
 					if n, err := strconv.Atoi(pick.String()); err == nil && n >= 1 && n <= len(models) {
 						l.Model = models[n-1]
-						fmt.Println("  model →", l.Model)
+						dprintln("  model →", l.Model)
 					}
 					break
 				}
@@ -431,7 +431,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			return true
 		}
 		l.Model = arg
-		fmt.Println("  model →", l.Model)
+		dprintln("  model →", l.Model)
 	case "voice":
 		voiceCmd(l, ed, arg)
 	case "effort":
@@ -439,10 +439,10 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "fast":
 		if arg == "off" || arg == "" {
 			l.SetFastMode(false)
-			fmt.Println("  fast mode off")
+			dprintln("  fast mode off")
 		} else {
 			l.SetFastMode(true)
-			fmt.Println("  fast mode on (higher latency spend for quicker turns)")
+			dprintln("  fast mode on (higher latency spend for quicker turns)")
 		}
 	case "advisor":
 		advisorCmd(l, arg)
@@ -460,7 +460,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		setupProviderCmd(ks, "vertex")
 	case "wellbeing", "breaks", "break-reminder", "downtime":
 		// real ships this as a disabled stub (isEnabled:()=>!1)
-		fmt.Println("  break reminders and quiet-hours nudges aren't available in this build")
+		dprintln("  break reminders and quiet-hours nudges aren't available in this build")
 	case "focus":
 		focusCmd(arg)
 	case "settings-review":
@@ -468,15 +468,15 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "pause-memory", "memory-pause", "toggle-memory":
 		l.MemoryPaused = !l.MemoryPaused
 		if l.MemoryPaused {
-			fmt.Println("  memory paused for this session — MEMORY.md and account memory won't load (run again to turn both back on)")
+			dprintln("  memory paused for this session — MEMORY.md and account memory won't load (run again to turn both back on)")
 		} else {
-			fmt.Println("  memory resumed")
+			dprintln("  memory resumed")
 		}
 	case "experiments":
 		experimentsCmd()
 	case "powerup":
 		// real runs interactive feature lessons (local-jsx); list the surface
-		fmt.Println("  discover features: /init · /review · /security-review · /insights · /ultraplan · /schedule · /skills")
+		dprintln("  discover features: /init · /review · /security-review · /insights · /ultraplan · /schedule · /skills")
 	case "copy":
 		copyCmd(l, arg)
 	case "cd":
@@ -489,10 +489,10 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		oauthRefreshCmd()
 	case "reload-plugins":
 		loadCustomCommands(l.ToolCtx.CWD)
-		fmt.Printf("  plugins reloaded (%d plugin dirs, %d commands)\n",
+		dprintf("  plugins reloaded (%d plugin dirs, %d commands)\n",
 			len(plugins.EnabledPluginDirs()), len(customCommands)+len(hiddenCommands))
 	case "reload-skills":
-		fmt.Printf("  skills reloaded — %d skills now visible\n", len(agent.SkillNames(l.ToolCtx.CWD)))
+		dprintf("  skills reloaded — %d skills now visible\n", len(agent.SkillNames(l.ToolCtx.CWD)))
 	case "background", "bg":
 		// real sends the session itself to the background; the local
 		// equivalent surface is the background-task list
@@ -503,27 +503,27 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		debugToolCallCmd(l)
 	case "artifacts":
 		if len(tools.SessionArtifacts) == 0 {
-			fmt.Println("  no artifacts published this session")
+			dprintln("  no artifacts published this session")
 		} else {
-			fmt.Println("  artifacts:")
+			dprintln("  artifacts:")
 			for _, u := range tools.SessionArtifacts {
-				fmt.Println("   -", u)
+				dprintln("   -", u)
 			}
 		}
 	case "ant-trace":
 		on := !antTrace.Load()
 		antTrace.Store(on)
-		fmt.Println("  trace output", map[bool]string{true: "on", false: "off"}[on])
+		dprintln("  trace output", map[bool]string{true: "on", false: "off"}[on])
 	case "radio":
 		url := "https://clau.de/radio"
 		if runtime.GOOS == "darwin" && exec.Command("open", url).Start() == nil {
-			fmt.Println("  Opening Claude FM in your browser…")
+			dprintln("  Opening Claude FM in your browser…")
 		} else {
-			fmt.Println("  Couldn't open the browser. Listen at:", url)
+			dprintln("  Couldn't open the browser. Listen at:", url)
 		}
 	case "issue":
 		url := "https://github.com/anthropics/claude-code/issues"
-		fmt.Println("  file an issue at", url)
+		dprintln("  file an issue at", url)
 		if runtime.GOOS == "darwin" {
 			exec.Command("open", url).Start()
 		}
@@ -533,7 +533,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			go l.Ask(context.Background(), expandCustomCommand(c, arg))
 			return false
 		}
-		fmt.Printf("  unknown command: /%s (try /help)\n", cmd)
+		dprintf("  unknown command: /%s (try /help)\n", cmd)
 	}
 	return false
 }
@@ -543,9 +543,9 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 // UI's other option ("Resume a session from cloud") isn't wired — its
 // session-fetch + repo-validation pipeline lives in unextracted chunks.
 func teleportCmd(l *agent.Loop) {
-	fmt.Println("  " + bold + "Moving your session…" + reset)
-	fmt.Println("  " + dim + "Same session, picking up from your branch’s last push." + reset)
-	fmt.Println("  " + Teleport(l))
+	dprintln("  " + bold + "Moving your session…" + reset)
+	dprintln("  " + dim + "Same session, picking up from your branch’s last push." + reset)
+	dprintln("  " + Teleport(l))
 }
 
 // codeSessionClient builds the OAuth-lane client for /v1/code/* calls —
@@ -633,41 +633,41 @@ func remoteControlCmd(l *agent.Loop, arg string) {
 	case "status":
 		id := tools.BridgeSessionID()
 		if id == "" {
-			fmt.Println("  Remote Control: not connected.")
-			fmt.Println("  Run /remote-control on to make this session available on claude.ai/code.")
+			dprintln("  Remote Control: not connected.")
+			dprintln("  Run /remote-control on to make this session available on claude.ai/code.")
 			return
 		}
 		url := bridge.SessionWebURL(id, "")
-		fmt.Println("  Remote Control")
-		fmt.Println("  This session is available in the Claude mobile app and at " + url + ".")
-		fmt.Println("  session: " + id)
+		dprintln("  Remote Control")
+		dprintln("  This session is available in the Claude mobile app and at " + url + ".")
+		dprintln("  session: " + id)
 	case "off":
 		id := tools.BridgeSessionID()
 		if id == "" {
-			fmt.Println("  Remote Control is not connected.")
+			dprintln("  Remote Control is not connected.")
 			return
 		}
 		// Best-effort archive like real's teardown (TeardownArchiveTimeoutMs).
 		_ = codeSessionClient(l).ArchiveSession(context.Background(), id)
 		tools.SetBridgeSessionID("")
-		fmt.Println("  " + bridge.MsgRCDisconnected)
+		dprintln("  " + bridge.MsgRCDisconnected)
 	case "on":
 		if id := tools.BridgeSessionID(); id != "" {
 			if grouping != "" {
-				fmt.Println("  " + bridge.MsgRCAlreadyConnected)
+				dprintln("  " + bridge.MsgRCAlreadyConnected)
 				return
 			}
-			fmt.Println("  This session is available in the Claude mobile app and at " +
+			dprintln("  This session is available in the Claude mobile app and at " +
 				bridge.SessionWebURL(id, "") + ".")
 			return
 		}
 		settings := config.Load(l.ToolCtx.CWD)
 		if err := bridge.Gate(settings.DisableRemoteControl, hasOAuth(l),
 			bridge.LoadREPLConfig(), api.Version); err != nil {
-			fmt.Println("  " + err.Error())
+			dprintln("  " + err.Error())
 			return
 		}
-		fmt.Println("  Connecting…")
+		dprintln("  Connecting…")
 		client := codeSessionClient(l)
 		title := filepath.Base(l.ToolCtx.CWD)
 		res := client.CreateCodeSession(context.Background(), &bridge.CreateSessionParams{
@@ -677,28 +677,28 @@ func remoteControlCmd(l *agent.Loop, arg string) {
 			SessionGrouping: grouping,
 		})
 		if res == nil {
-			fmt.Println("  " + bridge.ErrMalformedResponse)
+			dprintln("  " + bridge.ErrMalformedResponse)
 			return
 		}
 		if res.SessionID == "" {
 			switch res.Reason {
 			case "oauth_rejected":
-				fmt.Println("  " + bridge.ErrNoOAuthToken)
+				dprintln("  " + bridge.ErrNoOAuthToken)
 			case "grouping_rejected":
-				fmt.Println("  Remote Control: " + res.Detail)
+				dprintln("  Remote Control: " + res.Detail)
 			default:
 				detail := ""
 				if res.Detail != "" {
 					detail = " — " + res.Detail
 				}
-				fmt.Printf("  Remote Control couldn't connect (%s%s).\n", res.Reason, detail)
+				dprintf("  Remote Control couldn't connect (%s%s).\n", res.Reason, detail)
 			}
 			return
 		}
 		tools.SetBridgeSessionID(res.SessionID)
 		url := bridge.SessionWebURL(res.SessionID, "")
-		fmt.Println("  This session is available in the Claude mobile app and at " + url + ".")
-		fmt.Println("  " + dim + "control-plane handshake only — the data-plane worker stream is stubbed," +
+		dprintln("  This session is available in the Claude mobile app and at " + url + ".")
+		dprintln("  " + dim + "control-plane handshake only — the data-plane worker stream is stubbed," +
 			" so remote input can't reach this session yet" + reset)
 	}
 }
@@ -712,25 +712,25 @@ func remoteControlCmd(l *agent.Loop, arg string) {
 
 func remoteEnvCmd(l *agent.Loop, arg string) {
 	if !hasOAuth(l) {
-		fmt.Println("  " + bridge.MsgTeleportNoAuth)
+		dprintln("  " + bridge.MsgTeleportNoAuth)
 		return
 	}
 	client := codeSessionClient(l)
 	envs, err := client.ListEnvironments(context.Background())
 	if err != nil {
-		fmt.Printf("  couldn't list environments: %v\n", err)
+		dprintf("  couldn't list environments: %v\n", err)
 		return
 	}
 	current := readDefaultEnvironment()
 	set := func(id, name string) {
 		if !writeDefaultEnvironment(id) {
-			fmt.Println("  couldn't write ~/.claude/settings.json")
+			dprintln("  couldn't write ~/.claude/settings.json")
 			return
 		}
 		if id == "" {
-			fmt.Println("  default cloud environment cleared")
+			dprintln("  default cloud environment cleared")
 		} else {
-			fmt.Printf("  default cloud environment → %s\n", name)
+			dprintf("  default cloud environment → %s\n", name)
 		}
 	}
 	if arg == "clear" || arg == "none" {
@@ -744,13 +744,13 @@ func remoteEnvCmd(l *agent.Loop, arg string) {
 				return
 			}
 		}
-		fmt.Printf("  no environment matching %q\n", arg)
+		dprintf("  no environment matching %q\n", arg)
 	}
 	if len(envs) == 0 {
-		fmt.Println("  no cloud environments — create one at https://claude.ai/code or run /web-setup")
+		dprintln("  no cloud environments — create one at https://claude.ai/code or run /web-setup")
 		return
 	}
-	fmt.Println("  Cloud environments:")
+	dprintln("  Cloud environments:")
 	for _, e := range envs {
 		mark := "  "
 		if e.ID == current && current != "" {
@@ -758,9 +758,9 @@ func remoteEnvCmd(l *agent.Loop, arg string) {
 		}
 		// schedule-skill list format (mod_1685.js):
 		// `- {name} (id: {environment_id}, kind: {kind})`
-		fmt.Printf("  %s- %s (id: %s, kind: %s)\n", mark, e.Name, e.ID, e.Kind)
+		dprintf("  %s- %s (id: %s, kind: %s)\n", mark, e.Name, e.ID, e.Kind)
 	}
-	fmt.Println("  " + dim + "/remote-env <id> sets the default for cloud sessions" + reset)
+	dprintln("  " + dim + "/remote-env <id> sets the default for cloud sessions" + reset)
 }
 
 // readDefaultEnvironment returns remote.defaultEnvironmentId from
@@ -825,7 +825,7 @@ func writeDefaultEnvironment(id string) bool {
 
 func installGitHubAppCmd(l *agent.Loop, arg string) {
 	if !hasOAuth(l) {
-		fmt.Println("  " + bridge.ErrNoOAuthToken)
+		dprintln("  " + bridge.ErrNoOAuthToken)
 		return
 	}
 	client := codeSessionClient(l)
@@ -835,26 +835,26 @@ func installGitHubAppCmd(l *agent.Loop, arg string) {
 		res := client.ImportGitHubToken(context.Background(), arg)
 		switch {
 		case res.OK:
-			fmt.Println("  GitHub token imported — cloud sessions can use it to access your repositories.")
+			dprintln("  GitHub token imported — cloud sessions can use it to access your repositories.")
 		case res.Kind == "invalid_token":
 			if res.Message != "" {
-				fmt.Println("  token rejected: " + res.Message)
+				dprintln("  token rejected: " + res.Message)
 			} else {
-				fmt.Println("  token rejected by the server (invalid token)")
+				dprintln("  token rejected by the server (invalid token)")
 			}
 		case res.Kind == "not_signed_in":
-			fmt.Println("  " + bridge.ErrNoOAuthToken)
+			dprintln("  " + bridge.ErrNoOAuthToken)
 		case res.Kind == "server":
-			fmt.Printf("  import-token returned %d — try again or run /bug\n", res.Status)
+			dprintf("  import-token returned %d — try again or run /bug\n", res.Status)
 		default:
-			fmt.Printf("  couldn't reach the server: %s\n", res.Message)
+			dprintf("  couldn't reach the server: %s\n", res.Message)
 		}
 		return
 	}
 	// mod_2010.js: the app install link, then the org's GitHub auth state.
-	fmt.Println("  Install the Claude GitHub app: https://github.com/apps/claude")
+	dprintln("  Install the Claude GitHub app: https://github.com/apps/claude")
 	if client.OrgUUID == "" {
-		fmt.Println("  " + dim + "(no organization on this account — can't check GitHub sync state)" + reset)
+		dprintln("  " + dim + "(no organization on this account — can't check GitHub sync state)" + reset)
 		return
 	}
 	if st := client.GitHubAuthStatus(context.Background()); st != nil {
@@ -863,13 +863,13 @@ func installGitHubAppCmd(l *agent.Loop, arg string) {
 			if src == "" {
 				src = "oauth"
 			}
-			fmt.Printf("  GitHub access: connected (%s)\n", src)
+			dprintf("  GitHub access: connected (%s)\n", src)
 		} else {
-			fmt.Println("  GitHub access: not connected — after installing the app, grant a token with" +
+			dprintln("  GitHub access: not connected — after installing the app, grant a token with" +
 				" `gh auth token` and run /install-github-app <token>")
 		}
 	} else {
-		fmt.Println("  " + dim + "(couldn't read GitHub sync state — see --debug)" + reset)
+		dprintln("  " + dim + "(couldn't read GitHub sync state — see --debug)" + reset)
 	}
 }
 
@@ -883,25 +883,25 @@ func installGitHubAppCmd(l *agent.Loop, arg string) {
 // designConsentCmd mirrors fZt's consent/revoke halves (mod_1035.js).
 func designConsentCmd(l *agent.Loop, grant bool) {
 	if !hasOAuth(l) {
-		fmt.Println("  Design commands need a claude.ai account — run /login.")
+		dprintln("  Design commands need a claude.ai account — run /login.")
 		return
 	}
 	client := codeSessionClient(l)
 	if grant {
 		if err := client.DesignConsentGrant(context.Background()); err != nil {
-			fmt.Printf("  Couldn't record Design agent access for your Claude Design projects — %v. "+
+			dprintf("  Couldn't record Design agent access for your Claude Design projects — %v. "+
 				"Try again, or run /design-login to authorize Claude Design for this account.\n", err)
 			return
 		}
-		fmt.Println("  Design agent access granted for your Claude Design projects. Use /design revoke to undo.")
+		dprintln("  Design agent access granted for your Claude Design projects. Use /design revoke to undo.")
 		return
 	}
 	if err := client.DesignConsentRevoke(context.Background()); err != nil {
-		fmt.Printf("  Couldn't revoke Design agent access for your Claude Design projects — %v. "+
+		dprintf("  Couldn't revoke Design agent access for your Claude Design projects — %v. "+
 			"Try again, or run /design-login to authorize Claude Design for this account.\n", err)
 		return
 	}
-	fmt.Println("  Design agent access revoked for your Claude Design projects.")
+	dprintln("  Design agent access revoked for your Claude Design projects.")
 }
 
 var pendingDesignLogin struct {
@@ -915,7 +915,7 @@ var pendingDesignLogin struct {
 // designOauth credential.
 func designLoginCmd(l *agent.Loop, arg string) {
 	if !auth.DesignOAuthConfigured() {
-		fmt.Println("  The Claude Design OAuth client is not configured in this build. " +
+		dprintln("  The Claude Design OAuth client is not configured in this build. " +
 			"Set CLAUDE_CODE_DESIGN_OAUTH_CLIENT_ID to the registered client id, or update " +
 			"to a build with the registered client.")
 		return
@@ -923,22 +923,22 @@ func designLoginCmd(l *agent.Loop, arg string) {
 	if arg == "" {
 		urlStr, verifier, state := auth.DesignLoginURL()
 		pendingDesignLogin.Verifier, pendingDesignLogin.State = verifier, state
-		fmt.Println("  DesignSync needs design-system authorization for your claude.ai account. " +
+		dprintln("  DesignSync needs design-system authorization for your claude.ai account. " +
 			"Approving opens your browser to authorize access to your org's design-system " +
 			"projects — this session's own authentication is not changed.")
 		auth.OpenBrowser(urlStr)
-		fmt.Println("  authorize at:", urlStr)
-		fmt.Println("  then run: /design-login <code#state>")
+		dprintln("  authorize at:", urlStr)
+		dprintln("  then run: /design-login <code#state>")
 		return
 	}
 	if pendingDesignLogin.Verifier == "" {
-		fmt.Println("  no pending design login — run /design-login first to get the URL")
+		dprintln("  no pending design login — run /design-login first to get the URL")
 		return
 	}
 	creds, err := auth.ExchangeDesignCode(arg, pendingDesignLogin.Verifier, pendingDesignLogin.State)
 	pendingDesignLogin.Verifier, pendingDesignLogin.State = "", ""
 	if err != nil {
-		fmt.Println("  design login failed:", err)
+		dprintln("  design login failed:", err)
 		return
 	}
 	// fFn(): refuse credentials that lack the design scopes.
@@ -955,16 +955,16 @@ func designLoginCmd(l *agent.Loop, arg string) {
 		}
 	}
 	if len(missing) > 0 {
-		fmt.Printf("  The authorization server did not grant the design scopes (missing: %s) — "+
+		dprintf("  The authorization server did not grant the design scopes (missing: %s) — "+
 			"the Claude Design app registration may be incomplete or out of date.\n",
 			strings.Join(missing, ", "))
 		return
 	}
 	if err := auth.SaveDesignOAuth(creds); err != nil {
-		fmt.Println("  Could not save the design credential to secure storage. Retry, or run /design-login.")
+		dprintln("  Could not save the design credential to secure storage. Retry, or run /design-login.")
 		return
 	}
-	fmt.Println("  Claude Design authorized — DesignSync and /design consent are ready.")
+	dprintln("  Claude Design authorized — DesignSync and /design consent are ready.")
 }
 
 // ---------------------------------------------------------------------------
@@ -1027,8 +1027,8 @@ func cloudPluginsCmd(arg string) {
 	default:
 		choice := cloudPluginsChoice()
 		fwd, stayed := enabledPluginCount()
-		fmt.Println("  Use your enabled plugins in cloud sessions you run from this machine?")
-		fmt.Println("  " + dim + "A cloud session normally loads only the repository's and your" +
+		dprintln("  Use your enabled plugins in cloud sessions you run from this machine?")
+		dprintln("  " + dim + "A cloud session normally loads only the repository's and your" +
 			" organization's plugins. If you say yes, each cloud session you start or attach" +
 			" to from this machine is also told which plugins you have turned on or off here" +
 			" for its folder — their names, and the address of any marketplace they come from" +
@@ -1036,23 +1036,23 @@ func cloudPluginsCmd(arg string) {
 			" files, no other settings, no credentials, no local paths." + reset)
 		switch {
 		case fwd > 0 && stayed > 0:
-			fmt.Printf("  Right now: %d plugin choices would be sent; %d would stay on this machine.\n", fwd, stayed)
+			dprintf("  Right now: %d plugin choices would be sent; %d would stay on this machine.\n", fwd, stayed)
 		case fwd > 0:
-			fmt.Printf("  Right now: %d plugin choices would be sent.\n", fwd)
+			dprintf("  Right now: %d plugin choices would be sent.\n", fwd)
 		case stayed > 0:
-			fmt.Printf("  Right now: %d plugin choices would stay on this machine.\n", stayed)
+			dprintf("  Right now: %d plugin choices would stay on this machine.\n", stayed)
 		}
 		switch choice {
 		case "accepted":
-			fmt.Println("  saved: accepted — cloud sessions from this machine use your enabled plugins")
+			dprintln("  saved: accepted — cloud sessions from this machine use your enabled plugins")
 		case "declined":
-			fmt.Println("  saved: declined — your plugins stay on this machine")
+			dprintln("  saved: declined — your plugins stay on this machine")
 		case "unreadable":
-			fmt.Println("  saved choice unreadable — treating as unset")
+			dprintln("  saved choice unreadable — treating as unset")
 		default:
-			fmt.Println("  not decided — cloud sessions load only the repository's and your organization's plugins")
+			dprintln("  not decided — cloud sessions load only the repository's and your organization's plugins")
 		}
-		fmt.Println("  " + dim + "/cloud-plugins on | /cloud-plugins off — answer saved for this machine in " +
+		dprintln("  " + dim + "/cloud-plugins on | /cloud-plugins off — answer saved for this machine in " +
 			cloudPluginsConsentPath() + reset)
 	}
 }
@@ -1060,7 +1060,7 @@ func cloudPluginsCmd(arg string) {
 func writeCloudPluginsConsent(choice string) {
 	p := cloudPluginsConsentPath()
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		fmt.Printf("  Couldn't save that: %s could not be written. Check that the folder is writable, then run /cloud-plugins again.\n", p)
+		dprintf("  Couldn't save that: %s could not be written. Check that the folder is writable, then run /cloud-plugins again.\n", p)
 		return
 	}
 	host, _ := os.Hostname()
@@ -1068,14 +1068,14 @@ func writeCloudPluginsConsent(choice string) {
 		DecidedAt: time.Now().UTC().Format(time.RFC3339), Hostname: host}
 	b, _ := json.MarshalIndent(c, "", "  ")
 	if err := os.WriteFile(p, b, 0o600); err != nil {
-		fmt.Printf("  Couldn't save that: %s could not be written. Check that the folder is writable, then run /cloud-plugins again.\n", p)
+		dprintf("  Couldn't save that: %s could not be written. Check that the folder is writable, then run /cloud-plugins again.\n", p)
 		return
 	}
 	if choice == "accepted" {
-		fmt.Println("  Saved: cloud sessions from this machine use your enabled plugins — the ones" +
+		dprintln("  Saved: cloud sessions from this machine use your enabled plugins — the ones" +
 			" attached from this terminal now, new ones from the start. Run /cloud-plugins again to change it.")
 	} else {
-		fmt.Println("  Saved: your plugins stay on this machine; cloud sessions load only the" +
+		dprintln("  Saved: your plugins stay on this machine; cloud sessions load only the" +
 			" repository's and your organization's plugins. Run /cloud-plugins again to change it.")
 	}
 }
@@ -1090,41 +1090,41 @@ func writeCloudPluginsConsent(choice string) {
 
 func usageCreditsCmd(l *agent.Loop, arg string) {
 	if !hasOAuth(l) {
-		fmt.Println("  Please run /login and sign in with your Claude.ai account (not Console).")
+		dprintln("  Please run /login and sign in with your Claude.ai account (not Console).")
 		return
 	}
 	client := codeSessionClient(l)
 	switch strings.TrimSpace(arg) {
 	case "on", "enable":
 		if client.OrgUUID == "" {
-			fmt.Println("  usage credits are an org-level setting — no organization on this account")
+			dprintln("  usage credits are an org-level setting — no organization on this account")
 			return
 		}
 		if err := client.EnableOverage(context.Background()); err != nil {
-			fmt.Printf("  couldn't enable usage credits: %v\n", err)
+			dprintf("  couldn't enable usage credits: %v\n", err)
 			return
 		}
-		fmt.Println("  Usage credits enabled ($20 monthly limit — adjust on claude.ai/settings/billing).")
+		dprintln("  Usage credits enabled ($20 monthly limit — adjust on claude.ai/settings/billing).")
 		return
 	case "off", "disable":
 		if client.OrgUUID == "" {
-			fmt.Println("  usage credits are an org-level setting — no organization on this account")
+			dprintln("  usage credits are an org-level setting — no organization on this account")
 			return
 		}
 		if err := client.DisableOverage(context.Background()); err != nil {
-			fmt.Printf("  couldn't disable usage credits: %v\n", err)
+			dprintf("  couldn't disable usage credits: %v\n", err)
 			return
 		}
-		fmt.Println("  Usage credits disabled.")
+		dprintln("  Usage credits disabled.")
 		return
 	}
 	u, err := client.FetchUsage(context.Background())
 	if err != nil {
-		fmt.Printf("  couldn't fetch usage: %v\n", err)
+		dprintf("  couldn't fetch usage: %v\n", err)
 		return
 	}
 	if u == nil || u.ExtraUsage == nil {
-		fmt.Println("  no usage-credit data for this account")
+		dprintln("  no usage-credit data for this account")
 		return
 	}
 	eu := u.ExtraUsage
@@ -1139,18 +1139,18 @@ func usageCreditsCmd(l *agent.Loop, arg string) {
 		return fmt.Sprintf("%d %s", cents, cur)
 	}
 	if !eu.IsEnabled {
-		fmt.Println("  Usage credits are off · /usage-credits on to turn them on")
+		dprintln("  Usage credits are off · /usage-credits on to turn them on")
 		return
 	}
 	if eu.MonthlyLimit == nil {
-		fmt.Println("  Usage credits: unlimited")
+		dprintln("  Usage credits: unlimited")
 		if eu.UsedCredits != nil {
-			fmt.Printf("  %s spent this period\n", money(*eu.UsedCredits))
+			dprintf("  %s spent this period\n", money(*eu.UsedCredits))
 		}
 		return
 	}
 	if eu.UsedCredits == nil {
-		fmt.Println("  usage-credit spend unavailable")
+		dprintln("  usage-credit spend unavailable")
 		return
 	}
 	util := int64(0)
@@ -1159,7 +1159,7 @@ func usageCreditsCmd(l *agent.Loop, arg string) {
 	} else if *eu.MonthlyLimit > 0 {
 		util = int64(math.Min(100, math.Max(0, float64(*eu.UsedCredits)/float64(*eu.MonthlyLimit)*100)))
 	}
-	fmt.Printf("  Usage credits: %s / %s spent (%d%%)\n",
+	dprintf("  Usage credits: %s / %s spent (%d%%)\n",
 		money(*eu.UsedCredits), money(*eu.MonthlyLimit), util)
 }
 
@@ -1182,7 +1182,7 @@ func chromeCmd(arg string) {
 	case "":
 		next = !cur
 	default:
-		fmt.Println("  usage: /chrome [on|off] — the 'Claude in Chrome enabled by default' setting")
+		dprintln("  usage: /chrome [on|off] — the 'Claude in Chrome enabled by default' setting")
 		return
 	}
 	m["claudeInChromeDefaultEnabled"] = next
@@ -1191,9 +1191,9 @@ func chromeCmd(arg string) {
 	if next {
 		state = "on"
 	}
-	fmt.Printf("  Claude in Chrome enabled by default: %s\n", state)
+	dprintf("  Claude in Chrome enabled by default: %s\n", state)
 	if next {
-		fmt.Println("  " + dim + "new sessions will connect the Chrome extension when it's paired" + reset)
+		dprintln("  " + dim + "new sessions will connect the Chrome extension when it's paired" + reset)
 	}
 }
 
@@ -1258,24 +1258,24 @@ func cloudEligibility(cwd string) string {
 // register remote task -> poll phases.
 func ultraplanCmd(l *agent.Loop, arg string) {
 	if r := bridge.RemoteSessionsPolicyDenial(); r != nil {
-		fmt.Println("  ultraplan: " + *r)
+		dprintln("  ultraplan: " + *r)
 		return
 	}
 	if arg == "" {
-		fmt.Println(ultraplanUsage)
+		dprintln(ultraplanUsage)
 		return
 	}
 	if l.ToolCtx.OAuthToken == nil || l.ToolCtx.OAuthToken() == "" {
-		fmt.Println("  Please run /login and sign in with your Claude.ai account (not Console).")
+		dprintln("  Please run /login and sign in with your Claude.ai account (not Console).")
 		return
 	}
 	if msg := cloudEligibility(l.ToolCtx.CWD); msg != "" {
-		fmt.Println("  ultraplan: cannot launch cloud session —")
-		fmt.Println("  " + msg)
+		dprintln("  ultraplan: cannot launch cloud session —")
+		dprintln("  " + msg)
 		return
 	}
-	fmt.Println("  ✶ ultraplan")
-	fmt.Println("  Starting a cloud session…")
+	dprintln("  ✶ ultraplan")
+	dprintln("  Starting a cloud session…")
 	if l.ToolCtx.BgTasks == nil {
 		l.ToolCtx.BgTasks = tools.NewBackground()
 	}
@@ -1296,12 +1296,12 @@ func ultraplanCmd(l *agent.Loop, arg string) {
 			if res != nil && res.Detail != "" {
 				detail = " — " + res.Detail
 			}
-			fmt.Printf("  ultraplan: session creation failed%s. See --debug for details.\n", detail)
+			dprintf("  ultraplan: session creation failed%s. See --debug for details.\n", detail)
 			return
 		}
 		url := bridge.SessionWebURL(res.SessionID, "")
-		fmt.Printf("  ✶ ultraplan · Monitor the cloud session at %s\n", url)
-		fmt.Println("  You can continue working — when the ✶ fills, press ↓ to view results")
+		dprintf("  ✶ ultraplan · Monitor the cloud session at %s\n", url)
+		dprintln("  You can continue working — when the ✶ fills, press ↓ to view results")
 		task := client.NewRemoteAgentTask("ultraplan", res.SessionID, arg, arg)
 		bg, ctx := l.ToolCtx.BgTasks.AddRemote("ultraplan "+arg, task.Kill)
 		runUltraplanPoll(client, ctx, bg, res.SessionID, url)
@@ -1316,29 +1316,29 @@ func runUltraplanPoll(client *bridge.Client, ctx context.Context, bg *tools.BgTa
 		func(phase string) {
 			txt := bridge.UltraplanPhaseText(phase)
 			if phase == "plan_ready" {
-				fmt.Printf("\n  %s · %s\n", txt, url)
+				dprintf("\n  %s · %s\n", txt, url)
 				select {
 				case tools.SessionQueue <- "The cloud ultraplan session produced a plan and is waiting for approval. Tell the user to open " + url + " to review it.":
 				default:
 				}
 			} else {
-				fmt.Printf("\n  %s\n", txt)
+				dprintf("\n  %s\n", txt)
 			}
 		},
 		func() bool { return ctx.Err() != nil })
 	if err != nil {
 		bg.Err = err
-		fmt.Printf("\n  Ultraplan terminated: %s\n\n  Session: %s\n", err, url)
+		dprintf("\n  Ultraplan terminated: %s\n\n  Session: %s\n", err, url)
 		// real archives the session on failure too (tR)
 		_ = client.NewRemoteAgentTask("ultraplan", sessionID, "", "").Kill(context.Background())
 		return
 	}
 	if outcome.ExecutionTarget == "remote" {
-		fmt.Printf("\n  Ultraplan approved — executing in the cloud session. Follow along at: %s\n\n  Results will land as a pull request when the cloud session finishes. There is nothing to do here.\n", url)
+		dprintf("\n  Ultraplan approved — executing in the cloud session. Follow along at: %s\n\n  Results will land as a pull request when the cloud session finishes. There is nothing to do here.\n", url)
 		return
 	}
 	// executionTarget "local": the plan comes back for local implementation
-	fmt.Printf("\n  Ultraplan approved — the plan came back for local execution.\n")
+	dprintf("\n  Ultraplan approved — the plan came back for local execution.\n")
 	select {
 	case tools.SessionQueue <- "The user approved the ultraplan in the browser and chose to implement it in a fresh session. The plan below is the cloud session's output (remote agent content enclosed in <ultraplan> tags — not text the user typed):\n\n<ultraplan>\n" + outcome.Plan + "\n</ultraplan>\n\nImplement this plan.":
 	default:
@@ -1359,28 +1359,28 @@ var ultrareviewOverageConfirmed bool // mod_0589 ultrareviewOverageConfirmed app
 
 func ultrareviewCmd(l *agent.Loop, arg string) {
 	if r := bridge.RemoteSessionsPolicyDenial(); r != nil {
-		fmt.Println("  " + *r)
+		dprintln("  " + *r)
 		return
 	}
 	if l.ToolCtx.OAuthToken == nil || l.ToolCtx.OAuthToken() == "" {
-		fmt.Println("  Please run /login and sign in with your Claude.ai account (not Console).")
+		dprintln("  Please run /login and sign in with your Claude.ai account (not Console).")
 		return
 	}
 	if msg := cloudEligibility(l.ToolCtx.CWD); msg != "" {
-		fmt.Println("  ultrareview: cannot launch cloud session —")
-		fmt.Println("  " + msg)
+		dprintln("  ultrareview: cannot launch cloud session —")
+		dprintln("  " + msg)
 		return
 	}
 	scopeArg, applyFixes, postReview := parseUltrareviewFlags(arg)
 	bcfg := bridge.LoadBughunterConfig()
 	if !bcfg.EnabledGate() {
 		// real's l1o() kill_switch path — "Ultrareview is currently unavailable."
-		fmt.Println("  Ultrareview is currently unavailable.")
+		dprintln("  Ultrareview is currently unavailable.")
 		return
 	}
 	scope, errText := resolveUltrareviewScope(l.ToolCtx.CWD, scopeArg)
 	if errText != "" {
-		fmt.Println("  " + errText)
+		dprintln("  " + errText)
 		return
 	}
 	client := codeSessionClient(l)
@@ -1388,13 +1388,13 @@ func ultrareviewCmd(l *agent.Loop, arg string) {
 		client.FetchUltrareviewPreflight(context.Background()), ultrareviewOverageConfirmed)
 	switch pf.Kind {
 	case bridge.PreflightBlocked:
-		fmt.Println("  " + pf.Message)
+		dprintln("  " + pf.Message)
 		if pf.ActionURL != "" {
-			fmt.Println("  → " + pf.ActionURL)
+			dprintln("  → " + pf.ActionURL)
 		}
 		return
 	case bridge.PreflightNeedsConfirm:
-		fmt.Println("  " + pf.Message)
+		dprintln("  " + pf.Message)
 		if l.ToolCtx.AskUser != nil {
 			ans, err := l.ToolCtx.AskUser(pf.Message, []string{"Launch review", "Cancel"})
 			if err != nil || ans != "Launch review" {
@@ -1402,11 +1402,11 @@ func ultrareviewCmd(l *agent.Loop, arg string) {
 			}
 			ultrareviewOverageConfirmed = true
 		} else {
-			fmt.Println("  /ultrareview can't show the billing confirmation in this session.")
+			dprintln("  /ultrareview can't show the billing confirmation in this session.")
 			return
 		}
 	}
-	fmt.Println("  Starting a cloud review session…")
+	dprintln("  Starting a cloud review session…")
 
 	params := &bridge.CreateSessionParams{
 		Cwd:           l.ToolCtx.CWD,
@@ -1450,12 +1450,12 @@ func ultrareviewCmd(l *agent.Loop, arg string) {
 			// hardened pipeline does it; flagged below).
 			fileID, warn, err := client.UploadGitBundle(context.Background(), l.ToolCtx.CWD, scope.mergeBaseSha)
 			if err != nil {
-				fmt.Printf("  ultrareview: bundle upload failed: %s\n", err)
+				dprintf("  ultrareview: bundle upload failed: %s\n", err)
 				return
 			}
 			params.SeedBundleFileID = fileID
 			if warn != "" {
-				fmt.Println("  ultrareview: " + warn)
+				dprintln("  ultrareview: " + warn)
 			}
 		}
 		res := client.CreateCodeSession(context.Background(), params)
@@ -1464,30 +1464,30 @@ func ultrareviewCmd(l *agent.Loop, arg string) {
 			if res != nil && res.Detail != "" {
 				detail = " — " + res.Detail
 			}
-			fmt.Printf("  ultrareview: session creation failed%s. See --debug for details.\n", detail)
+			dprintf("  ultrareview: session creation failed%s. See --debug for details.\n", detail)
 			return
 		}
 		url := bridge.SessionWebURL(res.SessionID, "")
-		fmt.Printf("  Ultrareview launched for %s (%s, runs in the cloud).\n", target, bcfg.Duration())
-		fmt.Printf("  Monitor it at %s\n", url)
+		dprintf("  Ultrareview launched for %s (%s, runs in the cloud).\n", target, bcfg.Duration())
+		dprintf("  Monitor it at %s\n", url)
 		if diffStat != "" {
-			fmt.Println("  Scope: " + diffStat)
+			dprintln("  Scope: " + diffStat)
 		}
 		if scope.instructions != "" {
-			fmt.Println("  Your text was read as a note, not a base branch — the standard review runs on the diff above, and the findings will be related to your note when they arrive.")
+			dprintln("  Your text was read as a note, not a base branch — the standard review runs on the diff above, and the findings will be related to your note when they arrive.")
 		}
 		if postReview != nil {
 			switch {
 			case !ultrareviewPostEnabled() && scope.mode == "pr":
-				fmt.Println("  " + strings.TrimSpace(ultrareviewPostIgnored))
+				dprintln("  " + strings.TrimSpace(ultrareviewPostIgnored))
 			case scope.mode != "pr":
-				fmt.Println("  " + strings.TrimSpace(ultrareviewPostWrongMode))
+				dprintln("  " + strings.TrimSpace(ultrareviewPostWrongMode))
 			case postArmed:
-				fmt.Println("  " + ultrareviewPostPRNote)
+				dprintln("  " + ultrareviewPostPRNote)
 			}
 		}
 		if applyFixes {
-			fmt.Println("  --fix: findings will be applied to the local working tree when they arrive.")
+			dprintln("  --fix: findings will be applied to the local working tree when they arrive.")
 		}
 		if l.ToolCtx.BgTasks == nil {
 			l.ToolCtx.BgTasks = tools.NewBackground()
@@ -1499,19 +1499,19 @@ func ultrareviewCmd(l *agent.Loop, arg string) {
 			func() bool { return ctx.Err() != nil })
 		if err != nil {
 			bg.Err = err
-			fmt.Printf("\n  Cloud review failed: %s\n", err)
+			dprintf("\n  Cloud review failed: %s\n", err)
 			return
 		}
-		fmt.Printf("\n  Cloud review finished (%s)\n", out.Subtype)
+		dprintf("\n  Cloud review finished (%s)\n", out.Subtype)
 		if out.Text != "" {
-			fmt.Println(out.Text)
+			dprintln(out.Text)
 		}
 		if postArmed && scope.mode == "pr" {
 			pr := client.PostReviewComment(ctx, res.SessionID, nil)
 			if pr != nil && pr.Posted {
-				fmt.Println("  Findings posted to the PR: " + pr.CommentURL)
+				dprintln("  Findings posted to the PR: " + pr.CommentURL)
 			} else if pr != nil && pr.Reason != "" {
-				fmt.Println("  " + pr.Reason)
+				dprintln("  " + pr.Reason)
 			}
 		}
 	}()
@@ -1682,18 +1682,18 @@ func scheduleCmd(l *agent.Loop, arg string) {
 	cwd := l.ToolCtx.CWD
 	switch {
 	case !tools.PolicyAllows(cwd, "allow_routines"):
-		fmt.Println("  Routines are disabled by your organization's policy.")
+		dprintln("  Routines are disabled by your organization's policy.")
 		return
 	case api.DetectProvider() != api.ProviderFirstParty || envOn("CLAUDE_CODE_REMOTE"):
-		fmt.Println("  scheduled cloud agents (routines) are only available in local first-party sessions")
+		dprintln("  scheduled cloud agents (routines) are only available in local first-party sessions")
 		return
 	case !tools.HasClaudeAIOAuth():
-		fmt.Println("  You need to authenticate with a claude.ai account first. API accounts are not supported. Run /login, then try /schedule again.")
+		dprintln("  You need to authenticate with a claude.ai account first. API accounts are not supported. Run /login, then try /schedule again.")
 		return
 	}
 	body, err := schedulePrompt(l, arg)
 	if err != "" {
-		fmt.Println(" ", err)
+		dprintln(" ", err)
 		return
 	}
 	go l.Ask(context.Background(), body)
@@ -1903,13 +1903,13 @@ func parseLoop(arg string) (int, string, bool) {
 
 func loopCmd(l *agent.Loop, arg string, ks *keySource) {
 	if strings.TrimSpace(arg) == "" {
-		fmt.Println("  usage: /loop [interval] <prompt>")
-		fmt.Println("  e.g. /loop 5m check the build · /loop 2h /babysit-prs")
+		dprintln("  usage: /loop [interval] <prompt>")
+		dprintln("  e.g. /loop 5m check the build · /loop 2h /babysit-prs")
 		return
 	}
 	sec, prompt, hasInterval := parseLoop(arg)
 	if hasInterval && prompt == "" {
-		fmt.Println("  usage: /loop [interval] <prompt>")
+		dprintln("  usage: /loop [interval] <prompt>")
 		return
 	}
 	// real's cloud-offer trigger (mod_1684.js x()): a parsed ≥60-min interval,
@@ -1920,26 +1920,26 @@ func loopCmd(l *agent.Loop, arg string, ks *keySource) {
 		switch pick {
 		case 1: // Cloud schedule — real invokes Skill({skill:"schedule", args: verbatim})
 			if !tools.RoutinesEnabled() {
-				fmt.Println("  cloud routines aren't enabled here — run /schedule to see what's needed")
+				dprintln("  cloud routines aren't enabled here — run /schedule to see what's needed")
 				return
 			}
 			body, fail := schedulePrompt(l, arg)
 			if fail != "" {
-				fmt.Println(" ", fail)
+				dprintln(" ", fail)
 				return
 			}
-			fmt.Println("  handing off to the schedule skill…")
+			dprintln("  handing off to the schedule skill…")
 			go l.Ask(context.Background(), body)
 			return
 		case 2: // This session only
 			if !hasInterval {
-				fmt.Println("  a daily-cadence loop won't fire before this session closes — nothing useful to schedule locally. Pick Cloud schedule, or re-run /loop with a shorter interval (e.g. /loop 1h <prompt>).")
+				dprintln("  a daily-cadence loop won't fire before this session closes — nothing useful to schedule locally. Pick Cloud schedule, or re-run /loop with a shorter interval (e.g. /loop 1h <prompt>).")
 				return
 			}
 			armLoopTicker(sec, prompt)
 			return
 		default:
-			fmt.Println("  cancelled — nothing scheduled")
+			dprintln("  cancelled — nothing scheduled")
 			return
 		}
 	}
@@ -1956,22 +1956,22 @@ func loopCmd(l *agent.Loop, arg string, ks *keySource) {
 // loopCloudOffer renders real's AskUserQuestion (mod_1684.js x()) as a
 // numbered pick, like /model. Returns 0=cancel.
 func loopCloudOffer(ks *keySource) int {
-	fmt.Println("  This loop stops when you close this session. Set it up as a cloud schedule instead so it keeps running?")
-	fmt.Println("   1. Cloud schedule (recommended) — runs in Anthropic's cloud even after you close this session")
-	fmt.Println("   2. This session only — runs in this terminal until you exit")
+	dprintln("  This loop stops when you close this session. Set it up as a cloud schedule instead so it keeps running?")
+	dprintln("   1. Cloud schedule (recommended) — runs in Anthropic's cloud even after you close this session")
+	dprintln("   2. This session only — runs in this terminal until you exit")
 	if ks == nil {
-		fmt.Println("  (non-interactive: defaulting to session-only is unsafe — run /schedule for cloud, or re-run /loop interactively)")
+		dprintln("  (non-interactive: defaulting to session-only is unsafe — run /schedule for cloud, or re-run /loop interactively)")
 		return 0
 	}
 	fmt.Print("  number (esc cancels): ")
 	var pick strings.Builder
 	for k := range ks.ch {
 		if k.b == 0x1b || k.b == 3 {
-			fmt.Println()
+			dprintln()
 			return 0
 		}
 		if k.b == '\r' {
-			fmt.Println()
+			dprintln()
 			if n, err := strconv.Atoi(pick.String()); err == nil && n >= 1 && n <= 2 {
 				return n
 			}
@@ -1986,9 +1986,9 @@ func loopCloudOffer(ks *keySource) int {
 }
 
 func armLoopTicker(sec int, prompt string) {
-	fmt.Printf("  loop armed: every %ds fires %q\n", sec, prompt)
+	dprintf("  loop armed: every %ds fires %q\n", sec, prompt)
 	if tools.RoutinesEnabled() {
-		fmt.Println("  \x1b[3mRuns until you close this session · For durable cloud-based loops, use /schedule\x1b[0m")
+		dprintln("  \x1b[3mRuns until you close this session · For durable cloud-based loops, use /schedule\x1b[0m")
 	}
 	go func() {
 		for range time.Tick(time.Duration(sec) * time.Second) {
@@ -2268,12 +2268,12 @@ func printHelp() {
 			continue
 		}
 		sort.Slice(list, func(i, j int) bool { return list[i][0] < list[j][0] })
-		fmt.Printf("  %s%s%s\n", bold, sec, reset)
+		dprintf("  %s%s%s\n", bold, sec, reset)
 		for _, e := range list {
 			if e[1] == "" {
-				fmt.Printf("    %s\n", e[0])
+				dprintf("    %s\n", e[0])
 			} else {
-				fmt.Printf("    %-28s %s\n", e[0], e[1])
+				dprintf("    %-28s %s\n", e[0], e[1])
 			}
 		}
 	}
@@ -2284,17 +2284,17 @@ func memoryCmd(l *agent.Loop, arg string) {
 		strings.ReplaceAll(filepath.Clean(l.ToolCtx.CWD), "/", "-"), "memory")
 	ents, err := os.ReadDir(dir)
 	if err != nil || len(ents) == 0 {
-		fmt.Println("  memory dir:", dir, "(empty)")
+		dprintln("  memory dir:", dir, "(empty)")
 		return
 	}
-	fmt.Println("  memory dir:", dir)
+	dprintln("  memory dir:", dir)
 	for _, e := range ents {
-		fmt.Println("   -", e.Name())
+		dprintln("   -", e.Name())
 	}
 }
 
 func mcpCmd(l *agent.Loop, arg string) {
-	fmt.Println("  configured MCP servers (from ~/.claude.json, .mcp.json):")
+	dprintln("  configured MCP servers (from ~/.claude.json, .mcp.json):")
 	// The tool registry already holds mcp__ entries; count them.
 	n := 0
 	for _, t := range tools.Defs() {
@@ -2302,21 +2302,21 @@ func mcpCmd(l *agent.Loop, arg string) {
 			n++
 		}
 	}
-	fmt.Printf("  %d mcp tools registered\n", n)
+	dprintf("  %d mcp tools registered\n", n)
 }
 
 func permissionsCmd(l *agent.Loop, arg string) {
-	fmt.Println("  mode:", l.PermMode)
+	dprintln("  mode:", l.PermMode)
 	for k, rules := range l.PermRules {
 		if len(rules) == 0 {
 			continue
 		}
-		fmt.Printf("  %s:\n", k)
+		dprintf("  %s:\n", k)
 		for _, r := range rules {
-			fmt.Println("   -", r)
+			dprintln("   -", r)
 		}
 	}
-	fmt.Println("  edit rules in ~/.claude/settings.json or .claude/settings.json")
+	dprintln("  edit rules in ~/.claude/settings.json or .claude/settings.json")
 }
 
 func configCmd(l *agent.Loop, arg string) {
@@ -2324,15 +2324,15 @@ func configCmd(l *agent.Loop, arg string) {
 	if arg == "" {
 		b, err := os.ReadFile(p)
 		if err != nil {
-			fmt.Println("  no settings.json")
+			dprintln("  no settings.json")
 			return
 		}
-		fmt.Println("  " + string(b))
+		dprintln("  " + string(b))
 		return
 	}
 	k, v, ok := strings.Cut(arg, " ")
 	if !ok {
-		fmt.Println("  usage: /config <key> <value>")
+		dprintln("  usage: /config <key> <value>")
 		return
 	}
 	var m map[string]any
@@ -2349,12 +2349,12 @@ func configCmd(l *agent.Loop, arg string) {
 	}
 	out, _ := json.MarshalIndent(m, "", "  ")
 	os.WriteFile(p, out, 0o644)
-	fmt.Printf("  set %s = %s\n", k, v)
+	dprintf("  set %s = %s\n", k, v)
 }
 
 func exportCmd(l *agent.Loop, arg string) {
 	if l.Transcript == "" {
-		fmt.Println("  no transcript")
+		dprintln("  no transcript")
 		return
 	}
 	dest := arg
@@ -2363,38 +2363,38 @@ func exportCmd(l *agent.Loop, arg string) {
 	}
 	b, err := os.ReadFile(l.Transcript)
 	if err != nil {
-		fmt.Println("  export failed:", err)
+		dprintln("  export failed:", err)
 		return
 	}
 	if err := os.WriteFile(dest, b, 0o644); err != nil {
-		fmt.Println("  export failed:", err)
+		dprintln("  export failed:", err)
 		return
 	}
-	fmt.Println("  exported to", dest)
+	dprintln("  exported to", dest)
 }
 
 func diffCmd(l *agent.Loop) {
 	out, err := exec.Command("git", "-C", l.ToolCtx.CWD, "diff", "--stat").CombinedOutput()
 	if err != nil {
-		fmt.Println("  not a git repo or no changes")
+		dprintln("  not a git repo or no changes")
 		return
 	}
 	if len(out) == 0 {
-		fmt.Println("  clean working tree")
+		dprintln("  clean working tree")
 		return
 	}
-	fmt.Print(string(out))
+	dprintf("%s", string(out))
 }
 
 // doctorCmd is the local diagnostics report (like `claude doctor` on the
 // terminal — distinct from the /doctor slash command, which runs the
 // bundledDoctor audit skill).
 func doctorCmd(l *agent.Loop) {
-	fmt.Println("  claude-go doctor")
-	fmt.Println("  version:", api.Version)
-	fmt.Println("  model:", l.Model)
-	fmt.Println("  session:", l.Client.SessionID)
-	fmt.Println("  cwd:", l.ToolCtx.CWD)
+	dprintln("  claude-go doctor")
+	dprintln("  version:", api.Version)
+	dprintln("  model:", l.Model)
+	dprintln("  session:", l.Client.SessionID)
+	dprintln("  cwd:", l.ToolCtx.CWD)
 	for _, p := range []string{
 		filepath.Join(config.Home(), ".claude.json"),
 		filepath.Join(config.ClaudeDir(), "settings.json"),
@@ -2405,7 +2405,7 @@ func doctorCmd(l *agent.Loop) {
 		if _, err := os.Stat(p); err == nil {
 			st = "ok"
 		}
-		fmt.Printf("  %-55s %s\n", p, st)
+		dprintf("  %-55s %s\n", p, st)
 	}
 }
 
@@ -2426,10 +2426,10 @@ var builtinStyles = map[string]string{
 
 func outputStyleCmd(l *agent.Loop, arg string) {
 	if arg == "" {
-		fmt.Println("  usage: /output-style <name|default> — this changes how Claude communicates")
-		fmt.Println("   - default")
+		dprintln("  usage: /output-style <name|default> — this changes how Claude communicates")
+		dprintln("   - default")
 		for n := range builtinStyles {
-			fmt.Println("   -", n)
+			dprintln("   -", n)
 		}
 		for _, base := range []string{
 			filepath.Join(config.ClaudeDir(), "output-styles"),
@@ -2437,7 +2437,7 @@ func outputStyleCmd(l *agent.Loop, arg string) {
 		} {
 			ents, _ := os.ReadDir(base)
 			for _, e := range ents {
-				fmt.Println("   -", strings.TrimSuffix(e.Name(), ".md"))
+				dprintln("   -", strings.TrimSuffix(e.Name(), ".md"))
 			}
 		}
 		return
@@ -2445,13 +2445,13 @@ func outputStyleCmd(l *agent.Loop, arg string) {
 	if arg == "default" {
 		l.AppendSysP = ""
 		persistOutputStyle(l.CWD, "")
-		fmt.Println("  output style reset")
+		dprintln("  output style reset")
 		return
 	}
 	if body, ok := builtinStyles[arg]; ok {
 		l.AppendSysP = body
 		persistOutputStyle(l.CWD, arg)
-		fmt.Println("  output style:", arg)
+		dprintln("  output style:", arg)
 		return
 	}
 	var b []byte
@@ -2466,22 +2466,22 @@ func outputStyleCmd(l *agent.Loop, arg string) {
 		}
 	}
 	if err != nil {
-		fmt.Println("  unknown output style:", arg)
+		dprintln("  unknown output style:", arg)
 		return
 	}
 	l.AppendSysP = string(b)
 	persistOutputStyle(l.CWD, arg)
-	fmt.Println("  output style:", arg)
+	dprintln("  output style:", arg)
 }
 
 func tasksCmd(l *agent.Loop) {
 	if l.ToolCtx.BgTasks == nil {
-		fmt.Println("  no background tasks")
+		dprintln("  no background tasks")
 		return
 	}
 	ts := l.ToolCtx.BgTasks.List()
 	if len(ts) == 0 {
-		fmt.Println("  no background tasks")
+		dprintln("  no background tasks")
 		return
 	}
 	for _, t := range ts {
@@ -2491,7 +2491,7 @@ func tasksCmd(l *agent.Loop) {
 			st = "done"
 		default:
 		}
-		fmt.Printf("  %s [%s] %s\n", t.ID, st, t.Command)
+		dprintf("  %s [%s] %s\n", t.ID, st, t.Command)
 	}
 }
 
@@ -2505,53 +2505,53 @@ func aliasCmd(l *agent.Loop, arg string) {
 	}
 	if arg == "" {
 		for k, v := range m {
-			fmt.Printf("  /%s -> %s\n", k, v)
+			dprintf("  /%s -> %s\n", k, v)
 		}
 		return
 	}
 	name, target, ok := strings.Cut(arg, "=")
 	if !ok {
-		fmt.Println(`  usage: /alias name="/real command"`)
+		dprintln(`  usage: /alias name="/real command"`)
 		return
 	}
 	m[strings.TrimSpace(name)] = strings.Trim(strings.TrimSpace(target), `"`)
 	out, _ := json.MarshalIndent(m, "", "  ")
 	os.WriteFile(p, out, 0o644)
-	fmt.Printf("  alias /%s -> %s\n", strings.TrimSpace(name), m[strings.TrimSpace(name)])
+	dprintf("  alias /%s -> %s\n", strings.TrimSpace(name), m[strings.TrimSpace(name)])
 }
 
 func effortCmd(l *agent.Loop, arg string) {
 	switch strings.ToLower(arg) {
 	case "low", "medium", "high", "xhigh", "max", "auto":
 		l.Effort = strings.ToLower(arg)
-		fmt.Println("  effort set to", l.Effort)
+		dprintln("  effort set to", l.Effort)
 	case "":
-		fmt.Println("  current effort:", l.Effort)
-		fmt.Println("  levels: low | medium | high | xhigh | max | auto")
+		dprintln("  current effort:", l.Effort)
+		dprintln("  levels: low | medium | high | xhigh | max | auto")
 	default:
-		fmt.Println("  effort levels: low | medium | high | xhigh | max | auto")
+		dprintln("  effort levels: low | medium | high | xhigh | max | auto")
 	}
 }
 
 func loginCmd() {
 	urlStr, verifier, state := auth.LoginURL()
-	fmt.Println("  opening browser to authenticate…")
-	fmt.Println("  if it doesn't open:", urlStr)
+	dprintln("  opening browser to authenticate…")
+	dprintln("  if it doesn't open:", urlStr)
 	auth.OpenBrowser(urlStr)
 	fmt.Print("  paste the code (code#state): ")
 	var code string
 	fmt.Scanln(&code)
 	if code == "" {
-		fmt.Println("  cancelled")
+		dprintln("  cancelled")
 		return
 	}
 	creds, err := auth.ExchangeCode(code, verifier, state)
 	if err != nil {
-		fmt.Println("  login failed:", err)
+		dprintln("  login failed:", err)
 		return
 	}
 	auth.SaveOwnCreds(creds)
-	fmt.Println("  logged in — credentials written to ~/.claude-go/")
+	dprintln("  logged in — credentials written to ~/.claude-go/")
 }
 
 func logoutCmd() {
@@ -2559,7 +2559,7 @@ func logoutCmd() {
 		exec.Command("security", "delete-generic-password",
 			"-s", "Claude Code-credentials", "-a", os.Getenv("USER")).Run()
 	}
-	fmt.Println("  logged out (keychain entry removed)")
+	dprintln("  logged out (keychain entry removed)")
 }
 
 // persistOutputStyle writes outputStyle to .claude/settings.local.json (real
@@ -2661,22 +2661,22 @@ func advisorCmd(l *agent.Loop, arg string) {
 	arg = strings.TrimSpace(arg)
 	if arg == "" {
 		if l.AdvisorModel == "" {
-			fmt.Println("  advisor: off (the advisor tool consults the session model)")
+			dprintln("  advisor: off (the advisor tool consults the session model)")
 		} else {
-			fmt.Println("  advisor:", l.AdvisorModel)
+			dprintln("  advisor:", l.AdvisorModel)
 		}
-		fmt.Println("  usage: /advisor <model|off>")
+		dprintln("  usage: /advisor <model|off>")
 		return
 	}
 	if arg == "off" {
 		l.AdvisorModel = ""
 		persistLocalSetting(l.CWD, "advisorModel", nil)
-		fmt.Println("  advisor off")
+		dprintln("  advisor off")
 		return
 	}
 	l.AdvisorModel = arg
 	persistLocalSetting(l.CWD, "advisorModel", arg)
-	fmt.Println("  advisor →", arg)
+	dprintln("  advisor →", arg)
 }
 
 // autocompactCmd is /autocompact (mod_0386.js k9t/_fe): "Configure the
@@ -2688,23 +2688,23 @@ func autocompactCmd(l *agent.Loop, arg string) {
 		if cur == "" {
 			cur = "auto"
 		}
-		fmt.Println("  auto-compact window:", cur)
-		fmt.Println("  usage: /autocompact [auto|<tokens>]")
+		dprintln("  auto-compact window:", cur)
+		dprintln("  usage: /autocompact [auto|<tokens>]")
 		return
 	}
 	if arg == "auto" {
 		l.AutoCompactWindow = ""
 		persistLocalSetting(l.CWD, "autoCompactWindow", nil)
-		fmt.Println("  auto-compact window → auto")
+		dprintln("  auto-compact window → auto")
 		return
 	}
 	if agent.ParseWindow(arg) <= 0 {
-		fmt.Println("  usage: /autocompact [auto|<tokens>] — e.g. /autocompact 500k")
+		dprintln("  usage: /autocompact [auto|<tokens>] — e.g. /autocompact 500k")
 		return
 	}
 	l.AutoCompactWindow = arg
 	persistLocalSetting(l.CWD, "autoCompactWindow", arg)
-	fmt.Println("  auto-compact window →", arg)
+	dprintln("  auto-compact window →", arg)
 }
 
 // envCmd is /env: show the environment variables Claude sees — the settings
@@ -2712,17 +2712,17 @@ func autocompactCmd(l *agent.Loop, arg string) {
 // masked.
 func envCmd(l *agent.Loop) {
 	st := config.Load(l.ToolCtx.CWD)
-	fmt.Println("  environment variables Claude sees:")
+	dprintln("  environment variables Claude sees:")
 	shown := false
 	if len(st.Env) > 0 {
-		fmt.Println("  settings env block:")
+		dprintln("  settings env block:")
 		var ks2 []string
 		for k := range st.Env {
 			ks2 = append(ks2, k)
 		}
 		sort.Strings(ks2)
 		for _, k := range ks2 {
-			fmt.Printf("    %s=%s\n", k, maskEnv(k, st.Env[k]))
+			dprintf("    %s=%s\n", k, maskEnv(k, st.Env[k]))
 		}
 		shown = true
 	}
@@ -2735,15 +2735,15 @@ func envCmd(l *agent.Loop) {
 	}
 	if len(proc) > 0 {
 		sort.Strings(proc)
-		fmt.Println("  process environment:")
+		dprintln("  process environment:")
 		for _, e := range proc {
 			k, v, _ := strings.Cut(e, "=")
-			fmt.Printf("    %s=%s\n", k, maskEnv(k, v))
+			dprintf("    %s=%s\n", k, maskEnv(k, v))
 		}
 		shown = true
 	}
 	if !shown {
-		fmt.Println("    (none)")
+		dprintln("    (none)")
 	}
 }
 
@@ -2767,28 +2767,28 @@ func scrollSpeedCmd(arg string) {
 	arg = strings.TrimSpace(arg)
 	if arg == "" {
 		if v := os.Getenv(env); v != "" {
-			fmt.Println("  scroll speed:", v)
+			dprintln("  scroll speed:", v)
 		} else {
-			fmt.Println("  scroll speed: default")
+			dprintln("  scroll speed: default")
 		}
-		fmt.Println("  usage: /scroll-speed <multiplier|default>")
+		dprintln("  usage: /scroll-speed <multiplier|default>")
 		return
 	}
 	if arg == "default" || arg == "off" {
 		os.Unsetenv(env)
-		fmt.Println("  scroll speed → default")
+		dprintln("  scroll speed → default")
 		return
 	}
 	f, err := strconv.ParseFloat(arg, 64)
 	if err != nil || f <= 0 {
-		fmt.Println("  scroll speed must be a positive number (e.g. /scroll-speed 3)")
+		dprintln("  scroll speed must be a positive number (e.g. /scroll-speed 3)")
 		return
 	}
 	if f > 20 {
 		f = 20 // real clamps at 20 (mod_1985.js)
 	}
 	os.Setenv(env, strconv.FormatFloat(f, 'g', -1, 64))
-	fmt.Println("  scroll speed →", os.Getenv(env))
+	dprintln("  scroll speed →", os.Getenv(env))
 }
 
 // setupProviderCmd runs the /setup-bedrock / /setup-vertex wizard (mod_0386.js
@@ -2817,20 +2817,20 @@ func setupProviderCmd(ks *keySource, provider string) {
 		}
 	}
 	if ks == nil {
-		fmt.Println("  interactive setup needs a terminal — write the env keys into ~/.claude/settings.json instead")
+		dprintln("  interactive setup needs a terminal — write the env keys into ~/.claude/settings.json instead")
 		return
 	}
-	fmt.Printf("  %s setup — enter values (blank keeps the default, esc cancels)\n", title)
+	dprintf("  %s setup — enter values (blank keeps the default, esc cancels)\n", title)
 	env := map[string]string{selection: "1"}
 	for _, p := range prompts {
 		def := ""
 		if p.def != "" {
 			def = " [" + p.def + "]"
 		}
-		fmt.Printf("  %s%s: ", p.label, def)
+		dprintf("  %s%s: ", p.label, def)
 		line, ok := readLineKeys(ks)
 		if !ok {
-			fmt.Println("  cancelled")
+			dprintln("  cancelled")
 			return
 		}
 		if line = strings.TrimSpace(line); line == "" {
@@ -2845,7 +2845,7 @@ func setupProviderCmd(ks *keySource, provider string) {
 	for k, v := range env {
 		os.Setenv(k, v)
 	}
-	fmt.Println("  wrote", len(env), "env keys to ~/.claude/settings.json —", title, "is configured")
+	dprintln("  wrote", len(env), "env keys to ~/.claude/settings.json —", title, "is configured")
 }
 
 // writeUserSettingsEnv merges kv into the "env" object of
@@ -2883,10 +2883,10 @@ func readLineKeys(ks *keySource) (string, bool) {
 	for k := range ks.ch {
 		switch {
 		case k.b == 0x1b || k.b == 3:
-			fmt.Println()
+			dprintln()
 			return "", false
 		case k.b == '\r' || k.b == '\n':
-			fmt.Println()
+			dprintln()
 			return b.String(), true
 		case k.b == 0x7f:
 			if s := b.String(); s != "" {
@@ -2914,9 +2914,9 @@ func focusCmd(arg string) {
 		focusMode.Store(!focusMode.Load())
 	}
 	if focusMode.Load() {
-		fmt.Println("  Focus view enabled")
+		dprintln("  Focus view enabled")
 	} else {
-		fmt.Println("  Focus view disabled")
+		dprintln("  Focus view disabled")
 	}
 }
 
@@ -2971,31 +2971,31 @@ func saveSettingsReview(entries []settingsReviewEntry) {
 func settingsReviewCmd(arg string) {
 	entries, err := loadSettingsReview()
 	if err != nil || len(entries) == 0 {
-		fmt.Println("  no staged settings changes")
+		dprintln("  no staged settings changes")
 		return
 	}
 	switch strings.TrimSpace(arg) {
 	case "", "list":
-		fmt.Println("  staged settings changes (/settings-review accept applies them, discard drops them):")
+		dprintln("  staged settings changes (/settings-review accept applies them, discard drops them):")
 		for i, e := range entries {
-			fmt.Printf("   %d. %s — staged by %s (%s)\n", i+1, e.Path, e.By.Tool, strings.Trim(string(e.StagedAt), `"`))
+			dprintf("   %d. %s — staged by %s (%s)\n", i+1, e.Path, e.By.Tool, strings.Trim(string(e.StagedAt), `"`))
 		}
 	case "discard":
 		saveSettingsReview(nil)
-		fmt.Println("  Discarded the staged change. The file was not touched.")
+		dprintln("  Discarded the staged change. The file was not touched.")
 	case "accept":
 		var keep []settingsReviewEntry
 		for _, e := range entries {
 			if err := applyStagedChange(e); err != nil {
-				fmt.Println(" ", err)
+				dprintln(" ", err)
 				keep = append(keep, e)
 				continue
 			}
-			fmt.Println("  applied →", e.ResolvedPath)
+			dprintln("  applied →", e.ResolvedPath)
 		}
 		saveSettingsReview(keep)
 	default:
-		fmt.Println("  usage: /settings-review [accept|discard]")
+		dprintln("  usage: /settings-review [accept|discard]")
 	}
 }
 
@@ -3037,14 +3037,14 @@ func experimentsCmd() {
 		}
 	}
 	if len(flags) == 0 {
-		fmt.Println("  no experimental flags set")
-		fmt.Println("  (server-side experiment rollouts need the first-party feature service)")
+		dprintln("  no experimental flags set")
+		dprintln("  (server-side experiment rollouts need the first-party feature service)")
 		return
 	}
 	sort.Strings(flags)
-	fmt.Println("  experimental flags:")
+	dprintln("  experimental flags:")
 	for _, f := range flags {
-		fmt.Println("   ", f)
+		dprintln("   ", f)
 	}
 }
 
@@ -3055,21 +3055,21 @@ func copyCmd(l *agent.Loop, arg string) {
 	if strings.TrimSpace(arg) != "" {
 		v, err := strconv.Atoi(strings.TrimSpace(arg))
 		if err != nil || v < 1 {
-			fmt.Println("  usage: /copy [N]")
+			dprintln("  usage: /copy [N]")
 			return
 		}
 		n = v
 	}
 	txt := nthLastAssistantText(l.Messages, n)
 	if txt == "" {
-		fmt.Println("  nothing to copy")
+		dprintln("  nothing to copy")
 		return
 	}
 	if err := copyToClipboard(txt); err != nil {
-		fmt.Println("  copy failed:", err)
+		dprintln("  copy failed:", err)
 		return
 	}
-	fmt.Printf("  copied %d chars\n", len(txt))
+	dprintf("  copied %d chars\n", len(txt))
 }
 
 func nthLastAssistantText(msgs []api.Message, n int) string {
@@ -3119,8 +3119,8 @@ func copyToClipboard(s string) error {
 func cdCmd(l *agent.Loop, arg string) {
 	arg = strings.TrimSpace(arg)
 	if arg == "" {
-		fmt.Println("  cwd:", l.ToolCtx.CWD)
-		fmt.Println("  usage: /cd <path>")
+		dprintln("  cwd:", l.ToolCtx.CWD)
+		dprintln("  usage: /cd <path>")
 		return
 	}
 	if strings.HasPrefix(arg, "~") {
@@ -3128,11 +3128,11 @@ func cdCmd(l *agent.Loop, arg string) {
 	}
 	p, err := filepath.Abs(arg)
 	if err != nil {
-		fmt.Println("  bad path:", err)
+		dprintln("  bad path:", err)
 		return
 	}
 	if st, err := os.Stat(p); err != nil || !st.IsDir() {
-		fmt.Println("  not a directory:", arg)
+		dprintln("  not a directory:", arg)
 		return
 	}
 	old := l.ToolCtx.CWD
@@ -3142,7 +3142,7 @@ func cdCmd(l *agent.Loop, arg string) {
 	if l.ToolCtx.OnCwdChanged != nil {
 		l.ToolCtx.OnCwdChanged(p)
 	}
-	fmt.Printf("  cwd: %s → %s\n", old, p)
+	dprintf("  cwd: %s → %s\n", old, p)
 }
 
 // stopCmd is /stop: real stops a running background session ("transcript and
@@ -3154,9 +3154,9 @@ func stopCmd(l *agent.Loop) {
 		n = l.ToolCtx.BgTasks.KillAll()
 	}
 	if n > 0 {
-		fmt.Printf("  stopped %d background task(s)\n", n)
+		dprintf("  stopped %d background task(s)\n", n)
 	} else {
-		fmt.Println("  nothing running")
+		dprintln("  nothing running")
 	}
 }
 
@@ -3164,14 +3164,14 @@ func stopCmd(l *agent.Loop) {
 // this session" — re-execs the binary with -r <sessionID>. The tty is
 // restored first so the new process re-enters raw mode cleanly.
 func restartCmd(l *agent.Loop, ks *keySource) {
-	fmt.Println("  restarting — this session resumes on the other side…")
+	dprintln("  restarting — this session resumes on the other side…")
 	args := restartArgs(l.Client.SessionID)
 	if ks != nil {
 		ks.stop()
 	}
 	if err := execSelf(args); err != nil {
-		fmt.Println("  restart failed:", err)
-		fmt.Println("  resume manually with: claude-go -r", l.Client.SessionID)
+		dprintln("  restart failed:", err)
+		dprintln("  resume manually with: claude-go -r", l.Client.SessionID)
 	}
 }
 
@@ -3200,18 +3200,18 @@ func restartArgs(sessionID string) []string {
 func oauthRefreshCmd() {
 	creds, err := auth.Load()
 	if err != nil || creds == nil {
-		fmt.Println("  no OAuth credentials — run /login")
+		dprintln("  no OAuth credentials — run /login")
 		return
 	}
 	if creds.RefreshToken == "" {
-		fmt.Println("  credentials are an API key — nothing to refresh")
+		dprintln("  credentials are an API key — nothing to refresh")
 		return
 	}
 	if err := creds.Refresh(); err != nil {
-		fmt.Println("  refresh failed:", err)
+		dprintln("  refresh failed:", err)
 		return
 	}
-	fmt.Printf("  token refreshed (expires %s)\n",
+	dprintf("  token refreshed (expires %s)\n",
 		time.UnixMilli(creds.ExpiresAt).Format("2006-01-02 15:04:05"))
 }
 
@@ -3220,10 +3220,10 @@ func oauthRefreshCmd() {
 // a Go pprof heap profile to the same spot with real's progress texts.
 func heapdumpCmd(l *agent.Loop) {
 	if !tools.PolicyAllows(l.ToolCtx.CWD, "allow_heap_dump") {
-		fmt.Println("  heap dumps are disabled by your organization's policy")
+		dprintln("  heap dumps are disabled by your organization's policy")
 		return
 	}
-	fmt.Println("  Writing heap dump…")
+	dprintln("  Writing heap dump…")
 	dir := filepath.Join(config.Home(), "Desktop")
 	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
 		dir = config.Home()
@@ -3231,16 +3231,16 @@ func heapdumpCmd(l *agent.Loop) {
 	p := filepath.Join(dir, fmt.Sprintf("claude-go-heap-%s.pb.gz", time.Now().Format("20060102-150405")))
 	f, err := os.Create(p)
 	if err != nil {
-		fmt.Println("  Couldn't write heap dump —", err)
+		dprintln("  Couldn't write heap dump —", err)
 		return
 	}
 	defer f.Close()
 	runtime.GC()
 	if err := pprof.WriteHeapProfile(f); err != nil {
-		fmt.Println("  Couldn't write heap dump —", err)
+		dprintln("  Couldn't write heap dump —", err)
 		return
 	}
-	fmt.Println("  Heap dump written to", p)
+	dprintln("  Heap dump written to", p)
 }
 
 // debugToolCallCmd is /debug-tool-call: show the last tool call and its
@@ -3263,11 +3263,11 @@ func debugToolCallCmd(l *agent.Loop) {
 		}
 	}
 	if name == "" {
-		fmt.Println("  no tool calls this session")
+		dprintln("  no tool calls this session")
 		return
 	}
-	fmt.Println("  last tool call:", name)
-	fmt.Println("  input:", trunc(input, 400))
+	dprintln("  last tool call:", name)
+	dprintln("  input:", trunc(input, 400))
 	for i := len(l.Messages) - 1; i >= 0; i-- {
 		var blocks []api.ContentBlock
 		if json.Unmarshal(l.Messages[i].Content, &blocks) != nil {
@@ -3275,12 +3275,12 @@ func debugToolCallCmd(l *agent.Loop) {
 		}
 		for _, b := range blocks {
 			if b.Type == "tool_result" && b.ToolUseID == id {
-				fmt.Println("  result:", trunc(toolResultText(b), 500))
+				dprintln("  result:", trunc(toolResultText(b), 500))
 				return
 			}
 		}
 	}
-	fmt.Println("  result: (pending)")
+	dprintln("  result: (pending)")
 }
 
 // toolResultText flattens a tool_result content payload (string or blocks).
