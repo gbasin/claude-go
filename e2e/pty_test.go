@@ -26,6 +26,12 @@ import (
 
 // openPTY allocates a master/slave pair (120x40).
 func openPTY(t *testing.T) (master, slave *os.File) {
+	return openPTYSize(t, 120, 40)
+}
+
+// openPTYSize allocates a master/slave pair at the given size — narrow
+// widths exercise the compositor's wrap/scroll-region paths.
+func openPTYSize(t *testing.T, cols, rows int) (master, slave *os.File) {
 	t.Helper()
 	if runtime.GOOS != "darwin" {
 		t.Skipf("pty harness implemented for darwin only (got %s)", runtime.GOOS)
@@ -61,7 +67,7 @@ func openPTY(t *testing.T) (master, slave *os.File) {
 		t.Skipf("open pty slave %s: %v", name, err)
 	}
 	if err := unix.IoctlSetWinsize(int(slave.Fd()), unix.TIOCSWINSZ,
-		&unix.Winsize{Row: 40, Col: 120}); err != nil {
+		&unix.Winsize{Row: uint16(rows), Col: uint16(cols)}); err != nil {
 		t.Logf("set winsize: %v (continuing)", err)
 	}
 	return master, slave
@@ -80,8 +86,13 @@ type ptyProc struct {
 
 // runPTY spawns the binary attached to a fresh pty.
 func (s *sess) runPTY(t *testing.T, extraEnv []string, args ...string) *ptyProc {
+	return s.runPTYSize(t, extraEnv, 120, 40, args...)
+}
+
+// runPTYSize spawns the binary on a pty of the given size.
+func (s *sess) runPTYSize(t *testing.T, extraEnv []string, cols, rows int, args ...string) *ptyProc {
 	t.Helper()
-	master, slave := openPTY(t)
+	master, slave := openPTYSize(t, cols, rows)
 	cmd := exec.Command(binPath, args...)
 	cmd.Dir = s.cwd
 	cmd.Env = append(append([]string{}, s.env...), extraEnv...)
