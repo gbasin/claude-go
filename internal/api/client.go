@@ -22,7 +22,8 @@ import (
 
 const Version = "2.1.289"
 
-// betaFlags in real's exact wire order (captured from claude 2.1.289).
+// betaFlags in real's exact wire order (captured from claude 2.1.289
+// default-model request through the mitm relay).
 const betaFlags = "claude-code-20250219," +
 	"oauth-2025-04-20," +
 	"interleaved-thinking-2025-05-14," +
@@ -30,12 +31,17 @@ const betaFlags = "claude-code-20250219," +
 	"context-management-2025-06-27," +
 	"prompt-caching-scope-2026-01-05," +
 	"mid-conversation-system-2026-04-07," +
+	"per-turn-control-2026-07-01," +
 	"mid-conversation-tool-changes-2026-07-01," +
 	"advisor-tool-2026-03-01," +
+	"advanced-tool-use-2025-11-20," +
+	"mid-conversation-system-clear-at-2026-08-21," +
 	"effort-2025-11-24," +
 	"dangerous-tool-use-2026-09-03," +
+	"thinking-binding-controls-2026-08-01," +
 	"afk-mode-2026-01-31," +
-	"extended-cache-ttl-2025-04-11"
+	"extended-cache-ttl-2025-04-11," +
+	"cache-diagnosis-2026-04-07"
 
 // streamTimeout is the per-request deadline for streaming calls, matching
 // the SDK's default timeout (X-Stainless-Timeout: 600). Applied to the
@@ -113,6 +119,15 @@ func NewClient(creds *auth.Credentials, sessionID string, ep Entrypoint) *Client
 	return c
 }
 
+// PromptID is the current turn's prompt uuid — same value real puts in
+// the x-claude-code-prompt-id header and the billing sys[0] cc_prompt_id.
+func (c *Client) PromptID() string {
+	if c.promptID == "" {
+		c.promptID = newUUID()
+	}
+	return c.promptID
+}
+
 // betaHeaderValue is the full anthropic-beta header/body list for this
 // client. The 1m-context family (fable/sonnet-5/opus-5 — same predicate as
 // the context window) adds context-1m at index 2 and per-turn-control at
@@ -132,15 +147,9 @@ func (c *Client) betaHeaderValue() string {
 			"thinking-binding-controls-2026-08-01,afk-mode-2026-01-31," +
 			"extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07"
 	}
-	if is1mModel(c.Model) || c.Wants1m {
-		betas = "claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07," +
-			"interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13," +
-			"context-management-2025-06-27,prompt-caching-scope-2026-01-05," +
-			"mid-conversation-system-2026-04-07,per-turn-control-2026-07-01," +
-			"mid-conversation-tool-changes-2026-07-01,advisor-tool-2026-03-01," +
-			"effort-2025-11-24,dangerous-tool-use-2026-09-03,afk-mode-2026-01-31," +
-			"extended-cache-ttl-2025-04-11"
-	}
+	// context-1m needs a positive server flag — the captured wire shows it
+	// absent even with a [1m]-configured model and eval unreachable.
+	// TODO: emit when the bootstrap/eval flag confirms 1m availability.
 	if c.Entrypoint == EntryCLI {
 		betas += ",thinking-display-updates-2026-08-18"
 	}
@@ -316,15 +325,17 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 			}
 		}
 		applyCustomHeaders(req)
-		if c.evalFailed {
-			req.Header.Set("anthropic-dispatch-id", "v2d")
-			req.Header.Set("x-claude-code-request-class", "main")
-			if c.promptID == "" {
-				c.promptID = newUUID()
-			}
-			req.Header.Set("x-claude-code-prompt-id", c.promptID)
-			req.Header.Set("x-client-request-id", newUUID())
+		// real sets these on every main request (verified in wire
+		// captures): dispatch-id is a constant, prompt-id is stable across
+		// a turn's retries/subrequests, client-request-id is fresh per
+		// request attempt.
+		req.Header.Set("anthropic-dispatch-id", "v2d")
+		req.Header.Set("x-claude-code-request-class", "main")
+		if c.promptID == "" {
+			c.promptID = newUUID()
 		}
+		req.Header.Set("x-claude-code-prompt-id", c.promptID)
+		req.Header.Set("x-client-request-id", newUUID())
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
 			lastErr = err

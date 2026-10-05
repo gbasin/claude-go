@@ -19,8 +19,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,6 +35,9 @@ type Server struct {
 	Addr     string
 	Requests atomic.Int64
 	LastBody []byte
+	// Bodies records every request body in order — golden-diff inspection.
+	Bodies [][]byte
+	mu     sync.Mutex
 }
 
 // Start launches the mock on 127.0.0.1:0 and returns it.
@@ -75,8 +81,22 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.LastBody = raw
+	s.mu.Lock()
+	s.Bodies = append(s.Bodies, append([]byte{}, raw...))
+	n := len(s.Bodies)
+	s.mu.Unlock()
+	// CLAUDE_GO_MOCK_RECORD=<dir>: dump each request body — the golden
+	// wire tests diff these against real captures.
+	if dir := os.Getenv("CLAUDE_GO_MOCK_RECORD"); dir != "" {
+		os.MkdirAll(dir, 0o755)
+		os.WriteFile(filepath.Join(dir, fmt.Sprintf("%03d.json", n)), raw, 0o644)
+	}
 	if err := json.Unmarshal(raw, &req); err != nil {
 		writeErr(w, 400, "invalid_request_error", err.Error())
+		return
+	}
+	if msg := validateRequest(&req); msg != "" {
+		writeErr(w, 400, "invalid_request_error", msg)
 		return
 	}
 

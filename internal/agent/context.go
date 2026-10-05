@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,13 +21,22 @@ import (
 //go:embed system_main.txt
 var systemMain string
 
+//go:embed system_session.txt
+var systemSessionFable string
+
+//go:embed system_session_opus.txt
+var systemSessionOpus string
+
 const (
 	identityCLI    = "You are Claude Code, Anthropic's official CLI for Claude."
 	identitySDK    = "You are a Claude agent, built on Anthropic's Claude Agent SDK."
 	identitySDKCLI = "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK."
 )
 
-var ephemeral1h = &api.CacheControl{Type: "ephemeral", TTL: "1h"}
+var (
+	ephemeral1h       = &api.CacheControl{Type: "ephemeral", TTL: "1h"}
+	ephemeral1hGlobal = &api.CacheControl{Type: "ephemeral", TTL: "1h", Scope: "global"}
+)
 
 // projectSlug mirrors CC's ~/.claude/projects/-path-with-dashes naming.
 func projectSlug(cwd string) string {
@@ -35,35 +45,67 @@ func projectSlug(cwd string) string {
 
 // SystemBlocks assembles the system array in the same order as Claude Code:
 // [billing header (uncached), identity (1h cache), main prompt (1h cache)].
-func SystemBlocks(entrypoint string, cwd, model, appendPrompt string, extra []string) []api.SystemBlock {
+func SystemBlocks(entrypoint string, cwd, model, appendPrompt string, extra, sessionExtras []string, bill BillingMeta) []api.SystemBlock {
+	// billing fields (captured): cch = per-install hash suffix,
+	// cc_prompt_id = the prompt uuid (== x-claude-code-prompt-id),
+	// cc_turn_origin = sdk|cli, cc_prompt_index = 0-based prompt count,
+	// cc_turn_index = 1-based request count this prompt
+	origin := "sdk"
+	if entrypoint == "cli" {
+		origin = "cli"
+	}
 	out := []api.SystemBlock{
 		{Type: "text", Text: fmt.Sprintf(
-			"x-anthropic-billing-header: cc_version=%s.4cb; cc_entrypoint=%s;%s",
-			version(), entrypoint, workloadTag())},
+			"x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s; cch=%s; cc_prompt_id=%s; cc_turn_origin=%s; cc_prompt_index=%d; cc_turn_index=%d;%s",
+			version(), buildHash(), entrypoint, cchHash(cwd), bill.PromptID, origin, bill.PromptIndex, bill.TurnIndex, workloadTag())},
 	}
 	ident := identityCLI
 	if entrypoint != "cli" {
 		ident = identitySDK
 	}
-	out = append(out, api.SystemBlock{Type: "text", Text: ident, CacheControl: ephemeral1h})
+	// real's wire layout (captured): identity block carries NO
+	// cache_control; the main prompt gets {ephemeral,1h,scope:global}
+	out = append(out, api.SystemBlock{Type: "text", Text: ident})
 
 	main := systemMain
-	bang := ""
-	if entrypoint == "cli" {
-		bang = " - If you need the user to run a shell command themselves (e.g., an interactive login like `gcloud auth login`), suggest they type `! <command>` in the prompt — the `!` prefix runs the command in this session so its output lands directly in the conversation.\n"
-	}
-	main = strings.Replace(main, "{{BANG_LINE}}", bang, 1)
-	for _, txt := range mcpInstructions() {
-		main += "\n\n" + txt
-	}
-	// parameterize per-session values baked into the captured prompt
-	memDir := filepath.Join(config.ClaudeDir(), "projects", projectSlug(cwd), "memory")
-	main = strings.ReplaceAll(main,
-		"/Users/garybasin/.claude/projects/-private-tmp/memory/", memDir+"/")
 	if appendPrompt != "" {
 		main += "\n\n" + appendPrompt
 	}
-	out = append(out, api.SystemBlock{Type: "text", Text: main, CacheControl: ephemeral1h})
+	out = append(out, api.SystemBlock{Type: "text", Text: main, CacheControl: ephemeral1hGlobal})
+
+	// sys[3] — the session block (captured): model-conditional head +
+	// shared sections + cli extras. Fable gets the long variant (identity,
+	// Delivering work, Writing for the user, autonomy); opus-class models
+	// get the short variant; haiku gets none.
+	var sess string
+	switch {
+	case strings.Contains(model, "fable"):
+		sess = systemSessionFable
+	case strings.Contains(model, "opus") || strings.Contains(model, "sonnet"):
+		sess = systemSessionOpus
+	}
+	if sess != "" {
+		memDir := filepath.Join(config.ClaudeDir(), "projects", projectSlug(cwd), "memory")
+		bang, deferred := "", ""
+		if entrypoint == "cli" {
+			bang = " - If you need the user to run a shell command themselves (e.g., an interactive login like `gcloud auth login`), suggest they type `! <command>` in the prompt — the `!` prefix runs the command in this session so its output lands directly in the conversation.\n"
+			deferred = "EndConversation (deferred tool): use only for sustained user abuse directed at the assistant, or when the user explicitly asks to see it demonstrated. Load the full guidance via ToolSearch(\"select:EndConversation\") before using it.\n"
+		}
+		var mcpb strings.Builder
+		for _, txt := range mcpInstructions() {
+			mcpb.WriteString("\n\n")
+			mcpb.WriteString(txt)
+		}
+		for _, s := range sessionExtras {
+			mcpb.WriteString("\n\n")
+			mcpb.WriteString(s)
+		}
+		sess = strings.ReplaceAll(sess, "{{MEMDIR}}", memDir)
+		sess = strings.ReplaceAll(sess, "{{BANG}}", bang)
+		sess = strings.ReplaceAll(sess, "{{DEFERRED_NOTE}}", deferred)
+		sess = strings.ReplaceAll(sess, "{{MCP_BLOCKS}}", mcpb.String())
+		out = append(out, api.SystemBlock{Type: "text", Text: sess, CacheControl: ephemeral1h})
+	}
 	for _, s := range extra {
 		out = append(out, api.SystemBlock{Type: "text", Text: s, CacheControl: ephemeral1h})
 	}
@@ -295,6 +337,30 @@ func platformName() string {
 }
 
 func version() string { return "2.1.289" }
+
+// BillingMeta carries the per-turn values the billing sys[0] needs.
+type BillingMeta struct {
+	PromptID    string
+	PromptIndex int
+	TurnIndex   int
+}
+
+// buildHash is real's cc_version 3-hex suffix — an install-build id.
+// Stable per binary: hash our version so it doesn't float.
+func buildHash() string {
+	h := fnv.New32a()
+	h.Write([]byte(version() + "|build"))
+	return fmt.Sprintf("%05x", h.Sum32()&0xfffff)[:3]
+}
+
+// cchHash approximates real's cch= field — a 5-hex tag derived per
+// session root (real's derivation is internal; observed values vary per
+// install, e.g. af1b7 / 5ba49).
+func cchHash(cwd string) string {
+	h := fnv.New32a()
+	h.Write([]byte(cwd + "|" + config.ClaudeDir()))
+	return fmt.Sprintf("%05x", h.Sum32()&0xfffff)[:5]
+}
 
 // DefaultThinking / OutputConfig / ContextManagement mirror the wire defaults.
 func DefaultThinking() json.RawMessage {

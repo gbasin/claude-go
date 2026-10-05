@@ -20,16 +20,24 @@ func TestDeferredExcludedAndDiscovered(t *testing.T) {
 			t.Fatal("deferred tool WebFetch must not be in the request tools")
 		}
 	}
-	// ToolSearch + DeferredToolPlaceholder tail: [..., placeholder, ToolSearch]
-	if len(defs) < 2 || defs[len(defs)-2].Name != "DeferredToolPlaceholder" ||
-		defs[len(defs)-1].Name != "ToolSearch" {
-		t.Fatalf("tail = %v", names[len(names)-2:])
+	// real's captured wire order (2.1.289): ..., Skill, ToolSearch,
+	// Workflow, DeferredToolPlaceholder, Write, advisor
+	idx := map[string]int{}
+	for i, d := range defs {
+		idx[d.Name] = i
 	}
-	if !defs[len(defs)-2].DeferLoading {
+	if !(idx["Skill"]+1 == idx["ToolSearch"] &&
+		idx["Workflow"]+1 == idx["DeferredToolPlaceholder"] &&
+		idx["DeferredToolPlaceholder"]+1 == idx["Write"] &&
+		idx["Write"]+1 == idx["advisor"]) {
+		t.Fatalf("order = %v", names)
+	}
+	phIdx := idx["DeferredToolPlaceholder"]
+	if !defs[phIdx].DeferLoading {
 		t.Error("placeholder must carry defer_loading:true")
 	}
 	var ph map[string]any
-	if err := json.Unmarshal(defs[len(defs)-2].InputSchema, &ph); err != nil {
+	if err := json.Unmarshal(defs[phIdx].InputSchema, &ph); err != nil {
 		t.Fatal(err)
 	}
 

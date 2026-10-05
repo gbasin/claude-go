@@ -48,6 +48,7 @@ type Loop struct {
 	CWD                   string
 	AppendSysP            string
 	ExtraSystem           []string
+	SessionExtras         []string // spliced into the sys[3] session block
 	PermRules             map[string][]string
 	AddDirs               []string
 	User                  UserConfig
@@ -76,11 +77,12 @@ type Loop struct {
 	AlwaysThinking        bool     // settings alwaysThinkingEnabled
 	pendingTrigger        string   // last compact trigger for the boundary record
 	compactSummaryPending bool     // next user log is the compact continuation
-	compactKept           int      // tail messages retained by the last compaction
-	announcedDeferred     string   // last announced deferred-tool name set (sorted join)
-	Precompute            bool     // precomputeCompactionEnabled gate
-	RateLimitNote         string   // set once a slow-lane rate-limit note was shown
-	noThinking            bool     // thinking config dropped after a thinking 400
+	compactKept           int
+	turnCount             int    // tail messages retained by the last compaction
+	announcedDeferred     string // last announced deferred-tool name set (sorted join)
+	Precompute            bool   // precomputeCompactionEnabled gate
+	RateLimitNote         string // set once a slow-lane rate-limit note was shown
+	noThinking            bool   // thinking config dropped after a thinking 400
 	dropSafeguards        bool
 	dropOutputConfig      bool
 	dropBetas             bool
@@ -161,14 +163,50 @@ func (l *Loop) buildRequest() *api.Request {
 		Model:             l.Model,
 		MaxTokens:         mt,
 		Messages:          msgs,
-		System:            SystemBlocks(l.Entrypoint, l.CWD, l.Model, l.AppendSysP, l.ExtraSystem),
+		System:            SystemBlocks(l.Entrypoint, l.CWD, l.Model, l.AppendSysP, l.ExtraSystem, l.SessionExtras, l.billingMeta()),
 		Tools:             tools.RequestDefs(l.ToolCtx),
 		Metadata:          Metadata(l.Client.SessionID, l.User),
 		Thinking:          l.thinkingConfig(),
 		ContextManagement: DefaultContextManagement(),
 		Safeguards:        safeguards,
 		OutputConfig:      outCfg,
+		// real sends diagnostics.previous_message_id on every request —
+		// null on the first turn, the last assistant message id after
+		// (message-threads-2026-08-12 beta machinery)
+		Diagnostics: l.diagnosticsField(),
 	}
+}
+
+// billingMeta supplies prompt id + indices for the billing sys[0].
+func (l *Loop) billingMeta() BillingMeta {
+	// captured: first turn emits cc_prompt_index=0, cc_turn_index=1
+	return BillingMeta{
+		PromptID:    l.Client.PromptID(),
+		PromptIndex: l.turnCount - 1,
+		TurnIndex:   l.turnCount,
+	}
+}
+
+// diagnosticsField builds {"previous_message_id": <last assistant id>}.
+func (l *Loop) diagnosticsField() json.RawMessage {
+	var lastID string
+	for i := len(l.Messages) - 1; i >= 0; i-- {
+		if l.Messages[i].Role != "assistant" {
+			continue
+		}
+		var raw struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(l.Messages[i].Raw, &raw) == nil && raw.ID != "" {
+			lastID = raw.ID
+		}
+		break
+	}
+	if lastID == "" {
+		return json.RawMessage(`{"previous_message_id":null}`)
+	}
+	b, _ := json.Marshal(map[string]string{"previous_message_id": lastID})
+	return b
 }
 
 // withDeferredReminder prepends the deferred-tools announcement
@@ -243,6 +281,7 @@ func withEphemeralBreakpoint(msgs []api.Message) []api.Message {
 
 // Ask submits one user turn and runs the tool loop to completion.
 func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
+	l.turnCount++
 	if h := l.runHook(hooks.UserPromptSubmit, map[string]any{"prompt": prompt}); h.Block {
 		return nil, fmt.Errorf("prompt blocked by hook: %s", h.Reason)
 	} else {
