@@ -386,7 +386,11 @@ func RunWithStore(l *agent.Loop, store Store) {
 								queuedPending.Add(1)
 								queueBuf = nil
 								compQueueDraft("")
-								fmt.Fprintf(os.Stderr, "\n  %s➤ queued%s\n", dim, reset)
+								// tracked write — a raw stderr print lands
+								// at the hardware cursor but leaves
+								// compStreamCol stale, so the next stream
+								// write repositions and overwrites it
+								streamPrint("  " + dim + "➤ queued" + reset)
 							}
 						} else if k.r != 0 {
 							queueBuf = append(queueBuf, k.r)
@@ -417,15 +421,6 @@ func RunWithStore(l *agent.Loop, store Store) {
 			if store != nil {
 				// log only NEW messages per turn (was O(n²) re-log + a git
 				// fork per record)
-				if kept := l.TakeCompactPending(); kept >= 0 && len(l.Messages) > 0 {
-					// compaction rewrote history: Messages[0] is the new
-					// isCompactSummary record, indices 1..kept are the
-					// retained tail already in the transcript
-					store.Log(l.Messages[0])
-					loggedTo = 1 + kept
-				} else if loggedTo > len(l.Messages) {
-					loggedTo = 0 // /clear wiped history
-				}
 				for _, m := range l.Messages[loggedTo:] {
 					store.Log(m)
 				}
