@@ -18,6 +18,14 @@ import (
 // Keys: ↑/↓/j/k navigate · enter resume · / or ctrl-f search · ctrl-r rename
 // · space preview pane · ctrl-b all projects · esc/ctrl-c cancel.
 func PickSession(cwd string) string {
+	return pickSession(cwd, nil)
+}
+
+// pickSession runs the picker against an existing keySource when the
+// caller is the REPL — a second stdin reader would race the REPL's and
+// starve the picker of arrows/enter (live-verified on m5p). nil starts
+// a standalone reader for the non-REPL -r path.
+func pickSession(cwd string, ks *keySource) string {
 	infos, err := session.List(cwd)
 	if err != nil {
 		infos = nil
@@ -26,12 +34,13 @@ func PickSession(cwd string) string {
 		session.Print(cwd)
 		return ""
 	}
-	ks, err := startKeys()
-	if err != nil {
-		session.Print(cwd)
-		return ""
+	if ks == nil {
+		if ks, err = startKeys(); err != nil {
+			session.Print(cwd)
+			return ""
+		}
+		defer ks.stop()
 	}
-	defer ks.stop()
 
 	const maxRows = 15
 	const maxPreview = 20
