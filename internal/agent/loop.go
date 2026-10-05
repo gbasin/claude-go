@@ -380,7 +380,7 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		results = append(results, toolResultBlock(b.ID, r))
 	}
 	if len(results) == 0 {
-		if !l.inCompact {
+		if l.ShouldAutoCompact(resp.Usage) && !l.inCompact {
 			l.inCompact = true
 			// AutoCompact re-checks the threshold, fires OnAutoCompact,
 			// and runs the compaction (instant when precomputed)

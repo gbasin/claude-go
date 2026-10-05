@@ -107,8 +107,10 @@ func TestInteractiveBanner(t *testing.T) {
 	s := newSession(t)
 	p := startREPL(t, s)
 	out := p.clean()
-	contains(t, out, "claude-go", "banner")
-	contains(t, out, "model:", "model line")
+	// compact banner (571b571) matches real 2.1.289: mascot + version +
+	// model line — "Claude Code v<ver>" and the model display name
+	contains(t, out, "Claude Code", "banner")
+	contains(t, out, "Fable", "model line")
 	if !utf8OK(out) {
 		t.Fatalf("output is not valid UTF-8")
 	}
