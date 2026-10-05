@@ -326,6 +326,19 @@ func RunWithStore(l *agent.Loop, store Store) {
 		var queued []string
 		var draftBack []rune
 		loggedTo := 0
+		if store != nil {
+			// mid-turn compaction replaces history inside Ask — persist
+			// the not-yet-logged tail of the replaced span so the last
+			// turn's messages land before the boundary record
+			l.Events.OnCompactSpan = func(span []api.Message) {
+				if loggedTo > len(span) {
+					return // whole span already logged
+				}
+				for _, m := range span[loggedTo:] {
+					store.Log(m)
+				}
+			}
+		}
 		runTurn := func(line string) {
 			tools.UserActive.Store(false)
 			defer tools.UserActive.Store(true)
@@ -404,6 +417,15 @@ func RunWithStore(l *agent.Loop, store Store) {
 			if store != nil {
 				// log only NEW messages per turn (was O(n²) re-log + a git
 				// fork per record)
+				if kept := l.TakeCompactPending(); kept >= 0 && len(l.Messages) > 0 {
+					// compaction rewrote history: Messages[0] is the new
+					// isCompactSummary record, indices 1..kept are the
+					// retained tail already in the transcript
+					store.Log(l.Messages[0])
+					loggedTo = 1 + kept
+				} else if loggedTo > len(l.Messages) {
+					loggedTo = 0 // /clear wiped history
+				}
 				for _, m := range l.Messages[loggedTo:] {
 					store.Log(m)
 				}
@@ -504,7 +526,13 @@ func trunc(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	// cut on a rune boundary — a raw byte slice can split multi-byte
+	// UTF-8 and emits U+FFFD garbage at narrow widths
+	if r := []rune(s); len(r) <= n {
+		return s
+	} else {
+		return string(r[:n]) + "…"
+	}
 }
 
 func summarize(name string, input json.RawMessage) string {
@@ -896,6 +924,18 @@ func printStatus(l *agent.Loop, ed *editor) {
 		// length pushed the right segment off at narrow widths
 		pad := w - visWidth(left) - visWidth(right)
 		if pad < 1 {
+			// narrow: shed the least-important segments before clamping
+			// mid-word (verified: "│ ? for shortcuts" got guillotined
+			// at 40 cols)
+			right = strings.TrimSuffix(right, " │ ? for shortcuts")
+			if pad = w - visWidth(left) - visWidth(right); pad < 1 {
+				if i := strings.LastIndex(right, " │ "); i > 0 {
+					right = right[:i]
+				}
+				pad = w - visWidth(left) - visWidth(right)
+			}
+		}
+		if pad < 1 {
 			pad = 1
 		}
 		status = dim + left + strings.Repeat(" ", pad) + right + reset
@@ -936,6 +976,12 @@ func termWidth() (int, error) {
 func (p *promptUI) askStructured(ks *keySource, header, question string, options []string, multi bool) ([]string, error) {
 	compSuspend() // modal menu — un-pin the live zone while it owns the screen
 	defer compResume()
+	// take over stdin — reading ks.ch here would race the turn busy-loop,
+	// which forwards every key into the dialog channel (same starvation
+	// bug as option-4 feedback)
+	dch := make(chan key, 16)
+	ks.dialog.Store(&dch)
+	defer ks.dialog.Store(nil)
 	dprintf("\n%s%s%s\n", bold, question, reset)
 	for i, o := range options {
 		dprintf("  %s%d.%s %s\n", bold, i+1, reset, o)
@@ -944,7 +990,7 @@ func (p *promptUI) askStructured(ks *keySource, header, question string, options
 	fmt.Print(other)
 	var picked []string
 	var custom strings.Builder
-	for k := range ks.ch {
+	for k := range dch {
 		c := k.b
 		if c >= '1' && c <= '9' {
 			idx := int(c - '1')

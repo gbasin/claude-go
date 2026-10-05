@@ -511,6 +511,18 @@ func (r *Runner) runAgentTurn(sub *Loop, prompt string, c *tools.Context, rec *t
 	if r.Transcript != "" {
 		if st, err := session.OpenSubagent(r.Transcript, rec.AgentID, c.CWD); err == nil {
 			subStore = st
+			// a mid-turn auto-compact in the subagent rewrites history —
+			// log the replaced span + boundary so the sidechain
+			// transcript keeps the full record like the parent does
+			sub.Events.OnCompactSpan = func(span []api.Message) {
+				for _, m := range span {
+					st.Log(m)
+				}
+			}
+			sub.Events.OnCompact = func() {
+				_, trig := sub.CompactMeta()
+				st.LogCompactBoundaryTrig(sub.LastInputTokens(), len(sub.Messages), trig)
+			}
 		}
 	}
 	resp, err := sub.Ask(ctx, prompt)

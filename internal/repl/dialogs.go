@@ -195,7 +195,7 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 				return false, ""
 			case '4', 'd', 'D':
 				dprintln("4. No, with feedback")
-				return false, readFeedbackLine(ks, deadline)
+				return false, readFeedbackLine(dch, deadline)
 			}
 			dprintf("\x1b[%dA\r", rows) // unrecognized — back to the block
 			printOpts(time.Until(deadline))
@@ -204,9 +204,12 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 }
 
 // readFeedbackLine captures the one-line "tell Claude what to do
-// differently" text for option 4. The auto-deny deadline stays armed —
-// walking away mid-capture denies with no feedback.
-func readFeedbackLine(ks *keySource, deadline time.Time) string {
+// differently" text for option 4. Keys must come from the dialog channel
+// (dch) — reading ks.ch races the turn busy-loop, which is already
+// forwarding every key into dch (verified live: feedback text starved).
+// The auto-deny deadline stays armed — walking away mid-capture denies
+// with no feedback.
+func readFeedbackLine(dch chan key, deadline time.Time) string {
 	dprintf("  %stell Claude what to do differently:%s ", dim, reset)
 	var buf []rune
 	t := time.NewTimer(time.Until(deadline))
@@ -216,7 +219,7 @@ func readFeedbackLine(ks *keySource, deadline time.Time) string {
 		case <-t.C:
 			dprintf("\n  %s⏵ auto-denied — unattended%s\n", dim, reset)
 			return ""
-		case k, ok := <-ks.ch:
+		case k, ok := <-dch:
 			if !ok {
 				return ""
 			}

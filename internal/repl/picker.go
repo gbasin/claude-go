@@ -103,6 +103,11 @@ func pickSession(cwd string, ks *keySource) string {
 		return in.Path
 	}
 
+	width, height, _ := term.GetSize(int(os.Stdout.Fd()))
+	if width <= 0 {
+		width = 80
+	}
+
 	draw := func() {
 		if lastLines > 0 {
 			fmt.Printf("\x1b[%dA", lastLines)
@@ -114,7 +119,10 @@ func pickSession(cwd string, ks *keySource) string {
 				fmt.Print("\r\n")
 			}
 			fmt.Print(s)
-			lastLines++
+			// count SCREEN rows, not logical lines — a line that wraps
+			// costs extra rows or the ↑N return lands mid-list and the
+			// picker duplicates rows on every redraw (40-col verified)
+			lastLines += 1 + visWidth(s)/width
 		}
 		scope := "this project"
 		if allProj {
@@ -132,14 +140,32 @@ func pickSession(cwd string, ks *keySource) string {
 			emit(fmt.Sprintf("  %s(no sessions)%s", dim, reset))
 		}
 		max := len(view)
+		// keep the whole list on-screen at short heights (an entry is 1
+		// row once it's width-truncated)
 		if max > maxRows {
 			max = maxRows
 		}
+		if r := height - 6; r < max {
+			max = r
+		}
+		if max < 1 {
+			max = 1
+		}
+		// entry text budget: "❯ " + "  " + "YYYY-MM-DD HH:MM" + "  " = 24
+		pvMax := width - 24
+		if pvMax > 60 {
+			pvMax = 60
+		}
+		if pvMax < 4 {
+			pvMax = 4
+		}
 		for i := 0; i < max; i++ {
 			in := view[i]
-			pv := in.Label()
-			if len(pv) > 60 {
-				pv = pv[:60] + "…"
+			// one row per entry — raw newlines (session previews keep
+			// them) would staircase under raw mode and break row math
+			pv := strings.ReplaceAll(strings.ReplaceAll(in.Label(), "\r", " "), "\n", " ")
+			if visWidth(pv) > pvMax {
+				pv = trunc(pv, pvMax)
 			}
 			line := fmt.Sprintf("  %s  %s", in.Modified.Format("2006-01-02 15:04"), pv)
 			if allProj {
@@ -165,7 +191,7 @@ func pickSession(cwd string, ks *keySource) string {
 			if len(block) > 0 {
 				emit(fmt.Sprintf("  %s─── preview ───%s", dim, reset))
 				for _, l := range block {
-					emit(fmt.Sprintf("  %s%s%s", dim, l, reset))
+					emit(fmt.Sprintf("  %s%s%s", dim, trunc(l, width-6), reset))
 				}
 			}
 		}

@@ -545,6 +545,18 @@ func main() {
 			_, trig := loop.CompactMeta()
 			st2.LogCompactBoundaryTrig(loop.LastInputTokens(), len(loop.Messages), trig)
 		}
+		if o.printMode {
+			// print mode logs messages only after Ask returns — a
+			// mid-turn compaction would drop the replaced span from the
+			// transcript entirely. Log it as it's replaced, ahead of the
+			// boundary record (interactive REPL logs incrementally and
+			// wires its own span handler in RunWithStore).
+			loop.Events.OnCompactSpan = func(span []api.Message) {
+				for _, m := range span {
+					st2.Log(m)
+				}
+			}
+		}
 		if o.sessionName != "" {
 			st2.LogRecord(map[string]any{"type": "summary", "summary": o.sessionName})
 		}
@@ -915,19 +927,7 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 	var out strings.Builder
 	sj := format == "stream-json"
 	if sj {
-		toolNames := tools.Names()
-		initFields := map[string]any{
-			"type": "system", "subtype": "init",
-			"session_id": l.Client.SessionID, "model": l.Model, "cwd": l.CWD,
-			"tools": toolNames, "mcp_servers": []string{}, "permissionMode": l.PermMode,
-			"slash_commands": repl.SlashCommandNames(), "apiKeySource": "none",
-		}
-		// mod_0659.js: startup payloads carry is_coordinator only when true
-		if tools.IsCoordinatorMode() {
-			initFields["is_coordinator"] = true
-		}
-		initEv, _ := json.Marshal(initFields)
-		fmt.Println(string(initEv))
+		emitStreamJSONInit(l)
 	}
 	l.Events.OnTextDelta = func(t string) {
 		switch format {
@@ -1050,8 +1050,11 @@ func newUUID() string {
 // runPrintStreamJSON implements --input-format stream-json: reads
 // newline-delimited user messages from stdin and answers each.
 func runPrintStreamJSON(l *agent.Loop) {
+	emitStreamJSONInit(l)
+	start := time.Now()
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 1<<20), 8<<20)
+	turns := 0
 	for sc.Scan() {
 		line := sc.Bytes()
 		if len(line) == 0 {
@@ -1086,13 +1089,59 @@ func runPrintStreamJSON(l *agent.Loop) {
 			continue
 		}
 		var out strings.Builder
-		l.Events.OnTextDelta = func(t string) { out.WriteString(t) }
+		l.Events.OnTextDelta = func(t string) {
+			out.WriteString(t)
+			if flagPartial {
+				ev, _ := json.Marshal(map[string]any{
+					"type": "stream_event",
+					"event": map[string]any{
+						"type":  "content_block_delta",
+						"index": 0,
+						"delta": map[string]any{"type": "text_delta", "text": t},
+					},
+					"session_id": l.Client.SessionID,
+				})
+				fmt.Println(string(ev))
+			}
+		}
+		turns++
 		if _, err := l.Ask(context.Background(), text); err != nil {
-			fmt.Fprintf(os.Stderr, `{"type":"error","error":%q}`+"\n", err.Error())
+			ev, _ := json.Marshal(map[string]any{
+				"type": "result", "subtype": "error", "is_error": true,
+				"error": err.Error(), "session_id": l.Client.SessionID,
+				"duration_ms": time.Since(start).Milliseconds(), "num_turns": turns,
+			})
+			fmt.Println(string(ev))
 			continue
 		}
-		fmt.Printf(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":%q}]}}`+"\n", out.String())
+		fmt.Printf(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":%q}]},"session_id":%q}`+"\n",
+			out.String(), l.Client.SessionID)
 	}
+	// stream-json protocol always ends with a result event
+	ev, _ := json.Marshal(map[string]any{
+		"type": "result", "subtype": "success", "is_error": false,
+		"result": "", "session_id": l.Client.SessionID,
+		"duration_ms": time.Since(start).Milliseconds(), "num_turns": turns,
+	})
+	fmt.Println(string(ev))
+}
+
+// emitStreamJSONInit writes the system/init event real emits first on
+// --output-format stream-json.
+func emitStreamJSONInit(l *agent.Loop) {
+	toolNames := tools.Names()
+	initFields := map[string]any{
+		"type": "system", "subtype": "init",
+		"session_id": l.Client.SessionID, "model": l.Model, "cwd": l.CWD,
+		"tools": toolNames, "mcp_servers": []string{}, "permissionMode": l.PermMode,
+		"slash_commands": repl.SlashCommandNames(), "apiKeySource": "none",
+	}
+	// mod_0659.js: startup payloads carry is_coordinator only when true
+	if tools.IsCoordinatorMode() {
+		initFields["is_coordinator"] = true
+	}
+	initEv, _ := json.Marshal(initFields)
+	fmt.Println(string(initEv))
 }
 
 func authLoginSub() {
