@@ -466,7 +466,28 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 			r = l.dispatch(b.Name, b.Input) // hook approved — skip the prompt
 		} else if l.ToolCtx.Permission != nil &&
 			!l.ToolCtx.Permission(b.Name, b.Input, toolSummary(b.Name, b.Input)) {
-			if l.PermMode == "dontAsk" {
+			// unresolvable permission goes to real's auto-mode security
+			// monitor — eval failure blocks with real's exact error text.
+			if l.SafetyEval != nil && l.ToolCtx.PermissionAsk != nil && l.ToolCtx.PermissionAsk() {
+				sev, cat, err := l.SafetyEval(ctx, b.Name, b.Input)
+				switch {
+				case err != nil:
+					r = tools.Result{
+						Content: "Auto mode could not evaluate this action and is blocking it for safety — run with --debug for details. This is not a judgment that the action is unsafe. This is usually transient — wait briefly and try this action again as-is; don't rewrite it. If it keeps failing, continue with other tasks that don't require this action and come back to it later.",
+						IsError: true,
+					}
+				case sev < 50:
+					r = l.dispatch(b.Name, b.Input)
+				default:
+					if cat != "" {
+						cat = " (" + cat + ")"
+					}
+					r = tools.Result{
+						Content: "Auto mode blocked this action" + cat + ". The security monitor scored it above the block threshold — try a different approach or report the limitation.",
+						IsError: true,
+					}
+				}
+			} else if l.PermMode == "dontAsk" {
 				r = tools.Result{
 					Content: "Permission to use " + b.Name + " has been denied because Claude Code is running in don't ask mode. Only use tools that are allowed in this mode via the permission settings.",
 					IsError: true,
