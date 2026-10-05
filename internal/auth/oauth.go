@@ -128,13 +128,84 @@ func exchangeCode(codeAndState, verifier, expectState, clientID string) (*Creden
 	if tr.ExpiresIn > 0 {
 		expMs = time.Now().UnixMilli() + tr.ExpiresIn*1000
 	}
-	return &Credentials{
+	creds := &Credentials{
 		AccessToken:      tr.AccessToken,
 		RefreshToken:     tr.RefreshToken,
 		ExpiresAt:        expMs,
 		Scopes:           strings.Split(tr.Scope, " "),
 		SubscriptionType: "oauth",
-	}, nil
+	}
+	// real's banner maps subscriptionType→"Claude Max/Pro/Team/API"; the
+	// exchange response doesn't carry it — fetch the profile for the real
+	// tier (organizationType/planDisplayName). Best-effort.
+	if p := FetchProfile(tr.AccessToken); p != nil {
+		if st := p.SubscriptionType(); st != "" {
+			creds.SubscriptionType = st
+		}
+	}
+	return creds, nil
+}
+
+// Profile is the subset of /api/oauth/profile used for the plan label —
+// the response nests under account/organization (verified live).
+type Profile struct {
+	Account struct {
+		DisplayName  string `json:"display_name"`
+		HasClaudeMax bool   `json:"has_claude_max"`
+		HasClaudePro bool   `json:"has_claude_pro"`
+	} `json:"account"`
+	Organization struct {
+		OrganizationType string `json:"organization_type"` // claude_max/pro/team/enterprise
+		BillingType      string `json:"billing_type"`
+		PlanDisplayName  string `json:"plan_display_name"`
+	} `json:"organization"`
+}
+
+// SubscriptionType maps the profile to the subscriptionType stored on
+// credentials ("max"/"pro"/"team"/"enterprise") — real's banner switch.
+func (p *Profile) SubscriptionType() string {
+	// planDisplayName like "Max" wins when present (real's sA() path)
+	switch strings.ToLower(p.Organization.PlanDisplayName) {
+	case "max", "pro", "team", "enterprise":
+		return strings.ToLower(p.Organization.PlanDisplayName)
+	}
+	switch p.Organization.OrganizationType {
+	case "claude_max":
+		return "max"
+	case "claude_pro":
+		return "pro"
+	case "claude_team":
+		return "team"
+	case "claude_enterprise", "enterprise":
+		return "enterprise"
+	}
+	if p.Account.HasClaudeMax {
+		return "max"
+	}
+	if p.Account.HasClaudePro {
+		return "pro"
+	}
+	return ""
+}
+
+// FetchProfile GETs /api/oauth/profile with the access token.
+func FetchProfile(token string) *Profile {
+	req, _ := http.NewRequest("GET", "https://api.anthropic.com/api/oauth/profile", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil
+	}
+	var p Profile
+	if json.NewDecoder(resp.Body).Decode(&p) != nil {
+		return nil
+	}
+	return &p
 }
 
 // WriteKeychain stores credentials the same way real claude does.

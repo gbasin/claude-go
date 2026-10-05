@@ -93,13 +93,35 @@ func (e *editor) boxFrame() (box []string, curRow, curCol int) {
 	}
 	lines := strings.Split(e.renderedBuf(), "\n")
 	pw := visWidth(e.prompt)
-	all := make([]string, 0, len(lines)+2)
+	// usable text width per box row: screen minus the left border and the
+	// prompt indent — long input soft-wraps onto extra rows (real CC
+	// behavior) instead of being clamped off the right edge, which hid
+	// everything past the border at narrow widths
+	w := compW
+	if w <= 0 {
+		w = 80
+	}
+	textW := w - 1 - pw
+	if textW < 4 {
+		textW = 4
+	}
+	// which buffer line holds the cursor, and its cell offset in it
+	before := string(e.buf[:e.pos])
+	curLine := strings.Count(before, "\n")
+	curCells := visWidth(before[strings.LastIndex(before, "\n")+1:])
+	// lay out: top border, soft-wrapped input rows, voice hint, bottom
+	// border — tracking which box row each logical line starts on
+	all := make([]string, 0, len(lines)+4)
 	all = append(all, "╭─╮")
+	lineRow := make([]int, len(lines))
 	for i, ln := range lines {
-		if i == 0 {
-			all = append(all, "│"+e.prompt+ln)
-		} else {
-			all = append(all, "│"+strings.Repeat(" ", pw)+ln)
+		lineRow[i] = len(all) - 1 // 0-based row among box content rows
+		for j, sg := range softWrap(ln, textW) {
+			if i == 0 && j == 0 {
+				all = append(all, "│"+e.prompt+sg)
+			} else {
+				all = append(all, "│"+strings.Repeat(" ", pw)+sg)
+			}
 		}
 	}
 	if hint := e.voiceHint(); hint != "" {
@@ -108,24 +130,30 @@ func (e *editor) boxFrame() (box []string, curRow, curCol int) {
 	}
 	all = append(all, "╰─╯")
 	e.boxAll = all
-	// which buffer line holds the cursor
-	before := string(e.buf[:e.pos])
-	curLine := strings.Count(before, "\n")
-	// window into at most compAvailRows input lines, keeping curLine visible
+	content := all[1 : len(all)-1]
+	// cursor's box row among content rows, and its column
+	curRow = lineRow[curLine] + curCells/textW
+	curCol = 1 + pw + curCells%textW
+	if e.pos == len(e.buf) && curCells > 0 && curCells%textW == 0 {
+		// cursor sits at a wrap boundary with no following row — the
+		// terminal's deferred-wrap position is the last cell of the
+		// full row, not the (nonexistent) next row
+		curRow--
+		curCol = w
+	}
+	// window into at most compAvailRows rows, keeping curRow visible
 	start := 0
-	if avail := compAvailRows(); len(lines) > avail {
-		start = curLine - avail + 1
+	if avail := compAvailRows(); len(content) > avail {
+		start = curRow - avail + 1
 		if start < 0 {
 			start = 0
 		}
-		if start > len(lines)-avail {
-			start = len(lines) - avail
+		if start > len(content)-avail {
+			start = len(content) - avail
 		}
 	}
-	box = append([]string{all[0]}, all[1+start:]...)
-	// cursor col: border (1) + prompt-width indent + cells before cursor
-	col := 1 + pw + visWidth(before[strings.LastIndex(before, "\n")+1:])
-	return box, 1 + curLine - start, col
+	box = append([]string{all[0]}, append(content[start:], all[len(all)-1])...)
+	return box, 1 + curRow - start, curCol
 }
 
 // redraw reprints the whole input area — into the compositor live zone

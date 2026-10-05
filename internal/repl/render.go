@@ -348,16 +348,29 @@ func (w *turnWriter) WriteString(s string) {
 // finish resets per-turn state (no flush needed — writes are immediate).
 func (w *turnWriter) finish() { w.line.Reset() }
 
-// streamPrint writes a completed line into the turn's stream region —
-// compStreamWrite appends \r\n at the current stream position. If the
-// streamed text ended mid-row, a newline lands the card at col 0 first
-// (real emits ⏺/⎿ on fresh rows, not mid-text).
-func streamPrint(s string) {
+// streamWrite emits s through the tracked stream writer — the mandatory
+// path for ANY output while a turn's stream owns the scroll bottom.
+// A raw fmt.Print lands at the hardware cursor but leaves
+// compStreamRow/compStreamCol stale, so the next compStreamWrite
+// repositions mid-text and overwrites it (verified: the ⏺ prefix and
+// thinking text were clobbered at 60 cols). Off-stream / suspended /
+// non-TTY this degrades to a plain write.
+func streamWrite(s string) { (&turnWriter{}).WriteString(s) }
+
+// streamFresh guarantees s begins on a fresh row: when the stream ended
+// mid-line a real newline lands first (real emits ⏺/⎿/✻ on fresh rows,
+// not mid-text).
+func streamFresh(s string) {
 	compMu.Lock()
 	midLine := compStreamOn && compStreamCol > 1
 	compMu.Unlock()
 	if midLine {
 		s = "\n" + s
 	}
-	(&turnWriter{}).WriteString(s + "\n")
+	streamWrite(s)
 }
+
+// streamPrint writes a completed line into the turn's stream region —
+// compStreamWrite appends \r\n at the current stream position. If the
+// streamed text ended mid-row, a newline lands the card at col 0 first.
+func streamPrint(s string) { streamFresh(s + "\n") }
