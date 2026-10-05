@@ -9,6 +9,7 @@
 //	error:429                                        -> HTTP 429 (tests retry)
 //	error:overloaded                                 -> SSE error event
 //	think:<text>                                     -> emit a thinking block first
+//	usage:<n>                                        -> report n input_tokens (drives auto-compact)
 //	anything else                                    -> echo response as streamed text
 package mock
 
@@ -18,6 +19,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -143,6 +145,13 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 
 	usage := map[string]int{"input_tokens": 1200, "output_tokens": 24,
 		"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+	// usage:<n> reports n input_tokens so tests can ramp context usage
+	// across turns and trip the auto-compact threshold deterministically
+	if strings.HasPrefix(lastText, "usage:") {
+		if n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(lastText, "usage:"))); err == nil {
+			usage["input_tokens"] = n
+		}
+	}
 
 	if !req.Stream {
 		w.Header().Set("Content-Type", "application/json")
