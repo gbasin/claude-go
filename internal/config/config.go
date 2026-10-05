@@ -353,3 +353,22 @@ func MergeCachedGBFeatures(feats map[string]any) {
 	m["cachedGrowthBookFeatures"] = cur
 	WriteClaudeJSON(p, m)
 }
+
+// GBFeature reads a cached GrowthBook feature value (real's
+// cachedGrowthBookFeatures persisted to ~/.claude.json).
+func GBFeature(name string) any {
+	home, _ := os.UserHomeDir()
+	b, err := os.ReadFile(filepath.Join(home, ".claude.json"))
+	if err != nil {
+		return nil
+	}
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil {
+		return nil
+	}
+	cur, _ := m["cachedGrowthBookFeatures"].(map[string]any)
+	if cur == nil {
+		return nil
+	}
+	return cur[name]
+}

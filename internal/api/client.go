@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"claude-go/internal/auth"
+	"claude-go/internal/config"
 )
 
 const Version = "2.1.289"
@@ -155,7 +156,11 @@ func (c *Client) betaHeaderValue() string {
 	}
 	// context-1m needs a positive server flag — the captured wire shows it
 	// absent even with a [1m]-configured model and eval unreachable.
-	// TODO: emit when the bootstrap/eval flag confirms 1m availability.
+	if c.Wants1m && ctx1mEntitled() {
+		parts := strings.Split(betas, ",")
+		parts = append(parts[:2], append([]string{"context-1m-2025-08-07"}, parts[2:]...)...)
+		betas = strings.Join(parts, ",")
+	}
 	if c.Entrypoint == EntryCLI {
 		// real's cli order: ...thinking-binding-controls, thinking-display-
 		// updates, afk-mode, extended-cache-ttl, cache-diagnosis
@@ -169,6 +174,18 @@ func (c *Client) betaHeaderValue() string {
 		betas += ",message-threads-2026-08-12"
 	}
 	return betas
+}
+
+// ctx1mEntitled reads the eval-confirmed 1m entitlement flags — real
+// emits context-1m only with a positive server flag, absent even on
+// [1m]-suffixed configs when eval is unreachable.
+func ctx1mEntitled() bool {
+	for _, name := range []string{"context_1m_entitlement", "supports_1m_beta"} {
+		if v, ok := config.GBFeature(name).(bool); ok && v {
+			return true
+		}
+	}
+	return false
 }
 
 func is1mModel(m string) bool {
