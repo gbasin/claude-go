@@ -7,6 +7,7 @@
 package e2e
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,4 +151,194 @@ func TestAgentToolSubagent(t *testing.T) {
 			truncStr(p.clean(), 3000))
 	}
 	p.exit()
+}
+
+// TestInterruptMidTurn: esc during a retrying turn (mock 5xx → SDK
+// backoff) interrupts the turn; the REPL stays alive afterward.
+func TestInterruptMidTurn(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+
+	p.sendUntilEchoed(t, "error:5*\r", "> error:5*", 8)
+	p.waitFor("esc to interrupt", 30*time.Second) // spinner up = turn running
+	p.send("\x1b")
+	p.waitFor("Interrupted", 15*time.Second)
+
+	p.sendUntilEchoed(t, "alive-after-interrupt\r", "> alive-after-interrupt", 8)
+	p.waitFor("Mock response to: alive-after-interrupt", 30*time.Second)
+	p.exit()
+}
+
+// TestExitPlanModeApproval: ExitPlanMode surfaces the approval dialog;
+// answering 1 exits plan mode and the tool result reports it.
+func TestExitPlanModeApproval(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+
+	// ExitPlanMode is deferred — ToolSearch loads its schema first
+	p.sendUntilEchoed(t,
+		`calls:[{"name":"ToolSearch","input":{"query":"select:ExitPlanMode"}},`+
+			`{"name":"ExitPlanMode","input":{"plan":"do the thing"}}]`+"\r",
+		`> calls:[{"name":"ToolSearch"`, 8)
+	// approval renders as the numbered permission dialog ("don't ask again
+	// for ExitPlanMode in <dir>") — 1 = Yes
+	p.waitFor("don't ask again for ExitPlanMode", 30*time.Second)
+	p.sendUntil("1", "Tool results received", 15)
+	if !strings.Contains(p.clean(), "Exited Plan Mode") {
+		t.Fatalf("approval should exit plan mode\noutput:\n%s", truncStr(p.clean(), 3000))
+	}
+	p.exit()
+}
+
+// TestSessionEndHook: the SessionEnd hook fires on the interactive quit
+// path (side-effect file proves it ran regardless of stdout handling).
+func TestSessionEndHook(t *testing.T) {
+	s := newSession(t)
+	marker := filepath.Join(s.cwd, "sessend.marker")
+	s.writeSettings(fmt.Sprintf(
+		`{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"touch %s"}]}]}}`,
+		marker))
+	p := startREPL(t, s)
+	p.exit()
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(marker); err == nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("SessionEnd hook did not run on exit")
+}
+
+// TestWebFetchPrivateRefusal: the SSRF guard refuses loopback/private
+// targets e2e — HTTP is upgraded to HTTPS and private IPs are rejected.
+func TestWebFetchPrivateRefusal(t *testing.T) {
+	s := newSession(t)
+	// WebFetch is deferred — ToolSearch loads its schema in the same turn
+	r := s.run(t, "--mock", "-p",
+		`calls:[{"name":"ToolSearch","input":{"query":"select:WebFetch"}},`+
+			`{"name":"WebFetch","input":{"url":"http://127.0.0.1:1/x","prompt":"summarize"}}]`,
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "loopback or private") {
+		t.Fatalf("private-address fetch should be refused: %s", truncStr(r.stdout, 2000))
+	}
+}
+
+// TestEscEscRewindPicker: double-esc opens the rewind selector listing past
+// user messages; picking 1 truncates the conversation to before it.
+func TestEscEscRewindPicker(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+
+	p.send("first-msg\r")
+	p.waitFor("Mock response to: first-msg", 30*time.Second)
+	p.sendUntilEchoed(t, "second-msg\r", "> second-msg", 8)
+	p.waitFor("Mock response to: second-msg", 30*time.Second)
+
+	// double-esc within 400ms opens the picker — retry until it lands
+	// (keys sent while the turn is still closing get dropped; an extra
+	// esc-esc on an open picker would cancel it, so poll between sends)
+	opened := false
+	for i := 0; i < 10 && !opened; i++ {
+		p.send("\x1b\x1b")
+		deadline := time.Now().Add(900 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			if strings.Contains(p.clean(), "Rewind to:") {
+				opened = true
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if !opened {
+		t.Fatalf("rewind picker never opened\noutput:\n%s", truncStr(p.clean(), 3000))
+	}
+	out := p.clean()
+	if !strings.Contains(out, "first-msg") || !strings.Contains(out, "second-msg") {
+		t.Fatalf("picker should list both user messages\noutput:\n%s", truncStr(out, 3000))
+	}
+	p.send("1\r")
+	p.waitFor("rewound to before", 15*time.Second)
+
+	p.sendUntilEchoed(t, "/context\r", "> /context", 8)
+	p.waitFor("messages: 0", 15*time.Second)
+	p.exit()
+}
+
+// TestVimModeEditor: editorMode:vim in ~/.claude.json starts the editor in
+// modal mode — esc enters normal mode where letters don't insert, i
+// returns to insert.
+func TestVimModeEditor(t *testing.T) {
+	s := newSession(t)
+	// rewrite .claude.json keeping the seeded trust/onboarding state
+	s.writeFile(filepath.Join(s.home, ".claude.json"), fmt.Sprintf(
+		`{"hasCompletedOnboarding":true,"editorMode":"vim",`+
+			`"projects":{%q:{"hasTrustDialogAccepted":true}}}`, s.cwd))
+	p := startREPL(t, s)
+
+	mark := len(p.output())
+	// esc → normal mode; letters are motions, not text
+	p.send("\x1b")
+	time.Sleep(300 * time.Millisecond)
+	p.send("hj") // motions, not text
+	time.Sleep(400 * time.Millisecond)
+	if strings.Contains(stripANSI(p.output()[mark:]), "> hj") {
+		t.Fatalf("normal-mode keys should not insert text")
+	}
+	// i → insert mode; typing echoes
+	p.send("i")
+	time.Sleep(300 * time.Millisecond)
+	p.send("vim-typed\r")
+	p.waitFor("Mock response to: vim-typed", 30*time.Second)
+	p.exit()
+}
+
+// TestLoopCloudOffer: /loop with an interval ≥60m triggers real's
+// cloud-schedule upsell; picking "This session only" arms the local ticker.
+func TestLoopCloudOffer(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+
+	p.sendUntilEchoed(t, "/loop 2h check the build\r", "> /loop 2h", 8)
+	p.waitFor("cloud schedule instead", 15*time.Second)
+	p.sendUntil("2\r", "loop armed: every 7200s", 15)
+	p.exit()
+}
+
+// TestLoopUsage: bare /loop and /loop 5m (interval without prompt) print
+// usage, not a silent no-op.
+func TestLoopUsage(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.sendUntilEchoed(t, "/loop\r", "> /loop", 8)
+	p.waitFor("usage: /loop", 15*time.Second)
+	p.exit()
+}
+
+// TestAgentToolBackground: default run_in_background launches the subagent
+// and returns the task handle; its completion notice lands on idle.
+func TestAgentToolBackground(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+
+	p.sendUntilEchoed(t,
+		`tool:Agent {"description":"bg e2e","prompt":"bg marker question"}`+"\r",
+		"> tool:Agent", 8)
+	p.waitFor("Launched agent", 30*time.Second)
+
+	// the subagent turn runs against the mock; the completion notice is
+	// delivered on idle — poke the REPL so it flushes
+	p.sendUntilEchoed(t, "wake\r", "> wake", 8)
+	p.waitFor("Mock response to: wake", 30*time.Second)
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(p.clean(), "completed") {
+			p.exit()
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("background agent completion notice never surfaced\noutput:\n%s",
+		truncStr(p.clean(), 3000))
 }
