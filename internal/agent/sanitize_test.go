@@ -125,7 +125,7 @@ func TestEphemeralBreakpoint(t *testing.T) {
 		api.TextMessage("assistant", "a"),
 		api.TextMessage("user", "last"),
 	}
-	out := withEphemeralBreakpoint(msgs)
+	out := new(Loop).withEphemeralBreakpoint(msgs)
 	// real puts the breakpoint on the last ASSISTANT block (captured:
 	// the tool_use in a tool-loop request), not the trailing user record
 	var blocks []api.ContentBlock

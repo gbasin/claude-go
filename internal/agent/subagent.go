@@ -5,6 +5,7 @@ import (
 	"claude-go/internal/hooks"
 	"claude-go/internal/session"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -43,6 +44,9 @@ var readOnlyDeny = []string{
 	"ExitPlanMode", "Edit", "Write", "NotebookEdit",
 }
 
+//go:embed prompts/agent_general_purpose.txt
+var generalPurposePrompt string
+
 // builtinAgentDefs are the default agent types (mod_0950:64).
 var builtinAgentDefs = []AgentDef{
 	{
@@ -52,6 +56,7 @@ var builtinAgentDefs = []AgentDef{
 			"***REMOVED***" +
 			"***REMOVED***" +
 			"perform the search for you.",
+		SystemPrompt: generalPurposePrompt,
 	},
 	{
 		Name:            "Explore",
@@ -427,6 +432,7 @@ func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, m
 		hooks.Run(r.Hooks, hooks.SubagentStart, payload, c.CWD)
 	}
 	sub := &Loop{
+		IsSubagent:   true,
 		AllowedTools: def.resolveAllowed(extraAllowed),
 		AppendSysP:   def.effectiveSystemPrompt(),
 		Client:       r.Client,
@@ -439,6 +445,7 @@ func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, m
 		User:         r.User,
 		PermRules:    r.PermRules,
 		ToolCtx: &tools.Context{
+			Subagent:   true,
 			Ctx:        c.Ctx,
 			CWD:        c.CWD,
 			BgTasks:    c.BgTasks,
@@ -456,6 +463,9 @@ func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, m
 	if def.InitialPrompt != "" {
 		prompt = def.InitialPrompt + "\n\n" + prompt
 	}
+	// real's subagent msg[0] ends with the SubagentHandback reminder
+	// block — emitted as a separate text block, not folded into the prompt
+	sub.handbackTail = true
 	finish := func(res tools.Result) tools.Result {
 		rec.Finish(res.Content)
 		if c.Session != "" {
@@ -525,7 +535,7 @@ func (r *Runner) runAgentTurn(sub *Loop, prompt string, c *tools.Context, rec *t
 			}
 		}
 	}
-	resp, err := sub.Ask(ctx, prompt)
+	resp, err := sub.Ask(ctx, prompt+"\n")
 	if subStore != nil {
 		for _, m := range sub.Messages {
 			subStore.Log(m)
@@ -615,3 +625,9 @@ func ResolveAgentPrompt(name, cwd string) string {
 // StatuslineSetupPrompt is assigned by the repl package (bundled real prompt);
 // when empty a minimal default applies.
 var StatuslineSetupPrompt string
+
+// handbackReminder is real's msg[0] tail block for spawned agents —
+// the final report only reaches the caller through SubagentHandback.
+const handbackReminderBlock = `<system-reminder>
+***REMOVED***
+</system-reminder>`

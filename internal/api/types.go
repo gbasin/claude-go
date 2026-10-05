@@ -112,8 +112,11 @@ type Request struct {
 	Stream       bool            `json:"stream"`
 
 	// Class overrides x-claude-code-request-class (default "main") —
-	// real uses "compaction", "auxiliary", etc.
+	// real uses "compaction", "auxiliary", "subagent", etc.
 	Class string `json:"-"`
+	// PromptID overrides the client's turn prompt-id — subagent requests
+	// carry their own (captured: distinct from the parent's).
+	PromptID string `json:"-"`
 	// Temperature is set only by aux-class calls (the title call sends 1).
 	Temperature *float64 `json:"temperature,omitempty"`
 }
