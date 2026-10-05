@@ -223,7 +223,10 @@ func withEphemeralBreakpoint(msgs []api.Message) []api.Message {
 		if err := json.Unmarshal(out[i].Content, &blocks); err != nil || len(blocks) == 0 {
 			return out
 		}
-		blocks[len(blocks)-1].CacheControl = &api.CacheControl{Type: "ephemeral"}
+		// ttl must match the system/env blocks (1h): the API enforces
+		// ttl ordering across tools→system→messages — a 5m block before
+		// a 1h block is rejected (live-verified 400)
+		blocks[len(blocks)-1].CacheControl = &api.CacheControl{Type: "ephemeral", TTL: "1h"}
 		if raw, err := json.Marshal(blocks); err == nil {
 			out[i].Content = raw
 		}
@@ -741,6 +744,31 @@ func capBreakpoints(msgs []api.Message, sysReserved int) []api.Message {
 		}
 	}
 	allowed := 4 - sysReserved
+	// normalize surviving message breakpoints to 1h — a stale 5m
+	// breakpoint (e.g. replayed transcript) before the 1h env block
+	// violates the API's ttl ordering and 400s even when count is fine
+	out2 := make([]api.Message, len(msgs))
+	copy(out2, msgs)
+	changed := false
+	for i, m := range out2 {
+		blocks := blocksOf(m.Content)
+		dirty := false
+		for _, b := range blocks {
+			if b.CacheControl != nil && b.CacheControl.TTL == "" {
+				b.CacheControl.TTL = "1h"
+				dirty = true
+				changed = true
+			}
+		}
+		if dirty {
+			if raw, err := json.Marshal(blocks); err == nil {
+				out2[i].Content = raw
+			}
+		}
+	}
+	if changed {
+		msgs = out2
+	}
 	if count <= allowed {
 		return msgs
 	}
