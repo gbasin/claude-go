@@ -62,8 +62,35 @@ func (p *ptyProc) sendUntil(keys, want string, tries int) {
 			time.Sleep(20 * time.Millisecond)
 		}
 	}
-	p.t.Fatalf("never saw %q after %d sends of %q\noutput:\n%s",
-		want, tries, keys, truncStr(p.clean(), 4000))
+	out := p.clean()
+	if len(out) > 4000 {
+		out = "…[head truncated]…" + out[len(out)-4000:]
+	}
+	p.t.Fatalf("never saw %q after %d sends of %q\noutput tail:\n%s",
+		want, tries, keys, out)
+}
+
+// sendUntilEchoed re-sends keys until the editor echo of the line appears.
+// Use for inputs whose execution must not run twice: unlike sendUntil (which
+// retries until the RESULT shows and can thus submit duplicate turns), this
+// only retries while the send was fully dropped — once the echo lands the
+// line was submitted and we stop.
+func (p *ptyProc) sendUntilEchoed(t *testing.T, keys, echoFrag string, tries int) {
+	t.Helper()
+	mark := len(p.output())
+	for i := 0; i < tries; i++ {
+		p.send(keys)
+		deadline := time.Now().Add(1500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			if strings.Contains(stripANSI(p.output()[mark:]), echoFrag) {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	out := stripANSI(p.output()[mark:])
+	t.Fatalf("line echo %q never appeared after %d sends — input keeps being dropped\nnew output:\n%s",
+		echoFrag, tries, truncStr(out, 3000))
 }
 
 // exit sends ctrl-U + /exit repeatedly until the process exits — keystrokes
