@@ -222,7 +222,13 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "tasks":
 		tasksCmd(l)
 	case "theme", "color":
-		dprintln("  themes not implemented; output uses standard ANSI")
+		if arg == "" {
+			dprintf("  theme: %s (dark, light, daltonian, ansi, none, or a ~/.claude/themes/<name>.json)\n", themeSetting(l.CWD))
+			break
+		}
+		applyTheme(arg, l.CWD)
+		persistTheme(l.CWD, arg)
+		dprintf("  theme set to %s\n", arg)
 	case "alias":
 		aliasCmd(l, arg)
 	case "login":
@@ -232,7 +238,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "keybindings":
 		dprintln("  edit ~/.claude/keybindings.json")
 	case "ide":
-		dprintln("  IDE integration not implemented")
+		ideCmd()
 	case "files":
 		out, _ := exec.Command("git", "-C", l.ToolCtx.CWD, "ls-files").CombinedOutput()
 		dprintf("%s", string(out))
@@ -3308,4 +3314,19 @@ func toolResultText(b api.ContentBlock) string {
 		return strings.Join(out, "\n")
 	}
 	return string(b.Content)
+}
+
+// ideCmd reports the IDE bridge status — the auto-connect at startup
+// (mcp.ConnectIDE over ~/.claude/ide/*.lock) surfaces as mcp__ide__*
+// tools when the extension is live.
+func ideCmd() {
+	for _, st := range tools.MCPServerStatus() {
+		if strings.Contains(st.Name, "ide") || strings.Contains(st.Name, "vscode") {
+			if st.Err == nil && st.Tools > 0 {
+				dprintf("  IDE connected: %s (%d tools)\n", st.Name, st.Tools)
+				return
+			}
+		}
+	}
+	dprintln("  no IDE detected — install the Claude Code extension in VS Code/Cursor and reopen this folder")
 }

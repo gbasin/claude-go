@@ -96,7 +96,7 @@ Flags:
   --project <dir>               run in a different project directory
   --from-pr <ref>               (accepted)
   --tmux                        (accepted; tmux integration not supported)
-  --ide, --desktop              (accepted; IDE bridge not supported)
+  --ide, --desktop              IDE integration hints (bridge auto-connects via ~/.claude/ide/*.lock)
   --chrome, --no-chrome         chrome tool toggle (env)
   --claude-in-chrome-mcp        run the Claude in Chrome stdio MCP server (no REPL)
   --chrome-native-host          run the Chrome native-messaging host (extension-facing)
