@@ -60,6 +60,10 @@ var kbContexts = map[string]bool{
 	"Plugin": true, "Scroll": true, "Agents": true,
 }
 
+// kbActiveCtxs — the prompt editor's resolution order (real builds
+// [focused contexts…, handler's own context, Global]).
+var kbActiveCtxs = []string{"Chat", "Global"}
+
 // kbReserved — non-rebindable keys (ctrl+m==enter, ctrl+[==esc,
 // ctrl+i==tab, ctrl+h==backspace are terminal aliases; ctrl+z is the
 // suspend signal the terminal driver owns).
@@ -326,16 +330,17 @@ func (e *editor) loadKeybindings() {
 		cs, w := parseChord(d.chord)
 		warns = append(warns, w...)
 		if cs != "" {
-			e.kb[cs] = d.action
+			e.kb[d.context+"\x00"+cs] = d.action
 		}
 	}
 	if b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "keybindings.json")); err == nil {
 		warns = append(warns, e.applyKeybindingFile(b)...)
 	}
 	for cs := range e.kb {
-		parts := strings.Split(cs, " ")
+		ctx, chord, _ := strings.Cut(cs, "\x00")
+		parts := strings.Split(chord, " ")
 		for i := 1; i < len(parts); i++ {
-			e.kbPrefix[strings.Join(parts[:i], " ")] = true
+			e.kbPrefix[ctx+"\x00"+strings.Join(parts[:i], " ")] = true
 		}
 	}
 	if len(warns) > 0 {
@@ -383,17 +388,18 @@ func (e *editor) applyKeybindingFile(b []byte) []string {
 			if first := strings.Split(cs, " ")[0]; kbReserved[first] != "" {
 				warns = append(warns, fmt.Sprintf("%q may not work: %s", kstr, kbReserved[first]))
 			}
+			ck := cb.Context + "\x00" + cs
 			if act == nil {
-				delete(e.kb, cs) // null unbinds the default
-				e.kbUnbound[cs] = true
+				delete(e.kb, ck) // null unbinds the default
+				e.kbUnbound[ck] = true
 				continue
 			}
 			// real accepts unknown action names SILENTLY — the binding is
 			// stored and resolves to no handler, consuming the key (a typo
 			// kills the key rather than warning). command:<name> executes a
 			// slash command. Both paths store the binding as-is.
-			delete(e.kbUnbound, cs)
-			e.kb[cs] = *act
+			delete(e.kbUnbound, ck)
+			e.kb[ck] = *act
 		}
 	}
 	return warns
@@ -421,12 +427,31 @@ func (e *editor) bindingKey(k key) (*readResult, bool) {
 		cand = strings.Join(append(append([]string{}, e.pendingChord...), s), " ")
 	}
 	e.pendingChord = nil
-	if e.kbPrefix[cand] {
-		e.pendingChord = strings.Fields(cand)
-		e.chordAt = time.Now()
-		return nil, true
+	// real's resolution list at the prompt: focused contexts (none for the
+	// editor), own context Chat, then Global — first context with a match
+	// wins; unbound within a context consumes the key.
+	act, found, consumed := "", false, false
+	// chord-prefix detection runs across ALL active contexts before
+	// exact-match resolution (mod_0245)
+	for _, ctx := range kbActiveCtxs {
+		if e.kbPrefix[ctx+"\x00"+cand] {
+			e.pendingChord = strings.Fields(cand)
+			e.chordAt = time.Now()
+			return nil, true
+		}
 	}
-	if act, ok := e.kb[cand]; ok {
+	for _, ctx := range kbActiveCtxs {
+		ck := ctx + "\x00" + cand
+		if a, ok := e.kb[ck]; ok {
+			act, found = a, true
+			break
+		}
+		if e.kbUnbound[ck] {
+			consumed = true
+			break
+		}
+	}
+	if found {
 		if f := kbActions[act]; f != nil {
 			return f(e), true
 		}
@@ -438,7 +463,7 @@ func (e *editor) bindingKey(k key) (*readResult, bool) {
 		// inert — consumed, no handler
 		return nil, true
 	}
-	if e.kbUnbound[cand] {
+	if consumed {
 		return nil, true
 	}
 	if hadPending {

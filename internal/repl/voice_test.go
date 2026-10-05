@@ -177,7 +177,7 @@ func TestVoiceWordCount(t *testing.T) {
 
 func TestVoiceSpaceBindingDefault(t *testing.T) {
 	e := newVoiceEditor(t, voice.Config{})
-	if e.kb["space"] != "voice:pushToTalk" {
-		t.Fatalf("default space binding = %q", e.kb["space"])
+	if e.kb["Chat\x00space"] != "voice:pushToTalk" {
+		t.Fatalf("default space binding = %q", e.kb["Chat\x00space"])
 	}
 }

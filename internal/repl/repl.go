@@ -266,6 +266,11 @@ func RunWithStore(l *agent.Loop, store Store) {
 	}
 	compactBanner(api.Version, agent.ModelDisplay(l.Model), eff, plan, l.CWD, l.Client.SessionID)
 
+	// transcript append cursor — session-scoped so each turn logs only
+	// new messages; starts past any resumed/loaded history, which is
+	// already in the transcript file
+	loggedTo := len(l.Messages)
+
 	for {
 		printStatus(l, ed)
 		tools.UserActive.Store(true)
@@ -325,7 +330,6 @@ func RunWithStore(l *agent.Loop, store Store) {
 
 		var queued []string
 		var draftBack []rune
-		loggedTo := 0
 		if store != nil {
 			// mid-turn compaction replaces history inside Ask — persist
 			// the not-yet-logged tail of the replaced span so the last
@@ -421,6 +425,15 @@ func RunWithStore(l *agent.Loop, store Store) {
 			if store != nil {
 				// log only NEW messages per turn (was O(n²) re-log + a git
 				// fork per record)
+				if kept := l.TakeCompactPending(); kept >= 0 && len(l.Messages) > 0 {
+					// compaction rewrote history: Messages[0] is the new
+					// isCompactSummary record, indices 1..kept are the
+					// retained tail already in the transcript
+					store.Log(l.Messages[0])
+					loggedTo = 1 + kept
+				} else if loggedTo > len(l.Messages) {
+					loggedTo = 0 // /clear wiped history
+				}
 				for _, m := range l.Messages[loggedTo:] {
 					store.Log(m)
 				}
