@@ -259,7 +259,15 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 		l.Messages = append(l.Messages, msg, envBlocks)
 	} else {
 		msg = api.TextMessage("user", prompt)
-		l.Messages = append(l.Messages, msg)
+		// if the previous turn was interrupted before the assistant
+		// replied, the env system block sits mid-array with no assistant
+		// after it — the API rejects that ("system must precede an
+		// assistant message or end the array"). Keep it last.
+		if n := len(l.Messages); n > 0 && l.Messages[n-1].Role == "system" {
+			l.Messages = append(l.Messages[:n-1], msg, l.Messages[n-1])
+		} else {
+			l.Messages = append(l.Messages, msg)
+		}
 	}
 	resp, err := l.run(ctx, 0)
 	if err != nil {

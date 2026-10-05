@@ -109,8 +109,18 @@ func (rawHTTP11RoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	if os.Getenv("CLAUDE_GO_DEBUG_HTTP") != "" {
 		fmt.Fprintf(os.Stderr, "[debug] %s %s -> %d\n", req.Method, req.URL.String(), resp.StatusCode)
 	}
-	// return conn to pool when the body is fully consumed or closed
-	resp.Body = &rawBody{rc: rc, host: host, r: resp.Body}
+	// return conn to pool when the body is fully consumed or closed;
+	// a cancelled request ctx must also kill the conn or Read blocks
+	// forever (esc-interrupt during a long stream relies on this)
+	body := &rawBody{rc: rc, host: host, r: resp.Body}
+	if done := req.Context().Done(); done != nil {
+		stop := context.AfterFunc(req.Context(), func() {
+			rc.closed = true
+			rc.conn.Close()
+		})
+		body.stopCancel = func() { stop() }
+	}
+	resp.Body = body
 	return resp, nil
 }
 
@@ -271,21 +281,28 @@ func hopHeader(k string) bool {
 
 // rawBody releases the conn to the keep-alive pool at EOF/Close.
 type rawBody struct {
-	rc   *rawConn
-	host string
-	r    io.ReadCloser
-	done bool
+	rc         *rawConn
+	host       string
+	r          io.ReadCloser
+	done       bool
+	stopCancel func() // detaches the ctx-kill watcher on clean close
 }
 
 func (b *rawBody) Read(p []byte) (int, error) {
 	n, err := b.r.Read(p)
 	if err == io.EOF && !b.done {
 		b.done = true
+		if b.stopCancel != nil {
+			b.stopCancel() // pooled conn must outlive the request ctx
+		}
 		putRawConn(b.host, b.rc, false)
 	}
 	return n, err
 }
 func (b *rawBody) Close() error {
+	if b.stopCancel != nil {
+		b.stopCancel()
+	}
 	if !b.done {
 		b.done = true
 		putRawConn(b.host, b.rc, true) // body not drained — conn unusable

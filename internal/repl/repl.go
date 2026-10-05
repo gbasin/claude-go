@@ -335,6 +335,9 @@ func RunWithStore(l *agent.Loop, store Store) {
 							continue // modal dialog owns the key
 						}
 						if (k.b == 0x1b || k.b == 3) && k.seq == "" {
+							if os.Getenv("CG_DBGKEY") != "" {
+								fmt.Fprintf(os.Stderr, "[dbgkey cancel b=%x seq=%q]", k.b, k.seq)
+							}
 							cancel()
 							// popQueuedIntoDraft: unfinished queued text returns to the editor
 							if len(queueBuf) > 0 {
@@ -365,6 +368,9 @@ func RunWithStore(l *agent.Loop, store Store) {
 			}()
 			compStreamBegin()
 			_, err := l.Ask(ctx, expandMentions(l, line))
+			// capture cancellation BEFORE cleanup cancel() — after that
+			// call ctx.Err() is always Canceled and would mask real errors
+			wasCancelled := ctx.Err() == context.Canceled
 			compStreamEnd()
 			spin.stop()
 			tools.SetPeerSessionBusy(false)
@@ -387,6 +393,27 @@ func RunWithStore(l *agent.Loop, store Store) {
 			md.Close()
 			close(respDone)
 			cancel()
+			// drain buffered interrupt keys from the turn — a stale Esc
+			// would otherwise fire cancel() instantly on the NEXT turn's
+			// loop. Printable keys stay queued for the editor.
+			for {
+				select {
+				case k, ok := <-ks.ch:
+					if !ok {
+						goto drained
+					}
+					if k.b != 0x1b && k.b != 3 {
+						select {
+						case ks.ch <- k:
+						default:
+						}
+						goto drained
+					}
+				default:
+					goto drained
+				}
+			}
+		drained:
 			fmt.Println()
 			// ping the notification channel when the turn ended with no
 			// user keystrokes — the session was unattended (UserActive is
@@ -404,7 +431,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 				fmt.Printf("%s  Context limit reached · /compact or /clear to continue%s%s\n", red, suffix, reset)
 			}
 			if err != nil {
-				if ctx.Err() == context.Canceled {
+				if wasCancelled {
 					fmt.Printf("%s⏺ Interrupted%s\n", yellow, reset)
 				} else {
 					fmt.Printf("%sError: %v%s\n", red, err, reset)
