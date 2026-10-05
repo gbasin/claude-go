@@ -73,11 +73,13 @@ type Client struct {
 	RetryCount int    // exposed for x-stainless-retry-count
 	UnixSocket string // ANTHROPIC_UNIX_SOCKET path, when set
 
-	mu             sync.Mutex
-	RateLimit      *RateLimit // headers from the most recent response
-	vertexToken    string
-	vertexTokenExp time.Time
-	promptID       string
+	mu              sync.Mutex
+	RateLimit       *RateLimit // headers from the most recent response
+	vertexToken     string
+	vertexTokenExp  time.Time
+	promptID        string
+	bootstrap       map[string]any // /api/claude_cli/bootstrap payload
+	accountSettings map[string]any // /api/oauth/account/settings payload
 }
 
 func NewClient(creds *auth.Credentials, sessionID string, ep Entrypoint) *Client {
@@ -122,6 +124,8 @@ func NewClient(creds *auth.Credentials, sessionID string, ep Entrypoint) *Client
 // PromptID is the current turn's prompt uuid — same value real puts in
 // the x-claude-code-prompt-id header and the billing sys[0] cc_prompt_id.
 func (c *Client) PromptID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.promptID == "" {
 		c.promptID = newUUID()
 	}
@@ -134,7 +138,10 @@ func (c *Client) PromptID() string {
 // index 8; verified against live captures of both model classes.
 func (c *Client) betaHeaderValue() string {
 	betas := betaFlags
-	if c.evalFailed {
+	c.mu.Lock()
+	evalFailed := c.evalFailed
+	c.mu.Unlock()
+	if evalFailed {
 		// eval-unreachable fallback (captured): the four default-on betas
 		// appear, context-1m is absent (needs a positive flag)
 		return "claude-code-20250219,oauth-2025-04-20," +
@@ -152,6 +159,11 @@ func (c *Client) betaHeaderValue() string {
 	// TODO: emit when the bootstrap/eval flag confirms 1m availability.
 	if c.Entrypoint == EntryCLI {
 		betas += ",thinking-display-updates-2026-08-18"
+	}
+	// haiku-class requests carry the message-threads beta + thread field
+	// (captured: haiku -p turn had both; fable/opus did not)
+	if strings.Contains(c.Model, "haiku") {
+		betas += ",message-threads-2026-08-12"
 	}
 	return betas
 }
@@ -330,11 +342,12 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 		// a turn's retries/subrequests, client-request-id is fresh per
 		// request attempt.
 		req.Header.Set("anthropic-dispatch-id", "v2d")
-		req.Header.Set("x-claude-code-request-class", "main")
-		if c.promptID == "" {
-			c.promptID = newUUID()
+		class_ := "main"
+		if r, ok := body.(*Request); ok && r.Class != "" {
+			class_ = r.Class
 		}
-		req.Header.Set("x-claude-code-prompt-id", c.promptID)
+		req.Header.Set("x-claude-code-request-class", class_)
+		req.Header.Set("x-claude-code-prompt-id", c.PromptID())
 		req.Header.Set("x-client-request-id", newUUID())
 		resp, err := c.HTTP.Do(req)
 		if err != nil {

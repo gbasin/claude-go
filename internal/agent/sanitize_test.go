@@ -126,10 +126,17 @@ func TestEphemeralBreakpoint(t *testing.T) {
 		api.TextMessage("user", "last"),
 	}
 	out := withEphemeralBreakpoint(msgs)
+	// real puts the breakpoint on the last ASSISTANT block (captured:
+	// the tool_use in a tool-loop request), not the trailing user record
 	var blocks []api.ContentBlock
-	json.Unmarshal(out[2].Content, &blocks)
+	json.Unmarshal(out[1].Content, &blocks)
 	if blocks[0].CacheControl == nil || blocks[0].CacheControl.Type != "ephemeral" {
-		t.Fatal("no breakpoint on last user message")
+		t.Fatal("no breakpoint on last assistant message")
+	}
+	var ublocks []api.ContentBlock
+	json.Unmarshal(out[2].Content, &ublocks)
+	if ublocks[0].CacheControl != nil {
+		t.Fatal("user message should not carry the breakpoint")
 	}
 	// original untouched
 	var orig []api.ContentBlock

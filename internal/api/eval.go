@@ -132,4 +132,8 @@ func (c *Client) evalBase() string {
 
 // MarkEvalFailed records the empty-features eval outcome — real switches
 // to the fallback header/beta set (MITM-verified).
-func (c *Client) MarkEvalFailed(f bool) { c.evalFailed = f }
+func (c *Client) MarkEvalFailed(f bool) {
+	c.mu.Lock()
+	c.evalFailed = f
+	c.mu.Unlock()
+}

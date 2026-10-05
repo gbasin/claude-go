@@ -106,6 +106,11 @@ func (rawHTTP11RoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 		putRawConn(host, rc, true)
 		return nil, err
 	}
+	if req.Close {
+		// axios-lane aux requests (Connection: close) never re-enter the
+		// keep-alive pool — the server closes its side after the body.
+		rc.closed = true
+	}
 	if os.Getenv("CLAUDE_GO_DEBUG_HTTP") != "" {
 		fmt.Fprintf(os.Stderr, "[debug] %s %s -> %d\n", req.Method, req.URL.String(), resp.StatusCode)
 	}
@@ -212,16 +217,20 @@ func writeRawRequest(rc *rawConn, req *http.Request) error {
 	}
 	fmt.Fprintf(&b, "%s %s HTTP/1.1\r\n", req.Method, path)
 
+	hasBody := req.Body != nil && req.Body != http.NoBody
 	seen := map[string]bool{}
 	for _, name := range rawHeaderOrder {
 		vals := req.Header.Values(name)
 		if len(vals) == 0 {
-			// defaults real sets: Accept, Content-Type
+			// defaults real sets: Accept, Content-Type. Aux-lane GETs
+			// (axios) send no Content-Type on bodyless requests.
 			switch name {
 			case "Accept":
 				vals = []string{"application/json"}
 			case "Content-Type":
-				vals = []string{"application/json"}
+				if hasBody || req.Method == "POST" {
+					vals = []string{"application/json"}
+				}
 			}
 		}
 		for _, v := range vals {
@@ -243,12 +252,21 @@ func writeRawRequest(rc *rawConn, req *http.Request) error {
 		}
 	}
 
-	// node fetch trailer block
-	b.WriteString("Connection: keep-alive\r\n")
-	fmt.Fprintf(&b, "Host: %s\r\n", req.URL.Host)
-	b.WriteString("Accept-Encoding: gzip, deflate, br, zstd\r\n")
+	// node fetch trailer block. Aux-lane requests (req.Close) ride axios,
+	// whose block differs: Accept-Encoding advertises compress, the conn
+	// is Connection: close, and field order is Accept-Encoding/Host/
+	// Connection (captured 2.1.289).
+	if req.Close {
+		b.WriteString("Accept-Encoding: gzip, compress, deflate, br\r\n")
+		fmt.Fprintf(&b, "Host: %s\r\n", req.URL.Host)
+		b.WriteString("Connection: close\r\n")
+	} else {
+		b.WriteString("Connection: keep-alive\r\n")
+		fmt.Fprintf(&b, "Host: %s\r\n", req.URL.Host)
+		b.WriteString("Accept-Encoding: gzip, deflate, br, zstd\r\n")
+	}
 	var body []byte
-	if req.Body != nil {
+	if hasBody {
 		var err error
 		body, err = io.ReadAll(req.Body)
 		req.Body.Close()
@@ -257,7 +275,11 @@ func writeRawRequest(rc *rawConn, req *http.Request) error {
 		}
 		req.Body = io.NopCloser(strings.NewReader(string(body)))
 	}
-	fmt.Fprintf(&b, "Content-Length: %d\r\n\r\n", len(body))
+	// axios GETs carry no Content-Length; POSTs always do.
+	if hasBody || req.Method == "POST" {
+		fmt.Fprintf(&b, "Content-Length: %d\r\n", len(body))
+	}
+	b.WriteString("\r\n")
 	if _, err := rc.conn.Write([]byte(b.String())); err != nil {
 		return err
 	}
