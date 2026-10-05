@@ -531,6 +531,15 @@ func RunWithStore(l *agent.Loop, store Store) {
 			queued = queued[1:]
 			queuedPending.Add(-1)
 		}
+		// EndConversation (or anything that set wantQuit mid-turn) takes
+		// effect at turn end — gating it on the next submitted line would
+		// wait for input that never comes.
+		if wantQuit.Load() {
+			l.SessionEndReason = "prompt_input_exit"
+			dprintln()
+			fireSessionEndHook(l)
+			return
+		}
 	}
 }
 
