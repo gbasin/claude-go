@@ -223,12 +223,21 @@ func DeferredReminder(names []string) string {
 // RequestDefs is the wire tools array: non-deferred defs, plus the
 // DeferredToolPlaceholder stub (second-to-last, real's splice point) and the
 // ToolSearch def while undiscovered deferred tools remain.
+// subagentTools is real's subagent wire surface (captured): the agent
+// gets a trimmed set plus SubagentHandback; the deferred placeholder
+// sits after Write for subagents (main's is before it).
+var subagentTools = []string{
+	"Agent", "Bash", "Edit", "Read", "Skill", "ToolSearch", "Write",
+	deferredPlaceholderName, "SubagentHandback", "advisor",
+}
+
 func RequestDefs(c *Context) []api.Tool {
 	if !toolSearchEnabled() {
 		return Defs()
 	}
 	var out []api.Tool
 	var deferred []string
+	sub := c.Subagent
 	for _, t := range All() {
 		if IsDeferredTool(t) && !c.IsDiscovered(t.Def.Name) {
 			deferred = append(deferred, t.Def.Name)
@@ -253,6 +262,25 @@ func RequestDefs(c *Context) []api.Tool {
 			out = append(out[:i], append([]api.Tool{ph}, out[i:]...)...)
 			break
 		}
+	}
+	// subagents get real's trimmed surface with SubagentHandback
+	if sub {
+		var sOut []api.Tool
+		seen := map[string]bool{}
+		for _, n := range subagentTools {
+			switch n {
+			case deferredPlaceholderName:
+				if len(deferred) > 0 {
+					sOut = append(sOut, ph)
+				}
+			default:
+				if t, ok := registry[n]; ok {
+					sOut = append(sOut, t.Def)
+					seen[n] = true
+				}
+			}
+		}
+		return sOut
 	}
 	return out
 }
