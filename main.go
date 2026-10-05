@@ -1565,16 +1565,25 @@ func safetyTranscript(l *agent.Loop, name string, input json.RawMessage) []strin
 		if json.Unmarshal(m.Content, &blocks) != nil || len(blocks) == 0 {
 			var s string
 			if json.Unmarshal(m.Content, &s) == nil && s != "" {
-				if m.Role == "user" {
+				if m.Role == "user" && !strings.HasPrefix(s, "SessionStart hook") {
 					b, _ := json.Marshal(map[string]string{"user": s})
 					lines = append(lines, string(b))
 				}
 			}
 			continue
 		}
+		if m.Role != "user" && m.Role != "assistant" {
+			continue
+		}
 		for _, blk := range blocks {
 			switch blk.Type {
 			case "text":
+				// ctx reminders and hook context aren't transcript
+				// content — real serializes prompt/reply text only
+				if strings.HasPrefix(blk.Text, "<system-reminder>") ||
+					strings.HasPrefix(blk.Text, "SessionStart hook") {
+					continue
+				}
 				key := "user"
 				if m.Role == "assistant" {
 					key = "assistant"
@@ -1587,8 +1596,10 @@ func safetyTranscript(l *agent.Loop, name string, input json.RawMessage) []strin
 			}
 		}
 	}
-	b, _ := json.Marshal(map[string]string{name: safetyInputSummary(input)})
-	lines = append(lines, string(b))
+	// the proposed call is already the last assistant tool_use in
+	// l.Messages — no extra line needed
+	_ = name
+	_ = input
 	return lines
 }
 
