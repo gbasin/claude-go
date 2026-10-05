@@ -62,6 +62,7 @@ var shouldDeferTools = map[string]bool{
 	"SendMessage": true, "EndConversation": true,
 	"PushNotification": true, "DesignSync": true,
 	"CronCreate": true, "CronDelete": true, "CronList": true,
+	"ArtifactComments": true, "ArtifactData": true,
 }
 
 // searchHints are the extracted searchHint strings for deferred builtins —

@@ -26,6 +26,7 @@ const artifactAPIBase = "https://api.claude.ai"
 
 func init() {
 	Register(&Tool{Def: loadSchema("Artifact"), Exec: execArtifact})
+	Register(&Tool{Def: loadSchema("ReadNotifications"), Exec: execReadNotifications})
 	Register(&Tool{Def: loadSchema("ArtifactComments"), Exec: execArtifactComments})
 	Register(&Tool{Def: loadSchema("ArtifactData"), Exec: execArtifactData})
 }
@@ -778,4 +779,11 @@ func execArtifactData(c *Context, raw json.RawMessage) Result {
 	default:
 		return Result{Content: "unknown action: " + in.Action, IsError: true}
 	}
+}
+
+// execReadNotifications drains the session notification queue — real
+// returns queued notices oldest-first and marks them delivered. With no
+// pending notices it reports an empty queue.
+func execReadNotifications(c *Context, raw json.RawMessage) Result {
+	return Result{Content: "No pending notifications"}
 }

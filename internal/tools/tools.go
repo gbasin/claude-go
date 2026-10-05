@@ -84,9 +84,9 @@ func All() []*Tool {
 		"EnterWorktree", "ExitPlanMode", "ExitWorktree", "ListAgents",
 		"ListMcpResourcesTool", "LSP", "Monitor", "NotebookEdit",
 		"PushNotification", "Read", "ReadMcpResourceDirTool",
-		"ReadMcpResourceTool", "RemoteTrigger", "ReportFindings",
-		"ScheduleWakeup", "SendFeedback", "SendMessage", "Skill",
-		"ToolSearch",
+		"ReadMcpResourceTool", "ReadNotifications", "RemoteTrigger",
+		"ReportFindings", "ScheduleWakeup", "SendFeedback", "SendMessage",
+		"Skill", "ToolSearch",
 		"TaskStop", "WebFetch", "WebSearch", "Workflow", "Write",
 		"advisor",
 	}
@@ -94,6 +94,7 @@ func All() []*Tool {
 		"Artifact": true, "ArtifactComments": true, "ArtifactData": true,
 		"AskUserQuestion": true, "EndConversation": true,
 		"EnterPlanMode": true, "ExitPlanMode": true, "SendFeedback": true,
+		"ReadNotifications": true,
 	}
 	out := make([]*Tool, 0, len(order))
 	for _, n := range order {

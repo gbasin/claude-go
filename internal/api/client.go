@@ -158,7 +158,11 @@ func (c *Client) betaHeaderValue() string {
 	// absent even with a [1m]-configured model and eval unreachable.
 	// TODO: emit when the bootstrap/eval flag confirms 1m availability.
 	if c.Entrypoint == EntryCLI {
-		betas += ",thinking-display-updates-2026-08-18"
+		// real's cli order: ...thinking-binding-controls, thinking-display-
+		// updates, afk-mode, extended-cache-ttl, cache-diagnosis
+		betas = strings.Replace(betas,
+			"thinking-binding-controls-2026-08-01,afk-mode-2026-01-31",
+			"thinking-binding-controls-2026-08-01,thinking-display-updates-2026-08-18,afk-mode-2026-01-31", 1)
 	}
 	// haiku-class requests carry the message-threads beta + thread field
 	// (captured: haiku -p turn had both; fable/opus did not)
