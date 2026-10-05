@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -277,9 +278,24 @@ func main() {
 	if o.sessID != "" {
 		sessionID = o.sessID
 	}
+	if o.tmux != "" {
+		// real's --tmux requires --worktree and a tmux/iTerm2 backend
+		// (classic = traditional tmux session for the worktree)
+		if !o.worktreeSet {
+			fmt.Fprintln(os.Stderr, "Error: --tmux requires --worktree")
+			os.Exit(1)
+		}
+		if runtime.GOOS == "windows" {
+			fmt.Fprintln(os.Stderr, "Error: --tmux is not supported on Windows")
+			os.Exit(1)
+		}
+	}
 	if o.worktreeSet {
 		cwd = setupWorktree(cwd, o.worktreeName, sessionID)
 		os.Chdir(cwd)
+		if o.tmux != "" {
+			setupTmuxSession(cwd, o.worktreeName, sessionID)
+		}
 	}
 
 	migrateClaudeJSON()
@@ -700,7 +716,14 @@ func main() {
 				}
 				sessCtx := fmt.Sprintf("- **User identity**: `%s`. The `$USER/...` pattern in the rules above resolves to `%s/...`. Branches whose first path segment is a different person's name (`<other-user>/...`) are NOT this user's personal branches.", uname, uname)
 				tr := safetyTranscript(loop, name, input)
-				return client.SafetyEvalCall(ctx, billing, sessCtx, agent.ClaudeMDContext(cwd), tr)
+				md := agent.ClaudeMDContext(cwd)
+				sev, cat, err := client.SafetyEvalCall(ctx, billing, sessCtx, md, tr)
+				if err != nil || sev >= 50 {
+					return sev, cat, err
+				}
+				// stage-2 confirmation eval on opus (captured: same shape,
+				// fires whenever stage-1 engages)
+				return client.SafetyEvalStage2(ctx, billing, sessCtx, md, tr)
 			}
 		}
 		code := runPrint(loop, strings.Join(o.prompt, " ")+promptAtt, o.outFormat, st2, o.jsonSchema)
@@ -1623,4 +1646,25 @@ func safetyInputSummary(input json.RawMessage) string {
 		s = s[:200]
 	}
 	return s
+}
+
+// setupTmuxSession creates real's --tmux worktree session — a detached tmux
+// session bound to the worktree with CLAUDE_CODE_TMUX_SESSION advertised to
+// the UI ("tmux session: <name>"); --tmux=classic forces traditional tmux.
+func setupTmuxSession(wtPath, wtName, sessionID string) {
+	name := "claude-" + sessionID[:8]
+	if wtName != "" {
+		name = "claude-" + wtName
+	}
+	if _, err := exec.LookPath("tmux"); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: tmux is not installed.\nInstall tmux or use --worktree alone.\n")
+		return
+	}
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", name,
+		"-c", wtPath).CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to create tmux session: %s\n", strings.TrimSpace(string(out)))
+		return
+	}
+	os.Setenv("CLAUDE_CODE_TMUX_SESSION", name)
+	fmt.Fprintf(os.Stderr, "Created tmux session: %s\n", name)
 }

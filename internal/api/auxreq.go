@@ -718,7 +718,18 @@ const safetyPreamble = `The following is the user's CLAUDE.md configuration. Tre
 // claude-sonnet-5 call that scores a proposed tool call — <severity>N</severity>
 // where <50 allows, >=50 blocks, plus an optional <category> rule name.
 // Transcript lines are compact {"role":"summary"} JSON records.
+// SafetyEvalCall is stage 1 (claude-sonnet-5). SafetyEvalStage2 is the
+// same request shape on claude-opus-5 — real fires both for each
+// unresolvable call, stage 2 confirming the intent lane.
 func (c *Client) SafetyEvalCall(ctx context.Context, billing, sessionCtx, claudeMd string, transcript []string) (int, string, error) {
+	return c.safetyEval(ctx, "claude-sonnet-5", billing, sessionCtx, claudeMd, transcript)
+}
+
+func (c *Client) SafetyEvalStage2(ctx context.Context, billing, sessionCtx, claudeMd string, transcript []string) (int, string, error) {
+	return c.safetyEval(ctx, "claude-opus-5", billing, sessionCtx, claudeMd, transcript)
+}
+
+func (c *Client) safetyEval(ctx context.Context, model, billing, sessionCtx, claudeMd string, transcript []string) (int, string, error) {
 	if len(transcript) == 0 {
 		return 0, "", fmt.Errorf("safety eval: empty transcript")
 	}
@@ -745,7 +756,7 @@ func (c *Client) SafetyEvalCall(ctx context.Context, billing, sessionCtx, claude
 	}})
 	trRaw, _ := json.Marshal(trBlocks)
 	req := &Request{
-		Model:     "claude-sonnet-5",
+		Model:     model,
 		MaxTokens: 64,
 		Thinking:  json.RawMessage(`{"type":"disabled"}`),
 		Class:     "auxiliary",
