@@ -49,6 +49,14 @@ func projectSlug(cwd string) string {
 
 // SystemBlocks assembles the system array in the same order as Claude Code:
 // [billing header (uncached), identity (1h cache), main prompt (1h cache)].
+// AuxBillingLine returns real's slim billing header for aux-class calls:
+// version+hash, entrypoint, cch — no prompt/turn ids (captured on the
+// title/walk-away requests).
+func AuxBillingLine(entrypoint, cwd string) string {
+	return fmt.Sprintf("x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s; cch=%s;",
+		version(), buildHash(), entrypoint, cchHash(cwd))
+}
+
 func SystemBlocks(entrypoint string, cwd, model, appendPrompt string, extra, sessionExtras []string, bill BillingMeta, tokensLeft int64) []api.SystemBlock {
 	// billing fields (captured): cch = per-install hash suffix,
 	// cc_prompt_id = the prompt uuid (== x-claude-code-prompt-id),

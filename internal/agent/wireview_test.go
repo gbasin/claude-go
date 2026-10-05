@@ -22,6 +22,7 @@ func TestWireMessagesShape(t *testing.T) {
 	}
 	env := api.BlocksMessage("system", []api.ContentBlock{{Type: "text", Text: "ENV"}})
 	l.Messages = []api.Message{api.TextMessage("user", "hi"), env}
+	l.envIdx = 1
 
 	r1 := l.wireMessages()
 	if len(r1) != 2 || r1[1].Role != "system" {
