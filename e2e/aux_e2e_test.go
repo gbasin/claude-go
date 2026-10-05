@@ -36,16 +36,21 @@ type recReq struct {
 }
 
 // auxRecorder serves every endpoint with a benign empty response and the
-// minimal SSE reply for streamed /v1/messages calls.
+// minimal SSE reply for streamed /v1/messages calls. A last user message
+// starting with "tool:" emits a tool_use block like the mock does;
+// non-streamed calls (the safety eval uses SendMessage) get a plain JSON
+// reply whose text is nonStreamText.
 type auxRecorder struct {
-	srv  *httptest.Server
+	srv           *httptest.Server
+	nonStreamText string
+
 	mu   sync.Mutex
 	reqs []recReq
 }
 
 func newAuxRecorder(t *testing.T) *auxRecorder {
 	t.Helper()
-	r := &auxRecorder{}
+	r := &auxRecorder{nonStreamText: "aux-server reply"}
 	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, rq *http.Request) {
 		var body []byte
 		if rq.Body != nil {
@@ -64,17 +69,26 @@ func newAuxRecorder(t *testing.T) *auxRecorder {
 		switch {
 		case rq.Method == "POST" && rq.URL.Path == "/v1/messages":
 			var req struct {
-				Stream bool `json:"stream"`
+				Stream   bool `json:"stream"`
+				Messages []struct {
+					Role    string          `json:"role"`
+					Content json.RawMessage `json:"content"`
+				} `json:"messages"`
 			}
 			json.Unmarshal(body, &req)
 			if req.Stream {
-				writeSSE(w, "aux-server reply")
+				if name, input, ok := auxToolDirective(req.Messages); ok {
+					writeToolUseSSE(w, name, input)
+				} else {
+					writeSSE(w, "aux-server reply")
+				}
 			} else {
 				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprint(w, `{"id":"m1","type":"message","role":"assistant",`+
-					`"content":[{"type":"text","text":"aux-server reply"}],`+
+				reply, _ := json.Marshal(r.nonStreamText)
+				fmt.Fprintf(w, `{"id":"m1","type":"message","role":"assistant",`+
+					`"content":[{"type":"text","text":%s}],`+
 					`"model":"m","stop_reason":"end_turn",`+
-					`"usage":{"input_tokens":10,"output_tokens":3}}`)
+					`"usage":{"input_tokens":10,"output_tokens":3}}`, reply)
 			}
 		default:
 			w.Header().Set("Content-Type", "application/json")
@@ -83,6 +97,78 @@ func newAuxRecorder(t *testing.T) *auxRecorder {
 	}))
 	t.Cleanup(r.srv.Close)
 	return r
+}
+
+// auxToolDirective extracts a `tool:Name {json}` / `tool:Name` directive
+// from the last user message — the mock's same test-control channel, so
+// the non-mock recorder can drive tool calls.
+func auxToolDirective(msgs []struct {
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
+}) (string, json.RawMessage, bool) {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != "user" {
+			continue
+		}
+		var blocks []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		var text string
+		if json.Unmarshal(msgs[i].Content, &blocks) == nil {
+			for _, b := range blocks {
+				if b.Type == "text" {
+					text = b.Text
+				}
+			}
+		} else {
+			var s string
+			if json.Unmarshal(msgs[i].Content, &s) == nil {
+				text = s
+			}
+		}
+		if strings.HasPrefix(text, "tool:") {
+			rest := strings.TrimPrefix(text, "tool:")
+			name, js, _ := strings.Cut(rest, " ")
+			input := json.RawMessage(`{}`)
+			if js != "" {
+				input = json.RawMessage(js)
+			}
+			return name, input, true
+		}
+		return "", nil, false
+	}
+	return "", nil, false
+}
+
+// writeToolUseSSE emits a single tool_use block turn (stop_reason
+// tool_use) in the SSE shape the client parser expects.
+func writeToolUseSSE(w http.ResponseWriter, name string, input json.RawMessage) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(200)
+	fl, _ := w.(http.Flusher)
+	emit := func(event string, v any) {
+		b, _ := json.Marshal(v)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
+		if fl != nil {
+			fl.Flush()
+		}
+	}
+	usage := map[string]int{"input_tokens": 10, "output_tokens": 3}
+	emit("message_start", map[string]any{"type": "message_start", "message": map[string]any{
+		"id": "msg_aux", "type": "message", "role": "assistant",
+		"model": "m", "content": []any{}, "usage": usage}})
+	emit("content_block_start", map[string]any{"type": "content_block_start",
+		"index": 0, "content_block": map[string]any{
+			"type": "tool_use", "id": "toolu_aux_0", "name": name,
+			"input": map[string]any{}}})
+	emit("content_block_delta", map[string]any{"type": "content_block_delta",
+		"index": 0, "delta": map[string]any{
+			"type": "input_json_delta", "partial_json": string(input)}})
+	emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
+	emit("message_delta", map[string]any{"type": "message_delta",
+		"delta": map[string]any{"stop_reason": "tool_use"}, "usage": usage})
+	emit("message_stop", map[string]any{"type": "message_stop"})
 }
 
 // writeSSE emits the minimal event sequence the client needs to finish a
@@ -324,4 +410,118 @@ func TestAuxInteractiveSession(t *testing.T) {
 		}
 	}
 	p.exit()
+}
+
+// sawSafetyEval reports whether the recorder saw the auto-mode security
+// monitor call: non-streamed POST /v1/messages, sonnet-5, max_tokens 64.
+func (r *auxRecorder) sawSafetyEval() (body []byte, ok bool) {
+	for _, q := range r.list() {
+		if q.method != "POST" || q.uri != "/v1/messages?beta=true" {
+			continue
+		}
+		var b struct {
+			Model   string `json:"model"`
+			MaxToks int    `json:"max_tokens"`
+			Stream  bool   `json:"stream"`
+		}
+		if json.Unmarshal(q.body, &b) != nil {
+			continue
+		}
+		if b.Model == "claude-sonnet-5" && b.MaxToks == 64 {
+			return q.body, true
+		}
+	}
+	return nil, false
+}
+
+// TestSafetyEvalBlocksOnError: an unresolved ask in -p runs the safety
+// monitor; when the eval response can't be parsed (no <severity>), the
+// call blocks instead of executing (real fails closed).
+func TestSafetyEvalBlocksOnError(t *testing.T) {
+	rec := newAuxRecorder(t) // default reply has no <severity> tag
+	s := newSession(t)
+	r := s.runAux(t, rec, nil, "-p",
+		`tool:Bash {"command":"echo SHOULD-NOT-RUN"}`,
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+
+	body, ok := rec.sawSafetyEval()
+	if !ok {
+		var uris []string
+		for _, q := range rec.list() {
+			uris = append(uris, q.method+" "+q.uri)
+		}
+		t.Fatalf("safety-eval call missing — requests: %v", uris)
+	}
+	// the transcript arrives as a block-array user message — decode past
+	// the json-escaped <transcript> tags
+	var bj struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if json.Unmarshal(body, &bj) != nil {
+		t.Fatalf("eval request body didn't parse: %s", truncStr(string(body), 400))
+	}
+	var sawTranscript bool
+	for _, m := range bj.Messages {
+		var blocks []struct {
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(m.Content, &blocks) == nil {
+			for _, b := range blocks {
+				if strings.Contains(b.Text, "<transcript>") {
+					sawTranscript = true
+				}
+			}
+		}
+	}
+	if !sawTranscript {
+		t.Fatalf("eval request should carry the <transcript> block: %s", truncStr(string(body), 400))
+	}
+	// the command string always appears in the echoed tool_use input — the
+	// fail-closed signal is the tool_result error text instead
+	if !strings.Contains(r.stdout, "could not be evaluated") {
+		t.Fatalf("expected the could-not-evaluate block: %s", truncStr(r.stdout, 2000))
+	}
+	if !strings.Contains(r.stdout, `"is_error":true`) {
+		t.Fatalf("eval failure must produce an error tool_result: %s", truncStr(r.stdout, 2000))
+	}
+}
+
+// TestSafetyEvalAllows: severity<50 allows the call — the Bash command
+// actually executes and its result reaches the next request.
+func TestSafetyEvalAllows(t *testing.T) {
+	rec := newAuxRecorder(t)
+	rec.nonStreamText = "<severity>10</severity>"
+	s := newSession(t)
+	r := s.runAux(t, rec, nil, "-p",
+		`tool:Bash {"command":"echo eval-allowed-marker"}`,
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if _, ok := rec.sawSafetyEval(); !ok {
+		t.Fatal("safety-eval call missing")
+	}
+	if !strings.Contains(r.stdout, "eval-allowed-marker") {
+		t.Fatalf("severity<50 should allow the tool: %s", truncStr(r.stdout, 2000))
+	}
+}
+
+// TestSafetyEvalBlocksHigh: severity>=50 blocks with the matched category.
+func TestSafetyEvalBlocksHigh(t *testing.T) {
+	rec := newAuxRecorder(t)
+	rec.nonStreamText = "<severity>80</severity><category>Destructive Action</category>"
+	s := newSession(t)
+	r := s.runAux(t, rec, nil, "-p",
+		`tool:Bash {"command":"rm -rf /tmp/nope"}`,
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if _, ok := rec.sawSafetyEval(); !ok {
+		t.Fatal("safety-eval call missing")
+	}
+	if !strings.Contains(r.stdout, "safety monitor") &&
+		!strings.Contains(r.stdout, "Destructive Action") {
+		t.Fatalf("severity>=50 should block with the category: %s", truncStr(r.stdout, 2000))
+	}
 }

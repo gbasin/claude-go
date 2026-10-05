@@ -342,3 +342,23 @@ func TestAgentToolBackground(t *testing.T) {
 	t.Fatalf("background agent completion notice never surfaced\noutput:\n%s",
 		truncStr(p.clean(), 3000))
 }
+
+// TestResumePickerInteractive: /resume opens the session picker listing
+// prior sessions for this cwd; enter resumes the top entry.
+func TestResumePickerInteractive(t *testing.T) {
+	s := newSession(t)
+	// seed a prior session transcript
+	r := s.run(t, "--mock", "-p", "seed prior session")
+	s.mustOK(t, r)
+
+	p := startREPL(t, s)
+	p.sendUntilEchoed(t, "/resume\r", "> /resume", 8)
+	p.waitFor("seed prior session", 15*time.Second) // picker lists the preview
+	p.send("\r")
+	p.waitFor("resumed session", 15*time.Second)
+
+	// resumed session answers normally
+	p.sendUntilEchoed(t, "resumed-alive\r", "> resumed-alive", 8)
+	p.waitFor("Mock response to: resumed-alive", 30*time.Second)
+	p.exit()
+}
