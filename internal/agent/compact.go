@@ -120,13 +120,28 @@ func (l *Loop) applySummary(text, transcriptPath string, keepLast int) {
 // summarize asks the model to condense msgs into a <summary>.
 func (l *Loop) summarize(ctx context.Context, msgs []api.Message) (string, error) {
 	req := l.buildRequest()
-	req.Tools = nil // summarization needs no tool surface
+	// real sends the compaction request with the FULL tool surface and
+	// class "compaction" (captured 2.1.289 wire)
+	req.Class = "compaction"
 	// the span is raw history — buildRequest's wire shaping only touched
 	// its own copy of l.Messages. Apply the same replay rules here:
 	// strip signature-only thinking blocks (API 400s on replay) and cap
 	// cache_control blocks so system+messages stay within the API's 4.
 	span := capBreakpoints(sanitizeReplayed(msgs), 2)
-	prompt := api.TextMessage("user", compactPrompt)
+	// the env record is once-only on the wire (buildRequest already sent
+	// it) — real's compact request carries the bare hook string in that
+	// slot instead (captured)
+	for i, m := range span {
+		if m.Role == "system" && i == 1 {
+			if l.SessionHookCtx != "" {
+				span[i] = api.StringMessage("system",
+					"SessionStart hook additional context: "+l.SessionHookCtx)
+			}
+			break
+		}
+	}
+	// real's compact directive is a bare-string user message, not blocks
+	prompt := api.StringMessage("user", compactPrompt)
 	// a trailing env "system" block must stay last: mid-array system
 	// blocks are only valid before an assistant message — appending the
 	// prompt after it would 400 ("system must precede an assistant

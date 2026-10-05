@@ -74,6 +74,6 @@ Before ending your turn, check your last paragraph. If it is a plan, an analysis
 Before running a command that changes system state (such as restarts, deletes, or config edits), check that the evidence actually supports that specific action. A signal that pattern-matches to a known failure may have a different cause.
 
 {{DEFERRED_NOTE}}
-<total_tokens>15000000 tokens left</total_tokens>
+<total_tokens>{{TOTAL_TOKENS}} tokens left</total_tokens>
 
 {{MCP_BLOCKS}}

@@ -1,0 +1,460 @@
+// Auxiliary request traffic — real claude 2.1.289 fires a burst of
+// settings/discovery GETs, a haiku quota probe, and an event_logging batch
+// around the main /v1/messages call (verified in TLS captures). These are
+// fire-and-forget: every error is swallowed, each request gets its own
+// short timeout, and the whole sequence is budgeted.
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"runtime/debug"
+	"strings"
+	"time"
+
+	"claude-go/internal/config"
+	"fmt"
+)
+
+const (
+	// auxReqTimeout bounds one auxiliary request (real's axios default is
+	// unbounded, but a hung endpoint must never stall the turn path).
+	auxReqTimeout = 4 * time.Second
+	// auxTotalBudget caps the whole startup GET sequence.
+	auxTotalBudget = 12 * time.Second
+	// mcpClientCapabilities is Azt's base64 connector capability blob
+	// ({"roots":{"listChanged":true},"elicitation":{}}).
+	mcpClientCapabilities = "eyJyb290cyI6eyJsaXN0Q2hhbmdlZCI6dHJ1ZX0sImVsaWNpdGF0aW9uIjp7fX0="
+	// mcpProtocolVersion is the MCP-Protocol-Version header on the
+	// /v1/mcp_servers listing calls.
+	mcpProtocolVersion = "2025-11-25"
+	// eventBetas is the truncated beta list stamped on telemetry events
+	// (real reports only the first seven flags in event_data.betas).
+	eventBetas = "claude-code-20250219,oauth-2025-04-20," +
+		"interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13," +
+		"context-management-2025-06-27,prompt-caching-scope-2026-01-05," +
+		"mid-conversation-system-2026-04-07"
+)
+
+// auxFamily selects the captured header shape for one auxiliary GET — each
+// caller lane in real signs differently (claude-code vs claude-cli UA,
+// mcp-servers vs oauth beta, org-scoped extras).
+type auxFamily int
+
+const (
+	famMCP      auxFamily = iota // /v1/mcp_servers — mcp beta + proto headers
+	famCLI                       // claude-cli UA + oauth beta
+	famCode                      // claude-code UA + oauth beta
+	famRegistry                  // mcp-registry — unauthenticated
+	famOrg                       // org-scoped — client-platform + org uuid
+)
+
+type auxCall struct {
+	path string
+	fam  auxFamily
+	ct   bool // Content-Type: application/json — per-call in the capture
+}
+
+// startupCalls is real's GET sequence in wire order (capture of a -p turn).
+// The POST /mcp connector initialize between the two mcp_servers calls is
+// env-conditional and intentionally skipped. Org-scoped calls ride along
+// only when an organization uuid is known.
+func (c *Client) startupCalls(model, org string) []auxCall {
+	ep := url.QueryEscape(string(c.Entrypoint))
+	m := url.QueryEscape(model)
+	calls := []auxCall{
+		{"/v1/mcp_servers?limit=1000&include_additional_installs=true", famMCP, true},
+		{"/v1/mcp_servers?limit=1000", famMCP, true},
+		{"/api/oauth/account/settings", famCLI, false},
+		{"/mcp-registry/v0/servers?version=latest&limit=100&visibility=commercial%2Cgsuite%2Centerprise%2Chealth", famRegistry, false},
+		{"/api/claude_cli/bootstrap?entrypoint=" + ep + "&model=" + m, famCode, true},
+		{"/api/claude_code_penguin_mode", famCode, false},
+		{"/api/claude_code_grove", famCLI, false},
+	}
+	if org != "" {
+		calls = append(calls,
+			auxCall{"/api/oauth/organizations/" + org + "/skills/list-skills?include_wiggle_skills=true&entrypoint=" + ep, famOrg, true},
+			auxCall{"/api/oauth/organizations/" + org + "/plugins/list-plugins?enabled_only=true&compact=true&limit=100&offset=0", famOrg, true},
+			auxCall{"/api/oauth/organizations/" + org + "/marketplaces", famOrg, false},
+			auxCall{"/api/oauth/organizations/" + org + "/skills/list-skills?include_wiggle_skills=true&entrypoint=" + ep, famOrg, true},
+		)
+	}
+	calls = append(calls,
+		auxCall{"/v1/mcp_servers?limit=1000&include_additional_installs=true", famMCP, true},
+		auxCall{"/v1/mcp_servers?limit=1000", famMCP, true},
+	)
+	if org != "" {
+		calls = append(calls,
+			auxCall{"/api/oauth/organizations/" + org + "/plugins/list-plugins?enabled_only=true&compact=true&limit=100&offset=0", famOrg, true},
+		)
+	}
+	return calls
+}
+
+// nonessentialDisabled mirrors real's nonessential-traffic gates.
+func nonessentialDisabled() bool {
+	return envTruthy("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC") ||
+		envTruthy("DISABLE_NON_ESSENTIAL_MODEL_CALLS")
+}
+
+// auxLane reports whether auxiliary traffic targets the first-party
+// api.anthropic.com shape (bedrock/vertex deployments don't send it).
+func (c *Client) auxLane() bool {
+	return c.Provider == ProviderFirstParty || c.Provider == ProviderGateway
+}
+
+// StartupTraffic fires real's auxiliary GET sequence in captured order.
+// Non-fatal throughout; bounded by auxTotalBudget. Meaningful responses
+// (account/settings, bootstrap) are stored on the client.
+func (c *Client) StartupTraffic(ctx context.Context, model string) {
+	if nonessentialDisabled() || !c.auxLane() {
+		return
+	}
+	if c.Creds == nil || c.Creds.IsAPIKey {
+		return // oauth-lane endpoints only (same gate as EvalCheck)
+	}
+	if model == "" {
+		model = "claude-fable-5-1"
+	}
+	ctx, cancel := context.WithTimeout(ctx, auxTotalBudget)
+	defer cancel()
+	org := config.OrganizationUUID()
+	for _, call := range c.startupCalls(model, org) {
+		if os.Getenv("AUXDBG") != "" {
+			fmt.Fprintf(os.Stderr, "[aux] %s\n", call.path)
+		}
+		body, err := c.auxGet(ctx, call, org)
+		if err != nil {
+			if os.Getenv("AUXDBG") != "" {
+				fmt.Fprintf(os.Stderr, "[aux-err] %s: %v\n", call.path, err)
+			}
+			continue
+		}
+		var m map[string]any
+		switch {
+		case strings.HasPrefix(call.path, "/api/oauth/account/settings"):
+			if json.Unmarshal(body, &m) == nil {
+				c.mu.Lock()
+				c.accountSettings = m
+				c.mu.Unlock()
+			}
+		case strings.HasPrefix(call.path, "/api/claude_cli/bootstrap"):
+			if json.Unmarshal(body, &m) == nil {
+				c.mu.Lock()
+				c.bootstrap = m
+				c.mu.Unlock()
+			}
+		}
+	}
+}
+
+// Bootstrap returns the /api/claude_cli/bootstrap payload (e.g.
+// auto_compact config), nil when the fetch didn't run or failed.
+func (c *Client) Bootstrap() map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.bootstrap
+}
+
+// AccountSettings returns the /api/oauth/account/settings payload.
+func (c *Client) AccountSettings() map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.accountSettings
+}
+
+// auxGet issues one auxiliary GET on the axios lane (req.Close — captured
+// Connection: close + "gzip, compress, deflate, br"). Returns the body on
+// a 2xx; any non-2xx or transport failure is an error for the caller to
+// ignore.
+func (c *Client) auxGet(ctx context.Context, call auxCall, org string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, auxReqTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", c.BaseURL+call.path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Close = true
+	h := req.Header
+	h.Set("Accept", "application/json, text/plain, */*")
+	if call.ct {
+		h.Set("Content-Type", "application/json")
+	}
+	cliUA := "claude-cli/" + Version + " (external, " + string(c.Entrypoint) + ")"
+	switch call.fam {
+	case famMCP:
+		h.Set("User-Agent", "claude-code/"+Version)
+		h.Set("anthropic-beta", "mcp-servers-2025-12-04")
+		h.Set("anthropic-version", "2023-06-01")
+		h.Set("anthropic-mcp-client-capabilities", mcpClientCapabilities)
+		h.Set("MCP-Protocol-Version", mcpProtocolVersion)
+	case famCLI:
+		h.Set("User-Agent", cliUA)
+		h.Set("anthropic-beta", "oauth-2025-04-20")
+	case famCode:
+		h.Set("User-Agent", "claude-code/"+Version)
+		h.Set("anthropic-beta", "oauth-2025-04-20")
+	case famRegistry:
+		h.Set("User-Agent", cliUA)
+	case famOrg:
+		h.Set("User-Agent", cliUA)
+		h.Set("anthropic-version", "2023-06-01")
+		h.Set("anthropic-client-platform", "claude_code_sdk")
+		h.Set("x-organization-uuid", org)
+	}
+	if call.fam != famRegistry {
+		if err := c.applyAuth(req); err != nil {
+			return nil, err
+		}
+	}
+	applyCustomHeaders(req)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &ErrAPI{
+			E:          &APIError{Type: errorTypeForStatus(resp.StatusCode), Message: resp.Status},
+			StatusCode: resp.StatusCode,
+			Headers:    resp.Header,
+		}
+	}
+	return body, nil
+}
+
+// QuotaProbe is real's startup haiku probe: one auxiliary-class
+// /v1/messages POST with max_tokens=1. Non-fatal, single attempt.
+func (c *Client) QuotaProbe(ctx context.Context) {
+	if nonessentialDisabled() || !c.auxLane() || c.Creds == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, auxReqTimeout)
+	defer cancel()
+	_, acctUUID, devID := config.Account()
+	inner, _ := json.Marshal(struct {
+		DeviceID    string `json:"device_id"`
+		AccountUUID string `json:"account_uuid"`
+		SessionID   string `json:"session_id"`
+	}{devID, acctUUID, c.SessionID})
+	metadata, _ := json.Marshal(struct {
+		UserID string `json:"user_id"`
+	}{string(inner)})
+	type probeMsg struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	body, _ := json.Marshal(struct {
+		Model    string          `json:"model"`
+		MaxToks  int             `json:"max_tokens"`
+		Messages []probeMsg      `json:"messages"`
+		Metadata json.RawMessage `json:"metadata"`
+	}{
+		Model:    "claude-haiku-4-5-20251001",
+		MaxToks:  1,
+		Messages: []probeMsg{{"user", "quota"}},
+		Metadata: metadata,
+	})
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		c.BaseURL+"/v1/messages?beta=true", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	c.headers(req)
+	if err := c.applyAuth(req); err != nil {
+		return
+	}
+	applyCustomHeaders(req)
+	// same request-identity headers as Do(), but the auxiliary class
+	req.Header.Set("anthropic-dispatch-id", "v2d")
+	req.Header.Set("x-claude-code-request-class", "auxiliary")
+	req.Header.Set("x-claude-code-prompt-id", c.PromptID())
+	req.Header.Set("x-client-request-id", newUUID())
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	c.setRateLimit(resp)
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+}
+
+// --- event logging ---
+
+// tenguEvent builds one ClaudeCodeInternalEvent envelope matching the
+// captured event_data field set (078_req.http).
+func (c *Client) tenguEvent(name, model string, interactive bool, meta map[string]any) map[string]any {
+	_, acctUUID, devID := config.Account()
+	org := config.OrganizationUUID()
+	subType := ""
+	if c.Creds != nil {
+		subType = c.Creds.SubscriptionType
+	}
+	if meta == nil {
+		meta = map[string]any{}
+	}
+	if _, ok := meta["subscription_type"]; !ok && subType != "" {
+		meta["subscription_type"] = subType
+	}
+	metaRaw, _ := json.Marshal(meta)
+	procRaw, _ := json.Marshal(procSnapshot())
+	eventData := map[string]any{
+		"event_name":          name,
+		"client_timestamp":    time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		"model":               model,
+		"session_id":          c.SessionID,
+		"user_type":           "external",
+		"betas":               eventBetas,
+		"env":                 tenguEnv(c.Creds != nil && !c.Creds.IsAPIKey),
+		"entrypoint":          string(c.Entrypoint),
+		"is_interactive":      interactive,
+		"client_type":         string(c.Entrypoint),
+		"process":             base64.StdEncoding.EncodeToString(procRaw),
+		"additional_metadata": base64.StdEncoding.EncodeToString(metaRaw),
+		"event_id":            newUUID(),
+		"device_id":           devID,
+	}
+	if org != "" || acctUUID != "" {
+		eventData["auth"] = map[string]any{
+			"organization_uuid": org,
+			"account_uuid":      acctUUID,
+		}
+	}
+	return map[string]any{
+		"event_type": "ClaudeCodeInternalEvent",
+		"event_data": eventData,
+	}
+}
+
+// tenguEnv is the captured env block. Values we can't know (node_version,
+// build_time) use the captured constants; host probing stays cheap.
+func tenguEnv(claudeAIAuth bool) map[string]any {
+	terminal := os.Getenv("TERM_PROGRAM")
+	if os.Getenv("TMUX") != "" {
+		terminal = "tmux"
+	}
+	shell := ""
+	if s := os.Getenv("SHELL"); s != "" {
+		shell = filepath.Base(s)
+	}
+	buildTime := ""
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range bi.Settings {
+			if s.Key == "vcs.time" {
+				buildTime = s.Value
+			}
+		}
+	}
+	return map[string]any{
+		"platform":               runtime.GOOS,
+		"node_version":           "v26.3.0", // captured runtime banner
+		"terminal":               terminal,
+		"package_managers":       detectOnPATH("npm", "yarn", "pnpm"),
+		"runtimes":               detectOnPATH("bun", "deno", "node"),
+		"is_running_with_bun":    true,
+		"is_ci":                  envTruthy("CI"),
+		"is_claubbit":            false,
+		"is_github_action":       envTruthy("GITHUB_ACTIONS"),
+		"is_claude_code_action":  os.Getenv("CLAUDE_CODE_ACTION") != "",
+		"is_claude_ai_auth":      claudeAIAuth,
+		"version":                Version,
+		"arch":                   runtime.GOARCH,
+		"is_claude_code_remote":  false,
+		"deployment_environment": "unknown-" + runtime.GOOS,
+		"is_conductor":           false,
+		"version_base":           Version,
+		"build_time":             buildTime,
+		"is_local_agent_mode":    false,
+		"platform_raw":           runtime.GOOS,
+		"shell":                  shell,
+	}
+}
+
+// detectOnPATH returns a comma-joined list of the named tools found on
+// PATH (real's package-manager/runtime probe).
+func detectOnPATH(names ...string) string {
+	var found []string
+	for _, n := range names {
+		if _, err := exec.LookPath(n); err == nil {
+			found = append(found, n)
+		}
+	}
+	return strings.Join(found, ",")
+}
+
+var processStart = time.Now()
+
+// procSnapshot approximates real's process-memory blob (uptime + heap).
+func procSnapshot() map[string]any {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return map[string]any{
+		"uptime":    time.Since(processStart).Seconds(),
+		"rss":       m.Sys,
+		"heapTotal": m.HeapSys,
+		"heapUsed":  m.HeapAlloc,
+	}
+}
+
+// LogSessionStart POSTs a minimal /api/event_logging/v2/batch — real
+// flushes hundreds of queued events at startup; we emit the well-formed
+// subset (tengu_started + a feature-eval event) rather than fabricating
+// the full sequence. Non-fatal.
+func (c *Client) LogSessionStart(ctx context.Context, model string, interactive bool) {
+	if nonessentialDisabled() || !c.auxLane() {
+		return
+	}
+	if c.Creds == nil || c.Creds.IsAPIKey {
+		return
+	}
+	if model == "" {
+		model = "claude-fable-5-1"
+	}
+	ctx, cancel := context.WithTimeout(ctx, auxReqTimeout)
+	defer cancel()
+	events := []map[string]any{
+		c.tenguEvent("tengu_started", model, interactive, map[string]any{
+			"worktree_flag":    false,
+			"tmux_flag":        os.Getenv("TMUX") != "",
+			"in_tmux_worktree": false,
+		}),
+		c.tenguEvent("tengu_feature_ok", model, interactive, map[string]any{
+			"feature_name": "agents_md",
+		}),
+	}
+	payload, _ := json.Marshal(map[string]any{"events": events})
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		c.BaseURL+"/api/event_logging/v2/batch", bytes.NewReader(payload))
+	if err != nil {
+		return
+	}
+	req.Close = true // axios lane
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "claude-code/"+Version)
+	req.Header.Set("x-service-name", "claude-code")
+	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+	if err := c.applyAuth(req); err != nil {
+		return
+	}
+	applyCustomHeaders(req)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+}

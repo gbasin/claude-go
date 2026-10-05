@@ -21,6 +21,14 @@ func TextMessage(role, text string) Message {
 	return Message{Role: role, Content: b}
 }
 
+// StringMessage builds a bare-string content message — real's persisted
+// system records serialize as {"role":"system","content":"..."} (verified
+// in wire captures), not block arrays.
+func StringMessage(role, text string) Message {
+	b, _ := json.Marshal(text)
+	return Message{Role: role, Content: b}
+}
+
 func BlocksMessage(role string, blocks []ContentBlock) Message {
 	b, _ := json.Marshal(blocks)
 	return Message{Role: role, Content: b}
@@ -102,6 +110,10 @@ type Request struct {
 	Thread       json.RawMessage `json:"thread,omitempty"`
 	OutputConfig json.RawMessage `json:"output_config,omitempty"`
 	Stream       bool            `json:"stream"`
+
+	// Class overrides x-claude-code-request-class (default "main") —
+	// real uses "compaction", "auxiliary", etc.
+	Class string `json:"-"`
 }
 
 // SSE event types from stream=true

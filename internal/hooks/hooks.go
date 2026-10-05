@@ -119,6 +119,71 @@ func Load(cwd string) Config {
 			out[ev] = append(out[ev], ms...)
 		}
 	}
+	// plugin hooks: each enabled plugin's hooks/hooks.json merges in —
+	// real resolves ${CLAUDE_PLUGIN_ROOT} in commands to the install path
+	for _, p := range pluginHooks() {
+		for ev, ms := range p.cfg {
+			out[ev] = append(out[ev], ms...)
+		}
+	}
+	return out
+}
+
+// pluginHooks loads hooks/hooks.json from each installed+enabled plugin's
+// cache dir. ${CLAUDE_PLUGIN_ROOT} in command strings expands to the
+// plugin's install path (real does this at spawn time).
+func pluginHooks() []struct {
+	root string
+	cfg  Config
+} {
+	var out []struct {
+		root string
+		cfg  Config
+	}
+	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "plugins", "installed_plugins.json"))
+	if err != nil {
+		return out
+	}
+	var wrap struct {
+		Plugins map[string][]struct {
+			InstallPath string `json:"installPath"`
+			Enabled     *bool  `json:"enabled"`
+		} `json:"plugins"`
+	}
+	if json.Unmarshal(b, &wrap) != nil {
+		return out
+	}
+	for _, vers := range wrap.Plugins {
+		for _, v := range vers {
+			if v.Enabled != nil && !*v.Enabled {
+				continue
+			}
+			hb, err := os.ReadFile(filepath.Join(v.InstallPath, "hooks", "hooks.json"))
+			if err != nil {
+				continue
+			}
+			var top struct {
+				Hooks Config `json:"hooks"`
+			}
+			if json.Unmarshal(hb, &top) != nil {
+				continue
+			}
+			// expand CLAUDE_PLUGIN_ROOT in every command
+			for ev, ms := range top.Hooks {
+				for mi := range ms {
+					for hi := range ms[mi].Hooks {
+						ms[mi].Hooks[hi].Command = strings.ReplaceAll(
+							ms[mi].Hooks[hi].Command, "${CLAUDE_PLUGIN_ROOT}", v.InstallPath)
+					}
+				}
+				top.Hooks[ev] = ms
+			}
+			out = append(out, struct {
+				root string
+				cfg  Config
+			}{v.InstallPath, top.Hooks})
+		}
+	}
 	return out
 }
 

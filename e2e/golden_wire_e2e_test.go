@@ -2,8 +2,8 @@
 
 package e2e
 
-// Golden-wire parity: real claude's /v1/messages request (captured through
-// the tlscap relay, redacted) vs our binary's request to the mock.
+// Golden-wire parity: real claude's /v1/messages requests (captured through
+// the tls capture+relay, redacted) vs our binary's requests to the mock.
 // Structural comparison — the same field set, system layout, tool list,
 // and scalars must match; per-run values (uuids, session ids, message
 // content) are ignored.
@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -29,10 +30,6 @@ type wireCapture struct {
 		Thinking          json.RawMessage   `json:"thinking"`
 		ContextManagement json.RawMessage   `json:"context_management"`
 		Diagnostics       json.RawMessage   `json:"diagnostics"`
-		OutputConfig      json.RawMessage   `json:"output_config"`
-		Safeguards        json.RawMessage   `json:"safeguards"`
-		Metadata          json.RawMessage   `json:"metadata"`
-		Thread            json.RawMessage   `json:"thread"`
 	} `json:"body"`
 }
 
@@ -108,23 +105,23 @@ func TestGoldenRequestParity(t *testing.T) {
 		}
 	}
 	// tool name list — exact match including order
-	var gtools, otools []struct{ Name string }
+	var gtools, otools []string
 	for _, g := range golden.Body.Tools {
 		var s struct{ Name string }
 		json.Unmarshal(g, &s)
-		gtools = append(gtools, s)
+		gtools = append(gtools, s.Name)
 	}
 	for _, o := range ours.Tools {
 		var s struct{ Name string }
 		json.Unmarshal(o, &s)
-		otools = append(otools, s)
+		otools = append(otools, s.Name)
 	}
 	if len(gtools) != len(otools) {
-		t.Fatalf("tool count ours %d vs golden %d", len(otools), len(gtools))
+		t.Fatalf("tool count ours %d vs golden %d: %v", len(otools), len(gtools), otools)
 	}
 	for i := range gtools {
-		if gtools[i].Name != otools[i].Name {
-			t.Fatalf("tool[%d] ours %q vs golden %q", i, otools[i].Name, gtools[i].Name)
+		if gtools[i] != otools[i] {
+			t.Fatalf("tool[%d] ours %q vs golden %q", i, otools[i], gtools[i])
 		}
 	}
 	// thinking + context_management + diagnostics identical
@@ -137,22 +134,141 @@ func TestGoldenRequestParity(t *testing.T) {
 	if normJSON(ours.Diagnostics) != normJSON(golden.Body.Diagnostics) {
 		t.Fatalf("diagnostics %s vs %s", ours.Diagnostics, golden.Body.Diagnostics)
 	}
-	// header parity — every golden header name must be present on ours
-	// (values normalized for per-request uuids)
-	goldenHdrs := map[string]bool{}
-	for k := range golden.Headers {
-		goldenHdrs[k] = true
-	}
-	for must := range map[string]bool{
-		"anthropic-beta": true, "anthropic-version": true, "x-app": true,
-		"x-stainless-runtime": true, "x-claude-code-session-id": true,
-		"x-claude-code-prompt-id": true, "x-client-request-id": true,
-		"anthropic-dispatch-id": true, "x-claude-code-request-class": true,
+	// the headers real sends on every main request must exist in the golden
+	for _, must := range []string{
+		"anthropic-beta", "anthropic-version", "x-app",
+		"x-stainless-runtime", "x-claude-code-session-id",
+		"x-claude-code-prompt-id", "x-client-request-id",
+		"anthropic-dispatch-id", "x-claude-code-request-class",
 	} {
-		if !goldenHdrs[must] {
+		if _, ok := golden.Headers[must]; !ok {
 			t.Fatalf("golden missing expected header %q", must)
 		}
 	}
+}
+
+// TestGoldenToolLoopParity: real's second (post-tool_use) request shape —
+// [user, sys-string hook ctx, asst tool_use+cc, user tool_result,
+// sys total_tokens+cc, sys-string parallel instruction].
+func TestGoldenToolLoopParity(t *testing.T) {
+	gb, err := os.ReadFile("testdata/realwire_toolloop_fable.json")
+	if err != nil {
+		t.Skip("no golden capture")
+	}
+	var golden wireCapture
+	if err := json.Unmarshal(gb, &golden); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newSession(t)
+	recDir := filepath.Join(t.TempDir(), "reqs")
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + recDir}, 60*time.Second,
+		"--mock", "-p", `tool:Bash {"command":"echo hi"}`,
+		"--permission-mode", "bypassPermissions")
+	s.mustOK(t, r)
+
+	ents, err := os.ReadDir(recDir)
+	if err != nil || len(ents) < 2 {
+		t.Fatalf("expected >=2 recorded requests, got %v err=%v", len(ents), err)
+	}
+	// find the request containing a tool_result
+	type msg struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	var ours []msg
+	for _, e := range ents {
+		raw, _ := os.ReadFile(filepath.Join(recDir, e.Name()))
+		var req struct {
+			Messages []msg `json:"messages"`
+		}
+		json.Unmarshal(raw, &req)
+		for _, m := range req.Messages {
+			if strings.Contains(string(m.Content), "tool_result") {
+				ours = req.Messages
+			}
+		}
+	}
+	if ours == nil {
+		t.Fatal("no request carried a tool_result — tool loop never ran")
+	}
+
+	var gmsgs []msg
+	if err := json.Unmarshal(mustJSON(golden.Body.Messages), &gmsgs); err != nil {
+		t.Fatal(err)
+	}
+
+	// the SessionStart hook-context system message at index 1 is
+	// env-conditional (the golden's account has a hook; the sandbox has
+	// none) — drop it from the golden before comparing shapes
+	if len(gmsgs) > 1 && gmsgs[1].Role == "system" &&
+		strings.Contains(string(gmsgs[1].Content), "SessionStart hook") {
+		gmsgs = append(gmsgs[:1], gmsgs[2:]...)
+	}
+	if len(ours) > 1 && ours[1].Role == "system" {
+		if s := contentShape(ours[1].Content); s != "string" {
+			t.Fatalf("messages[1] post-first request must be bare-string hook ctx or absent — got %q", s)
+		}
+	}
+
+	// shape diff: roles + per-message block-type sequences. msg[0]'s
+	// leading context blocks (CLAUDE.md reminder, userEmail ctx) are
+	// env-conditional — compare roles everywhere but block shapes only
+	// from index 1 onward.
+	if len(ours) != len(gmsgs) {
+		t.Fatalf("message count ours %d vs golden %d", len(ours), len(gmsgs))
+	}
+	if contentShape(ours[0].Content) == "" || !strings.HasPrefix(contentShape(ours[0].Content), "[text") {
+		t.Fatalf("messages[0] must start with text blocks, got %q", contentShape(ours[0].Content))
+	}
+	for i := 1; i < len(gmsgs); i++ {
+		if ours[i].Role != gmsgs[i].Role {
+			t.Fatalf("messages[%d] role ours %q vs golden %q", i, ours[i].Role, gmsgs[i].Role)
+		}
+		gt := contentShape(gmsgs[i].Content)
+		ot := contentShape(ours[i].Content)
+		if gt != ot {
+			t.Fatalf("messages[%d] content shape ours %q vs golden %q", i, ot, gt)
+		}
+	}
+	// breakpoints must land where golden has them
+	for i := 1; i < len(gmsgs); i++ {
+		var gb, ob []apiBlock
+		json.Unmarshal(gmsgs[i].Content, &gb)
+		json.Unmarshal(ours[i].Content, &ob)
+		if len(gb) != len(ob) {
+			continue
+		}
+		for j := range gb {
+			gcc := gb[j].CacheControl != nil
+			occ := ob[j].CacheControl != nil
+			if gcc != occ {
+				t.Fatalf("messages[%d].content[%d] cache_control ours=%v golden=%v", i, j, occ, gcc)
+			}
+		}
+	}
+}
+
+type apiBlock struct {
+	Type         string          `json:"type"`
+	CacheControl json.RawMessage `json:"cache_control"`
+}
+
+// contentShape: "string" for bare-string content, else the block type list.
+func contentShape(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return "string"
+	}
+	var bs []apiBlock
+	if json.Unmarshal(raw, &bs) != nil {
+		return "?"
+	}
+	var kinds []string
+	for _, b := range bs {
+		kinds = append(kinds, b.Type)
+	}
+	return "[" + strings.Join(kinds, ",") + "]"
 }
 
 // normJSON reparses a RawMessage so key order/indentation don't count.
