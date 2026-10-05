@@ -2295,14 +2295,18 @@ func memoryCmd(l *agent.Loop, arg string) {
 
 func mcpCmd(l *agent.Loop, arg string) {
 	dprintln("  configured MCP servers (from ~/.claude.json, .mcp.json):")
-	// The tool registry already holds mcp__ entries; count them.
-	n := 0
-	for _, t := range tools.Defs() {
-		if strings.HasPrefix(t.Name, "mcp__") {
-			n++
+	rows := tools.MCPServerStatus()
+	if len(rows) == 0 {
+		dprintln("    (none)")
+		return
+	}
+	for _, r := range rows {
+		if r.Err != nil {
+			dprintf("    %s  %sfailed%s: %v\n", r.Name, red, reset, r.Err)
+		} else {
+			dprintf("    %s  %sconnected%s — %d tool(s)\n", r.Name, green, reset, r.Tools)
 		}
 	}
-	dprintf("  %d mcp tools registered\n", n)
 }
 
 func permissionsCmd(l *agent.Loop, arg string) {

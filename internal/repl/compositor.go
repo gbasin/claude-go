@@ -695,9 +695,15 @@ func graphemeWidth(s string, i int) (cells, size int) {
 			// second regional indicator completes the flag pair
 			riCount++
 			j += sz2
-		case runeWidth(r2) == 0:
+		case r2 >= 0xa0 && runeWidth(r2) == 0:
 			// combining marks / keycap / other format chars: already
-			// zero cells — attaching keeps the cluster atomic
+			// zero cells — attaching keeps the cluster atomic. Control
+			// bytes (ESC/CR/LF, all < 0xa0) are NOT cluster members:
+			// swallowing an ESC desynced ANSI detection (the rest of the
+			// sequence was counted as text cells) and swallowing a \r\n
+			// emitted a real newline the tracker never saw — the stream
+			// position then pointed mid-row and later writes overwrote
+			// text (the 60-col ⏺/thinking clobber)
 			j += sz2
 		default:
 			if (chained || emoji || riCount == 2) && w < 2 {
@@ -922,6 +928,12 @@ func compStreamWrite(s string) {
 	}
 	b.WriteString(compESU)
 	io.WriteString(compOut, b.String())
+	if f := os.Getenv("CG_TRACEF"); f != "" {
+		if fh, _ := os.OpenFile(f, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); fh != nil {
+			fmt.Fprintf(fh, "  sw %q -> row=%d col=%d\n", s, compStreamRow, compStreamCol)
+			fh.Close()
+		}
+	}
 	compMu.Unlock()
 }
 

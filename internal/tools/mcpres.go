@@ -37,6 +37,12 @@ type rawCaller interface {
 var (
 	resMu   sync.Mutex
 	resSvrs = map[string]ResourceClient{}
+	// server status for /mcp — name → {tools, err}; real shows every
+	// configured server with its connect state
+	srvStatus = map[string]struct {
+		Tools int
+		Err   error
+	}{}
 )
 
 // RegisterMCPServer stores a resource-capable server for the MCP resource tools.
@@ -44,6 +50,40 @@ func RegisterMCPServer(name string, c ResourceClient) {
 	resMu.Lock()
 	resSvrs[name] = c
 	resMu.Unlock()
+}
+
+// NoteMCPServerStatus records a connect attempt's outcome for /mcp.
+func NoteMCPServerStatus(name string, toolCount int, err error) {
+	resMu.Lock()
+	srvStatus[name] = struct {
+		Tools int
+		Err   error
+	}{toolCount, err}
+	resMu.Unlock()
+}
+
+// MCPServerStatus returns configured-server status rows for /mcp.
+func MCPServerStatus() []struct {
+	Name  string
+	Tools int
+	Err   error
+} {
+	resMu.Lock()
+	defer resMu.Unlock()
+	var out []struct {
+		Name  string
+		Tools int
+		Err   error
+	}
+	for n, s := range srvStatus {
+		out = append(out, struct {
+			Name  string
+			Tools int
+			Err   error
+		}{n, s.Tools, s.Err})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 func serverFor(name string) (ResourceClient, error) {

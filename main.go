@@ -760,9 +760,11 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 			defer wg.Done()
 			c, err := mcp.Connect(name, cfg)
 			if err != nil {
+				tools.NoteMCPServerStatus(name, 0, err)
 				fmt.Fprintf(os.Stderr, "  [mcp] %s: %v\n", name, err)
 				return
 			}
+			tools.NoteMCPServerStatus(name, len(c.Tools), nil)
 			// tool prefix is the normalized server name (real's vn()):
 			// "claude.ai Claude Docs" → mcp__claude_ai_Claude_Docs__<tool>
 			prefix := mcp.NormalizeServerName(name)

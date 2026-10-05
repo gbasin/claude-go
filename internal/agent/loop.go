@@ -29,6 +29,11 @@ type Events struct {
 	OnUsage       func(u api.Usage)
 	OnCompact     func()
 	OnAutoCompact func(tokens int)
+	// OnCompactSpan fires with the message span about to be replaced by
+	// the compact summary — writers that log the transcript post-hoc
+	// (print mode, subagents) use it to persist the pre-compact history
+	// before the boundary record lands.
+	OnCompactSpan func(msgs []api.Message)
 }
 
 // Loop runs the query/tool-use cycle.
@@ -71,6 +76,7 @@ type Loop struct {
 	AlwaysThinking        bool     // settings alwaysThinkingEnabled
 	pendingTrigger        string   // last compact trigger for the boundary record
 	compactSummaryPending bool     // next user log is the compact continuation
+	compactKept           int      // tail messages retained by the last compaction
 	announcedDeferred     string   // last announced deferred-tool name set (sorted join)
 	Precompute            bool     // precomputeCompactionEnabled gate
 	RateLimitNote         string   // set once a slow-lane rate-limit note was shown
@@ -374,9 +380,11 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		results = append(results, toolResultBlock(b.ID, r))
 	}
 	if len(results) == 0 {
-		if l.ShouldAutoCompact(resp.Usage) && !l.inCompact {
+		if !l.inCompact {
 			l.inCompact = true
-			_ = l.compactAuto(ctx)
+			// AutoCompact re-checks the threshold, fires OnAutoCompact,
+			// and runs the compaction (instant when precomputed)
+			_ = l.AutoCompact(ctx, resp.Usage, l.Transcript)
 			l.inCompact = false
 		} else {
 			l.maybePrecompute(resp.Usage)
