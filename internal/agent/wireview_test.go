@@ -63,3 +63,43 @@ func TestWireMessagesShape(t *testing.T) {
 	var ab []api.ContentBlock
 	json.Unmarshal(r2[2].Content, &ab)
 }
+
+// New-turn ambient block: when ambientPending, the persisted string
+// record rides on the wire as the trailing cached system block
+// (captured post-compact request shape).
+func TestWireMessagesAmbientTail(t *testing.T) {
+	l := &Loop{
+		Model:          "claude-fable-5-1",
+		SessionHookCtx: "<hook>",
+		tokensLeft:     15000000,
+		ambientPending: true,
+		envSent:        true,
+		envIdx:         1,
+		ToolCtx:        &tools.Context{},
+		Client:         &api.Client{},
+	}
+	l.Messages = []api.Message{
+		api.TextMessage("user", "ctx"),
+		api.StringMessage("system", "SessionStart hook additional context: <hook>"),
+		api.TextMessage("assistant", "reply"),
+		api.StringMessage("user", "next prompt"),
+		api.StringMessage("system", "The following MCP servers are configured but failed to connect — X"),
+	}
+	out := l.wireMessages()
+	if len(out) != 5 {
+		t.Fatalf("len %d", len(out))
+	}
+	// last msg must be the ambient BLOCK with cc, not the bare string
+	var blocks []api.ContentBlock
+	if err := json.Unmarshal(out[4].Content, &blocks); err != nil || len(blocks) == 0 {
+		t.Fatalf("ambient tail should be block form: %s", out[4].Content)
+	}
+	if blocks[0].CacheControl == nil || blocks[0].CacheControl.TTL != "1h" {
+		t.Fatal("ambient block missing 1h cache_control")
+	}
+	// mid-array ambient stays a bare string
+	var s string
+	if err := json.Unmarshal(out[1].Content, &s); err != nil {
+		t.Fatalf("msg1 should stay bare string: %s", out[1].Content)
+	}
+}
