@@ -292,9 +292,13 @@ func (e *editor) loadKeybindings() {
 		}
 	}
 	if len(warns) > 0 {
-		fmt.Fprintf(os.Stderr, "[keybindings] Found %d validation issue(s)\n", len(warns))
-		for _, w := range warns {
-			fmt.Fprintf(os.Stderr, "[keybindings] %s\n", w)
+		// one summary line to stderr — real shows a dismissible notice,
+		// not 27 lines of stderr noise. Detail stays behind debug envs.
+		fmt.Fprintf(os.Stderr, "[keybindings] %d validation issue(s) (CLAUDE_GO_DEBUG_KB=1 for detail)\n", len(warns))
+		if os.Getenv("CLAUDE_GO_DEBUG_KB") != "" {
+			for _, w := range warns {
+				fmt.Fprintf(os.Stderr, "[keybindings] %s\n", w)
+			}
 		}
 	}
 }
