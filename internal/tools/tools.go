@@ -37,14 +37,19 @@ type Tool struct {
 
 // Context carries per-session tool state.
 type Context struct {
-	Ctx           context.Context
-	CWD           string // current working directory (Bash persists this)
-	mu            sync.Mutex
-	readFiles     map[string]readState
-	BgTasks       *Background
-	Agent         AgentRunner // for Agent/SendMessage-style tools
-	AskUser       func(question string, options []string) (string, error)
-	Permission    func(toolName string, input json.RawMessage, summary string) bool
+	Ctx        context.Context
+	CWD        string // current working directory (Bash persists this)
+	mu         sync.Mutex
+	readFiles  map[string]readState
+	BgTasks    *Background
+	Agent      AgentRunner // for Agent/SendMessage-style tools
+	AskUser    func(question string, options []string) (string, error)
+	Permission func(toolName string, input json.RawMessage, summary string) bool
+	// PermissionAsk reports when the last Permission call resolved to
+	// "ask" rather than a hard allow/deny — the loop feeds it to the
+	// auto-mode safety eval instead of flat-denying (real's behavior
+	// for unresolvable calls in non-interactive mode).
+	PermissionAsk func() bool
 	Notes         []string // queued system notes from background tasks
 	Answerer      Answerer // WebFetch page-answer model
 	Searcher      Searcher // WebSearch backend

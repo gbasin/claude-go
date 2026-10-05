@@ -148,6 +148,29 @@ func SystemBlocks(entrypoint string, cwd, model, appendPrompt string, extra, ses
 // FirstUserMessage builds the initial user message: [CLAUDE.md reminder,
 // memory index (skipped when memoryPaused — /pause-memory), user-context
 // reminder, prompt].
+// ClaudeMDContext is the same CLAUDE.md preamble the first-turn
+// <system-reminder> block carries — the auto-mode safety eval embeds it
+// verbatim inside <user_claude_md>.
+func ClaudeMDContext(cwd string) string {
+	var b strings.Builder
+	for _, p := range claudeMDPaths(cwd) {
+		if raw, err := os.ReadFile(p); err == nil && len(raw) > 0 {
+			label := "Contents of " + p
+			if strings.HasPrefix(p, filepath.Join(config.ClaudeDir())) {
+				label += " (user's private global instructions for all projects)"
+			}
+			fmt.Fprintf(&b, "%s:\n\n%s\n\n", label, string(raw))
+		}
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	return "Codebase and user instructions are shown below. " +
+		"Be sure to adhere to these instructions. IMPORTANT: These instructions " +
+		"OVERRIDE any default behavior and you MUST follow them exactly as written.\n\n" +
+		strings.TrimRight(b.String(), "\n") + "\n"
+}
+
 func FirstUserMessage(prompt, cwd, email string, memoryPaused bool) api.Message {
 	var blocks []api.ContentBlock
 	var claudeMD strings.Builder
