@@ -114,6 +114,8 @@ type Request struct {
 	// Class overrides x-claude-code-request-class (default "main") —
 	// real uses "compaction", "auxiliary", etc.
 	Class string `json:"-"`
+	// Temperature is set only by aux-class calls (the title call sends 1).
+	Temperature *float64 `json:"temperature,omitempty"`
 }
 
 // SSE event types from stream=true

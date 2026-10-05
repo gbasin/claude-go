@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"claude-go/internal/agent"
@@ -485,6 +486,23 @@ func main() {
 	loop.SessionStartSource = "startup"
 	tools.SetPeerPermMode(func() string { return loop.PermMode })
 	tools.RegisterSession(sessionID, cwd, "")
+	// interactive cli only — real's -p wire shows no title/walk-away
+	// calls (verified against captures)
+	if !o.mockMode && !o.printMode {
+		var titled atomic.Bool
+		billLine := agent.AuxBillingLine(string(loop.Client.Entrypoint), cwd)
+		loop.Events.OnTurnEnd = func(ask string, toolCalls int, tail string, elapsed time.Duration) {
+			go func() {
+				bg := context.Background()
+				if !titled.Swap(true) && ask != "" {
+					_ = client.TitleCall(bg, billLine, ask)
+				}
+				state := fmt.Sprintf("Current state: working (for %dm)\nTool calls so far: %s\nUser's most recent ask: %q\n\nAssistant message tail (last 30 chars):\n%s",
+					int(elapsed.Minutes()), auxToolCallCount(toolCalls), ask, last30(tail))
+				_ = client.WalkAwayCall(bg, billLine, state)
+			}()
+		}
+	}
 	// durable cron (tengu_kairos_cron_durable): take the project scheduler
 	// lock, surface missed one-shots, and re-arm .claude/scheduled_tasks.json
 	tools.StartScheduledTasks(cwd, sessionID)
@@ -1448,4 +1466,20 @@ func chromeSessionSetup(o *cliOpts, creds *auth.Credentials) (sysP string, cfgs 
 		cfgs = map[string]mcp.ServerConfig{browsermcp.ServerName: cfg}
 	}
 	return prompt, cfgs
+}
+
+// auxToolCallCount renders real's "Tool calls so far" line.
+func auxToolCallCount(n int) string {
+	if n == 0 {
+		return "none"
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+func last30(s string) string {
+	r := []rune(s)
+	if len(r) > 30 {
+		return string(r[len(r)-30:])
+	}
+	return s
 }

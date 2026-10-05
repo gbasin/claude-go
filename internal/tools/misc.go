@@ -69,9 +69,7 @@ func execAgent(c *Context, raw json.RawMessage) Result {
 		if wr.IsError {
 			return wr
 		}
-		sub = &Context{}
-		*sub = *c
-		sub.CWD = worktreeSession.wtPath
+		sub = c.cloneForWorktree(worktreeSession.wtPath)
 	}
 	return c.Agent.RunAgent(sub, in.Description, in.Prompt, st, in.Model, bg)
 }
@@ -593,4 +591,29 @@ func monitorTimeout(ms int) time.Duration {
 		return 600000
 	}
 	return time.Duration(ms) * time.Millisecond
+}
+
+// cloneForWorktree returns a Context for a worktree sub-agent: pointer
+// fields shared, mutex-protected state fresh (a copied sync.Mutex is a
+// vet error and a copied readFiles map would share the parent's locks
+// wrongly — the worktree tracks its own read-before-edit set).
+func (c *Context) cloneForWorktree(wtPath string) *Context {
+	return &Context{
+		Ctx:           c.Ctx,
+		CWD:           wtPath,
+		BgTasks:       c.BgTasks,
+		Agent:         c.Agent,
+		AskUser:       c.AskUser,
+		Permission:    c.Permission,
+		Answerer:      c.Answerer,
+		Searcher:      c.Searcher,
+		AskStructured: c.AskStructured,
+		SetPermMode:   c.SetPermMode,
+		PlanApprove:   c.PlanApprove,
+		EndSession:    c.EndSession,
+		Session:       c.Session,
+		OAuthToken:    c.OAuthToken,
+		OnCwdChanged:  c.OnCwdChanged,
+		OnFileChanged: c.OnFileChanged,
+	}
 }
