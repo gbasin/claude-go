@@ -22,7 +22,7 @@ type modelInfo struct {
 }
 
 var modelTable = map[string]modelInfo{
-	"claude-fable-5-1":          {"Fable 5.1", "claude-fable-5-1[1m]", "June 2026"},
+	"claude-fable-5-1":          {"Fable 5.1", "claude-fable-5-1", "June 2026"},
 	"claude-opus-5-5":           {"Opus 5.5", "claude-opus-5-5", "March 2026"},
 	"claude-sonnet-5-5":         {"Sonnet 5.5", "claude-sonnet-5-5", "March 2026"},
 	"claude-haiku-4-5-20251001": {"Haiku 4.5", "claude-haiku-4-5-20251001", "February 2026"},
@@ -60,9 +60,16 @@ func toolSpecString(d AgentDef) string {
 }
 
 // EnvMessage builds the role:"system" message appended after the first user
-// message: environment, model card, agent registry, skill index, mode notes.
-func EnvMessage(cwd, model string, addDirs []string, permMode string, sessionID string) string {
+// message (captured wire order): hook ctx, environment, model card,
+// deferred-tool pool, connecting MCP servers, agent registry, skill index,
+// mode notes, <total_tokens> budget, date.
+func EnvMessage(cwd, model string, addDirs []string, permMode string, sessionID string, hookCtx string, deferred, connecting []string, tokensLeft int64) string {
 	var b strings.Builder
+	if hookCtx != "" {
+		b.WriteString("SessionStart hook additional context: ")
+		b.WriteString(hookCtx)
+		b.WriteString("\n\n")
+	}
 	b.WriteString("# Environment\nYou have been invoked in the following environment: \n")
 	fmt.Fprintf(&b, " - Primary working directory: %s\n", filepath.Clean(cwd))
 	isGit := exec.Command("git", "-C", cwd, "rev-parse", "--is-inside-work-tree").Run() == nil
@@ -94,6 +101,23 @@ func EnvMessage(cwd, model string, addDirs []string, permMode string, sessionID 
 	}
 	b.WriteString("\n\n")
 
+	if len(deferred) > 0 {
+		b.WriteString("The following deferred tools are now available via ToolSearch. Their schemas are NOT loaded — calling them directly will fail with InputValidationError. Use ToolSearch with query \"select:<name>[,<name>...]\" to load tool schemas before calling them:\n")
+		for _, n := range deferred {
+			b.WriteString(n)
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+	if len(connecting) > 0 {
+		b.WriteString("The following MCP servers are still connecting — their tools (typically named mcp__<server>__*) are not yet available but will appear shortly:\n")
+		for _, n := range connecting {
+			b.WriteString(n)
+			b.WriteString("\n")
+		}
+		b.WriteString("\nIf the user's request might be served by one of these servers (even if they didn't name it explicitly), call ToolSearch with a relevant keyword — ToolSearch will wait for connecting servers and search their tools once available. Do not report a capability as unavailable without first searching.\n\n")
+	}
+
 	b.WriteString("Available agent types for the Agent tool:\n")
 	agents := AgentTypes(cwd)
 	sort.Slice(agents, func(i, j int) bool {
@@ -103,6 +127,17 @@ func EnvMessage(cwd, model string, addDirs []string, permMode string, sessionID 
 		fmt.Fprintf(&b, "- %s: %s (Tools: %s)\n", a.Name, a.Description, toolSpecString(a))
 	}
 	b.WriteString("\nWhen you launch multiple agents for independent work, send them in a single message with multiple tool uses so they run concurrently.\n\n")
+
+	// real embeds MCP server instructions inside the env block between
+	// the agent registry and the skill index (captured -p wire)
+	if ins := mcpInstructions(); len(ins) > 0 {
+		b.WriteString("# MCP Server Instructions\n\nThe following MCP servers have provided instructions for how to use their tools and resources:\n")
+		for _, t := range ins {
+			b.WriteString("\n")
+			b.WriteString(t)
+			b.WriteString("\n")
+		}
+	}
 
 	if skills := loadSkillIndex(cwd); skills != "" {
 		b.WriteString("The following skills are available for use with the Skill tool:\n\n")
@@ -115,6 +150,9 @@ func EnvMessage(cwd, model string, addDirs []string, permMode string, sessionID 
 			"Do your work through the Bash tool wherever it can accomplish the job: read files with cat, head, or sed -n, " +
 			"search with grep and find, and make file changes with sed, heredocs, or short scripts, rather than using " +
 			"the dedicated Read, Edit, or Write tools. Fall back to a dedicated tool only when Bash genuinely cannot do the job.\n")
+	}
+	if tokensLeft > 0 {
+		fmt.Fprintf(&b, "\n<total_tokens>%d tokens left</total_tokens>\n", tokensLeft)
 	}
 	fmt.Fprintf(&b, "\nToday's date is %s.\n", time.Now().Format("2006-01-02"))
 	if ar := attributionReminder(cwd); ar != "" {

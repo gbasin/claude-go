@@ -105,9 +105,12 @@ func validateRequest(req *api.Request) string {
 			}
 		}
 		if m.Role == "system" && i < len(req.Messages)-1 && req.Messages[i+1].Role != "assistant" {
-			// real: system role valid only before an assistant message
-			// (index 0 head) or as the last element
-			return fmt.Sprintf("messages.%d: role 'system' must precede an 'assistant' message or end the array", i)
+			// real (captured 2.1.289 wire): a system message is legal when
+			// it precedes an assistant message OR sits in the trailing
+			// run of system records (req2 ends [sys-tokens, sys-string])
+			if req.Messages[i+1].Role != "system" {
+				return fmt.Sprintf("messages.%d: role 'system' must precede an 'assistant' message or end the array", i)
+			}
 		}
 	}
 	for id := range prevToolIDs {

@@ -40,12 +40,16 @@ var (
 
 // projectSlug mirrors CC's ~/.claude/projects/-path-with-dashes naming.
 func projectSlug(cwd string) string {
+	// real slugs the symlink-resolved path (/tmp -> /private-tmp on macOS)
+	if r, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = r
+	}
 	return strings.ReplaceAll(filepath.Clean(cwd), "/", "-")
 }
 
 // SystemBlocks assembles the system array in the same order as Claude Code:
 // [billing header (uncached), identity (1h cache), main prompt (1h cache)].
-func SystemBlocks(entrypoint string, cwd, model, appendPrompt string, extra, sessionExtras []string, bill BillingMeta) []api.SystemBlock {
+func SystemBlocks(entrypoint string, cwd, model, appendPrompt string, extra, sessionExtras []string, bill BillingMeta, tokensLeft int64) []api.SystemBlock {
 	// billing fields (captured): cch = per-install hash suffix,
 	// cc_prompt_id = the prompt uuid (== x-claude-code-prompt-id),
 	// cc_turn_origin = sdk|cli, cc_prompt_index = 0-based prompt count,
@@ -102,8 +106,24 @@ func SystemBlocks(entrypoint string, cwd, model, appendPrompt string, extra, ses
 		}
 		sess = strings.ReplaceAll(sess, "{{MEMDIR}}", memDir)
 		sess = strings.ReplaceAll(sess, "{{BANG}}", bang)
+		if deferred == "" {
+			// empty cli-only lines vanish entirely — real's -p block has
+			// no blank line where the marker sat
+			sess = strings.ReplaceAll(sess, "{{DEFERRED_NOTE}}\n", "")
+			sess = strings.ReplaceAll(sess, "{{BANG}}\n", "")
+		}
 		sess = strings.ReplaceAll(sess, "{{DEFERRED_NOTE}}", deferred)
+		sess = strings.ReplaceAll(sess, "{{BANG}}", bang)
+		if tokensLeft > 0 {
+			sess = strings.ReplaceAll(sess, "{{TOTAL_TOKENS}}", fmt.Sprintf("%d", tokensLeft))
+		} else {
+			sess = strings.ReplaceAll(sess, "<total_tokens>{{TOTAL_TOKENS}} tokens left</total_tokens>", "")
+		}
+		// no trailing blank lines when MCP_BLOCKS/extras are empty
 		sess = strings.ReplaceAll(sess, "{{MCP_BLOCKS}}", mcpb.String())
+		if mcpb.String() == "" {
+			sess = strings.TrimRight(sess, "\n")
+		}
 		out = append(out, api.SystemBlock{Type: "text", Text: sess, CacheControl: ephemeral1h})
 	}
 	for _, s := range extra {
@@ -387,9 +407,10 @@ func DefaultContextManagement() json.RawMessage {
 
 func mcpInstructions() []string {
 	var out []string
-	for _, t := range mcp.Instructions {
-		out = append(out, t)
+	for name, t := range mcp.Instructions {
+		out = append(out, "## "+name+"\n"+t)
 	}
+	sort.Strings(out)
 	return out
 }
 

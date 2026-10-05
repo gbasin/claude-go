@@ -308,6 +308,19 @@ func main() {
 			// transport errors keep the cached-flag production shape
 			client.MarkEvalFailed(err == nil && feats != nil && len(feats) == 0)
 		}()
+		// real's startup burst around the first /v1/messages call: aux
+		// GETs (settings/bootstrap/skills/plugins/mcp_servers), a haiku
+		// quota probe, then the event_logging batch — all non-fatal.
+		// Skipped in mock mode so e2e capture stays clean.
+		auxModel := startupModel(cwd, o.model) // main thread: resolveModel sets wants1m
+		auxDone = make(chan struct{})
+		go func() {
+			defer close(auxDone)
+			bg := context.Background()
+			client.StartupTraffic(bg, auxModel)
+			client.QuotaProbe(bg)
+			client.LogSessionStart(bg, auxModel, !o.printMode)
+		}()
 	}
 
 	// connect MCP servers in background (like CC's async init)
@@ -347,9 +360,11 @@ func main() {
 	if o.sysPrompt != "" {
 		loop.AppendSysP = o.sysPrompt
 	}
-	if chromeSysP != "" {
+	if chromeSysP != "" && !o.printMode {
 		// real splices the chrome/browser block into the sys[3] session
-		// block (captured: end of the session array entry), not sys[2]
+		// block for interactive cli only — -p requests lack it
+		// (captured: absent from real's -p sys[3] despite chrome tools
+		// being registered deferred)
 		loop.SessionExtras = append(loop.SessionExtras, chromeSysP)
 	}
 	for _, fp := range o.fileArgs {
@@ -620,6 +635,7 @@ func main() {
 			os.Stderr = f
 		}
 	}
+	fireHook(loop, hooks.SessionStart)
 	if o.printMode {
 		tools.Interactive = false
 		if o.inFormat == "stream-json" {
@@ -640,6 +656,14 @@ func main() {
 			fmt.Fprintf(os.Stderr, "note: --max-budget-usd %.2f (per-request cost tracking not yet enforced)\n", o.maxBudget)
 		}
 		agentCleanup() // os.Exit skips the deferred call above
+		// drain aux traffic briefly — real flushes its telemetry tail
+		// before exiting print mode
+		if auxDone != nil {
+			select {
+			case <-auxDone:
+			case <-time.After(2 * time.Second):
+			}
+		}
 		os.Exit(code)
 	}
 	tools.Interactive = true
@@ -649,7 +673,6 @@ func main() {
 		fmt.Println("not trusted — exiting")
 		return
 	}
-	fireHook(loop, hooks.SessionStart)
 	if o.teleport {
 		// claude --teleport: real's flag resumes a session FROM the cloud
 		// (mod_0686.js): <session> = direct resume via
@@ -700,8 +723,11 @@ func fireHook(l *agent.Loop, ev hooks.Event) {
 	res := hooks.Run(l.Hooks, ev, payload, l.ToolCtx.CWD)
 	// SessionStart hook stdout/additionalContext injects into the session
 	if ev == hooks.SessionStart {
+		// real wires SessionStart context as a system message in the
+		// messages array (merged into the env composite on request 1,
+		// bare string after) — not into the system prompt
 		if s := res.PlainText + res.AdditionalContext; s != "" {
-			l.AppendSysP += "\n\n" + strings.TrimSpace(s)
+			l.SessionHookCtx = strings.TrimSpace(s)
 		}
 	}
 	if res.NonBlockErr != "" {
@@ -825,6 +851,11 @@ func buildClient(mockMode bool, sessionID string) (*api.Client, func()) {
 }
 
 var lastCreds *auth.Credentials
+
+// auxDone closes when startup aux traffic (GETs, quota probe, event
+// batch) finishes — drained with a cap on exit so -p doesn't orphan
+// real's telemetry tail.
+var auxDone chan struct{}
 
 func clientCreds() string {
 	if lastCreds != nil {
@@ -1200,6 +1231,24 @@ func resolveModel(m string) string {
 // wants1m is set when the configured model used the [1m] suffix — the
 // request then carries the context-1m beta (client.go).
 var wants1m bool
+
+// startupModel resolves the model the aux bootstrap call reports before
+// loop.Model is finalized — same effective precedence as the flag/
+// settings/env chain below (flag wins; settings.model otherwise;
+// ANTHROPIC_MODEL only when neither is set; then the default).
+func startupModel(cwd, flagModel string) string {
+	m := resolveModel(flagModel)
+	if m == "" {
+		m = resolveModel(config.Load(cwd).Model)
+	}
+	if m == "" {
+		m = resolveModel(os.Getenv("ANTHROPIC_MODEL"))
+	}
+	if m == "" {
+		m = "claude-fable-5-1"
+	}
+	return m
+}
 
 // stampProjectState records lastSessionId/lastUsedModel/lastGracefulShutdown
 // under ~/.claude.json projects[cwd] (real fields), plus bumps numStartups.

@@ -61,6 +61,10 @@ func blocks(t *testing.T, m api.Message) []api.ContentBlock {
 	t.Helper()
 	var bs []api.ContentBlock
 	if err := json.Unmarshal(m.Content, &bs); err != nil {
+		var s string
+		if json.Unmarshal(m.Content, &s) == nil {
+			return nil // bare-string content — legal on the wire
+		}
 		t.Fatalf("message content did not parse: %v", err)
 	}
 	return bs
@@ -127,17 +131,20 @@ func TestAutoCompactE2E(t *testing.T) {
 	if len(req.System) == 0 {
 		t.Error("compact request missing system blocks")
 	}
-	if len(req.Tools) != 0 {
-		t.Error("compact request must carry no tools")
+	// real's compaction request keeps the FULL tool surface (captured
+	// 2.1.289 wire: all 17 tools incl. the deferred placeholder)
+	if len(req.Tools) == 0 {
+		t.Error("compact request must keep the tool surface (real sends all tools)")
 	}
 	if len(req.Messages) == 0 {
 		t.Fatal("compact request has no messages")
 	}
 	last := req.Messages[len(req.Messages)-1]
-	lb := blocks(t, last)
-	if last.Role != "user" || len(lb) == 0 ||
-		!strings.Contains(lb[len(lb)-1].Text, "detailed summary of the conversation") {
-		t.Errorf("last compact message should be the compact prompt, got %+v", lb)
+	// real's compact directive is a bare-string user message
+	var lastStr string
+	if err := json.Unmarshal(last.Content, &lastStr); err != nil ||
+		!strings.Contains(lastStr, "detailed summary of the conversation") {
+		t.Errorf("last compact message should be the string compact prompt, got %s", last.Content[:min(120, len(last.Content))])
 	}
 	// a mid-array role:"system" env block must precede an assistant message;
 	// any trailing one must remain last — never before a user message
@@ -236,9 +243,9 @@ func TestCompactEnvLast(t *testing.T) {
 	if last.Role != "system" {
 		t.Fatalf("trailing env system block must stay last, got role %q", last.Role)
 	}
-	secondLast := blocks(t, req[len(req)-2])
-	if !strings.Contains(secondLast[len(secondLast)-1].Text,
-		"detailed summary of the conversation") {
+	var secondLast string
+	if err := json.Unmarshal(req[len(req)-2].Content, &secondLast); err != nil ||
+		!strings.Contains(secondLast, "detailed summary of the conversation") {
 		t.Error("compact prompt should precede the env block")
 	}
 }
