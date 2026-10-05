@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -673,14 +674,34 @@ func main() {
 			runPrintStreamJSON(loop)
 			return
 		}
-		// non-interactive: honor rules, auto-deny what would need asking
+		// non-interactive: honor rules; unresolvable asks go to the
+		// auto-mode security monitor (real's aux sonnet-5 eval)
+		var lastAsk atomic.Bool
+		loop.ToolCtx.PermissionAsk = func() bool { return lastAsk.Load() }
 		loop.ToolCtx.Permission = func(name string, input json.RawMessage, _ string) bool {
 			if name == "Bash" && tools.SandboxAutoAllow(cwd) {
+				lastAsk.Store(false)
 				return true // sandboxed bash auto-allowed per settings
 			}
-			return perms.Check(perms.Mode(loop.PermMode), &perms.Rules{
+			d := perms.Check(perms.Mode(loop.PermMode), &perms.Rules{
 				Allow: rules["allow"], Deny: rules["deny"], Ask: rules["ask"],
-			}, name, input, loop.ToolCtx.CWD) == perms.Allow
+			}, name, input, loop.ToolCtx.CWD)
+			lastAsk.Store(d == perms.Ask)
+			return d == perms.Allow
+		}
+		if !o.mockMode {
+			ep := string(loop.Client.Entrypoint)
+			loop.SafetyEval = func(ctx context.Context, name string, input json.RawMessage) (int, string, error) {
+				billing := agent.AuxBillingLine(ep, "The following is the user's CLAUDE.md configuration.", "")
+				u, _ := user.Current()
+				uname := os.Getenv("USER")
+				if u != nil && uname == "" {
+					uname = u.Username
+				}
+				sessCtx := fmt.Sprintf("- **User identity**: `%s`. The `$USER/...` pattern in the rules above resolves to `%s/...`. Branches whose first path segment is a different person's name (`<other-user>/...`) are NOT this user's personal branches.", uname, uname)
+				tr := safetyTranscript(loop, name, input)
+				return client.SafetyEvalCall(ctx, billing, sessCtx, agent.ClaudeMDContext(cwd), tr)
+			}
 		}
 		code := runPrint(loop, strings.Join(o.prompt, " ")+promptAtt, o.outFormat, st2, o.jsonSchema)
 		if o.maxBudget > 0 {
@@ -1532,4 +1553,63 @@ func startupFacts(cwd string, o *cliOpts) api.SessionFacts {
 		f.CLIFlags = append(f.CLIFlags, "print")
 	}
 	return f
+}
+
+// safetyTranscript builds real's compact {"role":"summary"} JSON lines
+// the auto-mode eval sees — user prompts verbatim, tool calls as
+// {"Name":"<summary>"}, then the pending call itself.
+func safetyTranscript(l *agent.Loop, name string, input json.RawMessage) []string {
+	var lines []string
+	for _, m := range l.Messages {
+		var blocks []api.ContentBlock
+		if json.Unmarshal(m.Content, &blocks) != nil || len(blocks) == 0 {
+			var s string
+			if json.Unmarshal(m.Content, &s) == nil && s != "" {
+				if m.Role == "user" {
+					b, _ := json.Marshal(map[string]string{"user": s})
+					lines = append(lines, string(b))
+				}
+			}
+			continue
+		}
+		for _, blk := range blocks {
+			switch blk.Type {
+			case "text":
+				key := "user"
+				if m.Role == "assistant" {
+					key = "assistant"
+				}
+				b, _ := json.Marshal(map[string]string{key: blk.Text})
+				lines = append(lines, string(b))
+			case "tool_use":
+				b, _ := json.Marshal(map[string]string{blk.Name: safetyInputSummary(blk.Input)})
+				lines = append(lines, string(b))
+			}
+		}
+	}
+	b, _ := json.Marshal(map[string]string{name: safetyInputSummary(input)})
+	lines = append(lines, string(b))
+	return lines
+}
+
+// safetyInputSummary renders a tool input the way real's eval transcript
+// does — "(general): say hi" for an Agent call, the command for Bash.
+func safetyInputSummary(input json.RawMessage) string {
+	var m map[string]any
+	if json.Unmarshal(input, &m) != nil {
+		return string(input)
+	}
+	if st, _ := m["subagent_type"].(string); st != "" {
+		p, _ := m["prompt"].(string)
+		return "(" + st + "): " + p
+	}
+	if cmd, _ := m["command"].(string); cmd != "" {
+		return cmd
+	}
+	b, _ := json.Marshal(m)
+	s := string(b)
+	if len(s) > 200 {
+		s = s[:200]
+	}
+	return s
 }

@@ -38,7 +38,7 @@ func TestSlashTable(t *testing.T) {
 		{"/todos", "no todo tool", ""},
 		{"/vim", "moved to /config", ""},
 		{"/keybindings", "keybindings.json", ""},
-		{"/ide", "not implemented", ""},
+		{"/ide", "no IDE detected", "IDE connected"},
 		{"/terminal-setup", "unsupported terminal", ""}, // TERM_PROGRAM unset in sandbox
 		{"/privacy-settings", "telemetry", ""},
 		{"/release-notes", "claude-go", ""},
@@ -67,7 +67,7 @@ func TestSlashTable(t *testing.T) {
 		{"/alias bad-arg", "usage: /alias", ""},
 		{"/extra-usage", "renamed to /usage-credits", ""},
 		{"/usage-credits", "/login", ""},
-		{"/theme", "not implemented", "standard ANSI"},
+		{"/theme", "theme:", "daltonian"},
 		{"/chrome", "Chrome", ""},
 		{"/export", "exported to", "export failed"},
 		// fresh session has no message chain → fork fails deterministically
