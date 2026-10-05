@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"net/http"
 	"os"
@@ -266,17 +265,6 @@ func retryAfterDelay(h http.Header, now time.Time) (time.Duration, bool) {
 	return 0, false
 }
 
-// retryDelay returns the wait before the next attempt: a valid Retry-After
-// value (clamped to int32-ms like the SDK) wins over the backoff table.
-func retryDelay(h http.Header, attempt int) time.Duration {
-	wait := retryBackoff[min(attempt, len(retryBackoff)-1)]
-	if d, ok := retryAfterDelay(h, time.Now()); ok &&
-		d > 0 && d <= time.Duration(math.MaxInt32)*time.Millisecond {
-		return d
-	}
-	return wait
-}
-
 func (c *Client) setRateLimit(resp *http.Response) {
 	rl := parseRateLimitHeaders(resp.Header)
 	c.mu.Lock()
@@ -292,9 +280,11 @@ func (c *Client) LastRateLimit() *RateLimit {
 	return c.RateLimit
 }
 
-// Do executes a request, retrying on 429/5xx with backoff like the SDK
-// (maxRetries=2, i.e. up to 3 attempts; backoff 1s/3s/9s, overridden by a
-// valid Retry-After / Retry-After-Ms response header).
+// Do executes a request with real's two retry layers (captured):
+// transport errors retry inside the SDK layer bumping
+// x-stainless-retry-count (backoff 1s/3s/9s); status errors (429/5xx)
+// retry once as a fresh outer request — stainless stays 0 and the wait
+// floors at ~30s on 429 (real's lower-priority requeue, ~34s observed).
 func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var raw []byte
 	var err error
@@ -315,14 +305,19 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 		return nil, err
 	}
 	var lastErr error
-	maxRetries := 2 // SDK default
+	maxRetries := 2 // SDK default (transport-error attempts)
 	if v := os.Getenv("CLAUDE_CODE_MAX_RETRIES"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			maxRetries = n
 		}
 	}
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		c.RetryCount = attempt
+	// real's two retry layers (captured): status errors (429/5xx) retry
+	// ONCE as a fresh outer request — x-stainless-retry-count stays 0 and
+	// ~30s elapses; transport errors retry inside the SDK layer where the
+	// stainless counter actually increments.
+	statusRetries := 1
+	for transportAttempt := 0; transportAttempt <= maxRetries; {
+		c.RetryCount = transportAttempt
 		var rdr io.Reader
 		if raw != nil {
 			rdr = bytes.NewReader(raw)
@@ -356,38 +351,63 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
 			lastErr = err
-		} else {
-			c.setRateLimit(resp)
-			// x-should-retry: server-side override suppresses/forces retries
-			if sr := resp.Header.Get("x-should-retry"); sr == "false" {
-				return nil, decodeErr(resp) // surface the real error body
+			transportAttempt++
+			if transportAttempt > maxRetries {
+				break
 			}
-			if sr := resp.Header.Get("x-should-retry"); sr == "true" ||
-				resp.StatusCode == 408 || resp.StatusCode == 409 ||
-				resp.StatusCode == 429 || resp.StatusCode >= 500 {
-				wait := retryDelay(resp.Header, attempt)
-				resp.Body.Close()
-				lastErr = &ErrAPI{
-					E:          &APIError{Type: errorTypeForStatus(resp.StatusCode), Message: resp.Status},
-					StatusCode: resp.StatusCode,
-					Headers:    resp.Header,
-				}
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(wait):
-				}
-				continue
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(retryBackoff[min(transportAttempt-1, len(retryBackoff)-1)]):
 			}
-			return resp, nil
+			continue
 		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(retryBackoff[min(attempt, len(retryBackoff)-1)]):
+		c.setRateLimit(resp)
+		// x-should-retry: server-side override suppresses/forces retries
+		if sr := resp.Header.Get("x-should-retry"); sr == "false" {
+			return nil, decodeErr(resp) // surface the real error body
 		}
+		if sr := resp.Header.Get("x-should-retry"); sr == "true" ||
+			resp.StatusCode == 408 || resp.StatusCode == 409 ||
+			resp.StatusCode == 429 || resp.StatusCode >= 500 {
+			resp.Body.Close()
+			lastErr = &ErrAPI{
+				E:          &APIError{Type: errorTypeForStatus(resp.StatusCode), Message: resp.Status},
+				StatusCode: resp.StatusCode,
+				Headers:    resp.Header,
+			}
+			if statusRetries <= 0 {
+				break
+			}
+			statusRetries--
+			wait := statusRetryDelay(resp)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(wait):
+			}
+			continue
+		}
+		return resp, nil
 	}
 	return nil, lastErr
+}
+
+// statusRetryDelay is real's outer-retry wait on status errors. The
+// captured 429 retry landed ~34s out even with retry-after:0 — real
+// floors rate-limit waits near 30s (lower-priority requeue).
+func statusRetryDelay(resp *http.Response) time.Duration {
+	d, _ := retryAfterDelay(resp.Header, time.Now())
+	if resp.StatusCode == 429 {
+		if d < 30*time.Second {
+			return 30 * time.Second
+		}
+		return d
+	}
+	if d > 0 {
+		return d
+	}
+	return 1 * time.Second
 }
 
 // withStreamDeadline applies the 600s request deadline unless the caller's
