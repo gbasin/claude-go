@@ -6,6 +6,8 @@
 package e2e
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -269,5 +271,103 @@ func TestCtrlCDoubleExit(t *testing.T) {
 	p.send("\x03")
 	if err := p.waitExit(15 * time.Second); err != nil {
 		t.Fatalf("double ctrl-C should exit: %v", err)
+	}
+}
+
+// TestContinueFlag: `-c` resumes the cwd's latest session — the next
+// request carries the previous exchange's history.
+func TestContinueFlag(t *testing.T) {
+	s := newSession(t)
+	r1 := s.run(t, "--mock", "-p", "remember kw-marker-A")
+	s.mustOK(t, r1)
+
+	rec := filepath.Join(t.TempDir(), "reqs")
+	r2 := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 60*time.Second,
+		"--mock", "-c", "-p", "hi")
+	s.mustOK(t, r2)
+
+	ents, err := os.ReadDir(rec)
+	if err != nil || len(ents) == 0 {
+		t.Fatalf("no recorded requests from the resumed run: %v", err)
+	}
+	var carried bool
+	for _, e := range ents {
+		b, _ := os.ReadFile(filepath.Join(rec, e.Name()))
+		if bytes.Contains(b, []byte("kw-marker-A")) {
+			carried = true
+		}
+	}
+	if !carried {
+		t.Fatal("-c did not carry the prior session's messages into the request")
+	}
+}
+
+// TestOutputFormatJSON: --output-format json emits the single result blob.
+func TestOutputFormatJSON(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p", "hi", "--output-format", "json")
+	s.mustOK(t, r)
+	var out struct {
+		Type      string `json:"type"`
+		Result    string `json:"result"`
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &out); err != nil {
+		t.Fatalf("json output didn't parse: %v\n%s", err, truncStr(r.stdout, 500))
+	}
+	if strings.TrimSpace(out.Result) != "Mock response to: hi" || out.SessionID == "" {
+		t.Fatalf("unexpected json result: %+v", out)
+	}
+}
+
+// TestPipeStdin: `claude < file` — each stdin line is a prompt answered in
+// order (runPipe path, no PTY).
+func TestPipeStdin(t *testing.T) {
+	s := newSession(t)
+	r := s.runStdin(t, "pipe line one\npipe line two\n", "--mock")
+	s.mustOK(t, r)
+	for _, want := range []string{"pipe line one", "pipe line two"} {
+		if !strings.Contains(r.stdout, want) {
+			t.Fatalf("pipe reply missing %q: %s", want, truncStr(r.stdout, 1000))
+		}
+	}
+}
+
+// TestInputFormatStreamJSON: --input-format stream-json consumes JSONL
+// user messages from stdin in -p mode.
+func TestInputFormatStreamJSON(t *testing.T) {
+	s := newSession(t)
+	r := s.runStdin(t,
+		`{"type":"user","message":{"role":"user","content":"stream-in marker"}}`+"\n",
+		"--mock", "-p", "--input-format", "stream-json", "--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "Mock response to: stream-in marker") {
+		t.Fatalf("stream-json input not answered: %s", truncStr(r.stdout, 1500))
+	}
+}
+
+// TestAtMention: @file expands into the prompt — the file content lands on
+// the wire (recorded request body).
+func TestAtMention(t *testing.T) {
+	s := newSession(t)
+	s.writeFile("men.txt", "MENTION-CONTENTS-77")
+	rec := filepath.Join(t.TempDir(), "reqs")
+
+	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, "--mock")
+	p.waitFor("╭─╮", 30*time.Second)
+	p.sendUntilEchoed(t, "read @men.txt\r", "> read @men.txt", 8)
+	p.waitFor("Mock response to:", 30*time.Second)
+	p.exit()
+
+	ents, _ := os.ReadDir(rec)
+	var found bool
+	for _, e := range ents {
+		b, _ := os.ReadFile(filepath.Join(rec, e.Name()))
+		if bytes.Contains(b, []byte("MENTION-CONTENTS-77")) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("@mention content did not reach the wire")
 	}
 }
