@@ -57,8 +57,20 @@ var antTrace atomic.Bool
 // dprintf/dprintln translate \n → \r\n — the editor holds raw mode for
 // the whole REPL, so bare \n never carriage-returns and dialog lines
 // land mid-row (verified: permission dialogs rendered at stale columns).
+// Mid-turn (a stream owns the scroll bottom) they route through the
+// tracked stream writer instead — a raw print would land at the
+// hardware cursor but leave compStreamCol stale, so the next tracked
+// write repositions mid-text and overwrites it.
 func dprintf(format string, a ...any) {
-	fmt.Print(strings.ReplaceAll(fmt.Sprintf(format, a...), "\n", "\r\n"))
+	s := fmt.Sprintf(format, a...)
+	compMu.Lock()
+	streaming := compActive.Load() && compStreamOn && compSusp == 0 && compZoneH > 0
+	compMu.Unlock()
+	if streaming {
+		streamWrite(s) // tracked — keeps the stream position honest
+		return
+	}
+	fmt.Print(strings.ReplaceAll(s, "\n", "\r\n"))
 }
 func dprintln(a ...any) {
 	dprintf("%s", fmt.Sprintln(a...))

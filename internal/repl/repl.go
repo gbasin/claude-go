@@ -187,7 +187,10 @@ func RunWithStore(l *agent.Loop, store Store) {
 	l.Events.OnTextDelta = func(t string) {
 		spinRef.stop()
 		if !printedDot {
-			fmt.Print("\r\x1b[K⏺ ")
+			// tracked write — a raw print here left the hardware and
+			// stream cursors disagreeing, so the first md.Write chunk
+			// re-positioned over the ⏺ (verified live at 60 cols)
+			streamFresh("\r\x1b[K⏺ ")
 			printedDot = true
 		}
 		md.Write(t)
@@ -197,16 +200,19 @@ func RunWithStore(l *agent.Loop, store Store) {
 			return // meta+t collapsed (real hides thinking by default display)
 		}
 		if !thinkingSeen {
-			dprintf("%s✻ Thinking…%s\n", dim, reset)
+			streamPrint(dim + "✻ Thinking…" + reset)
 			thinkingSeen = true
 		}
-		fmt.Print(dim + t + reset)
+		streamWrite(dim + t + reset)
 	}
 	l.Events.OnToolUse = func(name string, input json.RawMessage) {
 		spinRef.stop()
 		if focusMode.Load() {
 			return // focus view hides tool lines (real's viewMode:"focus")
 		}
+		// the next text block is a new message — it gets its own ⏺
+		printedDot = false
+		thinkingSeen = false
 		streamPrint(fmt.Sprintf("%s⏺%s %s%s%s", green, reset, bold+name+reset, summarize(name, input), ""))
 	}
 	l.Events.OnToolResult = func(name string, r tools.Result) {
@@ -239,7 +245,20 @@ func RunWithStore(l *agent.Loop, store Store) {
 	// (the tall starfield is a first-run path)
 	plan := "Claude"
 	if l.Client != nil && l.Client.Creds != nil && l.Client.Creds.SubscriptionType != "" {
-		plan = "Claude " + strings.Title(l.Client.Creds.SubscriptionType)
+		// real's mapping (mod_0132.js): enterprise→Claude Enterprise,
+		// team→Claude Team, max→Claude Max, pro→Claude Pro, else Claude API
+		switch l.Client.Creds.SubscriptionType {
+		case "max":
+			plan = "Claude Max"
+		case "pro":
+			plan = "Claude Pro"
+		case "team":
+			plan = "Claude Team"
+		case "enterprise":
+			plan = "Claude Enterprise"
+		default:
+			plan = "Claude API"
+		}
 	}
 	eff := l.Effort
 	if eff == "" {
@@ -873,7 +892,9 @@ func printStatus(l *agent.Loop, ed *editor) {
 		if tools.IsCoordinatorMode() {
 			right = "coordinator │ " + right
 		}
-		pad := w - len(left) - len(right)
+		// cell widths, not bytes — │/⏵ are multi-byte runes, and byte
+		// length pushed the right segment off at narrow widths
+		pad := w - visWidth(left) - visWidth(right)
 		if pad < 1 {
 			pad = 1
 		}
