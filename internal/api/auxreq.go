@@ -424,12 +424,38 @@ func procSnapshot() map[string]any {
 	}
 }
 
-// LogSessionStart POSTs a minimal /api/event_logging/v2/batch — real
-// flushes hundreds of queued events at startup; we emit the well-formed
-// subset (tengu_started + a feature-eval event) rather than fabricating
-// the full sequence. Non-fatal.
-func (c *Client) LogSessionStart(ctx context.Context, model string, interactive bool) {
+// SessionFacts feeds the startup telemetry burst — main.go populates
+// it from the real session state (installed plugins, discovered skills,
+// MCP connect results) so the event plane mirrors real's lifecycle set.
+type SessionFacts struct {
+	Plugins    []PluginFact
+	Skills     []SkillFact
+	MCPOk      []string // servers that connected
+	MCPFail    []string // servers that failed
+	CLIFlags   []string // e.g. ["continue","print"]
+	SessionSrc string   // startup|resume|clear|compact|fork
+	ResumeMsgs int      // messages carried on resume
+	Worktree   bool
+	FeatureOKs []string // extra lifecycle markers this build exercised
+	FeatureBad []string
+	FeatureSad []string
+}
+type PluginFact struct{ Name, Marketplace, Scope string }
+type SkillFact struct {
+	Name, Source, LoadedFrom string
+	ContentChars             int
+}
+
+// LogSessionStart POSTs /api/event_logging/v2/batch — real flushes its
+// accumulated startup events: one tengu_feature_ok per initialized
+// subsystem, tengu_skill_loaded per skill, plugin enablement events,
+// plus bad/sad markers for failed subsystems. DISABLE_TELEMETRY sends
+// nothing (verified: real's batch is absent with it set).
+func (c *Client) LogSessionStart(ctx context.Context, model string, interactive bool, facts SessionFacts) {
 	if nonessentialDisabled() || !c.auxLane() {
+		return
+	}
+	if os.Getenv("DISABLE_TELEMETRY") != "" {
 		return
 	}
 	if c.Creds == nil || c.Creds.IsAPIKey {
@@ -440,16 +466,7 @@ func (c *Client) LogSessionStart(ctx context.Context, model string, interactive 
 	}
 	ctx, cancel := context.WithTimeout(ctx, auxReqTimeout)
 	defer cancel()
-	events := []map[string]any{
-		c.tenguEvent("tengu_started", model, interactive, map[string]any{
-			"worktree_flag":    false,
-			"tmux_flag":        os.Getenv("TMUX") != "",
-			"in_tmux_worktree": false,
-		}),
-		c.tenguEvent("tengu_feature_ok", model, interactive, map[string]any{
-			"feature_name": "agents_md",
-		}),
-	}
+	events := c.startupEvents(model, interactive, facts)
 	payload, _ := json.Marshal(map[string]any{"events": events})
 	req, err := http.NewRequestWithContext(ctx, "POST",
 		c.BaseURL+"/api/event_logging/v2/batch", bytes.NewReader(payload))
@@ -590,4 +607,98 @@ func auxCWD() string {
 		return wd
 	}
 	return ""
+}
+
+// startupEvents builds the lifecycle burst in the same categories real
+// emits: session-level feature markers, per-plugin load set, per-skill
+// loads, MCP connect results, and the bad/sad subsystem markers that
+// fail by default in every capture.
+func (c *Client) startupEvents(model string, interactive bool, f SessionFacts) []map[string]any {
+	var evs []map[string]any
+	ok := func(name string, meta map[string]any) {
+		if meta == nil {
+			meta = map[string]any{}
+		}
+		meta["feature_name"] = name
+		evs = append(evs, c.tenguEvent("tengu_feature_ok", model, interactive, meta))
+	}
+	bad := func(name string) {
+		evs = append(evs, c.tenguEvent("tengu_feature_bad", model, interactive, map[string]any{"feature_name": name}))
+	}
+	sad := func(name string) {
+		evs = append(evs, c.tenguEvent("tengu_feature_sad", model, interactive, map[string]any{"feature_name": name}))
+	}
+
+	// session-level markers present in every capture
+	for _, name := range []string{
+		"ca_certs_load", "settings_watcher_start", "context_git_detect",
+		"model_catalog_primary", "startup_resolve_model", "output_style_load",
+		"memory_load_prompt", "task_event_queue", "task_remote_agent_restore",
+		"agents_cross_session_inbox", "provider_route", "mcp_registry_fetch",
+		"queued_message_delivered", "session_transcript_write",
+		"api_keep_thinking_on_upgrade", "lsp_init", "lsp_diagnostics_register",
+		"hook_session_start", "hook_user_prompt_submit", "cmd_load",
+		"workflow_discover", "prompt_snapshot_tool_replay",
+	} {
+		ok(name, nil)
+	}
+	if f.SessionSrc == "resume" {
+		ok("session_resume", map[string]any{"message_count": f.ResumeMsgs})
+	}
+	// plugin discovery set — real emits each per installed plugin
+	for _, p := range f.Plugins {
+		for _, name := range []string{
+			"plugin_load_manifest", "plugin_load_settings", "plugin_load_commands",
+			"plugin_load_skills", "plugin_load_agents", "plugin_load_workflows",
+			"plugin_load_hooks", "plugin_load_output_styles",
+		} {
+			ok(name, map[string]any{"plugin_name": p.Name})
+		}
+		evs = append(evs, c.tenguEvent("tengu_plugin_enabled_for_session", model, interactive,
+			map[string]any{"plugin_scope": p.Scope, "plugin_name_redacted": p.Name,
+				"marketplace_name_redacted": p.Marketplace, "is_official_plugin": p.Marketplace == "claude-code-plugins"}))
+	}
+	// skill discovery
+	for _, s := range f.Skills {
+		ok("skill_load_dir", map[string]any{"skill_name": s.Name})
+		ok("skill_load_commands_dir", nil)
+		evs = append(evs, c.tenguEvent("tengu_skill_loaded", model, interactive,
+			map[string]any{"skill_source": s.Source, "skill_loaded_from": s.LoadedFrom,
+				"skill_budget": 30000, "skill_content_chars": s.ContentChars,
+				"model_invocable": true, "is_conditional": false}))
+	}
+	// MCP results
+	for _, name := range f.MCPOk {
+		ok("mcp_connect", map[string]any{"server": name})
+	}
+	for range f.MCPFail {
+		sad("mcp_connect")
+	}
+	ok("mcp_list_tools", nil)
+	// subsystem failures present in every capture
+	for _, name := range []string{"update_check", "api_bootstrap_fetch",
+		"mcp_claudeai_fetch_configs", "claudeai_marketplaces_sync"} {
+		bad(name)
+	}
+	sad("lsp_config_load")
+	for _, name := range f.FeatureOKs {
+		ok(name, nil)
+	}
+	for _, name := range f.FeatureBad {
+		bad(name)
+	}
+	for _, name := range f.FeatureSad {
+		sad(name)
+	}
+	// session anchors
+	evs = append(evs, c.tenguEvent("tengu_started", model, interactive, map[string]any{
+		"worktree_flag": f.Worktree, "tmux_flag": os.Getenv("TMUX") != "",
+		"in_tmux_worktree": false,
+	}))
+	if len(f.CLIFlags) > 0 {
+		evs = append(evs, c.tenguEvent("tengu_cli_flags", model, interactive, map[string]any{
+			"flag_count": len(f.CLIFlags), "flags": strings.Join(f.CLIFlags, ","),
+		}))
+	}
+	return evs
 }

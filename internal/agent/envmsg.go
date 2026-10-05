@@ -308,3 +308,45 @@ func SkillNames(cwd string) []string {
 	sort.Strings(out)
 	return out
 }
+
+// SkillFacts lists discovered skills for the telemetry burst — same
+// roots the env index scans, with name + content length per SKILL.md.
+func SkillFacts(cwd string) []struct {
+	Name, Root string
+	Chars      int
+} {
+	seen := map[string]bool{}
+	var out []struct {
+		Name, Root string
+		Chars      int
+	}
+	for _, dir := range skillRoots(cwd) {
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range ents {
+			if !e.IsDir() {
+				continue
+			}
+			f := filepath.Join(dir, e.Name(), "SKILL.md")
+			fb, err := os.ReadFile(f)
+			if err != nil {
+				continue
+			}
+			name := parseFrontmatter(string(fb))["name"]
+			if name == "" {
+				name = e.Name()
+			}
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			out = append(out, struct {
+				Name, Root string
+				Chars      int
+			}{name, dir, len(fb)})
+		}
+	}
+	return out
+}
