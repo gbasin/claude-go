@@ -20,7 +20,7 @@ func RegisterMCP(server string, caller MCPCaller, name, desc string, schema json
 	if schema == nil {
 		schema = json.RawMessage(`{"type":"object","properties":{}}`)
 	}
-	mcpTools = append(mcpTools, &Tool{
+	t := &Tool{
 		IsMCP: true, // every MCP tool defers (mod_0314.js h(): isMcp===true)
 		Def:   api.Tool{Name: full, Description: desc, InputSchema: schema},
 		Exec: func(c *Context, input json.RawMessage) Result {
@@ -30,5 +30,9 @@ func RegisterMCP(server string, caller MCPCaller, name, desc string, schema json
 			}
 			return Result{Content: out, IsError: isErr}
 		},
-	})
+	}
+	mcpTools = append(mcpTools, t)
+	// registry membership is what Dispatch resolves — deferred tools stay
+	// refused in the loop until ToolSearch discovery, then must dispatch.
+	registry[full] = t
 }

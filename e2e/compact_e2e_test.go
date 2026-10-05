@@ -3,6 +3,10 @@
 package e2e
 
 import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -130,5 +134,61 @@ func TestAutoCompactThreshold(t *testing.T) {
 		if rec["subtype"] == "compact_boundary" || rec["isCompactSummary"] == true {
 			t.Fatal("compact fired below threshold")
 		}
+	}
+}
+
+// TestCompactRequestShape: the auto-compact request on the wire carries the
+// full tool surface and ends with the compaction directive as a bare-string
+// user message (real 2.1.289 wire shape, not a block array).
+func TestCompactRequestShape(t *testing.T) {
+	s := newSession(t)
+	recDir := filepath.Join(t.TempDir(), "reqs")
+	r := s.runEx(t, []string{
+		"CLAUDE_GO_MOCK_RECORD=" + recDir,
+		"CLAUDE_CODE_AUTO_COMPACT_WINDOW=40000",
+	}, 60*time.Second, "--mock", "-p", "usage:9000")
+	s.mustOK(t, r)
+
+	ents, err := os.ReadDir(recDir)
+	if err != nil {
+		t.Fatalf("no recorded requests: %v", err)
+	}
+	var compactReq map[string]json.RawMessage
+	for _, e := range ents {
+		raw, _ := os.ReadFile(filepath.Join(recDir, e.Name()))
+		var req map[string]json.RawMessage
+		if json.Unmarshal(raw, &req) != nil {
+			continue
+		}
+		if bytes.Contains(raw, []byte("detailed summary of the conversation")) {
+			compactReq = req
+		}
+	}
+	if compactReq == nil {
+		t.Fatal("no recorded request carried the compact directive")
+	}
+	// full tool surface rides the compact request
+	var toolsArr []json.RawMessage
+	if err := json.Unmarshal(compactReq["tools"], &toolsArr); err != nil || len(toolsArr) == 0 {
+		t.Fatalf("compact request must carry the tool surface, got %s", compactReq["tools"])
+	}
+	// last message = bare-string user directive (not a block array)
+	var msgs []struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(compactReq["messages"], &msgs); err != nil {
+		t.Fatal(err)
+	}
+	last := msgs[len(msgs)-1]
+	if last.Role != "user" {
+		t.Fatalf("compact directive should be the last user message, got role %q", last.Role)
+	}
+	var strContent string
+	if err := json.Unmarshal(last.Content, &strContent); err != nil {
+		t.Fatalf("compact directive should be a bare string, got %s", last.Content)
+	}
+	if !strings.Contains(strContent, "detailed summary of the conversation") {
+		t.Fatalf("compact directive content wrong: %s", truncStr(strContent, 300))
 	}
 }
