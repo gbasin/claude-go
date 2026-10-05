@@ -10,6 +10,7 @@ package e2e
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -279,4 +280,127 @@ func normJSON(r json.RawMessage) string {
 	}
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// TestGoldenResumeParity: seeded transcript resumed via -c -p must hit the
+// wire the way real's resume request does (captured req 440):
+//   - env composite is NOT re-sent (no system block record)
+//   - consecutive same-role transcript records coalesce into one message
+//   - the new prompt is bare-string user content
+//
+// Structural diff against realwire_resume_fable.json where env-conditional.
+func TestGoldenResumeParity(t *testing.T) {
+	s := newSession(t)
+	recDir := filepath.Join(t.TempDir(), "reqs")
+
+	// seed ~/.claude/projects/<slug>/<id>.jsonl — a prior turn plus two
+	// consecutive user records (real merges them into one wire message)
+	slug := strings.ReplaceAll(s.cwd, "/", "-")
+	proj := filepath.Join(s.home, ".claude", "projects", slug)
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatalf("mkdir projects: %v", err)
+	}
+	recs := []map[string]any{
+		{"type": "user", "message": map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "text", "text": "ctx-a"},
+			map[string]any{"type": "text", "text": "first question"},
+		}}},
+		{"type": "system", "message": map[string]any{"role": "system", "content": "SessionStart hook additional context: hook-ctx"}},
+		{"type": "assistant", "message": map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "text", "text": "first answer"},
+		}}},
+		{"type": "user", "message": map[string]any{"role": "user", "content": "second question"}},
+		{"type": "user", "message": map[string]any{"role": "user", "content": "third question"}},
+		{"type": "assistant", "message": map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "text", "text": "second answer"},
+		}}},
+	}
+	var sb strings.Builder
+	for _, r := range recs {
+		b, _ := json.Marshal(r)
+		sb.Write(b)
+		sb.WriteByte('\n')
+	}
+	if err := os.WriteFile(filepath.Join(proj, "aabbccdd-1111-2222-3333-444455556666.jsonl"),
+		[]byte(sb.String()), 0o644); err != nil {
+		t.Fatalf("seed transcript: %v", err)
+	}
+
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + recDir}, 30*time.Second,
+		"--mock", "-c", "-p", "fresh prompt")
+	s.mustOK(t, r)
+
+	ents, err := os.ReadDir(recDir)
+	if err != nil || len(ents) == 0 {
+		t.Fatalf("no recorded requests: %v", err)
+	}
+	b, _ := os.ReadFile(filepath.Join(recDir, ents[len(ents)-1].Name()))
+	var req struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(b, &req); err != nil {
+		t.Fatalf("request parse: %v", err)
+	}
+	msgs := req.Messages
+
+	// no system BLOCK record — real does not re-send the env composite
+	for i, m := range msgs {
+		if m["role"] != "system" {
+			continue
+		}
+		if _, ok := m["content"].([]any); ok {
+			t.Fatalf("msg[%d]: env composite re-sent on resume (real sends hook string only)", i)
+		}
+	}
+
+	// consecutive user records coalesced: "second"+"third" merged into ONE
+	// user message with 2 text blocks
+	var merged bool
+	for _, m := range msgs {
+		if m["role"] != "user" {
+			continue
+		}
+		blocks, ok := m["content"].([]any)
+		if !ok || len(blocks) != 2 {
+			continue
+		}
+		var texts []string
+		for _, b2 := range blocks {
+			if bm, ok := b2.(map[string]any); ok {
+				texts = append(texts, fmt.Sprint(bm["text"]))
+			}
+		}
+		if len(texts) == 2 && texts[0] == "second question" && texts[1] == "third question" {
+			merged = true
+		}
+	}
+	if !merged {
+		t.Fatalf("consecutive user records not coalesced; msgs=%v", roleForm(msgs))
+	}
+
+	// last user message = the new prompt as a bare string (real's form)
+	var lastUserStr bool
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i]["role"] == "user" {
+			lastUserStr = msgs[i]["content"] == "fresh prompt"
+			break
+		}
+	}
+	if !lastUserStr {
+		t.Fatalf("new prompt should be bare-string user content; msgs=%v", roleForm(msgs))
+	}
+}
+
+// roleForm renders the wire message array's role/content-form sequence
+// for failure output.
+func roleForm(msgs []map[string]any) string {
+	var b strings.Builder
+	for i, m := range msgs {
+		form := "str"
+		if blk, ok := m["content"].([]any); ok {
+			form = fmt.Sprintf("blk:%d", len(blk))
+		}
+		fmt.Fprintf(&b, "%d:%s(%s) ", i, m["role"], form)
+	}
+	return b.String()
 }

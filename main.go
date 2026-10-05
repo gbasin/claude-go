@@ -497,16 +497,16 @@ func main() {
 	// calls (verified against captures)
 	if !o.mockMode && !o.printMode {
 		var titled atomic.Bool
-		billLine := agent.AuxBillingLine(string(loop.Client.Entrypoint), cwd)
 		loop.Events.OnTurnEnd = func(ask string, toolCalls int, tail string, elapsed time.Duration) {
 			go func() {
 				bg := context.Background()
+				ep := string(loop.Client.Entrypoint)
 				if !titled.Swap(true) && ask != "" {
-					_ = client.TitleCall(bg, billLine, ask)
+					_ = client.TitleCall(bg, agent.AuxBillingLine(ep, ask, ask), ask)
 				}
 				state := fmt.Sprintf("Current state: working (for %dm)\nTool calls so far: %s\nUser's most recent ask: %q\n\nAssistant message tail (last 30 chars):\n%s",
 					int(elapsed.Minutes()), auxToolCallCount(toolCalls), ask, last30(tail))
-				_ = client.WalkAwayCall(bg, billLine, state)
+				_ = client.WalkAwayCall(bg, agent.AuxBillingLine(ep, state, state), state)
 			}()
 		}
 	}
