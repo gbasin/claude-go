@@ -111,10 +111,13 @@ func Check(mode Mode, rules *Rules, toolName string, input json.RawMessage, cwd 
 		return Ask
 	}
 	if mode == ModeAuto {
-		// "auto" defers to the server-side dangerous_tool_use classifier
-		// (sent in the request safeguards block). Locally, only explicit
-		// rules restrict; everything else proceeds.
-		return Allow
+		// "auto" auto-allows read-only tools and routes everything
+		// else to the security-monitor eval — Ask so the loop's
+		// SafetyEval decides (real's dangerous_tool_use lane).
+		if readOnly(toolName) {
+			return Allow
+		}
+		return Ask
 	}
 	if mode == ModeDontAsk {
 		return Deny
