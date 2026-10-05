@@ -22,8 +22,15 @@ import (
 	"time"
 
 	"claude-go/internal/config"
+	_ "embed"
 	"fmt"
 )
+
+//go:embed aux_title_prompt.txt
+var auxTitlePrompt string
+
+//go:embed aux_walkaway_prompt.txt
+var auxWalkAwayPrompt string
 
 const (
 	// auxReqTimeout bounds one auxiliary request (real's axios default is
@@ -129,6 +136,12 @@ func (c *Client) StartupTraffic(ctx context.Context, model string) {
 	defer cancel()
 	org := config.OrganizationUUID()
 	for _, call := range c.startupCalls(model, org) {
+		// cli-only aux calls real interleaves here: the remote-control
+		// session registration POST + ultrareview quota probe
+		if call.path == "/api/oauth/account/settings" && c.Entrypoint == EntryCLI {
+			c.registerCodeSession(ctx, model)
+			_, _ = c.auxGet(ctx, auxCall{"/v1/ultrareview/quota", famCLI, false}, org)
+		}
 		if os.Getenv("AUXDBG") != "" {
 			fmt.Fprintf(os.Stderr, "[aux] %s\n", call.path)
 		}
@@ -459,4 +472,122 @@ func (c *Client) LogSessionStart(ctx context.Context, model string, interactive 
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+}
+
+// auxIdentity is real's plain identity line on aux system arrays.
+const auxIdentity = "You are Claude Code, Anthropic's official CLI for Claude."
+
+// auxMessageCall runs a single-turn haiku call with the aux header set.
+// billingLine is the caller-built sys[0] text (agent owns the hash
+// derivation); sysText follows verbatim. Non-fatal: "" on any failure.
+func (c *Client) auxMessageCall(ctx context.Context, billingLine string, maxTok int,
+	thinking string, temp *float64, sysText []string, userText string) string {
+	return c.auxMessageCallFmt(ctx, billingLine, maxTok, thinking, temp, sysText, userText, false)
+}
+
+// bareStr selects real's content form: the walk-away call sends a bare
+// string user message; the title call sends a text block array.
+func (c *Client) auxMessageCallFmt(ctx context.Context, billingLine string, maxTok int,
+	thinking string, temp *float64, sysText []string, userText string, bareStr bool) string {
+	if nonessentialDisabled() || !c.auxLane() || c.Creds == nil || c.Creds.IsAPIKey {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, auxReqTimeout)
+	defer cancel()
+	sys := []SystemBlock{{Type: "text", Text: billingLine}}
+	for _, t := range sysText {
+		sys = append(sys, SystemBlock{Type: "text", Text: t})
+	}
+	req := &Request{
+		Model:     "claude-haiku-4-5-20251001",
+		MaxTokens: maxTok,
+		System:    sys,
+		Messages: []Message{func() Message {
+			if bareStr {
+				return StringMessage("user", userText)
+			}
+			return BlocksMessage("user", []ContentBlock{{Type: "text", Text: userText}})
+		}()},
+		Thinking:    json.RawMessage(`{"type":"` + thinking + `"}`),
+		Temperature: temp,
+		Class:       "auxiliary",
+		Stream:      true,
+	}
+	resp, err := c.StreamMessage(ctx, req, func(*StreamEvent) error { return nil })
+	if err != nil {
+		return ""
+	}
+	var text string
+	for _, b := range resp.Content {
+		if b.Type == "text" {
+			text += b.Text
+		}
+	}
+	return text
+}
+
+// TitleCall asks haiku to name the session — real fires it once after the
+// first completed turn (auxiliary class, temp=1, captured prompt verbatim).
+// Returns {"title":...} text or "".
+func (c *Client) TitleCall(ctx context.Context, billingLine, firstUserText string) string {
+	one := float64(1)
+	user := "<session>\n" + firstUserText + "\n</session>\n\n" +
+		"Write the title in the predominant language of the session — a stray word or code token in another language doesn't change it, and neither does the English of these instructions."
+	return c.auxMessageCall(ctx, billingLine, 32000, "disabled", &one,
+		[]string{auxIdentity, auxTitlePrompt}, user)
+}
+
+// WalkAwayCall asks haiku to classify the session state (working / waiting /
+// blocked / done) from the last assistant tail — real fires it at turn end
+// (auxiliary class, max_tokens 1024, captured 16K prompt verbatim).
+func (c *Client) WalkAwayCall(ctx context.Context, billingLine, state string) string {
+	return c.auxMessageCallFmt(ctx, billingLine, 1024, "disabled", nil,
+		[]string{auxWalkAwayPrompt}, state, true)
+}
+
+// registerCodeSession POSTs /v1/code/sessions — real's remote-control
+// registration (cli only): hostname-slug title, empty bridge, auto tag.
+func (c *Client) registerCodeSession(ctx context.Context, model string) {
+	if nonessentialDisabled() || !c.auxLane() || c.Creds == nil || c.Creds.IsAPIKey {
+		return
+	}
+	host, err := os.Hostname()
+	if err != nil {
+		host = "localhost"
+	}
+	body, _ := json.Marshal(map[string]any{
+		"title":  strings.ReplaceAll(host, ".", "-"),
+		"bridge": map[string]any{},
+		"tags":   []string{"remote-control-auto"},
+		"config": map[string]any{"cwd": auxCWD(), "model": model},
+	})
+	req, err := http.NewRequestWithContext(ctx, "POST", c.BaseURL+"/v1/code/sessions", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Close = true
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("User-Agent", "claude-code/"+Version)
+	if err := c.applyAuth(req); err != nil {
+		return
+	}
+	applyCustomHeaders(req)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return
+	}
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	resp.Body.Close()
+}
+
+// auxCWD resolves the invocation directory for the code-session record.
+func auxCWD() string {
+	if wd, err := os.Getwd(); err == nil {
+		if r, e2 := filepath.EvalSymlinks(wd); e2 == nil {
+			return r
+		}
+		return wd
+	}
+	return ""
 }

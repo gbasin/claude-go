@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"claude-go/internal/api"
 	"claude-go/internal/hooks"
@@ -34,6 +35,10 @@ type Events struct {
 	// (print mode, subagents) use it to persist the pre-compact history
 	// before the boundary record lands.
 	OnCompactSpan func(msgs []api.Message)
+	// OnTurnEnd fires after a user turn completes (resp or error) —
+	// main.go uses it for real's auxiliary post-turn calls (session
+	// title on first turn, walk-away state each turn).
+	OnTurnEnd func(userAsk string, toolCalls int, assistantTail string, elapsed time.Duration)
 }
 
 // Loop runs the query/tool-use cycle.
@@ -79,6 +84,10 @@ type Loop struct {
 	compactSummaryPending bool     // next user log is the compact continuation
 	compactKept           int
 	turnCount             int
+	toolCallsTotal        int
+	envIdx                int
+	firstPrompt           string
+	sessionStarted        time.Time
 	envSent               bool   // env composite has been on the wire once
 	tokensLeft            int64  // <total_tokens> budget (starts 15000000)
 	SessionHookCtx        string // SessionStart hook context — wires as sys msg    // tail messages retained by the last compaction
@@ -354,6 +363,7 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 			envBlocks.OutputConfig = DefaultOutputConfig()
 		}
 		l.Messages = append(l.Messages, msg, envBlocks)
+		l.envIdx = len(l.Messages) - 1
 	} else {
 		msg = api.TextMessage("user", prompt)
 		// if the previous turn was interrupted before the assistant
@@ -366,9 +376,27 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 			l.Messages = append(l.Messages, msg)
 		}
 	}
+	if l.firstPrompt == "" {
+		l.firstPrompt = prompt
+	}
+	if l.sessionStarted.IsZero() {
+		l.sessionStarted = time.Now()
+	}
+	started := time.Now()
 	resp, err := l.run(ctx, 0)
 	if err != nil {
 		return resp, err
+	}
+	if l.Events.OnTurnEnd != nil {
+		var tail string
+		if resp != nil {
+			for _, b := range resp.Content {
+				if b.Type == "text" {
+					tail = b.Text
+				}
+			}
+		}
+		l.Events.OnTurnEnd(prompt, l.toolCallsTotal, tail, time.Since(started))
 	}
 	return l.maybeGoalCheck(ctx, resp)
 }
@@ -398,6 +426,7 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		if b.Type != "tool_use" {
 			continue
 		}
+		l.toolCallsTotal++
 		if l.Events.OnToolUse != nil {
 			l.Events.OnToolUse(b.Name, b.Input)
 		}
@@ -898,8 +927,19 @@ func capBreakpoints(msgs []api.Message, sysReserved int) []api.Message {
 // "SessionStart hook additional context" string (or drop it).
 func (l *Loop) envWireTransform() []api.Message {
 	msgs := make([]api.Message, 0, len(l.Messages)+2)
+	envAt := l.envIdx
+	if envAt == 0 {
+		// records built without Ask (resume/replay paths) — locate the
+		// env record by its marker text instead of trusting index 1
+		for i, m := range l.Messages {
+			if m.Role == "system" && strings.Contains(string(m.Content), "# Environment") {
+				envAt = i
+				break
+			}
+		}
+	}
 	for i, m := range l.Messages {
-		if m.Role == "system" && i == 1 && l.envSent {
+		if m.Role == "system" && i == envAt && l.envSent {
 			if l.SessionHookCtx != "" {
 				msgs = append(msgs, api.StringMessage("system",
 					"SessionStart hook additional context: "+l.SessionHookCtx))
