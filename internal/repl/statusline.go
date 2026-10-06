@@ -22,13 +22,8 @@ func footerHints(l *agent.Loop, ed *editor) []string {
 	if n := int(queuedPending.Load()); n > 0 {
 		hints = append(hints, fmt.Sprintf("%d queued", n))
 	}
-	if ed != nil && ed.vim {
-		mode := ed.mode
-		if mode == "" {
-			mode = "insert"
-		}
-		hints = append(hints, "vim:"+mode)
-	}
+	// vim badge renders at draw time (editor knows live mode) — see
+	// editor.footerText in term.go
 	if briefMode.Load() {
 		hints = append(hints, "brief")
 	}

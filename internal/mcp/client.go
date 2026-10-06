@@ -372,6 +372,16 @@ func (c *Client) SetNotificationHandler(fn func(method string, params json.RawMe
 
 // handleNotification invokes the OnNotification hook and performs default
 // bookkeeping (tool list refresh on tools/list_changed).
+// ListTools returns a copy of the current tool list (refreshed on
+// notifications/tools/list_changed).
+func (c *Client) ListTools() []Tool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]Tool, len(c.Tools))
+	copy(out, c.Tools)
+	return out
+}
+
 func (c *Client) handleNotification(method string, params json.RawMessage) {
 	c.mu.Lock()
 	fn := c.OnNotification

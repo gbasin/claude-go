@@ -950,6 +950,7 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 				for _, t := range c.Tools {
 					tools.RegisterMCP(prefix, c, t.Name, t.Description, t.InputSchema)
 				}
+				_ = tools.MCPToolEntry{} // SyncMCPTools is the additive variant
 			}
 			tools.RegisterMCPServer(name, c)
 			mu.Lock()
