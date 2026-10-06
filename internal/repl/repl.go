@@ -1002,6 +1002,12 @@ func (s *spinner) run() {
 		case <-s.done:
 			return
 		case <-t.C:
+			if f := os.Getenv("CG_DBGSPIN"); f != "" {
+				if h, e := os.OpenFile(f, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); e == nil {
+					fmt.Fprintf(h, "tick active=%v\n", compActive.Load())
+					h.Close()
+				}
+			}
 			el := fmtDur(time.Since(start))
 			toks := ""
 			if n := spinTokens.Load(); n > 0 {
@@ -1226,6 +1232,10 @@ func printStatus(l *agent.Loop, ed *editor) {
 			// real: "← N agents" when background agents are running
 			right = strings.Replace(right, "← for agents", fmt.Sprintf("← %d agents", n), 1)
 			right = strings.Replace(right, "? for shortcuts", "? for shortcuts · ← "+fmt.Sprint(n)+" agents", 1)
+			if !strings.Contains(right, " agents") {
+				// bypass mode's right side has neither needle — append
+				right = right + " · ← " + fmt.Sprint(n) + " agents"
+			}
 		}
 		if right == "" {
 			right = "? for shortcuts"
