@@ -52,10 +52,10 @@ func TestNonTablePipeLine(t *testing.T) {
 
 func TestFenceHighlight(t *testing.T) {
 	out := renderToString(t, "```go\nfunc main() { return 1 } // hi\n```\n")
-	if !strings.Contains(out, "\x1b[35mfunc") { // keyword magenta
+	if !strings.Contains(out, "\x1b[38;2;249;38;114mfunc") { // Monokai keyword pink
 		t.Fatalf("keyword not highlighted: %q", out)
 	}
-	if !strings.Contains(out, "\x1b[2m// hi") {
+	if !strings.Contains(out, "\x1b[38;2;117;113;94m// hi") {
 		t.Fatalf("comment not dimmed: %q", out)
 	}
 }
