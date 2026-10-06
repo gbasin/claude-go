@@ -29,7 +29,7 @@ func TestSlashTable(t *testing.T) {
 		want string
 		alt  string // second accepted output
 	}{
-		{"/status", "version:", ""},
+		{"/status", "Version:", ""},
 		{"/context", "context tokens", ""},
 		{"/cost", "input:", ""},
 		{"/usage", "cache-read:", ""},
@@ -89,6 +89,8 @@ func TestSlashTable(t *testing.T) {
 		for {
 			newOut := stripANSI(p.output()[mark:])
 			if strings.Contains(newOut, tc.want) || (tc.alt != "" && strings.Contains(newOut, tc.alt)) {
+				p.sendQuiet("\x1b") // dismiss modal dialogs (/status, /model…)
+				time.Sleep(300 * time.Millisecond)
 				break
 			}
 			if time.Now().After(deadline) {
