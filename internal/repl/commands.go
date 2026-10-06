@@ -1,6 +1,8 @@
 package repl
 
 import (
+	"golang.org/x/term"
+
 	"claude-go/internal/config"
 	"context"
 	"crypto/sha256"
@@ -123,7 +125,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "mcp":
 		mcpCmd(l, arg)
 	case "permissions", "allowed-tools":
-		permissionsCmd(l, arg)
+		permissionsModal(l, ks)
 	case "config", "settings":
 		configCmd(l, arg)
 	case "agents":
@@ -3857,4 +3859,145 @@ func spinnerTip() string {
 		return ""
 	}
 	return spinnerTipsList[int(tipsIdx.Add(1))%len(spinnerTipsList)]
+}
+
+// permissionsModal — real's /permissions: a tabbed modal with a bordered
+// ⌕ Search… box, numbered rules ("Add a new rule…" first), ←/→ to switch
+// tabs, ↑/↓ to select, typing filters, Esc to cancel.
+var permTabs = []struct{ key, title, sub string }{
+	{"recent", "Recently denied", "Tools Claude Code most recently asked about."},
+	{"allow", "Allow", "Claude Code won't ask before using allowed tools."},
+	{"ask", "Ask", "Claude Code asks before using these tools."},
+	{"deny", "Deny", "Claude Code never uses denied tools."},
+	{"auto", "Auto mode", "Auto mode handles permission prompts automatically."},
+	{"workspace", "Workspace", "Paths Claude Code may read and write."},
+}
+
+func permissionsModal(l *agent.Loop, ks *keySource) {
+	compSuspend()
+	defer compResume()
+	dch := make(chan key, 16)
+	ks.dialog.Store(&dch)
+	defer ks.dialog.Store(nil)
+
+	cyan := "\x1b[38;5;153m"
+	gray := "\x1b[38;5;246m"
+	box := "\x1b[38;5;239m"
+	tab, sel := 1, 0 // start on "Allow" like real
+	var query []rune
+	lastLines := 0
+
+	rulesFor := func() []string {
+		return l.PermRules[permTabs[tab].key]
+	}
+	draw := func() {
+		if lastLines > 0 {
+			fmt.Printf("\x1b[%dA", lastLines)
+		}
+		fmt.Print("\r\x1b[J")
+		lastLines = 0
+		emit := func(s string) {
+			if lastLines > 0 {
+				fmt.Print("\r\n")
+			}
+			fmt.Print(s)
+			w, _, _ := term.GetSize(int(os.Stdout.Fd()))
+			if w <= 0 {
+				w = 80
+			}
+			lastLines += 1 + visWidth(s)/w
+		}
+		w, _, _ := term.GetSize(int(os.Stdout.Fd()))
+		if w <= 0 {
+			w = 80
+		}
+		emit(bold + "Permissions" + unbold)
+		var tb strings.Builder
+		for i, t := range permTabs {
+			if i == tab {
+				tb.WriteString(cyan + " " + t.title + " " + "\x1b[39m")
+			} else {
+				tb.WriteString(dim + " " + t.title + " " + reset)
+			}
+			if i < len(permTabs)-1 {
+				tb.WriteString(dim + " " + reset)
+			}
+		}
+		emit(" " + tb.String())
+		emit(" " + gray + permTabs[tab].sub + "\x1b[39m")
+		emit(" " + box + "╭" + strings.Repeat("─", w-4) + "╮" + reset)
+		sl := "⌕ Search…"
+		if len(query) > 0 {
+			sl = "⌕ " + string(query)
+		}
+		emit(" " + box + "│" + reset + sl)
+		emit(" " + box + "╰" + strings.Repeat("─", w-4) + "╯" + reset)
+		rules := rulesFor()
+		q := strings.ToLower(string(query))
+		var list []string
+		list = append(list, "Add a new rule…")
+		for _, r := range rules {
+			if q == "" || strings.Contains(strings.ToLower(r), q) {
+				list = append(list, r)
+			}
+		}
+		if sel >= len(list) {
+			sel = len(list) - 1
+		}
+		if sel < 0 {
+			sel = 0
+		}
+		for i, r := range list {
+			row := fmt.Sprintf("%2d. %s", i+1, r)
+			if i == sel {
+				emit(fmt.Sprintf(" %s❯%s %s%s%s", cyan, "\x1b[39m", cyan, row, "\x1b[39m"))
+			} else {
+				emit("    " + row)
+			}
+		}
+		emit(" " + gray + "←/→ to switch · ↑/↓ to select · Esc to cancel" + "\x1b[39m")
+	}
+	draw()
+	for k := range dch {
+		switch {
+		case k.seq == "[D" || k.seq == "[Z": // ← / shift+tab — prev tab
+			if tab > 0 {
+				tab--
+				sel = 0
+			}
+			draw()
+		case k.seq == "[C": // → — next tab
+			if tab < len(permTabs)-1 {
+				tab++
+				sel = 0
+			}
+			draw()
+		case k.seq == "[A":
+			if sel > 0 {
+				sel--
+			}
+			draw()
+		case k.seq == "[B":
+			sel++
+			draw()
+		case k.b == 0x1b || k.b == 3:
+			fmt.Print("\r\n")
+			return
+		case k.b == '\r' || k.b == '\n':
+			fmt.Print("\r\n")
+			if sel == 0 {
+				dprintln("  add rules in ~/.claude/settings.json permissions.allow[]")
+			}
+			return
+		case k.b == 0x7f || k.b == 8:
+			if len(query) > 0 {
+				query = query[:len(query)-1]
+			}
+			draw()
+		case k.b >= 0x20 && k.b < 0x7f:
+			query = append(query, rune(k.b))
+			sel = 0
+			draw()
+		}
+	}
 }
