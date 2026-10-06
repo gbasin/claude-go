@@ -36,6 +36,10 @@ type editor struct {
 	lastCtrlC      time.Time
 	lastEsc        int64
 	completer      func(prefix string) []string // slash command completion
+	acOpen         bool                         // autocomplete menu visible
+	acDesc         func(name string) string     // per-item description
+	acItems        []string                     // filtered matches
+	acSel          int                          // selected index
 	cycleMode      func()                       // shift+tab -> permission mode cycle
 	keys           *keySource
 	pendingX       bool
@@ -141,6 +145,7 @@ func (e *editor) boxFrame() (box []string, curRow, curCol int) {
 		// voice indicator row (real renders it inside the composer area)
 		all = append(all, strings.Repeat(" ", pw)+hint)
 	}
+	all = append(all, e.acRows(w)...)
 	all = append(all, rule)
 	if e.footer != "" {
 		all = append(all, e.footer) // footer row below the bottom rule
@@ -184,8 +189,27 @@ func (e *editor) redraw() {
 	b.WriteString("\r\x1b[J") // col0, clear to screen bottom
 	hint := e.voiceHint()
 	b.WriteString(e.prompt + e.renderedBuf())
+	extra := 0 // rows drawn below the input line
 	if hint != "" {
 		b.WriteString("\r\n  " + hint)
+		extra++
+	}
+	// autocomplete dropdown — real renders the menu inside the box
+	w := compW
+	if w <= 0 {
+		w = 80
+	}
+	for _, row := range e.acRows(w) {
+		b.WriteString("\r\n" + row)
+		extra++
+	}
+	// bottom rule + footer always render (the box stays complete while
+	// typing — real keeps the full chrome live during composition)
+	b.WriteString("\r\n" + boxRule())
+	extra++
+	if e.footer != "" {
+		b.WriteString("\r\n" + e.footer)
+		extra++
 	}
 	// reposition cursor to e.pos
 	before := string(e.buf[:e.pos])
@@ -195,10 +219,7 @@ func (e *editor) redraw() {
 	if nlBefore == 0 {
 		col += len(e.prompt) + 1 // +1 for left border
 	}
-	if up := totalNL - nlBefore; up > 0 || hint != "" {
-		if hint != "" {
-			up++ // voice hint occupies a row below the buffer
-		}
+	if up := totalNL - nlBefore + extra; up > 0 {
 		fmt.Fprintf(&b, "\x1b[%dA", up)
 	}
 	b.WriteString("\r")
@@ -216,6 +237,7 @@ func (e *editor) insert(rs ...rune) {
 		e.buf[e.pos] = r
 		e.pos++
 	}
+	e.acRefresh()
 	e.redraw()
 }
 
@@ -228,6 +250,7 @@ func (e *editor) del(back bool) {
 	} else if e.pos < len(e.buf) {
 		e.buf = append(e.buf[:e.pos], e.buf[e.pos+1:]...)
 	}
+	e.acRefresh()
 	e.redraw()
 }
 
@@ -433,6 +456,14 @@ func (e *editor) insertKey(k key) *readResult {
 	case c == 4: // ctrl-D
 		return e.exitKey()
 	case (c == '\r' || c == '\n') && k.r != '\n' && k.mod == 0: // submit
+		// menu open + input is still a strict prefix → Enter accepts the
+		// completion; an exact match already typed submits (real behavior)
+		if e.acOpen && len(e.acItems) > 0 &&
+			string(e.buf) != "/"+e.acItems[e.acSel] {
+			e.acAccept()
+			e.redraw()
+			return nil
+		}
 		return e.submitKey()
 	case c == 0x7f || c == 8:
 		e.del(true)
@@ -456,9 +487,30 @@ func (e *editor) insertKey(k key) *readResult {
 		for e.pos > 0 && e.buf[e.pos-1] != ' ' {
 			e.del(true)
 		}
+	case k.seq == "[A" && e.acOpen:
+		if e.acSel > 0 {
+			e.acSel--
+		}
+		e.redraw()
+	case k.seq == "[B" && e.acOpen:
+		if e.acSel < len(e.acItems)-1 {
+			e.acSel++
+		}
+		e.redraw()
 	case c == 0x1b && k.seq == "" && k.mod == 0:
+		if e.acOpen {
+			e.acOpen = false
+			e.acItems = nil
+			e.redraw()
+			return nil
+		}
 		return e.cancelKey()
 	case c == '\t':
+		if e.acOpen {
+			e.acAccept()
+			e.redraw()
+			return nil
+		}
 		e.complete()
 	case k.seq == "[Z": // shift+tab: cycle permission mode
 		if e.cycleMode != nil {
@@ -911,6 +963,67 @@ func (e *editor) closeBox() {
 	if !e.zoneEdit {
 		os.Stdout.WriteString("\n" + boxRule() + "\n")
 	}
+}
+
+// acRefresh updates the autocomplete dropdown for the current buffer —
+// real opens the menu as soon as "/" is typed and filters live.
+func (e *editor) acRefresh() {
+	if e.completer == nil || len(e.buf) == 0 || e.buf[0] != '/' ||
+		strings.ContainsRune(string(e.buf), ' ') {
+		e.acOpen, e.acItems = false, nil
+		return
+	}
+	prefix := string(e.buf)[1:]
+	e.acItems = e.completer(prefix)
+	e.acOpen = len(e.acItems) > 0
+	if e.acSel >= len(e.acItems) {
+		e.acSel = 0
+	}
+}
+
+// acAccept commits the selected completion into the buffer.
+func (e *editor) acAccept() {
+	if e.acOpen && len(e.acItems) > 0 {
+		e.buf = []rune("/" + e.acItems[e.acSel] + " ")
+		e.pos = len(e.buf)
+	}
+	e.acOpen = false
+	e.acItems = nil
+}
+
+// acRows renders the dropdown — real draws it between the input line and
+// the bottom rule, highlighted row in suggestion color.
+func (e *editor) acRows(w int) []string {
+	if !e.acOpen || len(e.acItems) == 0 {
+		return nil
+	}
+	show := e.acItems
+	sel := e.acSel
+	if len(show) > 8 {
+		// window around the selection
+		start := sel - 4
+		if start < 0 {
+			start = 0
+		}
+		if start+8 > len(show) {
+			start = len(show) - 8
+		}
+		show = show[start : start+8]
+		sel -= start
+	}
+	rows := make([]string, 0, len(show))
+	for i, m := range show {
+		desc := ""
+		if e.acDesc != nil {
+			desc = " · " + dim + e.acDesc(m) + reset
+		}
+		line := "  /" + m + desc
+		if i == sel {
+			line = "\x1b[38;5;153m❯ " + "/" + m + "\x1b[39m" + desc
+		}
+		rows = append(rows, compClamp(line, w))
+	}
+	return rows
 }
 
 // complete runs slash-command completion when buffer starts with /.
