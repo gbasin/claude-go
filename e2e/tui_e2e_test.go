@@ -655,11 +655,7 @@ func TestMigrateClaudeJSON(t *testing.T) {
 }
 
 // TestQueuedHint: a queued mid-turn prompt shows "N queued" in the footer.
-// SKIPPED: footerHints() is dead code — nothing calls it, so the hint
-// never renders. Re-enable once the sibling wires it.
 func TestQueuedHint(t *testing.T) {
-	t.Skip("footerHints() is dead code — never rendered")
-
 	s := newSession(t)
 	p := s.runPTY(t, nil, "--mock", "--permission-mode", "bypassPermissions")
 	p.waitFor("❯", 30*time.Second)
@@ -673,11 +669,7 @@ func TestQueuedHint(t *testing.T) {
 }
 
 // TestVimBadge: vim mode shows the vim:<mode> hint in the footer.
-// SKIPPED: footerHints() is dead code — never rendered. Re-enable once
-// the sibling wires it.
 func TestVimBadge(t *testing.T) {
-	t.Skip("footerHints() is dead code — never rendered")
-
 	s := newSession(t)
 	// rewrite .claude.json keeping the seeded trust/onboarding state
 	s.writeFile(filepath.Join(s.home, ".claude.json"), fmt.Sprintf(
@@ -686,6 +678,8 @@ func TestVimBadge(t *testing.T) {
 	p := s.runPTY(t, nil, "--mock")
 	p.waitFor("vim:insert", 30*time.Second)
 	p.send("\x1b") // esc → normal mode
+	time.Sleep(300 * time.Millisecond)
+	p.send("\x1b[B") // arrow — nudge a repaint
 	p.waitFor("vim:normal", 15*time.Second)
 	p.exit()
 }
@@ -699,4 +693,58 @@ func TestStatusLineCommand(t *testing.T) {
 	p := s.runPTY(t, nil, "--mock")
 	p.waitFor("STATUSLINE-MARKER", 30*time.Second)
 	p.exit()
+}
+
+// TestStashYank: ctrl+s stashes the draft; ctrl+y yanks it back.
+func TestStashYank(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.send("stash-me")
+	time.Sleep(200 * time.Millisecond)
+	p.send("\x13") // ctrl+s — stash
+	p.waitFor("stashed draft", 15*time.Second)
+	p.send("\x19") // ctrl+y — yank
+	p.waitFor("❯ stash-me", 15*time.Second)
+	p.exit()
+}
+
+// TestSpinnerDuringToolExec: the spinner keeps animating while a tool
+// runs — "esc to interrupt" stays visible and a slow PostToolUse hook
+// shows "(running PostToolUse hook".
+func TestSpinnerDuringToolExec(t *testing.T) {
+	s := newSession(t)
+	marker := filepath.Join(s.cwd, "hook-ran")
+	s.writeFile(".claude/settings.json",
+		`{"hooks":{"PostToolUse":[{"matcher":"Bash","hooks":[`+
+			`{"type":"command","command":"touch `+marker+`; sleep 3"}]}]}}`)
+	p := s.runPTY(t, nil, "--mock", "--permission-mode", "bypassPermissions")
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"echo hi"}`+"\r", "❯ tool:Bash", 8)
+	// spinner must still be live during the 3s hook — either the
+	// running-hook status or at least the interrupt affordance
+	deadline := time.Now().Add(12 * time.Second)
+	sawEsc, sawHook := false, false
+	for time.Now().Before(deadline) {
+		out := p.clean()
+		if strings.Contains(out, "esc to interrupt") {
+			sawEsc = true
+		}
+		if strings.Contains(out, "running PostToolUse hook") {
+			sawHook = true
+		}
+		if sawEsc && sawHook {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	p.waitFor("hi", 30*time.Second)
+	p.exit()
+	if !sawEsc {
+		t.Fatal("spinner stopped during tool execution — no 'esc to interrupt'")
+	}
+	if !sawHook {
+		_, herr := os.Stat(marker)
+		t.Fatalf("hook status never rendered; sawEsc=%v hookRan=%v", sawEsc, herr == nil)
+	}
 }

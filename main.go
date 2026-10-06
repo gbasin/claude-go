@@ -911,6 +911,17 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 			for _, t := range c.Tools {
 				tools.RegisterMCP(prefix, c, t.Name, t.Description, t.InputSchema)
 			}
+			// tools/list_changed: the client refreshes c.Tools; re-register
+			// the new entries so they surface (real reloads in place)
+			c.OnToolsChanged = func() {
+				var ents []tools.MCPToolEntry
+				for _, t := range c.ListTools() {
+					ents = append(ents, tools.MCPToolEntry{
+						Name: t.Name, Description: t.Description,
+						InputSchema: t.InputSchema})
+				}
+				tools.SyncMCPTools(prefix, c, ents)
+			}
 			tools.RegisterMCPServer(name, c)
 			mu.Lock()
 			clients = append(clients, c)

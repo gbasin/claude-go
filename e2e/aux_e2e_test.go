@@ -760,6 +760,7 @@ func TestTokenRefreshRace(t *testing.T) {
 	r := s.runEx(t, []string{
 		"CLAUDE_GO_CREDS_FILE=" + credsFile,
 		"CLAUDE_GO_TOKEN_URL=" + tokenSrv.URL,
+		"CG_DBG401=1",
 		"CLAUDE_GO_RAW_HTTP=0",
 	}, 30*time.Second, "--sdk-url", apiSrv.URL, "-p", "hi",
 		"--output-format", "stream-json")
@@ -819,5 +820,69 @@ func TestDeferredToolMaterializes(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("Glob should materialize on the wire after select:Glob; tools=%v", names)
+	}
+}
+
+// Test401RefreshRetry: a 401 on OAuth creds forces a token refresh and
+// retries once — the retry carries the new bearer.
+func Test401RefreshRetry(t *testing.T) {
+	var apiCalls int
+	var secondAuth string
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// /api/oauth/profile is an aux probe — only /v1/messages 401s,
+		// and only while it still carries the stale token
+		if !strings.HasPrefix(r.URL.Path, "/v1/messages") {
+			json.NewEncoder(w).Encode(map[string]any{})
+			return
+		}
+		apiCalls++
+		if r.Header.Get("Authorization") == "Bearer stale-token" {
+			w.WriteHeader(401)
+			fmt.Fprint(w, `{"type":"error","error":{"type":"authentication_error","message":"invalid token"}}`)
+			return
+		}
+		secondAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"fable\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n")
+		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"POST-REFRESH OK\"}}\n\n")
+		fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n")
+		fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer apiSrv.Close()
+
+	var refreshCalls int
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		refreshCalls++
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "fresh-token-2", "refresh_token": "fresh-refresh-2",
+			"expires_in": 3600,
+		})
+	}))
+	defer tokenSrv.Close()
+
+	s := newSession(t)
+	credsFile := filepath.Join(s.home, ".claude-go", ".credentials.json")
+	os.MkdirAll(filepath.Dir(credsFile), 0o700)
+	// token still "fresh" (expires in an hour) — only the server's 401
+	// should trigger the reactive refresh
+	os.WriteFile(credsFile, []byte(`{"claudeAiOauth":{"accessToken":"stale-token",`+
+		`"refreshToken":"stale-refresh","expiresAt":9999999999999,"subscriptionType":"max"}}`), 0o600)
+
+	r := s.runEx(t, []string{
+		"CLAUDE_GO_CREDS_FILE=" + credsFile,
+		"CLAUDE_GO_TOKEN_URL=" + tokenSrv.URL,
+		"CG_DBG401=1",
+		"ANTHROPIC_BASE_URL=" + apiSrv.URL,
+	}, 60*time.Second, "-p", "hi")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "POST-REFRESH OK") {
+		t.Fatalf("no post-refresh reply (apiCalls=%d):\n%s", apiCalls, truncStr(r.stdout+r.stderr, 2000))
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("expected exactly 1 refresh, got %d (secondAuth=%q apiCalls=%d)\nstderr: %s", refreshCalls, secondAuth, apiCalls, r.stderr)
+	}
+	if secondAuth != "Bearer fresh-token-2" {
+		t.Fatalf("retry didn't carry new token: %q", secondAuth)
 	}
 }

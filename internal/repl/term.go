@@ -153,8 +153,8 @@ func (e *editor) boxFrame() (box []string, curRow, curCol int) {
 	}
 	all = append(all, e.acRows(w)...)
 	all = append(all, rule)
-	if e.footer != "" {
-		all = append(all, e.footer) // footer row below the bottom rule
+	if f := e.footerText(); f != "" {
+		all = append(all, f) // footer row below the bottom rule
 	}
 	e.boxAll = all
 	content := all[1 : len(all)-1]
@@ -213,8 +213,8 @@ func (e *editor) redraw() {
 	// typing — real keeps the full chrome live during composition)
 	b.WriteString("\r\n" + boxRule())
 	extra++
-	if e.footer != "" {
-		b.WriteString("\r\n" + e.footer)
+	if f := e.footerText(); f != "" {
+		b.WriteString("\r\n" + f)
 		extra++
 	}
 	// reposition cursor to e.pos
@@ -323,8 +323,8 @@ func (e *editor) readLine(ks *keySource) readResult {
 			os.Stdout.WriteString("\r\x1b[K" + strings.Repeat(" ", max(0, w-visWidth(eff))) + eff + "\n")
 		}
 		os.Stdout.WriteString(boxRule() + "\n" + e.prompt + "\n" + boxRule())
-		if e.footer != "" {
-			os.Stdout.WriteString("\n" + e.footer)
+		if f := e.footerText(); f != "" {
+			os.Stdout.WriteString("\n" + f)
 		}
 		// cursor back to the input row
 		back := 1
@@ -571,6 +571,13 @@ func (e *editor) insertKey(k key) *readResult {
 // (d/c/y/>/<) × motions, linewise ops, f/F/t/T finds, registers, undo,
 // dot-repeat.
 func (e *editor) vimKey(k key) *readResult {
+	if len(e.buf) == 0 {
+		e.pos = 0
+	} else if e.pos < 0 {
+		e.pos = 0
+	} else if e.pos >= len(e.buf) {
+		e.pos = len(e.buf) - 1
+	}
 	c := k.b
 	toInsert := func() { e.mode = "insert"; e.redraw() }
 	if k.mod&(modCtrl|modAlt|modCmd) != 0 && k.r != 0 {
@@ -726,7 +733,9 @@ func (e *editor) vimKey(k key) *readResult {
 		e.pos = max(0, e.pos-cnt)
 		e.redraw()
 	case 'l', ' ':
-		e.pos = min(len(e.buf)-1, e.pos+cnt)
+		if len(e.buf) > 0 {
+			e.pos = min(len(e.buf)-1, e.pos+cnt)
+		}
 		e.redraw()
 	case 'j':
 		for i := 0; i < cnt; i++ {
@@ -1924,6 +1933,19 @@ func (e *editor) stashLine() {
 	e.redraw()
 }
 
+// yankLine pops the most recent stashed draft back into the input
+// (ctrl+y — the yank half of the stash the hint advertises).
+func (e *editor) yankLine() {
+	if len(e.stashed) == 0 {
+		return
+	}
+	e.pushUndo()
+	e.buf = e.stashed[len(e.stashed)-1]
+	e.stashed = e.stashed[:len(e.stashed)-1]
+	e.pos = len(e.buf)
+	e.redraw()
+}
+
 // showShortcuts prints the keyboard-shortcut overlay ('?' on empty input).
 func (e *editor) showShortcuts() {
 	var b strings.Builder
@@ -1984,4 +2006,18 @@ func boxRule() string {
 		w = 80
 	}
 	return "\x1b[38;5;244m" + strings.Repeat("─", w) + "\x1b[39m"
+}
+
+// footerText returns the status footer with the live vim badge prepended —
+// the badge must re-evaluate at draw time because esc flips modes between
+// printStatus calls.
+func (e *editor) footerText() string {
+	if !e.vim {
+		return e.footer
+	}
+	mode := e.mode
+	if mode == "" {
+		mode = "insert"
+	}
+	return "vim:" + mode + " · " + e.footer
 }

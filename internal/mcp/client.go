@@ -191,6 +191,9 @@ type Client struct {
 	// notifications (notifications/progress, notifications/*/list_changed,
 	// notifications/message, ...). Called on a separate goroutine.
 	OnNotification func(method string, params json.RawMessage)
+	// OnToolsChanged, if set, fires after a tools/list_changed refresh
+	// replaced c.Tools — callers re-register the surface from c.Tools.
+	OnToolsChanged func()
 
 	tr      transport
 	cmd     *exec.Cmd // stdio only
@@ -369,6 +372,16 @@ func (c *Client) SetNotificationHandler(fn func(method string, params json.RawMe
 
 // handleNotification invokes the OnNotification hook and performs default
 // bookkeeping (tool list refresh on tools/list_changed).
+// ListTools returns a copy of the current tool list (refreshed on
+// notifications/tools/list_changed).
+func (c *Client) ListTools() []Tool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]Tool, len(c.Tools))
+	copy(out, c.Tools)
+	return out
+}
+
 func (c *Client) handleNotification(method string, params json.RawMessage) {
 	c.mu.Lock()
 	fn := c.OnNotification
@@ -387,7 +400,11 @@ func (c *Client) handleNotification(method string, params json.RawMessage) {
 			if err := c.call(ctx, "tools/list", nil, &res); err == nil {
 				c.mu.Lock()
 				c.Tools = res.Tools
+				cb := c.OnToolsChanged
 				c.mu.Unlock()
+				if cb != nil {
+					cb()
+				}
 			}
 		}()
 	}
