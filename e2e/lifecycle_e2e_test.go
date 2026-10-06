@@ -138,6 +138,28 @@ func TestAskUserQuestionDialog(t *testing.T) {
 	p.exit()
 }
 
+// TestAskUserQuestionWizard: a two-question call renders real's tabbed
+// wizard — Q1/Q2 headers, answered ✓ markers, the Submit tab.
+func TestAskUserQuestionWizard(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+
+	p.sendUntilEchoed(t,
+		`tool:AskUserQuestion {"questions":[`+
+			`{"question":"Pick a color","header":"Color","options":[{"label":"Red"},{"label":"Blue"}]},`+
+			`{"question":"Pick a size","header":"Size","options":[{"label":"S"},{"label":"M"}]}`+
+			`]}`+"\r",
+		"❯ tool:AskUserQuestion", 8)
+	p.waitFor("Pick a color", 30*time.Second)
+	// Q1: answer Red (already selected) → advances to Q2
+	p.sendUntil("\r", "Pick a size", 10)
+	// Q2: ↓ to M, Enter → lands on Submit tab
+	p.sendUntil("\x1b[B\r", "Submit", 10)
+	// Submit tab Enter → both answers in the tool result
+	p.sendUntil("\r", "Tool results received", 15)
+	p.exit()
+}
+
 // TestAgentToolSubagent: the Agent tool spawns a synchronous subagent turn
 // against the mock — the subagent's reply lands in the tool result.
 func TestAgentToolSubagent(t *testing.T) {

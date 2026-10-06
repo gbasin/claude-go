@@ -62,13 +62,16 @@ type Context struct {
 	Answerer      Answerer // WebFetch page-answer model
 	Searcher      Searcher // WebSearch backend
 	AskStructured func(header, question string, options []AskOption, multi bool) ([]string, error)
-	SetPermMode   func(mode string)
-	PlanApprove   func() bool
-	EndSession    func()
-	Session       string        // session id for skill substitutions
-	OAuthToken    func() string // claude.ai oauth access token for remote APIs
-	OnCwdChanged  func(newCWD string)
-	OnFileChanged func(path, kind string)
+	// AskStructuredMulti renders real's multi-question wizard (question
+	// tabs + Submit). Falls back to sequential AskStructured when unset.
+	AskStructuredMulti func(questions []AskQuestion) (map[string][]string, error)
+	SetPermMode        func(mode string)
+	PlanApprove        func() bool
+	EndSession         func()
+	Session            string        // session id for skill substitutions
+	OAuthToken         func() string // claude.ai oauth access token for remote APIs
+	OnCwdChanged       func(newCWD string)
+	OnFileChanged      func(path, kind string)
 	// Discovered caches deferred tools whose schemas ToolSearch has served
 	// this session (real: declared-tools latch). Guarded by mu.
 	Discovered map[string]bool

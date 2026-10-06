@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -164,6 +165,9 @@ func RunWithStore(l *agent.Loop, store Store) {
 	}
 	l.ToolCtx.AskStructured = func(header, question string, options []tools.AskOption, multi bool) ([]string, error) {
 		return pr.askStructured(ks, header, question, options, multi)
+	}
+	l.ToolCtx.AskStructuredMulti = func(qs []tools.AskQuestion) (map[string][]string, error) {
+		return pr.askStructuredMulti(ks, qs)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "repl: raw mode:", err)
@@ -1968,4 +1972,226 @@ func tailRunes(s string, n int) string {
 		return s
 	}
 	return string(r[len(r)-n:])
+}
+
+// askStructuredMulti renders real's multi-question wizard: a tab row of
+// questions (←/→ or Tab to move) ending in a "✓ Submit" tab, per-question
+// option lists, space toggles multiSelect, Enter answers + advances.
+func (p *promptUI) askStructuredMulti(ks *keySource, qs []tools.AskQuestion) (map[string][]string, error) {
+	compSuspend()
+	defer compResume()
+	dch := make(chan key, 16)
+	ks.dialog.Store(&dch)
+	defer ks.dialog.Store(nil)
+
+	const (
+		chipBG = "\x1b[48;5;153m\x1b[38;5;16m"
+		cyan   = "\x1b[38;5;153m"
+		gray   = "\x1b[38;5;246m"
+		boldT  = "\x1b[38;5;231m\x1b[1m"
+		unbold = "\x1b[22m"
+	)
+	answers := make(map[string][]string)
+	toggled := make([]map[int]bool, len(qs))
+	custom := make([][]rune, len(qs))
+	customOn := make([]bool, len(qs)) // "Type something" editing per tab
+	for i := range toggled {
+		toggled[i] = map[int]bool{}
+	}
+	tab, sel := 0, 0
+	width, _, _ := term.GetSize(int(os.Stdout.Fd()))
+	if width <= 0 {
+		width = 80
+	}
+
+	draw := func() {
+		var sb strings.Builder
+		sb.WriteString("\r\x1b[J")
+		var q tools.AskQuestion
+		if tab < len(qs) {
+			q = qs[tab]
+		}
+		sb.WriteString(" " + chipBG + "  " + " " + "\x1b[49m\x1b[39m\n")
+		hdr := q.Header
+		if tab == len(qs) {
+			hdr = "Review"
+		}
+		sb.WriteString(" " + chipBG + " " + hdr + " " + "\x1b[49m\x1b[39m\n")
+		sb.WriteString(" " + boldT + q.Text + unbold + "\x1b[39m\n\n")
+		// question tabs — "← Q1 Q2 … ✓ Submit →" like real's tab bar
+		if len(qs) > 1 {
+			var tb strings.Builder
+			for i, qq := range qs {
+				lbl := qq.Header
+				if lbl == "" {
+					lbl = fmt.Sprintf("Q%d", i+1)
+				}
+				if len(answers[fmt.Sprint(i)]) > 0 {
+					lbl = "✓ " + lbl // answered marker
+				}
+				if i == tab {
+					tb.WriteString(" " + cyan + lbl + "\x1b[39m")
+				} else {
+					tb.WriteString(" " + gray + lbl + "\x1b[39m")
+				}
+			}
+			// submit tab
+			sub := " ✓ Submit "
+			if tab == len(qs) {
+				sb.WriteString("  ← " + tb.String() + " " + cyan + sub + "\x1b[39m" + " →\n")
+			} else {
+				sb.WriteString("  ← " + tb.String() + " " + gray + sub + "\x1b[39m" + " →\n")
+			}
+			sb.WriteString("\n")
+		}
+		if tab == len(qs) {
+			// submit tab: summary of answers
+			sb.WriteString(" " + gray + "Review your answers, then submit." + "\x1b[39m\n\n")
+			for i, qq := range qs {
+				ans := answers[fmt.Sprint(i)]
+				lbl := qq.Header
+				if lbl == "" {
+					lbl = fmt.Sprintf("Q%d", i+1)
+				}
+				sb.WriteString(fmt.Sprintf("  %s%s%s  %s%s%s\n", gray, lbl, "\x1b[39m", cyan, strings.Join(ans, ", "), "\x1b[39m"))
+			}
+		} else {
+			base := len(q.Options)
+			rows := base + 1 // + "Type something."
+			for i := 0; i < rows; i++ {
+				var lbl string
+				isCustomRow := i == base
+				if isCustomRow {
+					lbl = "Type something."
+					if customOn[tab] {
+						lbl = "Type something: " + string(custom[tab])
+					}
+				} else {
+					lbl = q.Options[i].Label
+				}
+				num := fmt.Sprintf("%d.", i+1)
+				if i == sel && !customOn[tab] {
+					sb.WriteString(fmt.Sprintf(" %s❯%s %s%s%s %s%s\n", cyan, "\x1b[39m", gray, num, "\x1b[39m", cyan, lbl+"\x1b[39m"))
+				} else if customOn[tab] && isCustomRow {
+					sb.WriteString(fmt.Sprintf(" %s❯%s %s%s%s %s█\n", cyan, "\x1b[39m", gray, num, "\x1b[39m", lbl))
+				} else {
+					check := ""
+					if q.MultiSelect && !isCustomRow {
+						check = "○ "
+						if toggled[tab][i] {
+							check = "● "
+						}
+					}
+					sb.WriteString(fmt.Sprintf("   %s%s%s %s%s\n", gray, num, "\x1b[39m", check, lbl))
+				}
+				if !isCustomRow && q.Options[i].Description != "" {
+					sb.WriteString("      " + gray + q.Options[i].Description + "\x1b[39m\n")
+				}
+			}
+			sb.WriteString(" " + gray + strings.Repeat("─", width) + "\x1b[39m\n")
+			sb.WriteString(fmt.Sprintf(" %s%d.%s Chat about this\n", gray, rows+1, "\x1b[39m"))
+		}
+		sb.WriteString("\n " + gray + "Enter to select · ↑/↓ to navigate" + "\x1b[39m")
+		if len(qs) > 1 {
+			sb.WriteString(gray + " · ←/→ questions · Esc to cancel" + "\x1b[39m")
+		} else {
+			sb.WriteString(gray + " · Esc to cancel" + "\x1b[39m")
+		}
+		fmt.Print(sb.String())
+	}
+	draw()
+	take := func() map[string][]string {
+		for i := range qs {
+			key := fmt.Sprint(i)
+			if s := strings.TrimSpace(string(custom[i])); s != "" && !slices.Contains(answers[key], s) {
+				answers[key] = append(answers[key], s)
+			}
+		}
+		return answers
+	}
+	for k := range dch {
+		if tab < len(qs) && customOn[tab] {
+			// typing into "Type something"
+			switch {
+			case k.b == '\r' || k.b == 0x1b || k.b == 3:
+				customOn[tab] = false
+				draw()
+			case k.b == 0x7f || k.b == 8:
+				if len(custom[tab]) > 0 {
+					custom[tab] = custom[tab][:len(custom[tab])-1]
+				}
+				draw()
+			case k.b >= 0x20:
+				custom[tab] = append(custom[tab], rune(k.b))
+				draw()
+			}
+			continue
+		}
+		switch {
+		case k.seq == "[D": // ← prev question
+			if tab > 0 {
+				tab--
+				sel = 0
+			}
+			draw()
+		case k.seq == "[C" || k.b == '\t': // → / Tab next question (Submit last)
+			if tab < len(qs) {
+				tab++
+				sel = 0
+			}
+			draw()
+		case k.seq == "[A":
+			if sel > 0 {
+				sel--
+			}
+			draw()
+		case k.seq == "[B":
+			tabMax := len(qs[tab].Options)
+			if tab < len(qs) && sel < tabMax {
+				sel++
+			}
+			draw()
+		case k.b == 0x1b || k.b == 3:
+			fmt.Print("\r\n")
+			return nil, fmt.Errorf("cancelled")
+		case k.b == ' ' && tab < len(qs) && qs[tab].MultiSelect && sel < len(qs[tab].Options):
+			toggled[tab][sel] = !toggled[tab][sel]
+			draw()
+		case k.b == '\r':
+			if tab == len(qs) {
+				fmt.Print("\r\n")
+				return take(), nil
+			}
+			q := qs[tab]
+			if sel == len(q.Options) {
+				customOn[tab] = true // Type something
+				draw()
+				continue
+			}
+			if q.MultiSelect {
+				// enter = confirm current toggles for this question
+				var sel2 []string
+				for i, on := range toggled[tab] {
+					if on {
+						sel2 = append(sel2, q.Options[i].Label)
+					}
+				}
+				if len(sel2) == 0 {
+					sel2 = []string{q.Options[sel].Label}
+				}
+				answers[fmt.Sprint(tab)] = sel2
+			} else {
+				answers[fmt.Sprint(tab)] = []string{q.Options[sel].Label}
+			}
+			if len(qs) == 1 {
+				// single question: answering submits immediately (no Submit tab)
+				fmt.Print("\r\n")
+				return take(), nil
+			}
+			tab++
+			sel = 0
+			draw()
+		}
+	}
+	return nil, fmt.Errorf("cancelled")
 }
