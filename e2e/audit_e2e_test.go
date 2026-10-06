@@ -7,6 +7,8 @@ package e2e
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -519,5 +521,58 @@ func TestPluginDisabled(t *testing.T) {
 	s.mustOK(t, r)
 	if _, err := os.Stat(filepath.Join(plugDir, "fired.marker")); !os.IsNotExist(err) {
 		t.Fatal("disabled plugin hook fired")
+	}
+}
+
+// TestInitCmd: /init fires the bundled init prompt at the model — the
+// request reaches the wire with CLAUDE.md instructions.
+func TestInitCmd(t *testing.T) {
+	s := newSession(t)
+	r, bodies := recordRequests(t, s, "-p", "hi")
+	s.mustOK(t, r)
+	_ = bodies // warm-up done; now the interactive path
+	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK_RECORD=" + t.TempDir() + "/initrec"},
+		"--mock", "--permission-mode", "bypassPermissions")
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t, "/init\r", "❯ /init", 8)
+	p.waitFor("analyzing codebase", 15*time.Second)
+	p.exit()
+}
+
+// TestOAuthRefreshCmd: /oauth-refresh calls the token endpoint with the
+// stored refresh token and reports success.
+func TestOAuthRefreshCmd(t *testing.T) {
+	var refreshHit bool
+	var grantType string
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		json.NewDecoder(r.Body).Decode(&body)
+		refreshHit = true
+		grantType = body["grant_type"]
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "e2e-refreshed-token",
+			"refresh_token": "e2e-refreshed-refresh",
+			"expires_in":    3600,
+		})
+	}))
+	defer tokenSrv.Close()
+
+	s := newSession(t)
+	credsFile := filepath.Join(s.home, ".claude-go", ".credentials.json")
+	os.MkdirAll(filepath.Dir(credsFile), 0o700)
+	os.WriteFile(credsFile, []byte(`{"claudeAiOauth":{`+
+		`"accessToken":"e2e-stale-token","refreshToken":"e2e-stale-refresh",`+
+		`"expiresAt":9999999999999,"subscriptionType":"max"}}`), 0o600)
+
+	p := s.runPTY(t, []string{
+		"CLAUDE_GO_CREDS_FILE=" + credsFile,
+		"CLAUDE_GO_TOKEN_URL=" + tokenSrv.URL,
+	}, "--mock")
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t, "/oauth-refresh\r", "❯ /oauth-refresh", 8)
+	p.waitFor("token refreshed", 15*time.Second)
+	p.exit()
+	if !refreshHit || grantType != "refresh_token" {
+		t.Fatalf("refresh endpoint not hit properly: hit=%v grant=%q", refreshHit, grantType)
 	}
 }
