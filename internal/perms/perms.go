@@ -102,6 +102,11 @@ func Check(mode Mode, rules *Rules, toolName string, input json.RawMessage, cwd 
 	if allSpecsAllowed(rules, toolName, specs) {
 		return Allow
 	}
+	// read-only tools never prompt in any mode (deny/ask rules already ran
+	// above — a user can still explicitly deny Glob)
+	if readOnly(toolName) {
+		return Allow
+	}
 	// file tools writing outside the workspace (cwd + additionalDirectories)
 	// always require an ask — real's acceptEdits only auto-allows
 	// IN-workspace edits ("acceptEdits already auto-allows in-workspace
