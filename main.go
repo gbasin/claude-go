@@ -196,7 +196,9 @@ func main() {
 			configSub(args[1:])
 			return
 		case "update", "install":
-			selfUpdate()
+			if os.Getenv("DISABLE_AUTOUPDATER") == "" {
+				selfUpdate()
+			}
 			return
 		case "login":
 			authLoginSub()
