@@ -266,8 +266,8 @@ func compInline(s string) {
 	}
 	compMu.Lock()
 	if compSusp > 0 || compZoneH == 0 {
-		compMu.Unlock()
 		io.WriteString(compOut, s)
+		compMu.Unlock()
 		return
 	}
 	var b strings.Builder
@@ -882,11 +882,15 @@ func compStreamWrite(s string) {
 	if s == "" {
 		return
 	}
+	// compMu serializes all zone writes — without it a long stream chunk
+	// can split mid-rune at the PTY and interleave a spinner frame's
+	// bytes (the intermittent invalid-utf8 the e2e caught at 50 cols).
+	compMu.Lock()
+	defer compMu.Unlock()
 	if !compActive.Load() || compZoneH == 0 || compSusp > 0 || !compStreamOn {
 		io.WriteString(compOut, s)
 		return
 	}
-	compMu.Lock()
 	var b strings.Builder
 	b.WriteString(compBSU)
 	// position once at the tracked stream position, then let the terminal
@@ -946,7 +950,6 @@ func compStreamWrite(s string) {
 			fh.Close()
 		}
 	}
-	compMu.Unlock()
 }
 
 // compStreamBegin marks the stream position at the scroll-region bottom —
