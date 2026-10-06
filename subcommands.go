@@ -383,6 +383,9 @@ func agentsSub(args []string) {
 	fmt.Println("local bus agents: none (no messaging socket)")
 	jobs := bg.List()
 	fmt.Println("\nbackground sessions:")
+	if pid := bg.DaemonPID(); pid != 0 {
+		fmt.Printf("  (daemon running, pid %d)\n", pid)
+	}
 	if len(jobs) == 0 {
 		fmt.Println("  none")
 	}
