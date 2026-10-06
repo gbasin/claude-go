@@ -71,8 +71,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		dprintf("  input: %d  output: %d  cache-read: %d  cache-write: %d\n",
 			u.InputTokens, u.OutputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens)
 	case "status":
-		dprintf("  version: %s\n  model: %s\n  session: %s\n  cwd: %s\n  permission mode: %s\n  transcript: %s\n",
-			api.Version, l.Model, l.Client.SessionID, l.ToolCtx.CWD, l.PermMode, l.Transcript)
+		statusOverlay(l, ks)
 	case "context":
 		u := l.UsageTotal
 		total := u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
@@ -130,7 +129,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		}
 		go l.Ask(context.Background(), body)
 	case "diff":
-		diffCmd(l)
+		diffCmdKS(l, ks)
 	case "review", "code-review":
 		dprintln("  reviewing (medium effort)…")
 		body := bundledCodeReview
@@ -2441,16 +2440,80 @@ func exportCmd(l *agent.Loop, arg string) {
 }
 
 func diffCmd(l *agent.Loop) {
-	out, err := exec.Command("git", "-C", l.ToolCtx.CWD, "diff", "--stat").CombinedOutput()
+	diffCmdKS(l, nil)
+}
+
+// diffCmdKS renders real's DiffDialog: a scrollable file list, each file's
+// diff shown inline, ↑↓ move between files, esc/q closes.
+func diffCmdKS(l *agent.Loop, ks *keySource) {
+	stat, err := exec.Command("git", "-C", l.ToolCtx.CWD, "diff", "--stat").CombinedOutput()
 	if err != nil {
 		dprintln("  not a git repo or no changes")
 		return
 	}
-	if len(out) == 0 {
-		dprintln("  clean working tree")
+	if len(stat) == 0 {
+		dprintln("  No changes this session") // real's empty state
 		return
 	}
-	dprintf("%s", string(out))
+	names, _ := exec.Command("git", "-C", l.ToolCtx.CWD, "diff", "--name-only").Output()
+	files := strings.Fields(string(names))
+	if ks == nil || len(files) == 0 {
+		dprintf("%s", string(stat))
+		return
+	}
+	compSuspend()
+	defer compResume()
+	dch := make(chan key, 16)
+	ks.dialog.Store(&dch)
+	defer ks.dialog.Store(nil)
+	sel := 0
+	show := func() {
+		dprintf("\n  %sChanges — git diff%s  %s%d files%s\n", bold, reset, dim, len(files), reset)
+		for i, f := range files {
+			mark := "  "
+			if i == sel {
+				mark = cyan + "❯ " + reset
+			}
+			dprintf("%s%s\n", mark, f)
+		}
+		dprintf("  %s↑↓ file · esc close%s\n", dim, reset)
+	}
+	show()
+	for k := range dch {
+		switch {
+		case k.seq == "[A" && sel > 0:
+			sel--
+			show()
+		case k.seq == "[B" && sel < len(files)-1:
+			sel++
+			show()
+		case k.b == 0x1b || k.b == 3 || k.b == 'q':
+			return
+		case k.b == '\r':
+			// open the selected file's diff inline
+			out, _ := exec.Command("git", "-C", l.ToolCtx.CWD, "diff", "--", files[sel]).Output()
+			dprintf("\n%s", highlightDiff(string(out)))
+		}
+	}
+}
+
+// highlightDiff colors +added green / -removed red / @@ hunk headers dim —
+// real's diff preview palette.
+func highlightDiff(d string) string {
+	var sb strings.Builder
+	for _, ln := range strings.Split(strings.TrimRight(d, "\n"), "\n") {
+		switch {
+		case strings.HasPrefix(ln, "+"):
+			sb.WriteString("\x1b[32m" + ln + reset + "\n")
+		case strings.HasPrefix(ln, "-"):
+			sb.WriteString("\x1b[31m" + ln + reset + "\n")
+		case strings.HasPrefix(ln, "@@"):
+			sb.WriteString(dim + ln + reset + "\n")
+		default:
+			sb.WriteString(ln + "\n")
+		}
+	}
+	return sb.String()
 }
 
 // doctorCmd is the local diagnostics report (like `claude doctor` on the
@@ -3382,4 +3445,92 @@ func ideCmd() {
 		}
 	}
 	dprintln("  no IDE detected — install the Claude Code extension in VS Code/Cursor and reopen this folder")
+}
+
+// statusOverlay renders real's /status — a tabbed panel (Settings /
+// Status / Config / UsageStats) with session fields + diagnostics.
+// Esc/enter/q closes; ←/→ move between tabs (Status is the default).
+func statusOverlay(l *agent.Loop, ks *keySource) {
+	compSuspend()
+	defer compResume()
+	dch := make(chan key, 16)
+	if ks != nil {
+		ks.dialog.Store(&dch)
+		defer ks.dialog.Store(nil)
+	}
+	tabs := []string{"Settings", "Status", "Config", "UsageStats"}
+	tab := 1
+	draw := func() {
+		var sb strings.Builder
+		sb.WriteString("\n")
+		for i, t2 := range tabs {
+			if i == tab {
+				sb.WriteString(bold + " " + t2 + " " + reset)
+			} else {
+				sb.WriteString(dim + " " + t2 + reset)
+			}
+		}
+		sb.WriteString("\n\n")
+		switch tab {
+		case 1:
+			auth := "none"
+			if l.Client != nil && l.Client.Creds != nil && (l.Client.Creds.AccessToken != "") {
+				auth = "present"
+			}
+			peer := ""
+			if sock := tools.ActiveSocketPath(); sock != "" {
+				peer = "uds:" + sock
+			}
+			for _, row := range [][2]string{
+				{"Version", api.Version},
+				{"Session name", "/rename to add a name"},
+				{"Session ID", l.Client.SessionID},
+				{"Session kind", "interactive"},
+				{"Peer address", peer},
+				{"cwd", l.ToolCtx.CWD},
+				{"Auth token", auth},
+				{"Model", "Default (" + l.Model + ")"},
+				{"Permission mode", l.PermMode},
+				{"Transcript", l.Transcript},
+			} {
+				sb.WriteString(fmt.Sprintf("  %-18s %s\n", row[0]+":", row[1]))
+			}
+			sb.WriteString("\n" + bold + "System diagnostics" + reset + "\n")
+			if _, err := exec.LookPath("claude"); err == nil {
+				if home := os.Getenv("HOME"); home != "" {
+					if !strings.Contains(os.Getenv("PATH"), filepath.Join(home, ".local", "bin")) {
+						sb.WriteString(yellow + "⚠ Native installation exists but ~/.local/bin is not in your PATH." + reset + "\n")
+					}
+				}
+			}
+		case 0:
+			sb.WriteString("  " + dim + "settings sources: user + project + local" + reset + "\n")
+		case 2:
+			sb.WriteString(fmt.Sprintf("  effort: %s\n  theme: %s\n", effortLabel(), themeSetting(l.ToolCtx.CWD)))
+		case 3:
+			u := l.UsageTotal
+			sb.WriteString(fmt.Sprintf("  input: %d · output: %d · cache read: %d\n",
+				u.InputTokens, u.OutputTokens, u.CacheReadInputTokens))
+		}
+		sb.WriteString("\n" + dim + "←→ tabs · Esc to cancel" + reset + "\n")
+		fmt.Print(sb.String())
+	}
+	draw()
+	if ks == nil {
+		return
+	}
+	rows := 24
+	_ = rows
+	for k := range dch {
+		switch {
+		case k.seq == "[C" && tab < len(tabs)-1:
+			tab++
+			draw()
+		case k.seq == "[D" && tab > 0:
+			tab--
+			draw()
+		case k.b == 0x1b || k.b == 3 || k.b == 'q' || k.b == '\r':
+			return
+		}
+	}
 }
