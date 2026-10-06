@@ -19,18 +19,18 @@ import (
 // settings.tasks.enabled. Task state persists per-session under the project
 // dir so --resume sees it; todos are in-memory like real 2.1.288.
 
-func taskToolsEnabled() bool {
-	if os.Getenv("CLAUDE_CODE_TASK_TOOLS") == "1" || os.Getenv("CLAUDE_CODE_TASK_LIST_ID") != "" {
-		return true
-	}
-	return taskToolsEnabledFor(os.Getenv("PWD"))
-}
-
 // taskToolsEnabledFor checks the settings gate against a specific project
 // dir (ProjectDir below) so --project/--add-dir moves resolve
 // tasks.enabled against the actual workspace, not the parent's launch dir.
+// The env vars (CLAUDE_CODE_TASK_TOOLS / CLAUDE_CODE_TASK_LIST_ID) force on.
 func taskToolsEnabledFor(cwd string) bool {
-	return settingStr(cwd, "tasks.enabled") == "true"
+	if os.Getenv("CLAUDE_CODE_TASK_TOOLS") == "1" || os.Getenv("CLAUDE_CODE_TASK_LIST_ID") != "" {
+		return true
+	}
+	if s := settingStr(cwd, "tasks.enabled"); s == "true" {
+		return true
+	}
+	return settingBool(cwd, "tasks.enabled")
 }
 
 // projectDir is the session's workspace, set when the loop builds its
@@ -48,9 +48,9 @@ func ProjectDir() string {
 }
 
 func init() {
-	if !taskToolsEnabled() {
-		return
-	}
+	// register unconditionally — the wire surface (All) and Dispatch gate
+	// on taskToolsEnabledFor(ProjectDir()) at call time, since launch $PWD
+	// isn't the project dir under --project/--add-dir
 	Register(&Tool{Def: taskDef("TaskCreate", `Create a structured task list item for your current session.`,
 		obj(
 			prop("subject", "string", "A brief title for the task"),

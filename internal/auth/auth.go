@@ -227,6 +227,17 @@ func (c *Credentials) Token() (string, error) {
 const tokenURL = "https://platform.claude.com/v1/oauth/token"
 const clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
+// ForceRefresh refreshes unconditionally — for the reactive path where the
+// server rejected a still-"fresh" token with a 401.
+func (c *Credentials) ForceRefresh() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.RefreshToken == "" || c.Borrowed {
+		return
+	}
+	_ = c.refreshLocked()
+}
+
 // Refresh rotates the OAuth token. Callers that already hold c.mu use
 // refreshLocked instead.
 func (c *Credentials) Refresh() error {

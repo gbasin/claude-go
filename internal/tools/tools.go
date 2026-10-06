@@ -125,8 +125,7 @@ func All() []*Tool {
 		if (n == "CronCreate" || n == "CronDelete" || n == "CronList") && !cronEnabled() {
 			continue
 		}
-		if (n == "TaskCreate" || n == "TaskGet" || n == "TaskList" ||
-			n == "TaskUpdate") && !taskToolsEnabledFor(ProjectDir()) {
+		if isTaskTool(n) && !taskToolsEnabledFor(ProjectDir()) {
 			continue
 		}
 		if n == "RemoteTrigger" && !remoteTriggerEnabled() {
@@ -185,6 +184,9 @@ func cronToolDef(t *Tool) *Tool {
 func Dispatch(ctx *Context, name string, input json.RawMessage) Result {
 	t, ok := registry[name]
 	if !ok {
+		return Result{Content: fmt.Sprintf("Unknown tool: %s", name), IsError: true}
+	}
+	if isTaskTool(name) && !taskToolsEnabledFor(ProjectDir()) {
 		return Result{Content: fmt.Sprintf("Unknown tool: %s", name), IsError: true}
 	}
 	defer func() {}()
@@ -291,4 +293,9 @@ func DirAllowed(c *Context, p string) bool {
 		}
 	}
 	return false
+}
+
+// isTaskTool reports whether n is one of the tasks.enabled-gated tools.
+func isTaskTool(n string) bool {
+	return n == "TaskCreate" || n == "TaskGet" || n == "TaskList" || n == "TaskUpdate"
 }

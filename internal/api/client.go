@@ -333,6 +333,8 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 	// ~30s elapses; transport errors retry inside the SDK layer where the
 	// stainless counter actually increments.
 	statusRetries := 1
+	retries401 := 0 // real refreshes OAuth creds on 401; bounded so a
+	// server that keeps rejecting can't spin the loop forever
 	for transportAttempt := 0; transportAttempt <= maxRetries; {
 		c.RetryCount = transportAttempt
 		var rdr io.Reader
@@ -387,6 +389,27 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 		// x-should-retry: server-side override suppresses/forces retries
 		if sr := resp.Header.Get("x-should-retry"); sr == "false" {
 			return nil, decodeErr(resp) // surface the real error body
+		}
+		// 401 on OAuth creds: the token died early (revoked / skew) —
+		// force a refresh and retry once, like real's auth retry
+		// 401 on OAuth creds: the token died early (revoked / skew) —
+		// force a refresh and retry once, like real's auth retry. The
+		// refresh only runs when the rejected token is still the current
+		// one, so concurrent lanes (aux, MCP) don't double-refresh.
+		if resp.StatusCode == 401 && retries401 < 2 && c.Creds != nil &&
+			!c.Creds.IsAPIKey && c.Creds.RefreshToken != "" {
+			retries401++
+			sent := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+			if sent != "" && c.Creds.AccessToken == sent {
+				resp.Body.Close()
+				c.Creds.ForceRefresh()
+				continue
+			}
+			if sent != "" && c.Creds.AccessToken != sent {
+				// another lane already refreshed — retry with the new token
+				resp.Body.Close()
+				continue
+			}
 		}
 		if sr := resp.Header.Get("x-should-retry"); sr == "true" ||
 			resp.StatusCode == 408 || resp.StatusCode == 409 ||

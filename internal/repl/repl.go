@@ -218,7 +218,9 @@ func RunWithStore(l *agent.Loop, store Store) {
 		streamWrite(dim + t + reset)
 	}
 	l.Events.OnToolUse = func(name string, input json.RawMessage) {
-		spinRef.stop()
+		// keep spinning — real animates "(running X hook · Ns)" and
+		// "esc to interrupt" while tools execute; compFooter writes the
+		// pinned row, so the tool card below can't clobber it
 		if focusMode.Load() {
 			return // focus view hides tool lines (real's viewMode:"focus")
 		}
@@ -443,6 +445,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 										queued = append(queued, string(queueBuf))
 									}
 									queuedPending.Add(1)
+									printStatus(l, ed) // refresh "N queued" badge
 									queueBuf = nil
 									compQueueDraft("")
 									// tracked write — a raw stderr print lands
@@ -564,6 +567,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 				case p := <-tools.SessionQueue:
 					queued = append(queued, p)
 					queuedPending.Add(1)
+					printStatus(l, ed)
 				default:
 					goto drained
 				}
@@ -587,6 +591,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			line = queued[0]
 			queued = queued[1:]
 			queuedPending.Add(-1)
+			printStatus(l, ed)
 			// queued lines get the same local dispatch as typed ones —
 			// a "/clear" submitted mid-turn is a command, not a prompt
 			switch {
@@ -1235,6 +1240,9 @@ func printStatus(l *agent.Loop, ed *editor) {
 		}
 		if right == "" {
 			right = "? for shortcuts"
+		}
+		if hints := footerHints(l, ed); len(hints) > 0 {
+			right = strings.Join(hints, " · ") + " · " + right
 		}
 		pad := w - visWidth(left) - visWidth(right)
 		if pad < 1 {
