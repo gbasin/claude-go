@@ -458,6 +458,12 @@ func RunWithStore(l *agent.Loop, store Store) {
 						if ks.forward(k) {
 							continue // modal dialog owns the key
 						}
+						if suspendSupported && isSuspendKey(k) {
+							// ctrl+z mid-turn: stop the process; compResume
+							// repaints spinner/draft on fg
+							suspendToShell(ks, nil)
+							continue
+						}
 						if (k.b == 0x1b || k.b == 3) && k.seq == "" {
 							if os.Getenv("CG_DBGKEY") != "" {
 								fmt.Fprintf(os.Stderr, "[dbgkey cancel b=%x seq=%q]", k.b, k.seq)
