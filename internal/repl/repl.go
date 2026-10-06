@@ -1601,7 +1601,7 @@ func expandMCPPrompt(c customCmd, arg string) string {
 	out, err := c.mcp(args)
 	if err != nil {
 		dprintf("  %s/%s: %v%s\n", red, c.Name, err, reset)
-		return "/nop" // expand to a no-op turn? no — report and drop
+		return "" // a failed prompt must not submit — callers skip empty
 	}
 	return out
 }
