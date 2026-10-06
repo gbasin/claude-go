@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"claude-go/internal/api"
 )
@@ -22,7 +23,28 @@ func taskToolsEnabled() bool {
 	if os.Getenv("CLAUDE_CODE_TASK_TOOLS") == "1" || os.Getenv("CLAUDE_CODE_TASK_LIST_ID") != "" {
 		return true
 	}
-	return settingStr(os.Getenv("PWD"), "tasks.enabled") == "true"
+	return taskToolsEnabledFor(os.Getenv("PWD"))
+}
+
+// taskToolsEnabledFor checks the settings gate against a specific project
+// dir (ProjectDir below) so --project/--add-dir moves resolve
+// tasks.enabled against the actual workspace, not the parent's launch dir.
+func taskToolsEnabledFor(cwd string) bool {
+	return settingStr(cwd, "tasks.enabled") == "true"
+}
+
+// projectDir is the session's workspace, set when the loop builds its
+// Context — the settings gate resolves against this, not PWD (the parent
+// may launch from elsewhere with --project).
+var projectDir atomic.Value // stores string
+
+// SetProjectDir records the workspace for settings gates.
+func SetProjectDir(cwd string) { projectDir.Store(cwd) }
+
+// ProjectDir returns the session workspace ("" until the loop starts).
+func ProjectDir() string {
+	s, _ := projectDir.Load().(string)
+	return s
 }
 
 func init() {

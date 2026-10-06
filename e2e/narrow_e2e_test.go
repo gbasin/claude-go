@@ -37,7 +37,7 @@ func TestNarrowTurn50(t *testing.T) {
 	// duplicate turn whose tool_use ids collide with the first (the mock
 	// reuses toolu_mock_N per response) → validator 400.
 	p.sendUntilEchoed(t, `tool:Bash {"command":"echo narrow-ok"}`+"\r", "❯ tool:Bash", 10)
-	p.waitFor("─ permission", 30*time.Second)
+	p.waitFor("Do you want to proceed?", 30*time.Second)
 	p.sendUntil("1", "Tool results received", 15)
 	out = p.clean()
 	if !strings.Contains(out, "narrow-ok") {

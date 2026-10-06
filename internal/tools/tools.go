@@ -126,7 +126,7 @@ func All() []*Tool {
 			continue
 		}
 		if (n == "TaskCreate" || n == "TaskGet" || n == "TaskList" ||
-			n == "TaskUpdate") && !taskToolsEnabled() {
+			n == "TaskUpdate") && !taskToolsEnabledFor(ProjectDir()) {
 			continue
 		}
 		if n == "RemoteTrigger" && !remoteTriggerEnabled() {

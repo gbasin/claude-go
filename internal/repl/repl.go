@@ -289,6 +289,23 @@ func RunWithStore(l *agent.Loop, store Store) {
 	loggedTo := len(l.Messages)
 
 	for {
+		// real's weekly-limit banner: "You've used N% of your weekly
+		// limit · resets <time>" — once per session at ≥80%
+		if rl := l.Client.LastRateLimit(); rl != nil && !rateBannerShown.Load() {
+			util := rl.OverageMonthlyUtilization
+			if rl.SlowBudgetUtilization > util {
+				util = rl.SlowBudgetUtilization
+			}
+			if util >= 0.8 {
+				rateBannerShown.Store(true)
+				resets := rl.ResetsAt
+				if resets.IsZero() {
+					resets = rl.OverageResetsAt
+				}
+				dprintf("  %sYou've used %d%% of your weekly limit · resets %s%s\n",
+					"\x1b[38;5;220m", int(util*100), resets.Local().Format("3:04pm"), reset)
+			}
+		}
 		// drain background-task notifications above the status line —
 		// real shows "⎿ Task b1 finished: <cmd>" between turns
 		if l.ToolCtx.BgTasks != nil {
@@ -1135,6 +1152,8 @@ func sessionGitBranch(cwd string) string {
 
 // curEffort tracks the session effort for the ◐ pill (set at REPL start,
 // updated by /effort and the model picker).
+var rateBannerShown atomic.Bool
+
 var curEffort atomic.Value // stores string
 
 // effortLabel is real's "◐ medium · /effort" right-aligned pill.
@@ -1165,6 +1184,11 @@ func printStatus(l *agent.Loop, ed *editor) {
 			left += "  " + b // real shows the branch as text
 		}
 		right := strings.TrimSpace(permModeBanner(l.PermMode))
+		if n := runningAgents(l); n > 0 {
+			// real: "← N agents" when background agents are running
+			right = strings.Replace(right, "← for agents", fmt.Sprintf("← %d agents", n), 1)
+			right = strings.Replace(right, "? for shortcuts", "? for shortcuts · ← "+fmt.Sprint(n)+" agents", 1)
+		}
 		if right == "" {
 			right = "? for shortcuts"
 		}
@@ -1708,4 +1732,20 @@ func showAgentsPane(l *agent.Loop, ks *keySource) {
 			return
 		}
 	}
+}
+
+// runningAgents counts live background tasks (real's "← N agents").
+func runningAgents(l *agent.Loop) int {
+	if l.ToolCtx == nil || l.ToolCtx.BgTasks == nil {
+		return 0
+	}
+	n := 0
+	for _, t := range l.ToolCtx.BgTasks.List() {
+		select {
+		case <-t.Done:
+		default:
+			n++
+		}
+	}
+	return n
 }
