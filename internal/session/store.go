@@ -154,7 +154,7 @@ func (s *Store) logMessage(m api.Message, compact bool, modelOnlyText string) er
 		Type: role, UUID: uuid, ParentUUID: s.lastUUID,
 		SessionID: s.SessionID, CWD: s.CWD,
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
-		Message:   raw, Version: "2.1.288",
+		Message:   raw, Version: "2.1.292",
 		UserType:         "external",
 		GitBranch:        currentGitBranch(s.CWD),
 		Entrypoint:       "cli",
@@ -217,7 +217,7 @@ func (s *Store) LogInit(model string) error {
 	return s.LogRecord(map[string]any{
 		"type": "system", "subtype": "init",
 		"model": model, "cwd": s.CWD,
-		"version": "2.1.288", "userType": "external",
+		"version": "2.1.292", "userType": "external",
 		"gitBranch": currentGitBranch(s.CWD), "entrypoint": "cli",
 	})
 }
