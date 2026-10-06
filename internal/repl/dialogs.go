@@ -116,89 +116,242 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 	// and scrolls inline instead of fighting the footer
 	compSuspend()
 	defer compResume()
-	// real dialog: titled bordered box, tool card with key:value rows (Edit
-	// gets a colored diff preview), decision-reason line, live M:SS countdown
-	dprintf("\n%s╭─ %s%s%s\n", yellow, bold+name+reset, dim+" ─ permission"+reset, reset)
-	printToolCard(name, input, summary)
-	if reason != "" {
-		dprintf("  %s%s%s\n", yellow, reason, reset)
-		if config != "" {
-			dprintf("  %s%s%s\n", dim, config, reset)
-		}
-	}
-	deadline := time.Now().Add(permAskTimeout)
-	// live countdown — real ticks `in M:SS`. The block is 6 lines; each is
-	// emitted with \x1b[K (clears stale text from earlier renders) and the
-	// cursor returns via a wrap-aware row count — a line that wraps would
-	// otherwise make \x1b[6A undershoot and duplicate rows every tick.
+	// real 2.1.291's dialog (captured bytes):
+	//   cyan-153 ─ rule · bold "<Tool> command" · auto-mode tip (non-auto
+	//   only) · gray-246 description · gray-239 ╌ frame around the content ·
+	//   "Do you want to proceed?" · cursor list numbered 1..N ·
+	//   "Esc to cancel · Tab to amend"
+	cyan153 := "\x1b[38;5;153m"
+	gray246 := "\x1b[38;5;246m"
+	gray239 := "\x1b[38;5;239m"
 	width, _, _ := term.GetSize(int(os.Stdout.Fd()))
 	if width <= 0 {
 		width = 120
 	}
-	rows := 6
-	printOpts := func(rem time.Duration) {
-		lines := []string{
-			fmt.Sprintf("  %s⏵ auto-deny in %d:%02d — to avoid blocking an unattended session%s", dim, int(rem.Minutes()), int(rem.Seconds())%60, reset),
-			fmt.Sprintf("  %s1.%s Yes", bold, reset),
-			fmt.Sprintf("  %s2.%s Yes, and don't ask again for %s in %s", bold, reset, name, l.ToolCtx.CWD),
-			fmt.Sprintf("  %s3.%s No", bold, reset),
-			fmt.Sprintf("  %s4.%s No, and tell Claude what to do differently", bold, reset),
-			fmt.Sprintf("  %s⌘ enter confirm · escape cancel%s", dim, reset),
-		}
+	rule := cyan153 + strings.Repeat("─", width)
+	dot := gray239 + strings.Repeat("╌", width)
+
+	title := name + " command"
+	if name != "Bash" {
+		title = name
+	}
+	tip := ""
+	if l.PermMode != "auto" {
+		tip = `Tip: auto mode handles these prompts for you — choose "switch to auto mode" below`
+	}
+	desc := permDesc(name, input, summary)
+	content := permContent(name, input)
+
+	// option list — real: Yes / always-allow-<spec> / switch-to-auto / No
+	alwaysSpec := ruleSuggestion(name, summary)
+	// real's option-2 label describes the GRANT in user terms ("always
+	// allow access to /tmp"), not the rule syntax
+	alwaysLabel := alwaysSpec
+	if dir := outsideDir(name, input, l.ToolCtx.CWD); dir != "" {
+		alwaysLabel = "access to " + dir
+	}
+	type opt struct{ label string }
+	var opts []opt
+	opts = append(opts, opt{"Yes"})
+	if alwaysSpec != "" {
+		opts = append(opts, opt{fmt.Sprintf("Yes, and always allow %s from this project", alwaysLabel)})
+	}
+	if l.PermMode != "auto" {
+		opts = append(opts, opt{"Yes, and switch to auto mode" + gray246 + " · auto mode handles these prompts for you" + "\x1b[39m"})
+	}
+	opts = append(opts, opt{"No"})
+
+	sel := 0
+	renderRows := 0
+	draw := func() {
 		var sb strings.Builder
-		rows = 0
-		for _, ln := range lines {
-			sb.WriteString("\r\x1b[K")
-			sb.WriteString(ln)
-			sb.WriteString("\r\n")
-			rows += 1 + visWidth(ln)/width // wrapped rows count extra
+		if renderRows > 0 {
+			fmt.Fprintf(&sb, "\x1b[%dA", renderRows)
 		}
-		fmt.Fprintf(&sb, "\x1b[%dA\r", rows)
+		renderRows = 0
+		put := func(s string) {
+			sb.WriteString("\r\x1b[K" + s + "\r\n")
+			renderRows++
+		}
+		put(rule)
+		put(" " + bold + title + unbold + "\x1b[39m")
+		if tip != "" {
+			put(" " + tip)
+		}
+		if desc != "" && desc != content {
+			put(" " + gray246 + desc + reset)
+		}
+		put(dot)
+		put(" " + content + reset)
+		put(dot)
+		put(" " + "Do you want to proceed?")
+		for i, o := range opts {
+			if i == sel {
+				put(fmt.Sprintf(" %s❯%s %s%d. %s%s%s", cyan153, "\x1b[39m", gray246, i+1, cyan153, o.label, "\x1b[39m"))
+			} else {
+				put(fmt.Sprintf("   %s%d. %s%s", gray246, i+1, "\x1b[39m", o.label))
+			}
+		}
+		put(" " + gray246 + "Esc to cancel · Tab to amend" + reset)
 		fmt.Print(sb.String())
 	}
-	printOpts(permAskTimeout)
+	draw()
+	deadline := time.Now().Add(permAskTimeout)
 	timeout := time.NewTimer(permAskTimeout)
-	tick := time.NewTicker(time.Second)
 	defer timeout.Stop()
-	defer tick.Stop()
 	for {
 		select {
-		case <-tick.C:
-			rem := time.Until(deadline)
-			if rem > 0 {
-				printOpts(rem)
-			}
 		case <-timeout.C:
-			dprintf("\x1b[%dB", rows) // below the options block
 			dprintf("\n  %s⏵ auto-denied — unattended for %s%s\n", dim, permAskTimeout, reset)
 			return false, ""
 		case k, ok := <-dch:
 			if !ok {
 				return false, ""
 			}
-			dprintf("\x1b[%dB\r", rows) // clear the options block
-			switch k.b {
-			case '1', 'y', 'Y', '\r':
-				dprintln("1. Yes")
-				return true, ""
-			case '2', 'a', 'A':
-				dprintln("2. Yes, always")
-				p.always[name] = true
-				// real writes a permission rule to .claude/settings.local.json
-				if rule := ruleSuggestion(name, summary); rule != "" {
-					addLocalPermissionRule(l.ToolCtx.CWD, rule)
-					dprintf("  %s%s added to permission allowlist%s\n", dim, rule, reset)
+			switch {
+			case k.seq == "[A":
+				if sel > 0 {
+					sel--
+					draw()
 				}
-				return true, ""
-			case '3', 'n', 'N', 0x1b, 3:
-				dprintln("3. No")
+				continue
+			case k.seq == "[B":
+				if sel < len(opts)-1 {
+					sel++
+					draw()
+				}
+				continue
+			case k.b == '\t':
+				// Tab to amend — edit the command inline, Enter re-approves
+				if name == "Bash" {
+					if amended := amendCommand(dch, content, deadline); amended != "" {
+						input, _ = json.Marshal(map[string]string{"command": amended})
+						content = amended
+						draw()
+					}
+				}
+				continue
+			case k.b == 0x1b || k.b == 3:
+				dprintln("  Esc — denied")
 				return false, ""
-			case '4', 'd', 'D':
-				dprintln("4. No, with feedback")
-				return false, readFeedbackLine(dch, deadline)
+			case k.b >= '1' && k.b <= '9' && int(k.b-'1') < len(opts):
+				sel = int(k.b - '1')
+				fallthrough
+			case k.b == '\r':
+				switch sel {
+				case 0:
+					dprintln("  ✔ " + title + " approved")
+					return true, ""
+				default:
+					if opts[sel].label == "No" {
+						dprintln("  ✗ No")
+						return false, ""
+					}
+					if strings.HasPrefix(opts[sel].label, "Yes, and switch to auto mode") {
+						l.PermMode = "auto"
+						dprintln("  switched to auto mode — " + title + " approved")
+						return true, ""
+					}
+					// always-allow
+					p.always[name] = true
+					if alwaysSpec != "" {
+						addLocalPermissionRule(l.ToolCtx.CWD, alwaysSpec)
+						dprintf("  %s%s added to permission allowlist%s\n", dim, alwaysSpec, reset)
+					}
+					return true, ""
+				}
 			}
-			dprintf("\x1b[%dA\r", rows) // unrecognized — back to the block
-			printOpts(time.Until(deadline))
+		}
+	}
+}
+
+// permDesc returns the dialog's gray description line — the model's
+// description field for Bash, else a derived summary.
+func permDesc(name string, input json.RawMessage, summary string) string {
+	var m map[string]any
+	json.Unmarshal(input, &m)
+	if d, _ := m["description"].(string); d != "" {
+		return d
+	}
+	if summary != "" {
+		return summary
+	}
+	return ""
+}
+
+// permContent renders the framed content line: command for Bash, file
+// path for file tools, compact JSON otherwise.
+func permContent(name string, input json.RawMessage) string {
+	var m map[string]any
+	json.Unmarshal(input, &m)
+	s := func(keys ...string) string {
+		for _, k := range keys {
+			if v, ok := m[k]; ok {
+				return fmt.Sprint(v)
+			}
+		}
+		return ""
+	}
+	switch name {
+	case "Bash":
+		return s("command")
+	case "Read", "Write", "Edit", "MultiEdit":
+		return s("file_path")
+	case "Glob", "LS":
+		return s("path", "pattern")
+	case "Grep":
+		return s("pattern", "path")
+	}
+	b, _ := json.Marshal(m)
+	if len(b) > 200 {
+		b = append(b[:200], []byte("…")...)
+	}
+	return string(b)
+}
+
+// amendCommand lets the user edit the Bash command inline (real's
+// "Tab to amend"); Enter returns the edited text, Esc cancels.
+func amendCommand(dch chan key, cur string, deadline time.Time) string {
+	buf := []rune(cur)
+	pos := len(buf)
+	gray := "\x1b[38;5;246m"
+	dprintf("  %samend command (enter applies, esc cancels):%s\n", gray, reset)
+	for {
+		dprintf("  > %s\r\x1b[K", string(buf))
+		if pos < len(buf) {
+			dprintf("\x1b[%dD", len(buf)-pos)
+		}
+		select {
+		case <-time.After(time.Until(deadline)):
+			return ""
+		case k, ok := <-dch:
+			if !ok {
+				return ""
+			}
+			switch {
+			case k.b == '\r':
+				dprintln()
+				return string(buf)
+			case k.b == 0x1b || k.b == 3:
+				dprintln()
+				return ""
+			case k.seq == "[D":
+				if pos > 0 {
+					pos--
+				}
+			case k.seq == "[C":
+				if pos < len(buf) {
+					pos++
+				}
+			case k.b == 0x7f || k.b == 8:
+				if pos > 0 {
+					buf = append(buf[:pos-1], buf[pos:]...)
+					pos--
+				}
+			case k.r != 0:
+				buf = append(buf[:pos], append([]rune{k.r}, buf[pos:]...)...)
+				pos++
+			}
 		}
 	}
 }
@@ -609,4 +762,28 @@ func sortedKeys(m map[string]any) []string {
 	}
 	sort.Strings(ks)
 	return ks
+}
+
+// outsideDir returns the directory a Bash command targets outside the
+// workspace (for real's "always allow access to <dir>" option), "" when
+// nothing outside is referenced.
+func outsideDir(name string, input json.RawMessage, cwd string) string {
+	if name != "Bash" {
+		return ""
+	}
+	var m map[string]any
+	if json.Unmarshal(input, &m) != nil {
+		return ""
+	}
+	cmd, _ := m["command"].(string)
+	for _, tok := range strings.Fields(cmd) {
+		if strings.HasPrefix(tok, "/") && !strings.HasPrefix(tok, cwd+"/") && !strings.HasPrefix(tok, cwd) {
+			// the first outside-path arg's parent dir
+			if strings.HasSuffix(tok, "/") {
+				return strings.TrimSuffix(tok, "/")
+			}
+			return filepath.Dir(tok)
+		}
+	}
+	return ""
 }

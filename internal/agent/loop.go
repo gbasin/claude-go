@@ -119,6 +119,7 @@ func NewLoop(client *api.Client, cwd string) *Loop {
 	if err != nil || cwd == "" {
 		abs = cwd
 	}
+	tools.SetProjectDir(abs)
 	return &Loop{
 		Client:     client,
 		Model:      defaultModel,

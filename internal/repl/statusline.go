@@ -78,7 +78,7 @@ func permModeBanner(mode string) string {
 	hint := gray + " (shift+tab to cycle) · ← for agents" + reset
 	switch mode {
 	case "", "default":
-		return gray + "? for shortcuts" + reset
+		return pill + "⏸ manual mode on" + reset + gray + " · ? for shortcuts · ← for agents" + reset
 	case "acceptEdits":
 		return pill + "⏵⏵ accept edits on" + reset + hint
 	case "plan":
