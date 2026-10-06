@@ -190,7 +190,14 @@ func TestMessengerWrongToken(t *testing.T) {
 	}
 	defer c2.Close()
 	writeLine(t, c2, peerFrame{Type: "auth", Token: "deadbeefdeadbeefdeadbeefdeadbeef"})
-	writeLine(t, c2, peerFrame{
+	// the server may drop the bad-auth conn before the frame write lands —
+	// a broken pipe here IS the drop, same as a read error
+	w2 := func(m peerFrame) bool {
+		b, _ := json.Marshal(m)
+		_, werr := c2.Write(append(b, '\n'))
+		return werr == nil
+	}
+	w2(peerFrame{
 		Type: "user", SessionID: sessionID,
 		Message: mustJSON(map[string]any{"role": "user", "content": "should not land"}),
 	})

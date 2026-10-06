@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -189,18 +190,28 @@ func TestMoveToCloudUnreachable(t *testing.T) {
 
 // --- TeleportToCloud orchestration (j + W) ---------------------------------
 
-func readyRepoDeps(t *testing.T, id string) (*TeleportDeps, *string) {
+// guardedCur is a mutex-safe shared string for the bridge-session id —
+// TeleportToCloud reads/writes it from a goroutine while the test polls.
+type guardedCur struct {
+	mu sync.Mutex
+	v  string
+}
+
+func (g *guardedCur) get() string  { g.mu.Lock(); defer g.mu.Unlock(); return g.v }
+func (g *guardedCur) set(v string) { g.mu.Lock(); defer g.mu.Unlock(); g.v = v }
+
+func readyRepoDeps(t *testing.T, id string) (*TeleportDeps, *guardedCur) {
 	t.Helper()
-	cur := id
+	cur := &guardedCur{v: id}
 	return &TeleportDeps{
 		CWD:             cleanRepo(t),
-		BridgeSessionID: func() string { return cur },
+		BridgeSessionID: func() string { return cur.get() },
 		StampBridgeSession: func(v string) {
-			cur = v
+			cur.set(v)
 		},
 		Environment:   func(context.Context) (string, error) { return "env_1", nil },
 		ReconnectWait: time.Millisecond,
-	}, &cur
+	}, cur
 }
 
 func TestTeleportPreconditions(t *testing.T) {
@@ -250,8 +261,8 @@ func TestTeleportSuccessDisconnected(t *testing.T) {
 	if got != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 	}
-	if *cur != "" {
-		t.Fatalf("bridge claim should be cleared after move, got %q", *cur)
+	if cur.get() != "" {
+		t.Fatalf("bridge claim should be cleared after move, got %q", cur.get())
 	}
 }
 
@@ -268,11 +279,11 @@ func TestTeleportReconnected(t *testing.T) {
 	// precondition worktree checks take variable time, so a fixed sleep
 	// raced stamp("") and could be cleared before the poll started
 	go func() {
-		for *cur != "" {
+		for cur.get() != "" {
 			time.Sleep(time.Millisecond)
 		}
 		time.Sleep(10 * time.Millisecond)
-		*cur = "cse_new000002" // remote-control loop stamped a fresh session
+		cur.set("cse_new000002") // remote-control loop stamped a fresh session
 	}()
 	got := TeleportToCloud(context.Background(), testClient(srv), d)
 	if !strings.Contains(got, "Session now in the cloud: https://claude.ai/code/cse_old000001?from=cli") ||
@@ -305,8 +316,8 @@ func TestTeleportCleanFailureRestoresClaim(t *testing.T) {
 	if got != "Couldn’t teleport: denied" {
 		t.Fatalf("failure text: %q", got)
 	}
-	if *cur != "cse_abc" {
-		t.Fatalf("non-committed failure must restore the claim, got %q", *cur)
+	if cur.get() != "cse_abc" {
+		t.Fatalf("non-committed failure must restore the claim, got %q", cur.get())
 	}
 }
 
