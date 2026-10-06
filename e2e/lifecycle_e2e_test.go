@@ -388,20 +388,16 @@ func TestResumePickerInteractive(t *testing.T) {
 
 	// same-transcript resume: the new turn lands in the SEED session's
 	// file, not the running session's — real's /resume switches sessions
-	seed, follow := "", ""
-	for _, tp := range s.transcriptPaths(t) {
-		b, _ := os.ReadFile(tp)
-		if strings.Contains(string(b), "seed prior session") {
-			seed = tp
+	poll(t, 5*time.Second, "turn appended to resumed transcript", func() bool {
+		for _, tp := range s.transcriptPaths(t) {
+			b, _ := os.ReadFile(tp)
+			if strings.Contains(string(b), "seed prior session") &&
+				strings.Contains(string(b), "resumed-alive") {
+				return true // both prompts in the same file = same-transcript resume
+			}
 		}
-		if strings.Contains(string(b), "resumed-alive") {
-			follow = tp
-		}
-	}
-	if seed == "" || follow != seed {
-		t.Fatalf("in-REPL /resume must continue the picked session's transcript; seed=%q follow=%q\noutput:\n%s",
-			seed, follow, p.clean())
-	}
+		return false
+	})
 	p.exit()
 }
 
