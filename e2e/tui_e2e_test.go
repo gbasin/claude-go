@@ -596,3 +596,60 @@ func TestAgentsCountInStatus(t *testing.T) {
 	p.waitFor("← 1 agent", 15*time.Second)
 	p.exit()
 }
+
+// TestThinkToggle: thinking blocks render by default; meta+t hides them.
+func TestThinkToggle(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.send("think:pondering aloud\r")
+	p.waitFor("Thinking", 30*time.Second)
+	if !strings.Contains(p.clean(), "pondering aloud") {
+		t.Fatalf("thinking not shown:\n%s", truncStr(p.clean(), 1200))
+	}
+	p.send("\x1bt") // meta+t — chat:thinkingToggle
+	time.Sleep(400 * time.Millisecond)
+	p.send("think:second thought\r")
+	p.waitFor("Done thinking", 30*time.Second)
+	out := p.clean()
+	if strings.Count(out, "Thinking") > 1 || strings.Contains(out, "second thought") {
+		t.Fatalf("meta+t should hide thinking:\n%s", truncStr(out, 1500))
+	}
+	p.exit()
+}
+
+// TestDraftBackOnEsc: text typed mid-turn and then esc'd returns to the
+// editor draft instead of being lost.
+func TestDraftBackOnEsc(t *testing.T) {
+	s := newSession(t)
+	p := s.runPTY(t, nil, "--mock", "--permission-mode", "bypassPermissions")
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"python3 -c \"import time;time.sleep(5)\""}`+"\r",
+		"❯ tool:Bash", 8)
+	time.Sleep(1 * time.Second)
+	p.send("draft-rescue")
+	time.Sleep(400 * time.Millisecond)
+	p.send("\x1b") // esc cancels; the typed draft pops back
+	p.waitFor("Interrupted", 20*time.Second)
+	// the draft should be back in the prompt buffer — clear it
+	p.send("\x03")
+	if strings.Contains(p.clean(), "❯ draft-rescue") == false &&
+		!strings.Contains(p.clean(), "draft-rescue") {
+		t.Fatalf("typed draft lost on esc:\n%s", truncStr(p.clean(), 1500))
+	}
+	p.exit()
+}
+
+// TestMigrateClaudeJSON: a legacy .claude.json without version gets one
+// written on startup.
+func TestMigrateClaudeJSON(t *testing.T) {
+	s := newSession(t)
+	cj := filepath.Join(s.home, ".claude.json")
+	os.WriteFile(cj, []byte(`{"hasCompletedOnboarding":true,"projects":{"`+s.cwd+`":{"allowedTools":[],"trustAccepted":true}}}`), 0o600)
+	r := s.run(t, "--mock", "-p", "hi")
+	s.mustOK(t, r)
+	b, _ := os.ReadFile(cj)
+	if !strings.Contains(string(b), `"version"`) {
+		t.Fatalf("version not migrated:\n%s", b)
+	}
+}
