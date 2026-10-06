@@ -68,6 +68,7 @@ type cliOpts struct {
 	sdkURL       string
 	betas        string
 	initOnly     bool
+	bgMode       bool
 	noPersist    bool
 	partialMsgs  bool
 	replayUser   bool
@@ -204,6 +205,8 @@ func parseCLI(args []string) *cliOpts {
 		"--dangerously-skip-permissions":       func() { o.permMode = "bypassPermissions" },
 		"--allow-dangerously-skip-permissions": func() { o.permMode = "bypassPermissions" },
 		"-c":                                   func() { o.cont = true },
+		"--bg":                                  func() { o.bgMode = true },
+		"--background":                          func() { o.bgMode = true },
 		"--continue":                           func() { o.cont = true },
 		"--fork-session":                       func() { o.forkSess = true },
 		"--strict-mcp-config":                  func() { o.strictMCP = true },
@@ -224,7 +227,7 @@ func parseCLI(args []string) *cliOpts {
 		"--enable-auth-status", "--restricted",
 		"--exclude-dynamic-system-prompt-sections", "--deep-link-origin",
 		"--reply-on-resume", "--disable-slash-commands",
-		"--bg", "--background", "--brief", "--ax-screen-reader", "--hard-fail",
+		"--brief", "--ax-screen-reader", "--hard-fail",
 	} {
 		flag := f
 		boolFlags[flag] = func() { os.Setenv(stubName(flag), "1") }

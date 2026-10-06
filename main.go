@@ -21,6 +21,7 @@ import (
 	"claude-go/internal/agent"
 	"claude-go/internal/api"
 	"claude-go/internal/auth"
+	"claude-go/internal/bg"
 	"claude-go/internal/bridge"
 	"claude-go/internal/browsermcp"
 	"claude-go/internal/config"
@@ -221,6 +222,12 @@ func main() {
 		case "agents":
 			agentsSub(args[1:])
 			return
+		case "attach":
+			attachSub(args[1:])
+			return
+		case "bg-host":
+			bgHostSub(args[1:])
+			return
 		case "import":
 			importSub(args[1:])
 			return
@@ -279,6 +286,22 @@ func main() {
 	sessionID := newUUID()
 	if o.sessID != "" {
 		sessionID = o.sessID
+	}
+	if o.bgMode {
+		// real's --bg (v2.1.198+): start the session as a background agent
+		// and return — prints the id + management commands
+		if _, err := bg.Spawn(bg.SpawnOpts{
+			SessionID: sessionID,
+			CWD:       cwd,
+			Prompt:    strings.Join(o.prompt, " "),
+		}); err != nil {
+			fmt.Fprintln(os.Stderr, "--bg:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("background session %s started\n", sessionID)
+		fmt.Printf("  attach:   claude attach %s\n", sessionID[:8])
+		fmt.Println("  monitor:  claude agents")
+		os.Exit(0)
 	}
 	if o.tmux != "" {
 		// real's --tmux requires --worktree and a tmux/iTerm2 backend
