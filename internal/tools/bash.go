@@ -402,11 +402,13 @@ func execTaskStop(c *Context, raw json.RawMessage) Result {
 func (b *Background) Notify(t *BgTask) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	status := "finished"
+	// real: `⏺ Background command "<desc>" completed (exit code 0)` —
+	// rendered as an assistant-style line, not a ⎿ note
 	if t.TimedOut || t.Err != nil || t.ExitCode != 0 {
-		status = "failed"
+		b.notif = append(b.notif, fmt.Sprintf("Background command %q failed (exit code %d)", t.Command, t.ExitCode))
+	} else {
+		b.notif = append(b.notif, fmt.Sprintf("Background command %q completed (exit code 0)", t.Command))
 	}
-	b.notif = append(b.notif, fmt.Sprintf("Task %s %s: %s", t.ID, status, t.Command))
 }
 
 // DrainNotifications returns and clears queued task-exit notes.
