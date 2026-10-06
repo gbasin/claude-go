@@ -188,9 +188,14 @@ func (p *Profile) SubscriptionType() string {
 	return ""
 }
 
-// FetchProfile GETs /api/oauth/profile with the access token.
+// FetchProfile GETs /api/oauth/profile with the access token. Honors
+// ANTHROPIC_BASE_URL so test/sdk seams don't hit the real API.
 func FetchProfile(token string) *Profile {
-	req, _ := http.NewRequest("GET", "https://api.anthropic.com/api/oauth/profile", nil)
+	base := "https://api.anthropic.com"
+	if u := os.Getenv("ANTHROPIC_BASE_URL"); u != "" {
+		base = strings.TrimRight(u, "/")
+	}
+	req, _ := http.NewRequest("GET", base+"/api/oauth/profile", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
