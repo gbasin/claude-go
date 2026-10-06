@@ -70,6 +70,10 @@ func dir(cwd string) string {
 	return filepath.Join(config.ClaudeDir(), "projects", Slug(cwd))
 }
 
+// ProjectsDir exposes the transcript dir for a cwd (resume uses it to
+// locate the leaf anchor in the same file it continues).
+func ProjectsDir(cwd string) string { return dir(cwd) }
+
 // Open creates (or appends to) the transcript for sessionID in cwd.
 func Open(cwd, sessionID string) (*Store, error) {
 	d := dir(cwd)
@@ -338,6 +342,32 @@ func currentGitBranch(cwd string) string {
 }
 
 func (s *Store) Close() { s.f.Close() }
+
+// SeedParent primes the parentUuid chain — on same-transcript resume the
+// next logged record must link to the loaded branch's leaf, not start a
+// new root.
+func (s *Store) SeedParent(uuid string) { s.lastUUID = uuid }
+
+// LeafUUID returns the uuid at the active branch's leaf in a transcript —
+// the parentUuid anchor a same-transcript resume continues from.
+func LeafUUID(path string) string {
+	recs, err := readRecords(path)
+	if err != nil {
+		return ""
+	}
+	branch := activeBranch(recs)
+	if branch == nil {
+		// no uuid chain — last uuid'd record is the best anchor
+		for i := len(recs) - 1; i >= 0; i-- {
+			if u, _ := recs[i]["uuid"].(string); u != "" {
+				return u
+			}
+		}
+		return ""
+	}
+	u, _ := branch[len(branch)-1]["uuid"].(string)
+	return u
+}
 
 // Load reconstructs the active branch: walk parentUuid from the leaf
 // backwards, excluding sidechains and non-message records. This mirrors
