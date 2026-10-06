@@ -445,13 +445,18 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 				sb.WriteString(fmt.Sprintf("\x1b[K  %sEnter to confirm · Esc to cancel · ←→ effort · s session-only%s\r\n", dim, reset))
 				fmt.Print(sb.String())
 			}
+			compSuspend()
+			defer compResume()
+			dch := make(chan key, 16)
+			ks.dialog.Store(&dch)
+			defer ks.dialog.Store(nil)
 			dprintf("  %sSelect model%s\n", bold, reset)
 			for range models {
 				dprintln()
 			}
 			dprintf("  %sEnter to confirm · Esc to cancel · ←→ effort · s session-only%s\n", dim, reset)
 			draw()
-			for k := range ks.ch {
+			for k := range dch {
 				switch {
 				case k.seq == "[A" || k.b == 'k':
 					if sel > 0 {
