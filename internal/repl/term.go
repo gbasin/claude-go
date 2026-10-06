@@ -337,6 +337,8 @@ func (e *editor) readLine(ks *keySource) readResult {
 		var ev *voiceEvent
 		var ve voiceEvent
 		select {
+		case kk := <-ks.replay: // post-turn drained keys replay first
+			k = kk
 		case kk, ok := <-ks.ch:
 			if !ok {
 				return readResult{quit: true}
@@ -1121,7 +1123,8 @@ func (e *editor) complete() {
 	lcp := matches[0]
 	for _, m := range matches[1:] {
 		for !strings.HasPrefix(m, lcp) {
-			lcp = lcp[:len(lcp)-1]
+			r := []rune(lcp)
+			lcp = string(r[:len(r)-1])
 		}
 	}
 	if len(lcp) > len(prefix)-1 {
@@ -1884,13 +1887,15 @@ var thinkingHidden atomic.Bool // meta+t toggle
 // ahead of queued lines) — real chat:sendNow.
 func (e *editor) sendNow() *readResult {
 	line := e.submitLine()
-	return &readResult{line: line, sendNow: true}
+	// ok:true — at idle this is a normal submit; the sendNow flag only
+	// matters to the mid-turn busy path (which reads the chord itself).
+	return &readResult{line: line, sendNow: true, ok: true}
 }
 
 // queueSubmitKey explicitly queues the line when the agent is running.
 func (e *editor) queueSubmitKey() *readResult {
 	line := e.submitLine()
-	return &readResult{line: line, queued: true}
+	return &readResult{line: line, queued: true, ok: true}
 }
 
 // modelPickerKey opens /model from the keymap (meta+p in real).

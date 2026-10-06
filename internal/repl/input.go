@@ -11,9 +11,10 @@ import (
 
 // keySource owns stdin for the life of the REPL and emits decoded keys.
 type keySource struct {
-	ch    chan key
-	old   *term.State
-	kitty bool // kitty keyboard protocol was enabled
+	replay chan key // keys drained post-turn, replayed to the editor first
+	ch     chan key
+	old    *term.State
+	kitty  bool // kitty keyboard protocol was enabled
 	// dialog, when non-nil, gets every key forwarded — the permission dialog
 	// owns stdin while open so the turn's busy-queue goroutine can't eat
 	// the user's answer.
@@ -41,7 +42,7 @@ func startKeys() (*keySource, error) {
 	if err != nil {
 		return nil, err
 	}
-	ks := &keySource{ch: make(chan key, 256), old: st}
+	ks := &keySource{ch: make(chan key, 256), old: st, replay: make(chan key, 256)}
 	os.Stdout.WriteString("\x1b[?2004h") // bracketed paste on
 	if kittyCapable() {
 		// kitty keyboard protocol: push flags (1 = disambiguate escape codes).
@@ -220,10 +221,16 @@ func utf8Len(b byte) int {
 }
 
 // forward returns the channel keys should go to while a modal dialog is open.
+// The send is non-blocking — a full dialog channel would otherwise wedge
+// the stdin reader forever (dead prompt).
 func (ks *keySource) forward(k key) bool {
 	if ch := ks.dialog.Load(); ch != nil {
-		*ch <- k
-		return true
+		select {
+		case *ch <- k:
+			return true
+		default:
+			return true // dialog owns but is full — drop rather than misroute
+		}
 	}
 	return false
 }

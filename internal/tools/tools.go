@@ -61,7 +61,7 @@ type Context struct {
 	Notes         []string // queued system notes from background tasks
 	Answerer      Answerer // WebFetch page-answer model
 	Searcher      Searcher // WebSearch backend
-	AskStructured func(header, question string, options []string, multi bool) ([]string, error)
+	AskStructured func(header, question string, options []AskOption, multi bool) ([]string, error)
 	SetPermMode   func(mode string)
 	PlanApprove   func() bool
 	EndSession    func()

@@ -215,7 +215,8 @@ func readOnly(name string) bool {
 	switch name {
 	case "Read", "Glob", "Grep", "LS", "WebFetch", "WebSearch",
 		"ListAgents", "ListMcpResourcesTool", "ReadMcpResourceTool",
-		"ReadMcpResourceDirTool", "LSP", "Skill", "ToolSearch":
+		"ReadMcpResourceDirTool", "LSP", "Skill", "ToolSearch",
+		"AskUserQuestion":
 		return true
 	}
 	return false

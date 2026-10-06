@@ -2102,7 +2102,7 @@ func debugPrompt(l *agent.Loop, arg string) string {
 	if b, err := os.ReadFile(logPath); err == nil {
 		const max = 65536 // real skill reads the last 64KiB
 		if len(b) > max {
-			b = b[len(b)-max:]
+			b = []byte(tailRunes(string(b), max))
 		}
 		tail = "```\n" + strings.TrimSpace(string(b)) + "\n```"
 	}
@@ -2902,7 +2902,11 @@ func maskEnv(k, v string) string {
 	if strings.Contains(up, "KEY") || strings.Contains(up, "TOKEN") ||
 		strings.Contains(up, "SECRET") || strings.Contains(up, "PASSWORD") {
 		if len(v) > 8 {
-			return v[:4] + "…" + v[len(v)-4:]
+			r := []rune(v)
+			if len(r) <= 8 {
+				return v
+			}
+			return string(r[:4]) + "…" + string(r[len(r)-4:])
 		}
 		return "***"
 	}
@@ -3041,7 +3045,8 @@ func readLineKeys(ks *keySource) (string, bool) {
 		case k.b == 0x7f:
 			if s := b.String(); s != "" {
 				b.Reset()
-				b.WriteString(s[:len(s)-1])
+				r := []rune(s)
+				b.WriteString(string(r[:len(r)-1]))
 				fmt.Print("\b \b")
 			}
 		case k.r != 0:
