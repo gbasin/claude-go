@@ -1916,6 +1916,19 @@ func (e *editor) stashLine() {
 	e.redraw()
 }
 
+// yankLine pops the most recent stashed draft back into the input
+// (ctrl+y — the hint printed by stashLine).
+func (e *editor) yankLine() {
+	if len(e.stashed) == 0 {
+		return
+	}
+	e.pushUndo()
+	e.buf = e.stashed[len(e.stashed)-1]
+	e.stashed = e.stashed[:len(e.stashed)-1]
+	e.pos = len(e.buf)
+	e.redraw()
+}
+
 // showShortcuts prints the keyboard-shortcut overlay ('?' on empty input).
 func (e *editor) showShortcuts() {
 	var b strings.Builder
