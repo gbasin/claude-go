@@ -60,6 +60,15 @@ func RunWithStore(l *agent.Loop, store Store) {
 		ed.insertRemaps = vimInsertRemaps()
 	}
 	ed.completer = slashCompleter
+	ed.acDesc = func(name string) string {
+		if e2, ok := helpTable[name]; ok {
+			return e2.desc
+		}
+		if c2, ok := customCommands[name]; ok {
+			return c2.Description
+		}
+		return ""
+	}
 	loadCustomCommands(l.ToolCtx.CWD)
 	ed.cycleMode = func() {
 		order := []string{"default", "acceptEdits", "plan", "auto"}
