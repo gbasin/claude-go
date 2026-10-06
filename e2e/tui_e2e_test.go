@@ -293,7 +293,7 @@ func TestTranscriptOverlay(t *testing.T) {
 }
 
 // TestBgTaskNotification: a finished background task prints a
-// "⎿ Task <id> finished" status note at the next prompt.
+// "⏺ Background command <cmd> completed" line at the next prompt.
 func TestBgTaskNotification(t *testing.T) {
 	s := newSession(t)
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
@@ -304,7 +304,7 @@ func TestBgTaskNotification(t *testing.T) {
 	// task finishes ~1s later; the note lands at the next status draw
 	time.Sleep(1500 * time.Millisecond)
 	p.sendUntilEchoed(t, "nudge\r", "❯ nudge", 8)
-	p.waitFor("Task b1 finished", 15*time.Second)
+	p.waitFor("Background command", 15*time.Second)
 	p.exit()
 }
 
