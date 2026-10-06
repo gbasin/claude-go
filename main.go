@@ -799,6 +799,7 @@ func main() {
 			}
 		}
 	}
+	checkUpdateToast()
 	repl.RunWithStore(loop, st2)
 	if !loop.SessionEndFired {
 		fireHook(loop, hooks.SessionEnd)
@@ -1434,6 +1435,17 @@ func stampProjectState(cwd, sessionID, model string, gracefulEnd bool) {
 
 // selfUpdate rebuilds from the source checkout that produced this binary —
 // claude-go ships from source, so "update" = git pull + go build + swap.
+// checkUpdateToast prints "✔ Update installed · Restart to update" once
+// after a successful selfUpdate (real's post-install toast).
+func checkUpdateToast() {
+	marker := filepath.Join(config.ClaudeDir(), ".update-installed")
+	if b, err := os.ReadFile(marker); err == nil {
+		os.Remove(marker)
+		fmt.Printf("  \x1b[38;5;107m✔%s\x1b[39m Update installed · Restart to update\n", "")
+		_ = b
+	}
+}
+
 func selfUpdate() {
 	exe, err := os.Executable()
 	if err != nil {
@@ -1479,6 +1491,9 @@ func selfUpdate() {
 		fmt.Println("update: couldn't replace binary:", err)
 		return
 	}
+	// next launch toasts "✔ Update installed · Restart to update"
+	marker := filepath.Join(config.ClaudeDir(), ".update-installed")
+	os.WriteFile(marker, []byte(api.Version), 0o644)
 	fmt.Println("updated claude-go →", exe)
 }
 
