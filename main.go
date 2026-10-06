@@ -228,6 +228,9 @@ func main() {
 		case "stop":
 			stopSub(args[1:])
 			return
+		case "daemon":
+			daemonSub(args[1:])
+			return
 		case "bg-host":
 			bgHostSub(args[1:])
 			return

@@ -55,5 +55,35 @@ func Spawn(o SpawnOpts) (*exec.Cmd, error) {
 		return nil, fmt.Errorf("spawn bg-host: %w", err)
 	}
 	go cmd.Wait() // reap — the worker outlives us
+	// real's daemon is the service arm of bg sessions — spawned on-demand
+	// ("transient spawn") when a session backgrounds. It respawns crashed
+	// workers; no-op when already alive or disabled (tests set
+	// CLAUDE_GO_BG_NODAEMON so the supervisor doesn't outlive a run).
+	if os.Getenv("CLAUDE_GO_BG_NODAEMON") == "" && !DaemonAlive() {
+		_, _ = StartDaemon()
+	}
+	return cmd, nil
+}
+
+// StartDaemon launches `claude daemon run` detached — same shape as a
+// worker spawn. No-op-ish if a daemon is already alive (callers check).
+func StartDaemon() (*exec.Cmd, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(exe, "daemon", "run")
+	cmd.Env = os.Environ()
+	cmd.SysProcAttr = detachAttr()
+	devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer devnull.Close()
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = devnull, devnull, devnull
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("spawn daemon: %w", err)
+	}
+	go cmd.Wait()
 	return cmd, nil
 }

@@ -85,9 +85,10 @@ func loadJob(dir string) (*Job, error) {
 	return &j, nil
 }
 
-// List returns all registered jobs, newest first. Dead jobs (stale
-// heartbeat or gone pid) are reaped — same as real's sweeper dropping
-// workers whose heartbeat died.
+// List returns live registered jobs, newest first. Dead workers are
+// filtered but NOT reaped — a crashed host's job dir must survive for the
+// daemon's respawn sweep (its pid dir IS the session's liveness record).
+// Removal happens on clean exit (host), `claude stop`, or daemon respawn.
 func List() []*Job {
 	ents, err := os.ReadDir(jobsRoot())
 	if err != nil {
@@ -103,10 +104,6 @@ func List() []*Job {
 			continue
 		}
 		if !j.Alive() {
-			if !pidAlive(j.PID) {
-				j.Remove()               // pid gone — reap the dir
-				os.Remove(j.SocketPath()) // and the dead rendezvous sock
-			}
 			continue
 		}
 		out = append(out, j)
