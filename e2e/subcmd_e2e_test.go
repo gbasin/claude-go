@@ -216,3 +216,17 @@ func TestUpdateFallback(t *testing.T) {
 		t.Fatalf("unexpected update output: %q", r.stdout)
 	}
 }
+
+// TestSandboxSub: claude-go sandbox without args prints usage; a bad
+// subcommand fails. `trust` itself needs the real keychain — skip it.
+func TestSandboxSub(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "sandbox")
+	if !strings.Contains(r.stderr+r.stdout, "usage:") {
+		t.Fatalf("sandbox without args should print usage: %s %s", r.stdout, r.stderr)
+	}
+	r = s.run(t, "sandbox", "bogus")
+	if !strings.Contains(r.stderr+r.stdout, "unknown sandbox") {
+		t.Fatalf("sandbox bogus should fail: %s %s", r.stdout, r.stderr)
+	}
+}
