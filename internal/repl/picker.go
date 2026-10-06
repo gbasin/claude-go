@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"claude-go/internal/session"
 	"golang.org/x/term"
@@ -107,6 +108,7 @@ func pickSession(cwd string, ks *keySource) string {
 	if width <= 0 {
 		width = 80
 	}
+	gray244 := "\x1b[38;5;244m"
 
 	draw := func() {
 		if lastLines > 0 {
@@ -119,68 +121,58 @@ func pickSession(cwd string, ks *keySource) string {
 				fmt.Print("\r\n")
 			}
 			fmt.Print(s)
-			// count SCREEN rows, not logical lines — a line that wraps
-			// costs extra rows or the ↑N return lands mid-list and the
-			// picker duplicates rows on every redraw (40-col verified)
 			lastLines += 1 + visWidth(s)/width
 		}
-		scope := "this project"
-		if allProj {
-			scope = "all projects"
+		// real 2.1.292: "Resume session (i of N)" header, bordered
+		// ⌕ Search… box, two-row entries (title + "ago · branch · size"),
+		// and the multi-key footer hints
+		emit(fmt.Sprintf("%sResume session (%d of %d)%s", bold, min(sel+1, len(view)), len(view), reset))
+		q := string(query)
+		box := " " + gray244 + "╭" + strings.Repeat("─", width-4) + "╮" + reset
+		emit(box)
+		searchLine := "  " + gray244 + "│" + reset + "⌕ Search…"
+		if searchMode || q != "" {
+			searchLine = "  " + gray244 + "│" + reset + "⌕ " + q
 		}
-		emit(fmt.Sprintf("%sResume session — %s%s  %s(↑/↓ select · enter resume · / search · ^R rename · space preview · ^B scope · esc cancel)%s",
-			bold, scope, reset, dim, reset))
-		switch {
-		case renameMode:
-			emit(fmt.Sprintf("  %srename:%s %s█", cyan, reset, string(rbuf)))
-		case searchMode || len(query) > 0:
-			emit(fmt.Sprintf("  %sfilter:%s %s", cyan, reset, string(query)))
+		emit(searchLine)
+		emit(" " + gray244 + "╰" + strings.Repeat("─", width-4) + "╯" + reset)
+		if renameMode {
+			emit(fmt.Sprintf("  %srename to:%s %s█", cyan, reset, string(rbuf)))
 		}
 		if len(view) == 0 {
 			emit(fmt.Sprintf("  %s(no sessions)%s", dim, reset))
 		}
 		max := len(view)
-		// keep the whole list on-screen at short heights (an entry is 1
-		// row once it's width-truncated)
 		if max > maxRows {
 			max = maxRows
 		}
-		if r := height - 6; r < max {
+		if r := height - 10; r < max {
 			max = r
 		}
 		if max < 1 {
 			max = 1
 		}
-		// entry text budget: "❯ " + "  " + "YYYY-MM-DD HH:MM" + "  " = 24
-		pvMax := width - 24
-		if pvMax > 60 {
-			pvMax = 60
-		}
-		if pvMax < 4 {
-			pvMax = 4
-		}
 		for i := 0; i < max; i++ {
 			in := view[i]
-			// one row per entry — raw newlines (session previews keep
-			// them) would staircase under raw mode and break row math
-			pv := strings.ReplaceAll(strings.ReplaceAll(in.Label(), "\r", " "), "\n", " ")
-			if visWidth(pv) > pvMax {
-				pv = trunc(pv, pvMax)
+			title := strings.ReplaceAll(strings.ReplaceAll(in.Label(), "\r", " "), "\n", " ")
+			if visWidth(title) > width-10 {
+				title = trunc(title, width-10)
 			}
-			line := fmt.Sprintf("  %s  %s", in.Modified.Format("2006-01-02 15:04"), pv)
+			meta := fmt.Sprintf("%s · %s · %s", relAgo(in.Modified), inBranch(in), humanKB(in.Size))
 			if allProj {
-				sp := session.SlugPath(in.Slug)
-				if len(sp) > 40 {
-					sp = "…" + tailRunes(sp, 40)
-				}
-				line += fmt.Sprintf("  %s%s%s", dim, sp, reset)
+				meta += "  " + dim + tailRunes(session.SlugPath(in.Slug), 30) + reset
 			}
 			if i == sel {
-				emit(fmt.Sprintf("%s❯%s%s", cyan, reset, line))
+				emit(fmt.Sprintf(" %s❯%s %s", cyan, "\x1b[39m", title))
+				emit("    " + dim + meta + reset)
 			} else {
-				emit(fmt.Sprintf(" %s%s%s", dim, line, reset))
+				emit("   " + title)
+				emit("    " + dim + meta + reset)
 			}
 		}
+		// real's footer: two hint rows
+		emit(" " + dim + "Ctrl+A to show all projects · Type to search · Esc to cancel" + reset)
+		emit(" " + dim + "Ctrl+B to only show current branch · Space to preview · Ctrl+R to rename" + reset)
 		if preview && len(view) > 0 && sel < len(view) {
 			p := view[sel].Path
 			block, ok := pcache[p]
@@ -306,4 +298,36 @@ func pickSession(cwd string, ks *keySource) string {
 		draw()
 	}
 	return ""
+}
+
+// relAgo renders "N minutes/hours/days ago" like real's picker meta row.
+func relAgo(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%d minutes ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%d hours ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%d days ago", int(d.Hours()/24))
+	}
+}
+
+func inBranch(in session.Info) string {
+	if in.Branch != "" {
+		return in.Branch
+	}
+	return "HEAD"
+}
+
+func humanKB(sz int64) string {
+	if sz < 1024 {
+		return fmt.Sprintf("%dB", sz)
+	}
+	if sz < 1<<20 {
+		return fmt.Sprintf("%.1fKB", float64(sz)/1024)
+	}
+	return fmt.Sprintf("%.1fMB", float64(sz)/(1<<20))
 }
