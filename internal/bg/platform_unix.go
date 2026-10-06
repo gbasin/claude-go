@@ -27,3 +27,10 @@ func detachAttr() *syscall.SysProcAttr { return &syscall.SysProcAttr{Setsid: tru
 func childAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
 }
+
+// signalHost asks a bg-pty-host worker to end its session.
+func signalHost(pid int) {
+	if pid > 0 {
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+	}
+}

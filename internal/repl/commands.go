@@ -3344,6 +3344,10 @@ func cdCmd(l *agent.Loop, arg string) {
 // and frees the terminal. handleSlash's true return ends the REPL through
 // the normal shutdown path (SessionEnd hook, transcript flush).
 func backgroundCmd(l *agent.Loop, arg string) bool {
+	if os.Getenv("CLAUDE_CODE_SESSION_KIND") == "bg" {
+		dprintln("  already running in the background")
+		return false
+	}
 	// -r resumes into a new session id here, so the bg worker gets a fresh
 	// id carrying this conversation — registry, `claude attach`, and the
 	// picker's bg marks all key on it

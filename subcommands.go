@@ -447,6 +447,29 @@ func attachSub(args []string) {
 	}
 }
 
+// stopSub is `claude stop <id>` — ends a running background session. The
+// transcript stays on disk (real's stop keeps transcript + worktree).
+func stopSub(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: claude stop <session-id|prefix|name>")
+		os.Exit(2)
+	}
+	j, err := bg.Lookup(args[0])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	short := args[0]
+	if j != nil {
+		short = j.Short
+	}
+	if err := bg.Stop(args[0]); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Printf("session %s stopped\n", short)
+}
+
 func quickFrontmatter(s string) map[string]string {
 	out := map[string]string{}
 	if !strings.HasPrefix(s, "---") {
