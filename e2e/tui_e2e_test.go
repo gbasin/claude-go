@@ -689,3 +689,14 @@ func TestVimBadge(t *testing.T) {
 	p.waitFor("vim:normal", 15*time.Second)
 	p.exit()
 }
+
+// TestStatusLineCommand: statusLine.command in ~/.claude/settings.json
+// runs per render — its stdout lands in the status line.
+func TestStatusLineCommand(t *testing.T) {
+	s := newSession(t)
+	os.WriteFile(filepath.Join(s.home, ".claude", "settings.json"), []byte(
+		`{"statusLine":{"type":"command","command":"echo STATUSLINE-MARKER"}}`), 0o600)
+	p := s.runPTY(t, nil, "--mock")
+	p.waitFor("STATUSLINE-MARKER", 30*time.Second)
+	p.exit()
+}
