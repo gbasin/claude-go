@@ -72,6 +72,8 @@ type Context struct {
 	// Discovered caches deferred tools whose schemas ToolSearch has served
 	// this session (real: declared-tools latch). Guarded by mu.
 	Discovered map[string]bool
+	// AllowedTools restricts the wire surface (--tools) — nil offers all.
+	AllowedTools []string
 }
 
 type readState struct {

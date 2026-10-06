@@ -456,6 +456,15 @@ func main() {
 			perms.AdditionalDirs = append(perms.AdditionalDirs, d)
 		}
 	}
+	// --add-dir does the same from the command line
+	for _, d := range o.addDirs {
+		if !filepath.IsAbs(d) {
+			d = filepath.Join(cwd, d)
+		}
+		d = filepath.Clean(d)
+		tools.ExtraAllowedDirs = append(tools.ExtraAllowedDirs, d)
+		perms.AdditionalDirs = append(perms.AdditionalDirs, d)
+	}
 	// persisted per-project allow rules from ~/.claude.json
 	if b, err := os.ReadFile(filepath.Join(config.Home(), ".claude.json")); err == nil {
 		var cfg struct {
@@ -474,6 +483,7 @@ func main() {
 	}
 	if o.toolsList != "" {
 		loop.AllowedTools = strings.Split(o.toolsList, ",")
+		loop.ToolCtx.AllowedTools = loop.AllowedTools
 	}
 	if o.denyTools != "" {
 		rules["deny"] = append(rules["deny"], strings.Split(o.denyTools, ",")...)
@@ -816,18 +826,23 @@ func fireHook(l *agent.Loop, ev hooks.Event) {
 // of the same name wins, like real's explicit mcpConfigs beat dynamic.
 func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.ServerConfig) (clients []*mcp.Client) {
 	var cfgs map[string]mcp.ServerConfig
-	if configFile != "" {
+	if strict {
+		// --strict-mcp-config: only the --mcp-config file's servers load
 		cfgs = map[string]mcp.ServerConfig{}
+	} else {
+		cfgs = mcp.LoadConfigs(cwd)
+	}
+	if configFile != "" {
 		if b, err := os.ReadFile(configFile); err == nil {
 			var top struct {
 				McpServers map[string]mcp.ServerConfig `json:"mcpServers"`
 			}
 			if json.Unmarshal(b, &top) == nil {
-				cfgs = top.McpServers
+				for n, c := range top.McpServers {
+					cfgs[n] = c
+				}
 			}
 		}
-	} else {
-		cfgs = mcp.LoadConfigs(cwd)
 	}
 	if cfgs == nil {
 		cfgs = map[string]mcp.ServerConfig{}
@@ -857,7 +872,6 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 		}
 		cancel()
 	}
-	_ = strict
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	httpMCP := map[string]*mcp.HTTPClient{}

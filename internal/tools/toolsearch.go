@@ -238,7 +238,14 @@ func RequestDefs(c *Context) []api.Tool {
 	var out []api.Tool
 	var deferred []string
 	sub := c.Subagent
+	allowed := map[string]bool{}
+	for _, n := range c.AllowedTools {
+		allowed[n] = true
+	}
 	for _, t := range All() {
+		if len(allowed) > 0 && !allowed[t.Def.Name] && t.Def.Name != "ToolSearch" {
+			continue
+		}
 		if IsDeferredTool(t) && !c.IsDiscovered(t.Def.Name) {
 			deferred = append(deferred, t.Def.Name)
 			continue
