@@ -1,7 +1,10 @@
 package perms
 
 import (
+	"claude-go/internal/config"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -32,8 +35,16 @@ func TestModes(t *testing.T) {
 	if Check(ModeBypass, nil, "Bash", j(`{"command":"rm -rf /"}`), "/tmp") != Allow {
 		t.Error("bypass should allow everything")
 	}
+	// useAutoModeDuringPlan (default true) routes non-read-only plan-mode
+	// calls to the auto-eval lane → Ask, not blanket Deny
+	if Check(ModePlan, nil, "Write", j(`{"file_path":"/tmp/x"}`), "/tmp") != Ask {
+		t.Error("plan mode should route Write to the auto-eval (Ask)")
+	}
+	// explicit off → hard deny like before
+	t.Setenv("HOME", t.TempDir())
+	writePlanAutoOff(t)
 	if Check(ModePlan, nil, "Write", j(`{"file_path":"/tmp/x"}`), "/tmp") != Deny {
-		t.Error("plan mode should deny Write")
+		t.Error("useAutoModeDuringPlan:false should deny Write in plan mode")
 	}
 	if Check(ModePlan, nil, "Read", j(`{"file_path":"/tmp/x"}`), "/tmp") != Allow {
 		t.Error("plan mode should allow Read")
@@ -93,4 +104,12 @@ func TestMcpServerRule(t *testing.T) {
 func bashIn(cmd string) []byte {
 	b, _ := json.Marshal(map[string]string{"command": cmd})
 	return b
+}
+
+func writePlanAutoOff(t *testing.T) {
+	t.Helper()
+	dir := config.ClaudeDir()
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, "settings.json"),
+		[]byte(`{"useAutoModeDuringPlan":false}`), 0o644)
 }
