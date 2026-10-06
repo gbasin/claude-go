@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"golang.org/x/term"
 	"io"
 	"os"
 	"os/exec"
@@ -768,9 +767,6 @@ func main() {
 	tools.Interactive = true
 	// entrypoint already set to cli before the aux goroutines (above)
 	tools.Checkpoints.Init(sessionID)
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		repl.MaybeOnboard(cwd)
-	}
 	if !repl.TrustGate(cwd) {
 		fmt.Println("not trusted — exiting")
 		return

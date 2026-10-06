@@ -59,10 +59,13 @@ var shouldDeferTools = map[string]bool{
 	"WebFetch":               true, "WebSearch": true, "NotebookEdit": true, "Monitor": true,
 	"EnterWorktree": true, "ExitWorktree": true,
 	"LSP": true, "TaskStop": true,
+	"TaskCreate": true, "TaskGet": true, "TaskList": true, "TaskUpdate": true,
 	"SendMessage": true, "EndConversation": true,
 	"PushNotification": true, "DesignSync": true,
 	"CronCreate": true, "CronDelete": true, "CronList": true,
 	"ArtifactComments": true, "ArtifactData": true,
+	"Glob": true, "Grep": true, "LS": true, "MultiEdit": true,
+	"NotebookRead": true, "TodoWrite": true,
 }
 
 // searchHints are the extracted searchHint strings for deferred builtins —
@@ -85,7 +88,17 @@ var searchHints = map[string]string{
 	"CronDelete":       "cancel a scheduled cron job",
 	"CronList":         "list active cron jobs",
 	"Monitor":          "run a shell command in the background and watch its output",
+	"TaskCreate":       "create a session task",
+	"TaskGet":          "get task details",
+	"TaskList":         "list session tasks",
+	"TaskUpdate":       "update a task's status or fields",
 	"EndConversation":  "end the conversation",
+	"Glob":             "find files by name pattern",
+	"Grep":             "search file contents (ripgrep)",
+	"LS":               "list directory contents",
+	"MultiEdit":        "apply multiple edits to one file",
+	"NotebookRead":     "read Jupyter notebook cells",
+	"TodoWrite":        "manage the task checklist",
 }
 
 func init() {
