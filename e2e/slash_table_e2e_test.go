@@ -73,6 +73,13 @@ func TestSlashTable(t *testing.T) {
 		// fresh session has no message chain → fork fails deterministically
 		{"/fork", "fork failed", "cannot fork"},
 		{"/branch", "branched session", ""},
+		{"/permissions", "Permissions", ""},
+		{"/bug", "report issues at", ""},
+		{"/issue", "file an issue", ""},
+		{"/radio", "laude", ""}, // Claude FM stub or URL
+		{"/stop", "nothing running", ""},
+		{"/schedule", "claude.ai account", ""},
+		{"/voice", "Voice mode", ""},
 		// state toggles last — they flip session-local flags
 		{"/goal clear", "goal cleared", ""},
 		{"/pause-memory", "memory paused", ""},
