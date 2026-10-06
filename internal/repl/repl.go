@@ -396,6 +396,15 @@ func RunWithStore(l *agent.Loop, store Store) {
 				}
 			}
 		}
+		// one-time "Fast mode is now available · /fast to turn on"
+		// announcement (captured in real's 2.1.292 startup)
+		if m, _ := config.ReadClaudeJSON(); m["fastModeNoticeShown"] != true {
+			m["fastModeNoticeShown"] = true
+			if b, e := json.MarshalIndent(m, "", "  "); e == nil {
+				os.WriteFile(filepath.Join(config.Home(), ".claude.json"), b, 0o644)
+			}
+			streamPrint(dim + "Fast mode is now available · /fast to turn on" + reset)
+		}
 		// real announces auto-compact inline when it fires
 		l.Events.OnAutoCompact = func(tokens int) {
 			streamPrint(dim + "Compacted · auto-compact summarized history" + reset)
