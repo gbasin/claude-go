@@ -80,6 +80,10 @@ func TestSlashTable(t *testing.T) {
 		{"/stop", "nothing running", ""},
 		{"/schedule", "claude.ai account", ""},
 		{"/voice", "Voice mode", ""},
+		{"/ant-trace", "trace output", ""},
+		{"/cloud-plugins", "plugins", ""},
+		{"/ultraplan", "ultraplan", ""},
+		{"/heapdump", "heap", "disabled"},
 		// state toggles last — they flip session-local flags
 		{"/goal clear", "goal cleared", ""},
 		{"/pause-memory", "memory paused", ""},
