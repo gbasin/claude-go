@@ -222,7 +222,11 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		tasksCmd(l)
 	case "theme", "color":
 		if arg == "" {
-			dprintf("  theme: %s (dark, light, daltonian, ansi, none, or a ~/.claude/themes/<name>.json)\n", themeSetting(l.CWD))
+			if pick := runThemePicker(ks); pick != "" {
+				applyTheme(pick, l.CWD)
+				persistTheme(l.CWD, pick)
+				dprintf("  theme set to %s\n", pick)
+			}
 			break
 		}
 		applyTheme(arg, l.CWD)
@@ -2356,33 +2360,49 @@ func memoryCmd(l *agent.Loop, arg string) {
 }
 
 func mcpCmd(l *agent.Loop, arg string) {
-	dprintln("  configured MCP servers (from ~/.claude.json, .mcp.json):")
+	if arg == "reconnect" || strings.HasPrefix(arg, "reconnect ") {
+		dprintln("  reconnecting MCP servers…")
+		return // real retries every failed server; ours reconnect on next turn
+	}
+	// real's /mcp: ●/○ status dot + name + transport + tool count
+	dprintf("  %sMCP servers%s\n", bold, reset)
 	rows := tools.MCPServerStatus()
 	if len(rows) == 0 {
-		dprintln("    (none)")
+		dprintln("    " + dim + "(none configured — /mcp add <name> <cmd>)" + reset)
 		return
 	}
 	for _, r := range rows {
 		if r.Err != nil {
-			dprintf("    %s  %sfailed%s: %v\n", r.Name, red, reset, r.Err)
+			dprintf("    %s○ %s%s  %sfailed%s — %v\n", red, r.Name, reset, red, reset, r.Err)
 		} else {
-			dprintf("    %s  %sconnected%s — %d tool(s)\n", r.Name, green, reset, r.Tools)
+			dprintf("    %s● %s%s  %s%d tools%s\n", green, r.Name, reset, dim, r.Tools, reset)
 		}
 	}
 }
 
 func permissionsCmd(l *agent.Loop, arg string) {
-	dprintln("  mode:", l.PermMode)
-	for k, rules := range l.PermRules {
+	// real's /permissions groups rules by section (allow/ask/deny +
+	// workspace paths), section headers bold, empty sections elided
+	dprintf("  %sPermissions%s  %s(%s)%s\n", bold, reset, dim, l.PermMode, reset)
+	shown := 0
+	for _, sec := range []struct{ key, title string }{
+		{"allow", "Allow"}, {"ask", "Ask"}, {"deny", "Deny"},
+		{"workspace", "Workspace"}, {"sandbox", "Sandbox"},
+	} {
+		rules := l.PermRules[sec.key]
 		if len(rules) == 0 {
 			continue
 		}
-		dprintf("  %s:\n", k)
+		shown++
+		dprintf("  %s%s%s\n", bold, sec.title, reset)
 		for _, r := range rules {
-			dprintln("   -", r)
+			dprintf("    %s•%s %s\n", dim, reset, r)
 		}
 	}
-	dprintln("  edit rules in ~/.claude/settings.json or .claude/settings.json")
+	if shown == 0 {
+		dprintln("  " + dim + "no custom rules — defaults apply" + reset)
+	}
+	dprintln("  " + dim + "edit in ~/.claude/settings.json or .claude/settings.json · /permissions update <rule>" + reset)
 }
 
 func configCmd(l *agent.Loop, arg string) {
