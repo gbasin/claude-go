@@ -56,7 +56,8 @@ type editor struct {
 	onToggleTodos  func()
 	onKillAgents   func()
 	onFastMode     func()
-	insertRemaps   []string // vimInsertModeRemaps: 2-char sequences -> <Esc>
+	runningAgents  func() int // ← agents-pane gate (real needs running tasks)
+	insertRemaps   []string   // vimInsertModeRemaps: 2-char sequences -> <Esc>
 	lastIns        rune
 	vimOp          rune
 	vimFind        rune
@@ -449,14 +450,26 @@ func (e *editor) insertKey(k key) *readResult {
 		}
 	case k.seq == "[D":
 		if len(e.buf) == 0 && e.mode == "insert" {
-			// ← opens the agents pane — real requires a double-press hint
+			// real (captured): ← opens the agents view/badge, ← again
+			// enters prompt history ("History N/100")
 			if e.leftArm {
 				e.leftArm = false
+				if len(e.history) > 0 {
+					e.histPrev()
+					return nil
+				}
 				return &readResult{agentsPane: true}
 			}
 			e.leftArm = true
-			os.Stdout.WriteString("\r\x1b[K  " + dim + "Press ← again to open agents" + reset)
 			time.AfterFunc(1500*time.Millisecond, func() { e.leftArm = false })
+			if e.runningAgents != nil && e.runningAgents() > 0 {
+				return &readResult{agentsPane: true}
+			}
+			if len(e.history) > 0 {
+				e.histPrev()
+			} else {
+				os.Stdout.WriteString("\r\x1b[K  " + dim + "Press ← again to open agents" + reset)
+			}
 			return nil
 		}
 		if e.pos > 0 {
@@ -1145,6 +1158,7 @@ func (e *editor) histPrev() {
 	if len(e.history) == 0 {
 		return
 	}
+	e.histSearch = true // badge state — History i/total while browsing
 	if e.hIdx == -1 {
 		e.saved = append([]rune(nil), e.buf...)
 		e.hIdx = len(e.history) - 1
@@ -1154,6 +1168,10 @@ func (e *editor) histPrev() {
 	e.buf = []rune(e.history[e.hIdx])
 	e.pos = len(e.buf)
 	e.redraw()
+	// real shows a dim "History i/total" badge above the composer
+	if e.histSearch {
+		compInline(fmt.Sprintf("\r\x1b[K  %sHistory %d/%d%s\r\n", dim, e.hIdx+1, len(e.history), reset))
+	}
 }
 
 func (e *editor) histNext() {
@@ -1166,6 +1184,7 @@ func (e *editor) histNext() {
 	} else {
 		e.hIdx = -1
 		e.buf = append([]rune(nil), e.saved...)
+		e.histSearch = false
 	}
 	e.pos = len(e.buf)
 	e.redraw()
