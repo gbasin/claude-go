@@ -289,6 +289,13 @@ func RunWithStore(l *agent.Loop, store Store) {
 	loggedTo := len(l.Messages)
 
 	for {
+		// drain background-task notifications above the status line —
+		// real shows "⎿ Task b1 finished: <cmd>" between turns
+		if l.ToolCtx.BgTasks != nil {
+			for _, n := range l.ToolCtx.BgTasks.DrainNotifications() {
+				dprintf("  %s⎿  %s%s\n", dim, n, reset)
+			}
+		}
 		printStatus(l, ed)
 		tools.UserActive.Store(true)
 		res := ed.readLine(ks)
@@ -1551,44 +1558,61 @@ func runRewindSelector(l *agent.Loop, ks *keySource, ed *editor) {
 		dprintln("  (nothing to rewind to)")
 		return
 	}
-	dprintln("\n  Rewind to:")
-	for i, m := range list {
-		if i >= 12 {
-			dprintf("    … %d more\n", len(list)-12)
-			break
-		}
-		dprintf("    %d. %s\n", i+1, trunc(strings.ReplaceAll(m.text, "\n", " "), 80))
+	// real's MessageSelector — cursor list of past user messages,
+	// newest selected; ↑↓ navigate, enter rewinds, esc cancels
+	compSuspend()
+	defer compResume()
+	dch := make(chan key, 16)
+	ks.dialog.Store(&dch)
+	defer ks.dialog.Store(nil)
+	sel := len(list) - 1
+	show := min(len(list), 12)
+	rows := show + 2
+	dprintf("\n  %sRewind to:%s\n", bold, reset)
+	for range list[len(list)-show:] {
+		dprintln()
 	}
-	fmt.Print("  number to restore (esc cancels): ")
-	sel := 0
-	for k := range ks.ch {
-		if k.b == 0x1b {
+	dprintf("  %senter to rewind · esc to cancel%s\n", dim, reset)
+	draw := func() {
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "\x1b[%dA", rows)
+		for i := len(list) - show; i < len(list); i++ {
+			m := list[i]
+			cur := "   "
+			if i == sel {
+				cur = cyan + "❯" + reset + " "
+			}
+			txt := trunc(strings.ReplaceAll(m.text, "\n", " "), 76)
+			sb.WriteString(fmt.Sprintf("\x1b[K %s%d. %s\r\n", cur, i+1, txt))
+		}
+		fmt.Print(sb.String())
+	}
+	draw()
+	for k := range dch {
+		switch {
+		case k.seq == "[A":
+			if sel > len(list)-show {
+				sel--
+				draw()
+			}
+		case k.seq == "[B":
+			if sel < len(list)-1 {
+				sel++
+				draw()
+			}
+		case k.b == 0x1b || k.b == 3:
 			dprintln()
 			return
-		}
-		if k.b >= '1' && k.b <= '9' {
-			sel = sel*10 + int(k.b-'0')
-			fmt.Print(string(k.b))
-			continue
-		}
-		if k.b == '\r' {
-			dprintln()
-			if sel < 1 || sel > len(list) {
-				dprintln("  (invalid)")
-				return
-			}
-			target := list[sel-1]
+		case k.b == '\r':
+			target := list[sel]
 			l.Messages = l.Messages[:target.i]
 			p, err := tools.Checkpoints.Rewind()
 			restored := 0
 			if err == nil && p != "" {
 				restored = 1
 			}
-			dprintf("  rewound to before %q (%d files restored)\n", trunc(target.text, 50), restored)
-			return
-		}
-		if k.b == 3 {
 			dprintln()
+			dprintf("  rewound to before %q (%d files restored)\n", trunc(target.text, 50), restored)
 			return
 		}
 	}

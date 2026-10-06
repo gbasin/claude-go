@@ -465,8 +465,10 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		}
 	}
 	if l.ToolCtx.BgTasks != nil && l.ToolCtx.BgTasks.OnExit == nil {
-		// TaskCompleted fires when a background task finishes
+		// TaskCompleted fires when a background task finishes; the exit
+		// also queues a "⎿ Task <id> finished" line for the REPL status
 		l.ToolCtx.BgTasks.OnExit = func(t *tools.BgTask) {
+			l.ToolCtx.BgTasks.Notify(t)
 			l.runHook(hooks.TaskCompleted, map[string]any{
 				"task_id":   t.ID,
 				"command":   t.Command,

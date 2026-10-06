@@ -42,6 +42,16 @@ type RateLimit struct {
 	SlowBudgetUtilization float64   // 0..1
 	SlowBudgetResetsAt    time.Time // anthropic-ratelimit-unified-slow-budget-reset
 
+	// anthropic-ratelimit-unified-overage-utilization (0..1)
+	OverageUtilization float64
+	// anthropic-ratelimit-unified-overage-period-channel-utilization
+	OverageChannelUtilization float64
+	// anthropic-ratelimit-unified-overage-period-monthly-utilization
+	OverageMonthlyUtilization float64
+	// anthropic-ratelimit-unified-overage-surpassed-threshold ("true")
+	OverageSurpassed bool
+	// anthropic-ratelimit-unified-upgrade-paths (raw)
+	UpgradePaths string
 	// anthropic-usage-limit (raw value)
 	UsageLimit string
 	// retry-after (raw header value)
@@ -92,8 +102,19 @@ func parseRateLimitHeaders(h http.Header) *RateLimit {
 		SlowOffer:             get("anthropic-ratelimit-unified-slow-offer"),
 		SlowStatus:            get("anthropic-ratelimit-unified-slow-status"),
 		SlowBudgetResetsAt:    epoch("anthropic-ratelimit-unified-slow-budget-reset"),
+		OverageSurpassed:      get("anthropic-ratelimit-unified-overage-surpassed-threshold") == "true",
+		UpgradePaths:          get("anthropic-ratelimit-unified-upgrade-paths"),
 		UsageLimit:            get("anthropic-usage-limit"),
 		RetryAfter:            get("retry-after"),
+	}
+	if f, ok := num("anthropic-ratelimit-unified-overage-utilization"); ok {
+		rl.OverageUtilization = f
+	}
+	if f, ok := num("anthropic-ratelimit-unified-overage-period-channel-utilization"); ok {
+		rl.OverageChannelUtilization = f
+	}
+	if f, ok := num("anthropic-ratelimit-unified-overage-period-monthly-utilization"); ok {
+		rl.OverageMonthlyUtilization = f
 	}
 	if f, ok := num("anthropic-ratelimit-unified-slow-retry-after"); ok {
 		rl.SlowRetryAfter = f
