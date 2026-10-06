@@ -353,6 +353,36 @@ func main() {
 			o.resume = id
 		}
 	}
+
+	// Resolve the resume target BEFORE sessionID-dependent wiring (client,
+	// store, checkpoints). Real continues the SAME transcript on -c/-r —
+	// new turns append to the resumed session's file, parentUuid-chained
+	// to the loaded leaf. Only --fork-session keeps the fresh id.
+	resumeID := ""
+	resumePath := "" // -r <file>.jsonl keeps the path for loading
+	if o.cont || o.resume != "" {
+		resumeID = o.resume
+		if o.cont {
+			if l2, err := session.Latest(cwd); err == nil {
+				resumeID = l2
+			}
+		}
+		if resumeID == "-" {
+			if id2 := repl.PickSession(cwd); id2 != "" {
+				resumeID = id2
+			} else {
+				return
+			}
+		}
+		if strings.HasSuffix(resumeID, ".jsonl") {
+			resumePath = resumeID
+			resumeID = strings.TrimSuffix(filepath.Base(resumeID), ".jsonl")
+		}
+		if !o.forkSess && resumeID != "" {
+			sessionID = resumeID
+		}
+	}
+
 	agentCleanup := installCLIAgents(o.agentsJSON, cwd)
 	if o.agentsJSON != "" {
 		os.Setenv("CLAUDE_GO_AGENTS_JSON", o.agentsJSON)
@@ -642,7 +672,10 @@ func main() {
 	if st2 != nil {
 		defer st2.Close()
 		loop.Transcript = st2.Path
-		st2.LogInit(loop.Model) // system/init record at session start (real)
+		if resumeID == "" || o.forkSess {
+			st2.LogInit(loop.Model) // system/init — fresh sessions only; a
+			// resumed transcript already carries its own init record
+		}
 		tools.OnSnapshot = func(path, backup string, ver int) {
 			st2.LogRecord(map[string]any{
 				"type": "file-history-snapshot", "isSnapshotUpdate": true,
@@ -678,38 +711,23 @@ func main() {
 
 	if o.cont || o.resume != "" {
 		loop.SessionStartSource = "resume"
-		id := o.resume
-		if o.cont {
-			if l2, err := session.Latest(cwd); err == nil {
-				id = l2
-			}
-		}
-		if id == "-" {
-			if id2 := repl.PickSession(cwd); id2 != "" {
-				id = id2
-			} else {
-				return
-			}
-		}
+		id := resumeID
+		loadPath := resumePath
 		if id != "" {
 			var msgs []api.Message
+			var leaf string
 			var err error
-			// normalize: -r accepts a transcript path, not just an id —
-			// resolve it to (id, loadPath) before branching on resumeAt
-			loadPath := ""
-			if strings.HasSuffix(id, ".jsonl") {
-				loadPath = id
-				id = strings.TrimSuffix(filepath.Base(id), ".jsonl")
-			}
 			switch {
 			case o.resumeAt != "" && loadPath != "":
-				msgs, err = loadSessionAtPath(loadPath, o.resumeAt)
+				msgs, leaf, err = loadSessionAtPath(loadPath, o.resumeAt)
 			case o.resumeAt != "":
-				msgs, err = loadSessionAt(cwd, id, o.resumeAt)
+				msgs, leaf, err = loadSessionAt(cwd, id, o.resumeAt)
 			case loadPath != "":
 				msgs, err = session.LoadPath(loadPath)
+				leaf = session.LeafUUID(loadPath)
 			default:
 				msgs, err = session.Load(cwd, id)
+				leaf = session.LeafUUID(filepath.Join(session.ProjectsDir(cwd), id+".jsonl"))
 			}
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "resume %s: %v\n", id, err)
@@ -725,6 +743,10 @@ func main() {
 					})
 					fmt.Fprintf(os.Stderr, "forked session %s → %s (%d messages)\n", id[:8], sessionID[:8], len(msgs))
 				} else {
+					if st2 != nil && leaf != "" {
+						st2.SeedParent(leaf) // continue the branch —
+						// the next record's parentUuid is the loaded leaf
+					}
 					fmt.Fprintf(os.Stderr, "resumed session %s (%d messages)\n", id, len(msgs))
 					// awaySummaryEnabled (default on): recap when the last
 					// message is 5+ minutes old — last assistant text
