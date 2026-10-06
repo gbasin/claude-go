@@ -162,7 +162,7 @@ func TestEndConversation(t *testing.T) {
 	p.sendUntilEchoed(t,
 		`calls:[{"name":"ToolSearch","input":{"query":"select:EndConversation"}},`+
 			`{"name":"EndConversation","input":{}}]`+"\r",
-		`> calls:[{"name":"ToolSearch"`, 8)
+		`❯ calls:[{"name":"ToolSearch"`, 8)
 	if err := p.waitExit(30 * time.Second); err != nil {
 		t.Fatalf("EndConversation should end the session: %v", err)
 	}
@@ -237,13 +237,13 @@ func TestPlanModeBlocksWrite(t *testing.T) {
 	p.sendUntilEchoed(t,
 		`calls:[{"name":"ToolSearch","input":{"query":"select:EnterPlanMode"}},`+
 			`{"name":"EnterPlanMode","input":{}}]`+"\r",
-		`> calls:[{"name":"ToolSearch"`, 8)
+		`❯ calls:[{"name":"ToolSearch"`, 8)
 	p.waitFor("plan mode", 30*time.Second)
 
 	target := filepath.Join(s.cwd, "blocked.txt")
 	p.sendUntilEchoed(t,
 		`tool:Write {"file_path":"`+target+`","content":"nope"}`+"\r",
-		"> tool:Write", 8)
+		"❯ tool:Write", 8)
 	p.waitFor("Tool results received", 30*time.Second)
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
 		t.Fatalf("plan mode must refuse writes — file exists: %s", target)
@@ -256,7 +256,7 @@ func TestPlanModeBlocksWrite(t *testing.T) {
 func TestBangCommand(t *testing.T) {
 	s := newSession(t)
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
-	p.sendUntilEchoed(t, "!echo bang-marker-42\r", "> !echo", 8)
+	p.sendUntilEchoed(t, "!echo bang-marker-42\r", "❯ !echo", 8)
 	p.waitFor("bang-marker-42", 15*time.Second)
 	p.exit()
 }
@@ -354,8 +354,8 @@ func TestAtMention(t *testing.T) {
 	rec := filepath.Join(t.TempDir(), "reqs")
 
 	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, "--mock")
-	p.waitFor("╭─╮", 30*time.Second)
-	p.sendUntilEchoed(t, "read @men.txt\r", "> read @men.txt", 8)
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t, "read @men.txt\r", "❯ read @men.txt", 8)
 	p.waitFor("Mock response to:", 30*time.Second)
 	p.exit()
 
@@ -436,13 +436,13 @@ func TestModelPicker(t *testing.T) {
 	s := newSession(t)
 	rec := filepath.Join(t.TempDir(), "reqs")
 	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, "--mock")
-	p.waitFor("╭─╮", 30*time.Second)
-	p.sendUntilEchoed(t, "/model\r", "> /model", 8)
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t, "/model\r", "❯ /model", 8)
 	p.waitFor("number (esc keeps", 15*time.Second)
 	p.send("4\r") // claude-sonnet-5-5
 	p.waitFor("model → claude-sonnet-5-5", 15*time.Second)
 
-	p.sendUntilEchoed(t, "hi\r", "> hi", 8)
+	p.sendUntilEchoed(t, "hi\r", "❯ hi", 8)
 	p.waitFor("Mock response to: hi", 30*time.Second)
 	p.exit()
 
@@ -494,7 +494,7 @@ func TestRemainingToolsDispatch(t *testing.T) {
 func TestQuickMemory(t *testing.T) {
 	s := newSession(t)
 	p := startREPL(t, s)
-	p.sendUntilEchoed(t, "# mem-fact-99\r", "> # mem-fact-99", 8)
+	p.sendUntilEchoed(t, "# mem-fact-99\r", "❯ # mem-fact-99", 8)
 	p.waitFor("saved to memory", 15*time.Second)
 	p.exit()
 

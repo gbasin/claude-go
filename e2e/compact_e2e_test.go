@@ -70,10 +70,10 @@ func TestAutoCompactPrint(t *testing.T) {
 func TestAutoCompactInteractive(t *testing.T) {
 	s := newSession(t)
 	p := s.runPTY(t, []string{"CLAUDE_CODE_AUTO_COMPACT_WINDOW=40000"}, "--mock")
-	p.waitFor("╭─╮", 30*time.Second)
+	p.waitFor("❯", 30*time.Second)
 	p.send("usage:9000\r")
 	// compact fires at end of this turn; the next prompt box must come back
-	p.waitCount("╭─╮", 2, 30*time.Second)
+	p.waitCount("❯", 2, 30*time.Second)
 	// keystrokes can land in the post-turn drain window — retry until one
 	// reaches the editor (each send submits a prompt; one answer suffices)
 	p.sendUntil("hi\r", "Mock response to: hi", 15)

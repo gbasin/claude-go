@@ -379,7 +379,7 @@ func TestAuxInteractiveSession(t *testing.T) {
 		"CLAUDE_CODE_OAUTH_TOKEN=e2e-fake-oauth-token",
 		"CLAUDE_GO_RAW_HTTP=0",
 	}, "--sdk-url", rec.srv.URL)
-	p.waitFor("╭─╮", 30*time.Second)
+	p.waitFor("❯", 30*time.Second)
 	p.send("hi\r")
 	p.waitFor("aux-server reply", 30*time.Second)
 

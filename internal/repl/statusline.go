@@ -51,20 +51,24 @@ func runningTaskCount(l *agent.Loop) int {
 	return running
 }
 
-// permModeBanner is the colored banner real CC shows above the input when
-// the permission mode isn't default ("⏵⏵ auto mode", "⏸ plan mode"…).
+// permModeBanner renders real's footer mode pill + cycle hint:
+// "⏵⏵ <mode> on (shift+tab to cycle) · ← for agents" — yellow-220 pill,
+// gray-246 hint. Empty only in a bare `? for shortcuts` default mode.
 func permModeBanner(mode string) string {
+	yel := "\x1b[38;5;220m"
+	gray := "\x1b[38;5;246m"
+	hint := gray + " (shift+tab to cycle) · ← for agents" + reset
 	switch mode {
 	case "", "default":
-		return ""
+		return gray + "? for shortcuts" + reset
 	case "acceptEdits":
-		return yellow + "⏵⏵ accept edits on" + reset
+		return yel + "⏵⏵ accept edits on" + reset + hint
 	case "plan":
-		return yellow + "⏸ plan mode" + reset
+		return yel + "⏸ plan mode" + reset + hint
 	case "auto":
-		return yellow + "⏵⏵ auto mode" + reset
+		return yel + "⏵⏵ auto mode on" + reset + hint
 	case "bypassPermissions":
-		return red + "⏵⏵ bypass permissions on" + reset
+		return yel + "⏵⏵ bypass permissions on" + reset + hint
 	}
-	return yellow + "⏵⏵ " + mode + " mode" + reset
+	return yel + "⏵⏵ " + mode + " mode" + reset + hint
 }

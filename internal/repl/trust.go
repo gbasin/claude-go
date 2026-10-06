@@ -4,6 +4,7 @@ import (
 	"claude-go/internal/config"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"golang.org/x/term"
@@ -22,6 +23,9 @@ func TrustGate(cwd string) bool {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return true
 	}
+	if rp, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = rp // real displays/keys the resolved path (/tmp → /private/tmp)
+	}
 	if accepted(cwd) {
 		return true
 	}
@@ -29,8 +33,8 @@ func TrustGate(cwd string) bool {
 	// workspace:" + path, the quick-safety-check paragraph, OSC8 security
 	// link, and a two-option cursor list whose DEFAULT is "No, exit"
 	fmt.Printf("\n%s%s%s\n", trustYellow, strings.Repeat("─", 78), reset)
-	fmt.Printf("  %s%sAccessing workspace:%s\n\n", trustYellow, bold, unbold+reset)
-	fmt.Printf("  %s%s%s\n\n", bold, cwd, unbold+reset)
+	fmt.Printf("  %s%sAccessing workspace:%s\n\n", trustYellow, bold, unbold+"\x1b[39m")
+	fmt.Printf("  %s%s%s\n\n", bold, cwd, unbold+"\x1b[39m")
 	fmt.Print("  Quick safety check: Is this a project you created or one you trust? (Like your\r\n")
 	fmt.Print("  own code, a well-known open source project, or work from your team). If not,\r\n")
 	fmt.Print("  take a moment to review what's in this folder first.\r\n\r\n")
