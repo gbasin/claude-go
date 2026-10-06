@@ -28,6 +28,8 @@ type editor struct {
 	buf            []rune
 	pos            int
 	stashed        [][]rune // ctrl+s draft stash
+	busyChord      []string
+	busyChordAt    time.Time
 	prompt         string
 	saved          []rune
 	vim            bool
