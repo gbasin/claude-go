@@ -90,7 +90,7 @@ func (ks *keySource) read() {
 			if pasting != nil {
 				// look for paste end marker
 				if c == 0x1b && i+5 < n && string(buf[i:i+6]) == pasteEnd {
-					ks.ch <- key{paste: string(pasting)}
+					ks.push(key{paste: string(pasting)})
 					pasting = nil
 					i += 5
 					continue
@@ -104,7 +104,7 @@ func (ks *keySource) read() {
 				continue
 			}
 			if c == 0x1b && i+1 < n && buf[i+1] == '\r' {
-				ks.ch <- key{b: '\n', r: '\n'} // option+enter -> newline
+				ks.push(key{b: '\n', r: '\n'}) // option+enter -> newline
 				i++
 				continue
 			}
@@ -115,17 +115,17 @@ func (ks *keySource) read() {
 					j++
 				}
 				if j < n && buf[j] >= 0x40 && buf[j] <= 0x7e {
-					ks.ch <- decodeCSI(string(buf[i+1 : j+1]))
+					ks.push(decodeCSI(string(buf[i+1 : j+1])))
 					i = j
 					continue
 				}
-				ks.ch <- key{b: 0x1b, seq: string(buf[i+1 : i+3])}
+				ks.push(key{b: 0x1b, seq: string(buf[i+1 : i+3])})
 				i += 2
 				continue
 			}
 			if c == 0x1b && i+1 < n && buf[i+1] >= 32 && buf[i+1] < 127 {
 				// ESC + printable = alt/meta+key (real treats them identically)
-				ks.ch <- key{b: buf[i+1], r: rune(buf[i+1]), mod: modAlt}
+				ks.push(key{b: buf[i+1], r: rune(buf[i+1]), mod: modAlt})
 				i++
 				continue
 			}
@@ -134,13 +134,13 @@ func (ks *keySource) read() {
 				if i+size <= n {
 					r := []rune(string(buf[i : i+size]))
 					if len(r) == 1 {
-						ks.ch <- key{b: c, r: r[0]}
+						ks.push(key{b: c, r: r[0]})
 					}
 					i += size - 1
 					continue
 				}
 			}
-			ks.ch <- key{b: c}
+			ks.push(key{b: c})
 		}
 	}
 }
@@ -226,4 +226,13 @@ func (ks *keySource) forward(k key) bool {
 		return true
 	}
 	return false
+}
+
+// push routes a key to the modal dialog when one is registered — the
+// dialog owns input wherever it's open (mid-turn or idle), matching
+// real's modal semantics. Falls back to ks.ch.
+func (ks *keySource) push(k key) {
+	if !ks.forward(k) {
+		ks.ch <- k
+	}
 }

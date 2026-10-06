@@ -289,6 +289,19 @@ func Run(c Config, ev Event, payload map[string]any, cwd string) Result {
 			if code != 0 && code != 2 && code != -1 && len(bytes.TrimSpace(stderr)) > 0 {
 				res.NonBlockErr += string(bytes.TrimSpace(stderr)) + "\n"
 			}
+			// a Stop hook that errors (nonzero, non-block exit) fires the
+			// StopFailure event — real lets a separate handler observe it
+			if ev == Stop && code != 0 && code != 2 && code != -1 {
+				fp := map[string]any{}
+				for k, v := range payload {
+					fp[k] = v
+				}
+				fp["error"] = strings.TrimSpace(string(stderr))
+				if fr := Run(c, StopFailure, fp, cwd); fr.Block {
+					res.Block = true
+					res.Reason = firstNonEmpty(fr.Reason, res.Reason)
+				}
+			}
 		}
 	}
 	return res
