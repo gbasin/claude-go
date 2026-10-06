@@ -356,6 +356,37 @@ func execEnterWorktree(c *Context, raw json.RawMessage) Result {
 	return Result{Content: fmt.Sprintf("Entered worktree at %s (branch %s)", wtPath, branch)}
 }
 
+// settingBool resolves a dotted settings key as a bool (real's
+// tasks.enabled et al are booleans, not strings).
+func settingBool(cwd, key string) bool {
+	for _, p := range []string{
+		filepath.Join(cwd, ".claude", "settings.json"),
+		filepath.Join(config.ClaudeDir(), "settings.json"),
+	} {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var m map[string]any
+		if json.Unmarshal(b, &m) != nil {
+			continue
+		}
+		v := any(m)
+		for _, k := range strings.Split(key, ".") {
+			mm, ok := v.(map[string]any)
+			if !ok {
+				v = nil
+				break
+			}
+			v = mm[k]
+		}
+		if bv, ok := v.(bool); ok {
+			return bv
+		}
+	}
+	return false
+}
+
 func settingStr(cwd, key string) string {
 	for _, p := range []string{
 		filepath.Join(cwd, ".claude", "settings.json"),

@@ -27,7 +27,8 @@ type sseMCPServer struct {
 	out chan []byte // JSON-RPC responses to stream back
 
 	mu      sync.Mutex
-	methods []string // jsonrpc methods received, in order
+	methods []string         // jsonrpc methods received, in order
+	extra   []map[string]any // extra tools served by tools/list
 }
 
 func newSSEMCPServer(t *testing.T) *sseMCPServer {
@@ -91,14 +92,25 @@ func (m *sseMCPServer) handleMsg(w http.ResponseWriter, r *http.Request) {
 		result = map[string]any{"contents": []map[string]any{{
 			"uri": "mem://note1", "mimeType": "text/plain", "text": "RES-CONTENT-E2E"}}}
 	case "tools/list":
-		result = map[string]any{"tools": []map[string]any{{
+		m.mu.Lock()
+		toolList := append([]map[string]any{{
 			"name":        "ping",
 			"description": "e2e ping tool",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
-		}}}
+		}}, m.extra...)
+		m.mu.Unlock()
+		result = map[string]any{"tools": toolList}
 	case "tools/call":
+		var in struct {
+			Name string `json:"name"`
+		}
+		var rpcIn struct{ Params json.RawMessage }
+		// re-read the raw body for the tool name — cheap decode again
+		txt := "PONG-E2E"
+		_ = in
+		_ = rpcIn
 		result = map[string]any{"content": []map[string]any{{
-			"type": "text", "text": "PONG-E2E"}}}
+			"type": "text", "text": txt}}}
 	default:
 		result = map[string]any{}
 	}
@@ -106,6 +118,23 @@ func (m *sseMCPServer) handleMsg(w http.ResponseWriter, r *http.Request) {
 		"jsonrpc": "2.0", "id": json.RawMessage(rpc.ID), "result": result})
 	m.out <- resp
 	w.WriteHeader(202)
+}
+
+// pushNotify streams a JSON-RPC notification (no id) to the client.
+func (m *sseMCPServer) pushNotify(method string, params any) {
+	b, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "method": method, "params": params})
+	m.out <- b
+}
+
+// addTool appends to the dynamic tools/list result.
+func (m *sseMCPServer) addTool(name, desc string) {
+	m.mu.Lock()
+	m.extra = append(m.extra, map[string]any{
+		"name": name, "description": desc,
+		"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
+	})
+	m.mu.Unlock()
 }
 
 func (m *sseMCPServer) sawMethods() []string {
@@ -344,5 +373,44 @@ func TestMCPOAuthNeedsAuth(t *testing.T) {
 	}
 	if !strings.Contains(r.stderr, "/authorize-e2e") {
 		t.Fatalf("discovered auth URL missing: %s", r.stderr)
+	}
+}
+
+// TestMCPListChanged: notifications/tools/list_changed over SSE triggers
+// a tools/list refresh and the new tool becomes dispatchable.
+func TestMCPListChanged(t *testing.T) {
+	srv := newSSEMCPServer(t)
+	s := newSession(t)
+	s.writeSettings(`{"enableAllProjectMcpServers":true}`)
+	s.writeFile(".mcp.json", fmt.Sprintf(
+		`{"mcpServers":{"ssetest":{"type":"sse","url":%q}}}`, srv.srv.URL+"/sse"))
+
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p.sendUntil("/mcp\r", "● ", 20)
+	p.send("\x1b") // close status
+	time.Sleep(300 * time.Millisecond)
+
+	// add a second tool server-side, then notify
+	srv.addTool("ping2", "e2e ping tool 2")
+	srv.pushNotify("notifications/tools/list_changed", map[string]any{})
+
+	// give the refresh a beat, then dispatch the new tool — if the
+	// notification path is dead this stays "Unknown tool"
+	time.Sleep(1500 * time.Millisecond)
+	line := `calls:[{"name":"ToolSearch","input":{"query":"select:mcp__ssetest__ping2"}},` +
+		`{"name":"mcp__ssetest__ping2","input":{}}]`
+	p.sendUntilEchoed(t, line+"\r", `❯ calls:[{"name":"ToolSearch"`, 8)
+	p.waitFor("PONG-E2E", 30*time.Second)
+	p.exit()
+
+	// the notification must have triggered a second tools/list
+	count := 0
+	for _, m := range srv.sawMethods() {
+		if m == "tools/list" {
+			count++
+		}
+	}
+	if count < 2 {
+		t.Fatalf("expected tools/list refresh after list_changed; methods: %v", srv.sawMethods())
 	}
 }

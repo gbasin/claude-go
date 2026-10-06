@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -318,7 +319,7 @@ var mascotRows = [3]string{" \u2590\u259b\u2588\u2588\u2588\u259b\u2588", "\u259
 // progressive sparkle fill (each frame reveals scattered block cells).
 // Skipped under prefers-reduced-motion or non-TTY.
 func animateMascot() {
-	if !term.IsTerminal(int(os.Stdout.Fd())) || os.Getenv("CLAUDE_GO_REDUCED_MOTION") != "" {
+	if !term.IsTerminal(int(os.Stdout.Fd())) || os.Getenv("CLAUDE_GO_REDUCED_MOTION") != "" || reducedMotionSetting() {
 		return
 	}
 	type cell struct {
@@ -405,4 +406,24 @@ func printAutoModeNotice(permMode string) {
 	if b, err := json.MarshalIndent(m, "", "  "); err == nil {
 		os.WriteFile(filepath.Join(config.Home(), ".claude.json"), b, 0o644)
 	}
+}
+
+// reducedMotionSetting honors settings.prefersReducedMotion (real's key).
+var reducedMotionOnce struct {
+	once sync.Once
+	v    bool
+}
+
+func reducedMotionSetting() bool {
+	reducedMotionOnce.once.Do(func() {
+		b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
+		if err != nil {
+			return
+		}
+		var m map[string]any
+		if json.Unmarshal(b, &m) == nil {
+			reducedMotionOnce.v, _ = m["prefersReducedMotion"].(bool)
+		}
+	})
+	return reducedMotionOnce.v
 }

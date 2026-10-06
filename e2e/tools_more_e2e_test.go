@@ -239,6 +239,10 @@ func TestPlanModeBlocksWrite(t *testing.T) {
 			`{"name":"EnterPlanMode","input":{}}]`+"\r",
 		`❯ calls:[{"name":"ToolSearch"`, 8)
 	p.waitFor("plan mode", 30*time.Second)
+	// the turn isn't done when "plan mode" prints — sending the Write
+	// directive mid-turn queues it as model text. Wait for the turn's
+	// end line first (✻ <verb> for Ns).
+	p.waitFor("· done", 30*time.Second)
 
 	target := filepath.Join(s.cwd, "blocked.txt")
 	p.sendUntilEchoed(t,
@@ -661,5 +665,64 @@ func TestTaskToolsGated(t *testing.T) {
 			bytes.Contains(b, []byte(`"TaskList"`)) {
 			t.Fatal("Task* tools on the wire without tasks.enabled")
 		}
+	}
+}
+
+// TestBashTimeout: a Bash that exceeds its timeout errors with
+// "Command timed out" — the tool_use_error reaches the model.
+func TestBashTimeout(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"python3 -c \"import time;time.sleep(20)\"","timeout":1500}`+"\r",
+		"❯ tool:Bash", 8)
+	p.waitFor("timed out after 1.5s", 30*time.Second)
+	p.exit()
+}
+
+// TestBashAutoBackground: CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS=N flips
+// a long foreground command into a background task at N ms.
+func TestBashAutoBackground(t *testing.T) {
+	s := newSession(t)
+	p := s.runPTY(t, []string{"CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS=2500"},
+		"--mock", "--permission-mode", "bypassPermissions")
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"python3 -c \"import time;time.sleep(15)\""}`+"\r",
+		"❯ tool:Bash", 8)
+	p.waitFor("moved to the background", 30*time.Second)
+	p.exit()
+}
+
+// TestTaskToolsSettingsGate: tasks.enabled in project settings enables
+// Task* tools — resolved against the project dir, not launch PWD.
+func TestTaskToolsSettingsGate(t *testing.T) {
+	s := newSession(t)
+	s.writeSettings(`{"tasks":{"enabled":true}}`)
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 60*time.Second,
+		"--mock", "-p", "hi", "--output-format", "stream-json")
+	s.mustOK(t, r)
+
+	ents, _ := os.ReadDir(rec)
+	var wire []byte
+	for _, e := range ents {
+		b, _ := os.ReadFile(filepath.Join(rec, e.Name()))
+		if bytes.Contains(b, []byte(`"tools"`)) || bytes.Contains(b, []byte("TaskCreate")) {
+			wire = b
+		}
+	}
+	if !bytes.Contains(wire, []byte("TaskCreate")) {
+		t.Fatal("tasks.enabled=true but TaskCreate absent from wire")
+	}
+
+	// dispatch path
+	r = s.run(t, "--mock", "-p",
+		`calls:[{"name":"TaskCreate","input":{"subject":"s","description":"d"}},`+
+			`{"name":"TaskList","input":{}}]`,
+		"--permission-mode", "bypassPermissions", "--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "Task") {
+		t.Fatalf("TaskList didn't dispatch under settings gate: %s", truncStr(r.stdout, 1500))
 	}
 }
