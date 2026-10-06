@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -81,7 +82,10 @@ func newSession(t *testing.T) *sess {
 	s := &sess{t: t, cwd: cwd, home: home}
 	s.env = []string{
 		"HOME=" + home,
-		"PATH=" + os.Getenv("PATH"),
+		// stubbin first on PATH — OS-integration binaries become no-ops
+		// so tests can't pop browser tabs, show macOS notifications,
+		// clobber the real clipboard, or read/delete real keychain items
+		"PATH=" + stubBinDir() + ":" + os.Getenv("PATH"),
 		"SHELL=/bin/bash",
 		"TERM=xterm-256color",
 		"LANG=en_US.UTF-8",
@@ -349,4 +353,31 @@ func hasBinary(name string) bool {
 func mustJSON(v any) []byte {
 	b, _ := json.Marshal(v)
 	return b
+}
+
+// stubBinDir is a shared dir of no-op binaries shadowing every OS
+// integration the replica shells out to: open/xdg-open (browser),
+// osascript/notify-send (notifications), pbcopy/pbpaste/pngpaste
+// (clipboard), security (keychain), open2 just in case.
+var stubBinOnce sync.Once
+var stubBinPath string
+
+func stubBinDir() string {
+	stubBinOnce.Do(func() {
+		d, err := os.MkdirTemp("", "cg-e2e-stubbin")
+		if err != nil {
+			return
+		}
+		for _, name := range []string{
+			"open", "xdg-open", "open2",
+			"osascript", "notify-send",
+			"pbcopy", "pbpaste", "pngpaste",
+			"security",
+		} {
+			os.WriteFile(filepath.Join(d, name),
+				[]byte("#!/bin/sh\nexit 0\n"), 0o755)
+		}
+		stubBinPath = d
+	})
+	return stubBinPath
 }

@@ -663,3 +663,29 @@ func TestTaskToolsGated(t *testing.T) {
 		}
 	}
 }
+
+// TestBashTimeout: a Bash that exceeds its timeout errors with
+// "Command timed out" — the tool_use_error reaches the model.
+func TestBashTimeout(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"python3 -c \"import time;time.sleep(20)\"","timeout":1500}`+"\r",
+		"❯ tool:Bash", 8)
+	p.waitFor("timed out after 1.5s", 30*time.Second)
+	p.exit()
+}
+
+// TestBashAutoBackground: CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS=N flips
+// a long foreground command into a background task at N ms.
+func TestBashAutoBackground(t *testing.T) {
+	s := newSession(t)
+	p := s.runPTY(t, []string{"CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS=2500"},
+		"--mock", "--permission-mode", "bypassPermissions")
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"python3 -c \"import time;time.sleep(15)\""}`+"\r",
+		"❯ tool:Bash", 8)
+	p.waitFor("moved to the background", 30*time.Second)
+	p.exit()
+}
