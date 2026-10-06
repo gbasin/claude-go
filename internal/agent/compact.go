@@ -288,6 +288,12 @@ func (l *Loop) ShouldAutoCompact(u api.Usage) bool {
 		return false
 	}
 	total := u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+	// CLAUDE_AUTOCOMPACT_PCT_OVERRIDE (0-100): compact at N% of window
+	if p := os.Getenv("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"); p != "" {
+		if pct, err := strconv.Atoi(p); err == nil && pct > 0 && pct <= 100 {
+			return total > l.contextWindow()*pct/100
+		}
+	}
 	return total > l.contextWindow()-20000-8000-4000
 }
 

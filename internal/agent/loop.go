@@ -153,6 +153,9 @@ func (l *Loop) buildRequest() *api.Request {
 	}
 	effort := l.Effort
 	if effort == "" {
+		effort = os.Getenv("CLAUDE_CODE_EFFORT_LEVEL")
+	}
+	if effort == "" {
 		effort = "medium"
 	}
 	// xhigh is fable-class only — opus rejects it ('This model does not
