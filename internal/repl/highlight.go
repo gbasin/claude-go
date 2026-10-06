@@ -56,15 +56,18 @@ var langKeywords = map[string][]string{
 }
 
 // token colors — reuse palette vars
+// Real's "Monokai Extended" dark syntax palette (mod_1275.js).
 var (
-	hlKeyword = "\x1b[35m" // magenta
-	hlString  = "\x1b[32m" // green
-	hlComment = "\x1b[2m"  // dim
-	hlNumber  = "\x1b[33m" // yellow
-	hlDiffAdd = "\x1b[32m"
-	hlDiffDel = "\x1b[31m"
+	hlKeyword = "\x1b[38;2;249;38;114m"  // keyword/operator — hot pink
+	hlString  = "\x1b[38;2;230;219;116m" // string/regexp — yellow
+	hlComment = "\x1b[38;2;117;113;94m"  // comment/meta — gray
+	hlNumber  = "\x1b[38;2;190;132;255m" // literal/number — purple
+	hlBuiltin = "\x1b[38;2;166;226;46m"  // built_in/type — lime
+	hlDiffAdd = "\x1b[38;2;105;219;124m" // diffAdded token
+	hlDiffDel = "\x1b[38;2;255;168;180m" // diffRemoved token
 	hlDiffCtx = "\x1b[2m"
-	hlBuiltin = "\x1b[36m" // cyan
+	hlParam   = "\x1b[38;2;253;151;31m"  // params — orange
+	hlPunct   = "\x1b[38;2;248;248;242m" // punctuation — off-white
 )
 
 func init() {

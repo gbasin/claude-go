@@ -102,13 +102,15 @@ func Check(mode Mode, rules *Rules, toolName string, input json.RawMessage, cwd 
 	if allSpecsAllowed(rules, toolName, specs) {
 		return Allow
 	}
-	if mode == ModeAcceptEdit && isEditTool(toolName) {
-		return Allow
-	}
 	// file tools writing outside the workspace (cwd + additionalDirectories)
-	// always require an ask — real CC treats this as a separate dimension.
+	// always require an ask — real's acceptEdits only auto-allows
+	// IN-workspace edits ("acceptEdits already auto-allows in-workspace
+	// edits" — mod_0400 rule warning).
 	if isEditTool(toolName) && !fileInsideWorkspace(input, cwd) {
 		return Ask
+	}
+	if mode == ModeAcceptEdit && isEditTool(toolName) {
+		return Allow
 	}
 	if mode == ModeAuto {
 		// "auto" auto-allows read-only tools and routes everything
