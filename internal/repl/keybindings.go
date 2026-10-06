@@ -65,8 +65,8 @@ var kbContexts = map[string]bool{
 var kbActiveCtxs = []string{"Chat", "Global"}
 
 // kbReserved — non-rebindable keys (ctrl+m==enter, ctrl+[==esc,
-// ctrl+i==tab, ctrl+h==backspace are terminal aliases; ctrl+z is the
-// suspend signal the terminal driver owns).
+// ctrl+i==tab, ctrl+h==backspace are terminal aliases; ctrl+z is job-control
+// suspend, handled before the binding layer sees it).
 var kbReserved = map[string]string{
 	"ctrl+c":   "interrupts Claude",
 	"ctrl+d":   "exits Claude",
