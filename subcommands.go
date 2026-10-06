@@ -14,6 +14,7 @@ import (
 
 	"claude-go/internal/api"
 	"claude-go/internal/auth"
+	"claude-go/internal/bg"
 	"claude-go/internal/bridge"
 	"claude-go/internal/mcp"
 	"claude-go/internal/netproxy"
@@ -379,6 +380,71 @@ func agentsSub(args []string) {
 	}
 	fmt.Println("\nbackground tasks: none (tasks live inside a running session)")
 	fmt.Println("local bus agents: none (no messaging socket)")
+	jobs := bg.List()
+	fmt.Println("\nbackground sessions:")
+	if len(jobs) == 0 {
+		fmt.Println("  none")
+	}
+	for _, j := range jobs {
+		what := j.Prompt
+		if what == "" {
+			what = j.Name
+		}
+		if what == "" {
+			what = "(idle)"
+		}
+		if len(what) > 60 {
+			what = what[:60] + "…"
+		}
+		fmt.Printf("  %s  %s  %s ago  %s\n", j.Short, j.CWD,
+			time.Since(j.StartedAt).Round(time.Second), what)
+	}
+}
+
+// bgHostSub is the hidden bg-pty-host worker — detached by Spawn,
+// never invoked by hand. Owns the session's pty + rendezvous socket.
+func bgHostSub(args []string) {
+	var o bg.HostOpts
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--session":
+			i++
+			o.SessionID = args[i]
+		case "--cwd":
+			i++
+			o.CWD = args[i]
+		case "--resume-from":
+			i++
+			o.ResumeFrom = args[i]
+		case "--prompt":
+			i++
+			o.Prompt = args[i]
+		case "--name":
+			i++
+			o.Name = args[i]
+		}
+	}
+	if o.SessionID == "" {
+		fmt.Fprintln(os.Stderr, "bg-host: --session required")
+		os.Exit(2)
+	}
+	if o.CWD == "" {
+		o.CWD = mustGetwd()
+	}
+	os.Exit(bg.RunHost(o))
+}
+
+// attachSub: claude attach <id> — live-attach this terminal to a running
+// background session (real's attach; Ctrl+Z inside detaches).
+func attachSub(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: claude attach <session-id|prefix|name>")
+		os.Exit(2)
+	}
+	if err := bg.Attach(args[0], os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 }
 
 func quickFrontmatter(s string) map[string]string {

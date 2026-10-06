@@ -25,6 +25,7 @@ import (
 	"claude-go/internal/agent"
 	"claude-go/internal/api"
 	"claude-go/internal/auth"
+	"claude-go/internal/bg"
 	"claude-go/internal/bridge"
 	"claude-go/internal/hooks"
 	"claude-go/internal/plugins"
@@ -599,9 +600,10 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "reload-skills":
 		dprintf("  skills reloaded — %d skills now visible\n", len(agent.SkillNames(l.ToolCtx.CWD)))
 	case "background", "bg":
-		// real sends the session itself to the background; the local
-		// equivalent surface is the background-task list
-		tasksCmd(l)
+		// real /background [prompt]: detach the session to run as a
+		// background agent — the interactive process exits, the session
+		// keeps running under a bg-pty-host, `claude attach` reattaches
+		return backgroundCmd(l, arg)
 	case "heapdump":
 		heapdumpCmd(l)
 	case "debug-tool-call":
@@ -3335,6 +3337,29 @@ func cdCmd(l *agent.Loop, arg string) {
 		l.ToolCtx.OnCwdChanged(p)
 	}
 	dprintf("  cwd: %s → %s\n", old, p)
+}
+
+// backgroundCmd is /background [prompt] (mod_0488): detach the session into
+// a bg-pty-host worker — it keeps running headless while this process exits
+// and frees the terminal. handleSlash's true return ends the REPL through
+// the normal shutdown path (SessionEnd hook, transcript flush).
+func backgroundCmd(l *agent.Loop, arg string) bool {
+	// -r resumes into a new session id here, so the bg worker gets a fresh
+	// id carrying this conversation — registry, `claude attach`, and the
+	// picker's bg marks all key on it
+	sid := api.NewUUID()
+	if _, err := bg.Spawn(bg.SpawnOpts{
+		SessionID:  sid,
+		CWD:        l.ToolCtx.CWD,
+		ResumeFrom: l.Client.SessionID,
+		Prompt:     arg,
+	}); err != nil {
+		dprintln("  background failed:", err)
+		return false
+	}
+	dprintf("  session detached — keeps running in the background\n")
+	dprintf("  reattach: claude attach %s   monitor: claude agents\n", sid[:8])
+	return true
 }
 
 // stopCmd is /stop: real stops a running background session ("transcript and
