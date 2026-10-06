@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -114,7 +115,10 @@ func Attach(prefix string, stdin, stdout *os.File) error {
 		}
 	}()
 
-	// stdin → socket; \x1a (ctrl+z) detaches — real's "Ctrl+Z to detach"
+	// stdin → socket; \x1a (ctrl+z) detaches — real's "Ctrl+Z to detach".
+	// stdin EOF keeps the attach alive watching output — `printf "/exit\r"
+	// | claude attach <id>` blocks until the session ends (a wait primitive
+	// for scripts); Ctrl+C kills the attach alone.
 	buf := make([]byte, 32*1024)
 	detached := false
 	for {
@@ -131,8 +135,11 @@ func Attach(prefix string, stdin, stdout *os.File) error {
 				break
 			}
 		}
-		if detached || rerr != nil {
+		if detached || (rerr != nil && !errors.Is(rerr, io.EOF)) {
 			break
+		}
+		if rerr == io.EOF {
+			break // stop reading stdin, but keep watching below
 		}
 	}
 	if detached {

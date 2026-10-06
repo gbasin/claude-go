@@ -157,6 +157,7 @@ Subcommands:
   agents                        list agent types + background sessions
   attach <id>                   attach to a running background session (^Z detaches)
   daemon run|start|status|stop  background-session supervisor (respawns dead workers)
+                                install|uninstall register as a service (launchd/systemd)
   stop <id>                     stop a running background session
   auth login|status|logout      credential management
   config get|set|list           settings.json

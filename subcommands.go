@@ -506,6 +506,21 @@ func daemonSub(args []string) {
 			os.Exit(1)
 		}
 		fmt.Println("daemon stopped")
+	case "install":
+		// real's daemon is an installable service — ours registers a
+		// LaunchAgent (macOS) or user systemd unit (linux)
+		if p, err := bg.InstallDaemon(); err != nil {
+			fmt.Fprintln(os.Stderr, "daemon install:", err)
+			os.Exit(1)
+		} else {
+			fmt.Printf("daemon service installed: %s\n", p)
+		}
+	case "uninstall":
+		if err := bg.UninstallDaemon(); err != nil {
+			fmt.Fprintln(os.Stderr, "daemon uninstall:", err)
+			os.Exit(1)
+		}
+		fmt.Println("daemon service removed")
 	case "status":
 		if pid := bg.DaemonPID(); pid != 0 {
 			jobs := bg.List()
@@ -514,7 +529,7 @@ func daemonSub(args []string) {
 			fmt.Println("daemon not running — `claude daemon start`")
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "usage: claude daemon [run|start|status|stop]\n")
+		fmt.Fprintf(os.Stderr, "usage: claude daemon [run|start|status|stop|install|uninstall]\n")
 		os.Exit(2)
 	}
 }
