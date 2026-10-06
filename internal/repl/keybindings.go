@@ -407,6 +407,46 @@ func (e *editor) applyKeybindingFile(b []byte) []string {
 
 // bindingKey dispatches a key through the keybinding layer. Returns
 // (result, consumed); consumed=false means fall through to default handling.
+// busyAction resolves a key to an action name for the mid-turn input
+// queue — same context+chord rules as bindingKey, but without dispatch
+// (the busy goroutine only needs to know if the key means sendNow etc).
+func (e *editor) busyAction(k key) string {
+	s := keystroke(k)
+	if s == "" {
+		e.busyChord = nil
+		return ""
+	}
+	if len(e.busyChord) > 0 && time.Since(e.busyChordAt) >= 3*time.Second {
+		e.busyChord = nil
+	}
+	cand := s
+	if len(e.busyChord) > 0 {
+		cand = strings.Join(append(append([]string{}, e.busyChord...), s), " ")
+	}
+	e.busyChord = nil
+	for _, ctx := range kbActiveCtxs {
+		if e.kbPrefix[ctx+"\x00"+cand] {
+			e.busyChord = strings.Fields(cand)
+			e.busyChordAt = time.Now()
+			return "" // chord prefix — consumed, awaiting the next stroke
+		}
+	}
+	for _, ctx := range kbActiveCtxs {
+		if a, ok := e.kb[ctx+"\x00"+cand]; ok {
+			return a
+		}
+	}
+	if cand != s {
+		// chord missed — retry the stroke standalone
+		for _, ctx := range kbActiveCtxs {
+			if a, ok := e.kb[ctx+"\x00"+s]; ok {
+				return a
+			}
+		}
+	}
+	return ""
+}
+
 func (e *editor) bindingKey(k key) (*readResult, bool) {
 	if e.kb == nil {
 		return nil, false
