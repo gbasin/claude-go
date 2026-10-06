@@ -33,6 +33,14 @@ func init() {
 const auqNotesOnly = "(notes only)" // EOt in the extracted module
 
 // AskOption is the label+description pair the host renders.
+// AskQuestion is one row of the AskUserQuestion wizard.
+type AskQuestion struct {
+	Header, Text string
+	Options      []AskOption
+	MultiSelect  bool
+	Kind         string // "choice" (default), "text", "number" — text/number need no options
+}
+
 type AskOption struct {
 	Label       string `json:"label"`
 	Description string `json:"description"`
@@ -394,26 +402,57 @@ func execAskUser(c *Context, raw json.RawMessage) Result {
 		if c.AskStructured == nil {
 			return Result{Content: "structured questions unavailable (non-interactive mode)", IsError: true}
 		}
-		for _, q := range in.Questions {
-			kind := q.Kind
-			if kind == "" {
-				kind = "choice"
-			}
-			var opts []AskOption
-			if kind == "choice" {
+		if c.AskStructuredMulti != nil {
+			// real: all questions in one tabbed wizard with a Submit tab
+			var qs []AskQuestion
+			for _, q := range in.Questions {
+				var opts []AskOption
 				for _, o := range q.Options {
 					opts = append(opts, AskOption{Label: o.Label, Description: o.Description})
 				}
+				kind := q.Kind
+				if kind == "" {
+					kind = "choice"
+				}
+				qs = append(qs, AskQuestion{
+					Header: q.Header, Text: auqDisplay(q), Options: opts,
+					MultiSelect: q.MultiSelect, Kind: kind,
+				})
 			}
-			sel, err := c.AskStructured(q.Header, auqDisplay(q), opts, q.MultiSelect)
+			got, err := c.AskStructuredMulti(qs)
 			if err != nil {
-				// dismissed with no answers → real "did not answer" outcome
 				return Result{Content: "The user did not answer the questions."}
 			}
-			if q.MultiSelect {
-				answers[q.Question] = sel
-			} else if len(sel) > 0 {
-				answers[q.Question] = sel[0]
+			for i, q := range in.Questions {
+				sel := got[fmt.Sprint(i)]
+				if q.MultiSelect {
+					answers[q.Question] = sel
+				} else if len(sel) > 0 {
+					answers[q.Question] = sel[0]
+				}
+			}
+		} else {
+			for _, q := range in.Questions {
+				kind := q.Kind
+				if kind == "" {
+					kind = "choice"
+				}
+				var opts []AskOption
+				if kind == "choice" {
+					for _, o := range q.Options {
+						opts = append(opts, AskOption{Label: o.Label, Description: o.Description})
+					}
+				}
+				sel, err := c.AskStructured(q.Header, auqDisplay(q), opts, q.MultiSelect)
+				if err != nil {
+					// dismissed with no answers → real "did not answer" outcome
+					return Result{Content: "The user did not answer the questions."}
+				}
+				if q.MultiSelect {
+					answers[q.Question] = sel
+				} else if len(sel) > 0 {
+					answers[q.Question] = sel[0]
+				}
 			}
 		}
 	}
