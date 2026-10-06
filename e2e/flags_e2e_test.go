@@ -704,3 +704,39 @@ func TestFlagProject(t *testing.T) {
 	}
 	t.Fatal("--project dir missing from the wire env composite")
 }
+
+// TestFlagExec: --exec/-m feeds the headless prompt path like -p.
+func TestFlagExec(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "--exec", "hi", "--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "Mock response") {
+		t.Fatalf("--exec should run the prompt: %s", truncStr(r.stdout, 800))
+	}
+	r = s.run(t, "--mock", "-m", "hi", "--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "Mock response") {
+		t.Fatalf("-m should run the prompt: %s", truncStr(r.stdout, 800))
+	}
+}
+
+// TestFlagFromPR: --from-pr resolves a session jsonl that references the
+// PR and resumes it.
+func TestFlagFromPR(t *testing.T) {
+	s := newSession(t)
+	slug := strings.NewReplacer("/", "-", ".", "-").Replace(
+		filepath.Clean(s.cwd))
+	dir := filepath.Join(s.home, ".claude", "projects", slug)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "prsession.jsonl"), []byte(
+		`{"type":"summary","summary":"pr work"}`+"\n"+
+			`{"type":"user","message":{"content":"work on pull/42"}}`+"\n"), 0o644)
+	r := s.run(t, "--mock", "--from-pr", "42", "-p", "hi",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "Mock response") {
+		t.Fatalf("--from-pr resume should answer: %s", truncStr(r.stdout, 800))
+	}
+}
