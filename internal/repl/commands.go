@@ -409,36 +409,84 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		}
 	case "model":
 		if arg == "" {
-			// interactive picker — real's current catalog (mod_0068)
-			models := []string{"claude-fable-5-1", "claude-fable-5-1[1m]", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"}
+			// real's picker: "Select model" dialog — arrow list with the
+			// active model marked, ←→ adjust effort, s = session-only
+			type mo struct{ id, label, desc string }
+			models := []mo{
+				{"claude-opus-5-5", "Opus 5.5", "Most capable for complex work"},
+				{"claude-sonnet-5-5", "Sonnet 5.5", "Best for everyday tasks"},
+				{"claude-haiku-4-5", "Haiku 4.5", "Fastest for quick answers"},
+				{"claude-fable-5-1", "Fable 5.1", "Latest model"},
+				{"claude-fable-5-1[1m]", "Fable 5.1 (1M context)", "Latest model, extended context"},
+			}
+			sel := 0
 			for i, m := range models {
-				mark := "  "
-				if l.Model == m {
-					mark = "● "
+				if l.Model == m.id {
+					sel = i
 				}
-				dprintf("%s%d. %s\n", mark, i+1, m)
 			}
-			dprintf("  number (esc keeps %s): ", l.Model)
-			var pick strings.Builder
-			for k := range ks.ch {
-				if k.b == 0x1b || k.b == 3 {
-					dprintln()
-					break
-				}
-				if k.b == '\r' {
-					dprintln()
-					if n, err := strconv.Atoi(pick.String()); err == nil && n >= 1 && n <= len(models) {
-						l.Model = models[n-1]
-						dprintln("  model →", l.Model)
+			cyan := "\x1b[38;5;153m"
+			rows := len(models) + 2
+			draw := func() {
+				var sb strings.Builder
+				sb.WriteString(fmt.Sprintf("\x1b[%dA\r", rows))
+				sb.WriteString(fmt.Sprintf("\x1b[K  %sSelect model%s\r\n", bold, reset))
+				for i, m := range models {
+					cur := "  "
+					if i == sel {
+						cur = cyan + "❯" + reset + " "
 					}
-					break
+					mark := ""
+					if l.Model == m.id {
+						mark = cyan + " ✔" + reset
+					}
+					sb.WriteString(fmt.Sprintf("\x1b[K %s%s%s %s%s\r\n", cur, m.label, mark, dim, m.desc+reset))
 				}
-				if k.b >= '0' && k.b <= '9' {
-					pick.WriteByte(k.b)
-					fmt.Print(string(k.b))
+				sb.WriteString(fmt.Sprintf("\x1b[K  %sEnter to confirm · Esc to cancel · ←→ effort · s session-only%s\r\n", dim, reset))
+				fmt.Print(sb.String())
+			}
+			dprintf("  %sSelect model%s\n", bold, reset)
+			for range models {
+				dprintln()
+			}
+			dprintf("  %sEnter to confirm · Esc to cancel · ←→ effort · s session-only%s\n", dim, reset)
+			draw()
+			for k := range ks.ch {
+				switch {
+				case k.seq == "[A" || k.b == 'k':
+					if sel > 0 {
+						sel--
+						draw()
+					}
+				case k.seq == "[B":
+					if sel < len(models)-1 {
+						sel++
+						draw()
+					}
+				case k.b == 0x1b || k.b == 3:
+					dprintln()
+					return false
+				case k.b == 's':
+					l.Model = models[sel].id
+					sessionOnlyModel = true
+					dprintln()
+					dprintln("  model →", l.Model, "(this session only)")
+					return false
+				case k.b == '\r':
+					l.Model = models[sel].id
+					sessionOnlyModel = false
+					if m, path := config.ReadClaudeJSON(); m != nil {
+						m["model"] = l.Model
+						if b, err := json.MarshalIndent(m, "", "  "); err == nil {
+							os.WriteFile(path, b, 0o644)
+						}
+					}
+					dprintln()
+					dprintln("  model →", l.Model)
+					return false
 				}
 			}
-			return false // true = exit the REPL — /model must not quit
+			return false
 		}
 		l.Model = arg
 		dprintln("  model →", l.Model)
