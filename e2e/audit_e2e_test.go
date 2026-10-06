@@ -482,3 +482,42 @@ func TestHookStopFailure(t *testing.T) {
 		t.Fatal("StopFailure hook did not fire on nonzero Stop hook")
 	}
 }
+
+// TestPluginHook: an enabled plugin's hooks/hooks.json fires on tool
+// calls — ${CLAUDE_PLUGIN_ROOT} expands to the install path.
+func TestPluginHook(t *testing.T) {
+	s := newSession(t)
+	plugDir := filepath.Join(s.home, ".claude", "plugins", "e2eplug")
+	os.MkdirAll(filepath.Join(plugDir, "hooks"), 0o755)
+	os.WriteFile(filepath.Join(plugDir, "hooks", "hooks.json"), []byte(
+		`{"hooks":{"PostToolUse":[{"matcher":"Bash","hooks":[`+
+			`{"type":"command","command":"touch ${CLAUDE_PLUGIN_ROOT}/fired.marker"}]}]}}`), 0o644)
+	os.WriteFile(filepath.Join(s.home, ".claude", "plugins", "installed_plugins.json"), []byte(
+		`{"plugins":{"e2eplug@mkt":[{"installPath":"`+plugDir+`","enabled":true}]}}`), 0o644)
+
+	r := s.run(t, "--mock", "-p",
+		`tool:Bash {"command":"echo plug-ok"}`, "--permission-mode", "bypassPermissions")
+	s.mustOK(t, r)
+	if _, err := os.Stat(filepath.Join(plugDir, "fired.marker")); err != nil {
+		t.Fatalf("plugin hook did not fire: %v", err)
+	}
+}
+
+// TestPluginDisabled: a disabled plugin's hooks do not fire.
+func TestPluginDisabled(t *testing.T) {
+	s := newSession(t)
+	plugDir := filepath.Join(s.home, ".claude", "plugins", "offplug")
+	os.MkdirAll(filepath.Join(plugDir, "hooks"), 0o755)
+	os.WriteFile(filepath.Join(plugDir, "hooks", "hooks.json"), []byte(
+		`{"hooks":{"PostToolUse":[{"matcher":"Bash","hooks":[`+
+			`{"type":"command","command":"touch ${CLAUDE_PLUGIN_ROOT}/fired.marker"}]}]}}`), 0o644)
+	os.WriteFile(filepath.Join(s.home, ".claude", "plugins", "installed_plugins.json"), []byte(
+		`{"plugins":{"offplug@mkt":[{"installPath":"`+plugDir+`","enabled":false}]}}`), 0o644)
+
+	r := s.run(t, "--mock", "-p",
+		`tool:Bash {"command":"echo plug-ok"}`, "--permission-mode", "bypassPermissions")
+	s.mustOK(t, r)
+	if _, err := os.Stat(filepath.Join(plugDir, "fired.marker")); !os.IsNotExist(err) {
+		t.Fatal("disabled plugin hook fired")
+	}
+}
