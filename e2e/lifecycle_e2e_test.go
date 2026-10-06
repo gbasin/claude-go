@@ -68,13 +68,13 @@ func TestRewindRestoresFile(t *testing.T) {
 	p.sendUntilEchoed(t,
 		`calls:[{"name":"Read","input":{"file_path":"`+target+`"}},`+
 			`{"name":"Write","input":{"file_path":"`+target+`","content":"v1-overwritten"}}]`+"\r",
-		`> calls:[{"name":"Read"`, 8)
+		`❯ calls:[{"name":"Read"`, 8)
 	p.waitFor("Tool results received", 30*time.Second)
 	if b, _ := os.ReadFile(target); string(b) != "v1-overwritten" {
 		t.Fatalf("write didn't land: %q", b)
 	}
 
-	p.sendUntilEchoed(t, "/rewind\r", "> /rewind", 8)
+	p.sendUntilEchoed(t, "/rewind\r", "❯ /rewind", 8)
 	p.waitFor("rewound", 15*time.Second)
 	if b, err := os.ReadFile(target); err != nil || string(b) != "v0-contents" {
 		t.Fatalf("/rewind should restore v0-contents, got %q err=%v", b, err)
@@ -91,14 +91,14 @@ func TestClearResetsLoop(t *testing.T) {
 	p.send("hello\r")
 	p.waitFor("Mock response to: hello", 30*time.Second)
 
-	p.sendUntilEchoed(t, "/clear\r", "> /clear", 8)
+	p.sendUntilEchoed(t, "/clear\r", "❯ /clear", 8)
 	p.waitFor("context cleared", 15*time.Second)
 
-	p.sendUntilEchoed(t, "/context\r", "> /context", 8)
+	p.sendUntilEchoed(t, "/context\r", "❯ /context", 8)
 	p.waitFor("messages: 0", 15*time.Second)
 
 	// a fresh turn still works after the reset
-	p.sendUntilEchoed(t, "second-wind\r", "> second-wind", 8)
+	p.sendUntilEchoed(t, "second-wind\r", "❯ second-wind", 8)
 	p.waitFor("Mock response to: second-wind", 30*time.Second)
 	p.exit()
 }
@@ -126,7 +126,7 @@ func TestAskUserQuestionDialog(t *testing.T) {
 	p.sendUntilEchoed(t,
 		`tool:AskUserQuestion {"questions":[{"question":"Pick a color","header":"Q1",`+
 			`"options":[{"label":"Red"},{"label":"Blue"}]}]}`+"\r",
-		"> tool:AskUserQuestion", 8)
+		"❯ tool:AskUserQuestion", 8)
 	p.waitFor("Pick a color", 30*time.Second)
 	p.waitFor("Blue", 10*time.Second)
 
@@ -145,8 +145,8 @@ func TestAgentToolSubagent(t *testing.T) {
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
 
 	p.sendUntilEchoed(t,
-		`tool:Agent {"description":"e2e sub","prompt":"subagent marker question","run_in_background":false}`+"",
-		"> tool:Agent", 8)
+		`tool:Agent {"description":"e2e sub","prompt":"subagent marker question","run_in_background":false}`+"\r",
+		"❯ tool:Agent", 8)
 	// waitFor polls the live screen each tick — the subagent's reply
 	// surfaces inside the parent turn's tool result while displayed (a
 	// post-hoc clean() only sees the current screen, which scrolls past)
@@ -160,12 +160,12 @@ func TestInterruptMidTurn(t *testing.T) {
 	s := newSession(t)
 	p := startREPL(t, s)
 
-	p.sendUntilEchoed(t, "error:5*\r", "> error:5*", 8)
+	p.sendUntilEchoed(t, "error:5*\r", "❯ error:5*", 8)
 	p.waitFor("esc to interrupt", 30*time.Second) // spinner up = turn running
 	p.send("\x1b")
 	p.waitFor("Interrupted", 15*time.Second)
 
-	p.sendUntilEchoed(t, "alive-after-interrupt\r", "> alive-after-interrupt", 8)
+	p.sendUntilEchoed(t, "alive-after-interrupt\r", "❯ alive-after-interrupt", 8)
 	p.waitFor("Mock response to: alive-after-interrupt", 30*time.Second)
 	p.exit()
 }
@@ -180,7 +180,7 @@ func TestExitPlanModeApproval(t *testing.T) {
 	p.sendUntilEchoed(t,
 		`calls:[{"name":"ToolSearch","input":{"query":"select:ExitPlanMode"}},`+
 			`{"name":"ExitPlanMode","input":{"plan":"do the thing"}}]`+"\r",
-		`> calls:[{"name":"ToolSearch"`, 8)
+		`❯ calls:[{"name":"ToolSearch"`, 8)
 	// approval renders as the numbered permission dialog ("don't ask again
 	// for ExitPlanMode in <dir>") — 1 = Yes
 	p.waitFor("don't ask again for ExitPlanMode", 30*time.Second)
@@ -234,7 +234,7 @@ func TestEscEscRewindPicker(t *testing.T) {
 
 	p.send("first-msg\r")
 	p.waitFor("Mock response to: first-msg", 30*time.Second)
-	p.sendUntilEchoed(t, "second-msg\r", "> second-msg", 8)
+	p.sendUntilEchoed(t, "second-msg\r", "❯ second-msg", 8)
 	p.waitFor("Mock response to: second-msg", 30*time.Second)
 
 	// double-esc within 400ms opens the picker — retry until it lands
@@ -262,7 +262,7 @@ func TestEscEscRewindPicker(t *testing.T) {
 	p.send("1\r")
 	p.waitFor("rewound to before", 15*time.Second)
 
-	p.sendUntilEchoed(t, "/context\r", "> /context", 8)
+	p.sendUntilEchoed(t, "/context\r", "❯ /context", 8)
 	p.waitFor("messages: 0", 15*time.Second)
 	p.exit()
 }
@@ -284,7 +284,7 @@ func TestVimModeEditor(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	p.send("hj") // motions, not text
 	time.Sleep(400 * time.Millisecond)
-	if strings.Contains(stripANSI(p.output()[mark:]), "> hj") {
+	if strings.Contains(stripANSI(p.output()[mark:]), "❯ hj") {
 		t.Fatalf("normal-mode keys should not insert text")
 	}
 	// i → insert mode; typing echoes
@@ -301,7 +301,7 @@ func TestLoopCloudOffer(t *testing.T) {
 	s := newSession(t)
 	p := startREPL(t, s)
 
-	p.sendUntilEchoed(t, "/loop 2h check the build\r", "> /loop 2h", 8)
+	p.sendUntilEchoed(t, "/loop 2h check the build\r", "❯ /loop 2h", 8)
 	p.waitFor("cloud schedule instead", 15*time.Second)
 	p.sendUntil("2\r", "loop armed: every 7200s", 15)
 	p.exit()
@@ -312,7 +312,7 @@ func TestLoopCloudOffer(t *testing.T) {
 func TestLoopUsage(t *testing.T) {
 	s := newSession(t)
 	p := startREPL(t, s)
-	p.sendUntilEchoed(t, "/loop\r", "> /loop", 8)
+	p.sendUntilEchoed(t, "/loop\r", "❯ /loop", 8)
 	p.waitFor("usage: /loop", 15*time.Second)
 	p.exit()
 }
@@ -325,12 +325,12 @@ func TestAgentToolBackground(t *testing.T) {
 
 	p.sendUntilEchoed(t,
 		`tool:Agent {"description":"bg e2e","prompt":"bg marker question"}`+"\r",
-		"> tool:Agent", 8)
+		"❯ tool:Agent", 8)
 	p.waitFor("Launched agent", 30*time.Second)
 
 	// the subagent turn runs against the mock; the completion notice is
 	// delivered on idle — poke the REPL so it flushes
-	p.sendUntilEchoed(t, "wake\r", "> wake", 8)
+	p.sendUntilEchoed(t, "wake\r", "❯ wake", 8)
 	p.waitFor("Mock response to: wake", 30*time.Second)
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
@@ -353,13 +353,13 @@ func TestResumePickerInteractive(t *testing.T) {
 	s.mustOK(t, r)
 
 	p := startREPL(t, s)
-	p.sendUntilEchoed(t, "/resume\r", "> /resume", 8)
+	p.sendUntilEchoed(t, "/resume\r", "❯ /resume", 8)
 	p.waitFor("seed prior session", 15*time.Second) // picker lists the preview
 	p.send("\r")
 	p.waitFor("resumed session", 15*time.Second)
 
 	// resumed session answers normally
-	p.sendUntilEchoed(t, "resumed-alive\r", "> resumed-alive", 8)
+	p.sendUntilEchoed(t, "resumed-alive\r", "❯ resumed-alive", 8)
 	p.waitFor("Mock response to: resumed-alive", 30*time.Second)
 	p.exit()
 }
@@ -445,7 +445,7 @@ func TestWebSearchBudget(t *testing.T) {
 func TestAutoCompact(t *testing.T) {
 	s := newSession(t)
 	p := startREPL(t, s)
-	p.sendUntilEchoed(t, "turn one\r", "> turn one", 8)
+	p.sendUntilEchoed(t, "turn one\r", "❯ turn one", 8)
 	p.waitFor("Mock response", 30*time.Second)
 	p.exit()
 
@@ -481,8 +481,8 @@ func TestCustomSlashCommand(t *testing.T) {
 
 	rec := filepath.Join(t.TempDir(), "reqs")
 	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, "--mock")
-	p.waitFor("╭─╮", 30*time.Second)
-	p.sendUntilEchoed(t, "/greet Bob\r", "> /greet Bob", 8)
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t, "/greet Bob\r", "❯ /greet Bob", 8)
 	p.waitFor("Mock response", 30*time.Second)
 	p.exit()
 
@@ -545,7 +545,7 @@ func TestHookPromptType(t *testing.T) {
 func TestHistorySearch(t *testing.T) {
 	s := newSession(t)
 	p := startREPL(t, s)
-	p.sendUntilEchoed(t, "searchable-marker-99\r", "> searchable-marker-99", 8)
+	p.sendUntilEchoed(t, "searchable-marker-99\r", "❯ searchable-marker-99", 8)
 	p.waitFor("Mock response", 30*time.Second)
 	// ctrl+r → type the query — resend until the search prompt renders
 	for i := 0; i < 12; i++ {
@@ -568,9 +568,9 @@ func TestQueuedMessage(t *testing.T) {
 	rec := filepath.Join(t.TempDir(), "reqs")
 	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec},
 		"--mock", "--permission-mode", "bypassPermissions")
-	p.waitFor("╭─╮", 30*time.Second)
+	p.waitFor("❯", 30*time.Second)
 	// a 3s Bash gives a wide mid-turn window to submit the queued prompt
-	p.sendUntilEchoed(t, `tool:Bash {"command":"sleep 3"}`+"\r", "> tool:Bash", 8)
+	p.sendUntilEchoed(t, `tool:Bash {"command":"sleep 3"}`+"\r", "❯ tool:Bash", 8)
 	time.Sleep(800 * time.Millisecond) // well inside the sleep window
 	p.send("queued-marker-e2e\r")
 	p.waitFor("Mock response to: queued-marker-e2e", 30*time.Second)
@@ -595,7 +595,7 @@ func TestBracketedPaste(t *testing.T) {
 	s := newSession(t)
 	rec := filepath.Join(t.TempDir(), "reqs")
 	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, "--mock")
-	p.waitFor("╭─╮", 30*time.Second)
+	p.waitFor("❯", 30*time.Second)
 	p.send("\x1b[200~paste-one\npaste-two\npaste-three\x1b[201~\r")
 	p.waitFor("Mock response", 30*time.Second)
 	p.exit()

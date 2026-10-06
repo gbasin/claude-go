@@ -835,11 +835,11 @@ func queueBoxRows(draft string) []string {
 	if w <= 0 {
 		w = 80
 	}
-	mid := "│ > " + draft
+	mid := " ❯\u00a0" + draft
 	if visWidth(mid) > w-1 {
-		// keep the tail that fits after "│ > …" — drop whole runes, a
+		// keep the tail that fits after " ❯ …" — drop whole runes, a
 		// byte-level slice splits multi-byte runes mid-sequence
-		keep := w - 1 - visWidth("│ > …")
+		keep := w - 1 - visWidth(" ❯\u00a0…")
 		if keep < 0 {
 			keep = 0
 		}
@@ -854,9 +854,10 @@ func queueBoxRows(draft string) []string {
 			i -= sz
 			start = i
 		}
-		mid = "│ > …" + draft[start:]
+		mid = " ❯\u00a0…" + draft[start:]
 	}
-	return []string{"╭─╮", mid, "╰─╯"}
+	rule := "\x1b[38;5;244m" + strings.Repeat("─", w) + "\x1b[39m"
+	return []string{rule, mid, rule}
 }
 
 // compQueueDraft renders queued input into the pinned box while the agent

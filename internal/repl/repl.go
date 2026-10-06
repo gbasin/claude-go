@@ -105,7 +105,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 				return
 			}
 			showTranscript(l, ks)
-			os.Stdout.WriteString("╭─╮\n")
+			os.Stdout.WriteString(boxRule() + "\n")
 			ed.redraw()
 		}
 		ed.onToggleTodos = func() {
@@ -264,7 +264,13 @@ func RunWithStore(l *agent.Loop, store Store) {
 	if eff == "" {
 		eff = "medium"
 	}
+	curEffort.Store(eff)
+	// real runs the session UI on the alternate screen with mouse
+	// tracking + a ✳ window title (entered post-trust/onboarding)
+	enterAltScreen()
+	defer exitAltScreen()
 	compactBanner(api.Version, agent.ModelDisplay(l.Model), eff, plan, l.CWD, l.Client.SessionID)
+	printAutoModeNotice(l.PermMode)
 
 	// transcript append cursor — session-scoped so each turn logs only
 	// new messages; starts past any resumed/loaded history, which is
@@ -1105,11 +1111,25 @@ func sessionGitBranch(cwd string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// curEffort tracks the session effort for the ◐ pill (set at REPL start,
+// updated by /effort and the model picker).
+var curEffort atomic.Value // stores string
+
+// effortLabel is real's "◐ medium · /effort" right-aligned pill.
+func effortLabel() string {
+	e, _ := curEffort.Load().(string)
+	if e == "" {
+		e = "medium"
+	}
+	return "◐ " + e + " · /effort"
+}
+
 func printStatus(l *agent.Loop, ed *editor) {
 	var status string
 	if out := statusLineCmd(l); out != "" {
 		status = out
 	} else {
+		// real's footer: cwd+branch left, mode pill + hints right
 		w, _ := termWidth()
 		cwdDisp := l.ToolCtx.CWD
 		if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(cwdDisp, home) {
@@ -1119,49 +1139,30 @@ func printStatus(l *agent.Loop, ed *editor) {
 		if b := sessionGitBranch(l.ToolCtx.CWD); b != "" {
 			left += "  " + b // real shows the branch as text
 		}
-		right := l.Model + " │ " + l.PermMode + " │ ? for shortcuts"
-		// standaloneAgentContext (mod_0575.js): {agentName, agentColor}
-		// surfaces in the status line; coordinator mode labels the session.
-		if name := os.Getenv("CLAUDE_GO_AGENT_NAME"); name != "" {
-			right = name + " │ " + right
+		right := strings.TrimSpace(permModeBanner(l.PermMode))
+		if right == "" {
+			right = "? for shortcuts"
 		}
-		if tools.IsCoordinatorMode() {
-			right = "coordinator │ " + right
-		}
-		// cell widths, not bytes — │/⏵ are multi-byte runes, and byte
-		// length pushed the right segment off at narrow widths
 		pad := w - visWidth(left) - visWidth(right)
 		if pad < 1 {
-			// narrow: shed the least-important segments before clamping
-			// mid-word (verified: "│ ? for shortcuts" got guillotined
-			// at 40 cols)
-			right = strings.TrimSuffix(right, " │ ? for shortcuts")
+			// narrow: shed hints before clamping mid-word
+			if i := strings.Index(right, " (shift+tab"); i > 0 {
+				right = right[:i] + "\x1b[39m"
+			}
 			if pad = w - visWidth(left) - visWidth(right); pad < 1 {
-				if i := strings.LastIndex(right, " │ "); i > 0 {
-					right = right[:i]
-				}
+				left = "  " + filepath.Base(cwdDisp)
 				pad = w - visWidth(left) - visWidth(right)
 			}
 		}
 		if pad < 1 {
 			pad = 1
 		}
-		status = dim + left + strings.Repeat(" ", pad) + right + reset
+		status = dim + left + strings.Repeat(" ", pad) + reset + right
 	}
 	if compActive.Load() {
 		compSetStatus(status) // pinned bottom row — real keeps it in the live region
 	} else {
 		dprintln(status)
-	}
-	if b := permModeBanner(l.PermMode); b != "" {
-		if compActive.Load() {
-			compInline("  " + b + "\r\n") // scroll region — raw Println lands mid-line
-		} else {
-			dprintln("  " + b)
-		}
-	}
-	if hints := footerHints(l, ed); len(hints) > 0 {
-		dprintf("%s  %s%s\n", dim, strings.Join(hints, " · "), reset)
 	}
 }
 

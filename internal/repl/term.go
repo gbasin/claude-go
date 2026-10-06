@@ -76,7 +76,8 @@ type editor struct {
 }
 
 func newEditor() *editor {
-	e := &editor{prompt: " > ", hIdx: -1, mode: "insert", pastes: map[string]string{}}
+	// real's prompt glyph is ❯ followed by a non-breaking space
+	e := &editor{prompt: " ❯\u00a0", hIdx: -1, mode: "insert", pastes: map[string]string{}}
 	e.history = loadHistoryFile()
 	e.loadKeybindings()
 	return e
@@ -88,7 +89,8 @@ func newEditor() *editor {
 func (e *editor) boxFrame() (box []string, curRow, curCol int) {
 	if e.histSearch {
 		ln := "  " + dim + "(search prompts `" + string(e.searchBuf) + "`): " + reset + e.searchMatch()
-		e.boxAll = []string{"╭─╮", ln, "╰─╯"}
+		rule := "\x1b[38;5;244m" + strings.Repeat("─", compW) + "\x1b[39m"
+		e.boxAll = []string{rule, ln, rule}
 		return e.boxAll, 1, visWidth(ln)
 	}
 	lines := strings.Split(e.renderedBuf(), "\n")
@@ -101,7 +103,7 @@ func (e *editor) boxFrame() (box []string, curRow, curCol int) {
 	if w <= 0 {
 		w = 80
 	}
-	textW := w - 1 - pw
+	textW := w - pw
 	if textW < 4 {
 		textW = 4
 	}
@@ -111,29 +113,39 @@ func (e *editor) boxFrame() (box []string, curRow, curCol int) {
 	curCells := visWidth(before[strings.LastIndex(before, "\n")+1:])
 	// lay out: top border, soft-wrapped input rows, voice hint, bottom
 	// border — tracking which box row each logical line starts on
-	all := make([]string, 0, len(lines)+4)
-	all = append(all, "╭─╮")
+	rule := "\x1b[38;5;244m" + strings.Repeat("─", w) + "\x1b[39m"
+	all := make([]string, 0, len(lines)+5)
+	// real renders the effort pill right-aligned on the row above the
+	// top rule: "◐ medium · /effort"
+	if eff := effortLabel(); eff != "" {
+		pad := w - visWidth(eff)
+		if pad < 0 {
+			pad = 0
+		}
+		all = append(all, strings.Repeat(" ", pad)+eff)
+	}
+	all = append(all, rule)
 	lineRow := make([]int, len(lines))
 	for i, ln := range lines {
 		lineRow[i] = len(all) - 1 // 0-based row among box content rows
 		for j, sg := range softWrap(ln, textW) {
 			if i == 0 && j == 0 {
-				all = append(all, "│"+e.prompt+sg)
+				all = append(all, e.prompt+sg)
 			} else {
-				all = append(all, "│"+strings.Repeat(" ", pw)+sg)
+				all = append(all, strings.Repeat(" ", pw)+sg)
 			}
 		}
 	}
 	if hint := e.voiceHint(); hint != "" {
 		// voice indicator row (real renders it inside the composer area)
-		all = append(all, "│"+strings.Repeat(" ", pw)+hint)
+		all = append(all, strings.Repeat(" ", pw)+hint)
 	}
-	all = append(all, "╰─╯")
+	all = append(all, rule)
 	e.boxAll = all
 	content := all[1 : len(all)-1]
 	// cursor's box row among content rows, and its column
 	curRow = lineRow[curLine] + curCells/textW
-	curCol = 1 + pw + curCells%textW
+	curCol = pw + curCells%textW
 	if e.pos == len(e.buf) && curCells > 0 && curCells%textW == 0 {
 		// cursor sits at a wrap boundary with no following row — the
 		// terminal's deferred-wrap position is the last cell of the
@@ -167,7 +179,7 @@ func (e *editor) redraw() {
 	var b strings.Builder
 	b.WriteString("\r\x1b[J") // col0, clear to screen bottom
 	hint := e.voiceHint()
-	b.WriteString("│" + e.prompt + e.renderedBuf())
+	b.WriteString(e.prompt + e.renderedBuf())
 	if hint != "" {
 		b.WriteString("\r\n  " + hint)
 	}
@@ -269,7 +281,7 @@ func (e *editor) readLine(ks *keySource) readResult {
 			compExitEdit(e.boxAll)
 		}()
 	} else {
-		os.Stdout.WriteString("╭─╮\n│" + e.prompt)
+		os.Stdout.WriteString(boxRule() + "\n" + e.prompt)
 	}
 	for {
 		var k key
@@ -877,7 +889,7 @@ func (e *editor) wordBack() int {
 // region when the zone collapses.
 func (e *editor) closeBox() {
 	if !e.zoneEdit {
-		os.Stdout.WriteString("\n╰─╯\n")
+		os.Stdout.WriteString("\n" + boxRule() + "\n")
 	}
 }
 
@@ -1717,4 +1729,43 @@ func (e *editor) showShortcuts() {
 	b.WriteString("\x1b[0m")
 	compInline(b.String()) // scroll-region print — works in both box modes
 	e.redraw()
+}
+
+// Alt-screen lifecycle — real runs the interactive UI in the alternate
+// screen buffer with full mouse tracking and a "✳ Claude Code" window
+// title; teardown restores the primary screen and modes.
+
+const altScreenEnter = "]0;â³ Claude Code" +
+	"[?1049h[2J[H" +
+	"[?1000h[?1002h[?1003h[?1006h" + // mouse: click/drag/motion/SGR
+	"[?2031h[?1004h" // colormode report + focus events
+const altScreenExit = "[?1004l[?2031l" +
+	"[?2004l" +
+	"[?1006l[?1003l[?1002l[?1000l" +
+	"[?1049l" + "]0;"
+
+var altScreenOn atomic.Bool
+
+func enterAltScreen() {
+	if altScreenOn.Swap(true) {
+		return
+	}
+	os.Stdout.WriteString(altScreenEnter)
+}
+
+func exitAltScreen() {
+	if !altScreenOn.Swap(false) {
+		return
+	}
+	os.Stdout.WriteString(altScreenExit)
+}
+
+// boxRule is the composer's gray ─ full-width rule (real's prompt-box
+// chrome — a horizontal rule above and below the input, not a │ box).
+func boxRule() string {
+	w := compW
+	if w <= 0 {
+		w = 80
+	}
+	return "\x1b[38;5;244m" + strings.Repeat("─", w) + "\x1b[39m"
 }

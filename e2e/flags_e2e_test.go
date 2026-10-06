@@ -551,7 +551,7 @@ func TestSettingsAskRule(t *testing.T) {
 		"allow":["Bash"],
 		"ask":["Bash(echo askme)"]}}`)
 	p := startREPL(t, s)
-	p.sendUntilEchoed(t, `tool:Bash {"command":"echo askme"}`+"\r", "> tool:Bash", 8)
+	p.sendUntilEchoed(t, `tool:Bash {"command":"echo askme"}`+"\r", "❯ tool:Bash", 8)
 	p.waitFor("1. Yes", 30*time.Second)
 	p.exit()
 }
