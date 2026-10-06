@@ -185,7 +185,24 @@ func cronToolDef(t *Tool) *Tool {
 }
 
 // Dispatch runs a tool by name.
+// legacyName maps real's old tool names to current ones (mod_0018.js):
+// Task→Agent, KillShell/KillBash→TaskStop, ListPeers→ListAgents,
+// Brief→SendUserMessage, ListMcpResources/ReadMcpResource→*Tool.
+var legacyName = map[string]string{
+	"Task":               "Agent",
+	"KillShell":          "TaskStop",
+	"KillBash":           "TaskStop",
+	"ListPeers":          "ListAgents",
+	"Brief":              "SendUserMessage",
+	"ListMcpResources":   "ListMcpResourcesTool",
+	"ReadMcpResource":    "ReadMcpResourceTool",
+	"ReadMcpResourceDir": "ReadMcpResourceDirTool",
+}
+
 func Dispatch(ctx *Context, name string, input json.RawMessage) Result {
+	if n2, ok := legacyName[name]; ok {
+		name = n2
+	}
 	t, ok := registry[name]
 	if !ok {
 		return Result{Content: fmt.Sprintf("Unknown tool: %s", name), IsError: true}

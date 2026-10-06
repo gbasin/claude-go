@@ -1,6 +1,12 @@
 package repl
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"sync"
+
+	"claude-go/internal/config"
 	"regexp"
 	"strings"
 )
@@ -95,6 +101,9 @@ var (
 // highlightLine colorizes one line of code in lang; returns "" if the lang
 // is unknown (caller emits plain).
 func highlightLine(line, lang string) string {
+	if syntaxDisabled() {
+		return line // real's syntaxHighlightingDisabled setting
+	}
 	lang = strings.ToLower(strings.TrimSpace(lang))
 	// diff-style lines always highlight regardless of lang
 	if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "++") {
@@ -155,4 +164,24 @@ func highlightLine(line, lang string) string {
 		i++
 	}
 	return out.String()
+}
+
+// syntaxDisabled reads settings.syntaxHighlightingDisabled once.
+var syntaxOff struct {
+	once sync.Once
+	v    bool
+}
+
+func syntaxDisabled() bool {
+	syntaxOff.once.Do(func() {
+		b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
+		if err != nil {
+			return
+		}
+		var m map[string]any
+		if json.Unmarshal(b, &m) == nil {
+			syntaxOff.v, _ = m["syntaxHighlightingDisabled"].(bool)
+		}
+	})
+	return syntaxOff.v
 }

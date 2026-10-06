@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,15 +22,16 @@ import (
 // ---------- background task manager ----------
 
 type BgTask struct {
-	ID       string
-	Command  string
-	Started  time.Time
-	Done     chan struct{}
-	Out      bytes.Buffer
-	Err      error
-	ExitCode int
-	TimedOut bool
-	cancel   context.CancelFunc
+	outputFile *os.File
+	ID         string
+	Command    string
+	Started    time.Time
+	Done       chan struct{}
+	Out        bytes.Buffer
+	Err        error
+	ExitCode   int
+	TimedOut   bool
+	cancel     context.CancelFunc
 	// Kind distinguishes remote-agent tasks ("remote_agent"): their work
 	// runs in a cloud session, and OnKill performs real's uRe.kill side
 	// effect (archive the session via tR).
@@ -149,6 +151,10 @@ func bashOutputCap() int {
 		if n, err := strconv.Atoi(v); err == nil {
 			return min(max(n, 4000), 128000)
 		}
+	}
+	// real's bashOutputMaxChars setting overrides the default cap
+	if n := intSetting("bashOutputMaxChars", 0); n > 0 {
+		return n
 	}
 	return 30000
 }
@@ -317,9 +323,22 @@ func (c *Context) runBackground(command string, timeoutMs int, disableSandbox bo
 		cancel()
 		return Result{Content: err.Error(), IsError: true}
 	}
-	cmd.Stdout = &t.Out
-	cmd.Stderr = &t.Out
+	// real writes bg output to <tmp>/claude-501/<slug>/<sid>/tasks/<id>.output
+	// and tells the model the path (it later cats/Reads it back)
+	outPath := ""
+	if f, perr := taskOutputFile(c, id); perr == nil {
+		outPath = f.Name()
+		cmd.Stdout = io.MultiWriter(&t.Out, f)
+		cmd.Stderr = io.MultiWriter(&t.Out, f)
+		t.outputFile = f
+	} else {
+		cmd.Stdout = &t.Out
+		cmd.Stderr = &t.Out
+	}
 	if err := cmd.Start(); err != nil {
+		if t.outputFile != nil {
+			t.outputFile.Close()
+		}
 		cancel()
 		return Result{Content: "failed to start: " + err.Error(), IsError: true}
 	}
@@ -351,6 +370,9 @@ func (c *Context) runBackground(command string, timeoutMs int, disableSandbox bo
 		}
 	}()
 	msg := fmt.Sprintf("Command running in background with ID %s", id)
+	if outPath != "" {
+		msg += "\nOutput file: " + outPath // real tells the model the path
+	}
 	if warn != "" {
 		msg = warn + "\n" + msg
 	}
@@ -496,4 +518,36 @@ func (c *Context) runForegroundTimed(command string, timeoutMs, autoAfterMs int,
 		_ = warn
 		return fgTimedResult{autoBgID: id, autoBgFile: outFile}
 	}
+}
+
+// intSetting reads a numeric key from ~/.claude/settings.json.
+func intSetting(key string, def int) int {
+	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
+	if err != nil {
+		return def
+	}
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil {
+		return def
+	}
+	if f, ok := m[key].(float64); ok {
+		return int(f)
+	}
+	return def
+}
+
+// taskOutputFile opens the session-scoped output file real creates for
+// background tasks: <tmp>/claude-<uid>/<slug>/<session>/tasks/<id>.output
+func taskOutputFile(c *Context, id string) (*os.File, error) {
+	slug := strings.ReplaceAll(filepath.Clean(c.CWD), "/", "-")
+	sid := "default"
+	if c.Session != "" {
+		sid = c.Session
+	}
+	dir := filepath.Join(os.TempDir(), fmt.Sprintf("claude-%d", os.Getuid()),
+		slug, sid, "tasks")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	return os.Create(filepath.Join(dir, id+".output"))
 }
