@@ -89,6 +89,7 @@ func newSession(t *testing.T) *sess {
 		"USER=" + os.Getenv("USER"),
 		// make sure a real key/token can't leak into mock runs
 		"ANTHROPIC_API_KEY=",
+		"CLAUDE_GO_NO_BROWSER=1",
 		"ANTHROPIC_AUTH_TOKEN=",
 		"CLAUDE_CODE_OAUTH_TOKEN=",
 		"CLAUDE_GO_TOKEN=",

@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"claude-go/internal/agent"
@@ -56,15 +57,42 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		}, l.ToolCtx.CWD)
 		dprintln("  context cleared (previous session remains resumable via /resume)")
 	case "compact":
-		dprintln("  compacting…")
+		// real: the spinner's verb becomes "Compacting conversation…",
+		// a rotating ⎿ Tip line shows, SessionStart hooks re-fire, then
+		// "⎿ Compacted (ctrl+o to see full summary)"
+		spinTip := spinnerTip()
+		if spinTip != "" {
+			dprintf("  %s⎿%s  %s%s\n", dim, reset, spinTip, reset)
+		}
 		if arg != "" {
 			l.AppendSysP += "\n\n## Compact Instructions\n" + arg
 		}
-		before := len(l.Messages)
-		if err := l.Compact(context.Background(), l.Transcript); err != nil {
+		spin := newSpinner()
+		spin.verb = "Compacting conversation"
+		done := make(chan struct{})
+		go func() { // spinner ticks while the compact request runs
+			for i := 0; ; i++ {
+				select {
+				case <-done:
+					return
+				case <-time.After(150 * time.Millisecond):
+					fmt.Fprintf(os.Stderr, "\r\x1b[K%s%s Compacting conversation…%s", claudeOrange, spinnerFrames[i%len(spinnerFrames)], reset)
+				}
+			}
+		}()
+		err := l.Compact(context.Background(), l.Transcript)
+		close(done)
+		fmt.Fprint(os.Stderr, "\r\x1b[K")
+		if err != nil {
 			dprintln("  compact failed:", err)
 		} else {
-			dprintf("  Compacted · %d messages summarized (ctrl+o to see them)\n", before)
+			// real re-fires SessionStart hooks post-compact
+			hooks.Run(l.Hooks, hooks.SessionStart, map[string]any{
+				"session_id": l.Client.SessionID, "transcript_path": l.Transcript,
+				"cwd": l.ToolCtx.CWD, "hook_event_name": "SessionStart", "source": "compact",
+				"permission_mode": l.PermMode,
+			}, l.ToolCtx.CWD)
+			dprintf("  %s⎿%s  Compacted (ctrl+o to see full summary)\n", dim, reset)
 		}
 	case "cost", "usage", "stats":
 		// real's /cost: Session summary (cost, durations, code changes,
@@ -208,9 +236,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "bug":
 		url := "https://github.com/anthropics/claude-code/issues"
 		dprintln("  report issues at", url)
-		if runtime.GOOS == "darwin" {
-			exec.Command("open", url).Start()
-		}
+		openURL(url)
 	case "vim":
 		// real CC: /vim is a compat shim — editor mode moved to /config
 		dprintln("  editor mode moved to /config")
@@ -588,7 +614,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		dprintln("  trace output", map[bool]string{true: "on", false: "off"}[on])
 	case "radio":
 		url := "https://clau.de/radio"
-		if runtime.GOOS == "darwin" && exec.Command("open", url).Start() == nil {
+		if openURL(url) {
 			dprintln("  Opening Claude FM in your browser…")
 		} else {
 			dprintln("  Couldn't open the browser. Listen at:", url)
@@ -596,9 +622,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "issue":
 		url := "https://github.com/anthropics/claude-code/issues"
 		dprintln("  file an issue at", url)
-		if runtime.GOOS == "darwin" {
-			exec.Command("open", url).Start()
-		}
+		openURL(url)
 	default:
 		if c, ok := hiddenCommands[cmd]; ok {
 			// hidden custom commands run but don't list in help/completion
@@ -3796,4 +3820,41 @@ func countPluginSkills(plugin string) (n, toks int) {
 		return nil
 	})
 	return
+}
+
+// openURL launches a URL in the system browser. Tests gate it via
+// CLAUDE_GO_NO_BROWSER=1 — a replica test run must never pop real tabs.
+var openURL = func(u string) bool {
+	if os.Getenv("CLAUDE_GO_NO_BROWSER") == "1" {
+		return true // pretend success so tests exercise the happy path
+	}
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	return exec.Command("open", u).Start() == nil
+}
+
+// compactSpin drives the "Compacting conversation…" spinner text during
+// /compact (real replaces the verb with this literal).
+var compactSpin atomic.Bool
+
+// spinnerTip returns a rotating tip for the ⎿ line (real's tipsFile
+// setting ships a fixed list — a starter set here).
+var tipsIdx atomic.Int64
+var spinnerTipsList = []string{
+	"Tip: Running multiple Claude sessions? Use /color and /rename to tell them apart at a glance.",
+	"Tip: Run /status to see your session's model, context usage, and config.",
+	"Tip: Use @ to mention files — /files lists what's attached.",
+	"Tip: Shift+Tab cycles permission modes — auto mode handles prompts for you.",
+	"Tip: ctrl+o opens the transcript viewer for everything Claude has done.",
+	"Tip: /compact summarizes context when a session gets long.",
+	"Tip: Double-esc rewinds to an earlier checkpoint.",
+	"Tip: meta+o toggles fast mode for quicker turns.",
+}
+
+func spinnerTip() string {
+	if len(spinnerTipsList) == 0 {
+		return ""
+	}
+	return spinnerTipsList[int(tipsIdx.Add(1))%len(spinnerTipsList)]
 }
