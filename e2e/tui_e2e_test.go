@@ -8,6 +8,8 @@ package e2e
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -214,6 +216,54 @@ func TestTmuxFocusWarn(t *testing.T) {
 	if !strings.Contains(p.clean(), "focus-events") &&
 		!strings.Contains(p.output(), "focus-events") {
 		t.Fatalf("tmux focus warning missing:\n%s", truncStr(p.clean(), 1200))
+	}
+	p.exit()
+}
+
+// TestOnboardingFirstRun: an empty .claude.json triggers real's first-run
+// flow — theme picker → trust dialog → REPL.
+func TestOnboardingFirstRun(t *testing.T) {
+	s := newSession(t)
+	// strip the pre-seeded onboarding/trust state
+	os.WriteFile(filepath.Join(s.home, ".claude.json"), []byte(`{}`), 0o644)
+
+	p := s.runPTY(t, nil, "--mock")
+	p.waitFor("Welcome to Claude Code", 30*time.Second)
+	p.waitFor("Choose the text style", 10*time.Second)
+	p.send("\r") // accept default theme
+	p.waitFor("trust", 20*time.Second)
+	p.send("1\r") // 1 = trust this directory
+	p.waitFor("❯", 20*time.Second)
+	p.exit()
+}
+
+// TestUsageBars: /usage renders the utilization bars — an
+// anthropic-ratelimit-unified-slow-* header set populates the data.
+func TestUsageBars(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			w.WriteHeader(404)
+			return
+		}
+		w.Header().Set("anthropic-ratelimit-unified-status", "allowed")
+		w.Header().Set("anthropic-ratelimit-unified-slow-status", "active")
+		w.Header().Set("anthropic-ratelimit-unified-slow-budget-utilization", "0.45")
+		writeSSE(w, "aux-server reply")
+	}))
+	t.Cleanup(srv.Close)
+
+	s := newSession(t)
+	p := s.runPTY(t, []string{
+		"CLAUDE_CODE_OAUTH_TOKEN=e2e-fake-oauth-token",
+		"CLAUDE_GO_RAW_HTTP=0",
+	}, "--sdk-url", srv.URL)
+	p.waitFor("❯", 30*time.Second)
+	p.send("hi\r")
+	p.waitFor("aux-server reply", 30*time.Second)
+	p.sendUntilEchoed(t, "/usage\r", "❯ /usage", 8)
+	p.waitFor("Current session", 15*time.Second)
+	if !strings.Contains(p.clean(), "45% used") {
+		t.Fatalf("usage bar should show 45%% used:\n%s", truncStr(p.clean(), 1500))
 	}
 	p.exit()
 }

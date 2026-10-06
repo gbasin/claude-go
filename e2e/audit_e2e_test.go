@@ -459,3 +459,26 @@ func TestIncludeHookEvents(t *testing.T) {
 		t.Fatalf("hook events missing from stream-json: %s", truncStr(r.stdout, 1500))
 	}
 }
+
+// TestHookStopFailure: a Stop hook whose command exits nonzero (not 2)
+// fires the StopFailure event — a separate handler can observe it.
+func TestHookStopFailure(t *testing.T) {
+	s := newSession(t)
+	mark := filepath.Join(s.cwd, "stopfail.marker")
+	s.writeSettings(`{"hooks":{"Stop":[{"hooks":[
+		{"type":"command","command":"exit 3"}]}],
+		"StopFailure":[{"hooks":[
+		{"type":"command","command":"touch ` + mark + `"}]}]}}`)
+	// Stop fires on turn end in the interactive REPL
+	p := startREPL(t, s)
+	p.send("hi\r")
+	p.waitFor("Mock response", 30*time.Second)
+	p.exit()
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) && !fileExists(mark) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !fileExists(mark) {
+		t.Fatal("StopFailure hook did not fire on nonzero Stop hook")
+	}
+}
