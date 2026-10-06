@@ -267,3 +267,41 @@ func TestUsageBars(t *testing.T) {
 	}
 	p.exit()
 }
+
+// TestTranscriptOverlay: ctrl+o opens the scrollable transcript view;
+// esc/q returns to the composer.
+func TestTranscriptOverlay(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.send("hi\r")
+	p.waitFor("Mock response", 30*time.Second)
+	time.Sleep(500 * time.Millisecond) // let the turn finish closing
+	// ctrl+o — app:toggleTranscript; resend until the overlay renders
+	// (a late resend toggles closed, but the next resend re-opens)
+	p.sendUntil("\x0f", "transcript · ", 10)
+	if !strings.Contains(p.clean(), "messages") {
+		t.Fatalf("transcript header missing:\n%s", truncStr(p.clean(), 1200))
+	}
+	p.send("\x1b") // esc closes
+	time.Sleep(300 * time.Millisecond)
+	// composer is back — a follow-up turn works
+	p.sendUntilEchoed(t, "alive\r", "❯ alive", 8)
+	p.waitFor("Mock response to: alive", 30*time.Second)
+	p.exit()
+}
+
+// TestBgTaskNotification: a finished background task prints a
+// "⎿ Task <id> finished" status note at the next prompt.
+func TestBgTaskNotification(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"sleep 1","run_in_background":true}`+"\r",
+		"❯ tool:Bash", 8)
+	p.waitFor("background", 30*time.Second)
+	// task finishes ~1s later; the note lands at the next status draw
+	time.Sleep(1500 * time.Millisecond)
+	p.sendUntilEchoed(t, "nudge\r", "❯ nudge", 8)
+	p.waitFor("Task b1 finished", 15*time.Second)
+	p.exit()
+}
