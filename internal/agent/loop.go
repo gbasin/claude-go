@@ -77,6 +77,7 @@ type Loop struct {
 	ThinkingBudget        int      // --max-thinking-tokens
 	SessionStartSource    string   // startup|resume|clear|compact|fork
 	SessionEndReason      string   // clear|logout|prompt_input_exit|other
+	SessionEndFired       bool     // SessionEnd hook already ran — main skips its duplicate fire
 	FastMode              bool     // fast mode: output_config.speed="fast"
 	AutoCompactWindow     string   // settings autoCompactWindow ("auto"|"500k"|N)
 	AdvisorModel          string   // settings advisorModel — the /advisor pick
