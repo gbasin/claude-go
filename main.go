@@ -309,6 +309,19 @@ func main() {
 	for _, s := range o.stubs {
 		fmt.Fprintf(os.Stderr, "note: %s accepted but not supported in claude-go\n", s)
 	}
+	if o.fromPRFlag {
+		if o.fromPR != "" {
+			// real resolves a session linked to the PR (number/URL); ours
+			// scans local transcripts for the PR link
+			if id := sessionForPR(cwd, o.fromPR); id != "" {
+				o.resume = id
+			} else {
+				fmt.Fprintf(os.Stderr, "no session linked to PR %s\n", o.fromPR)
+			}
+		} else if id := repl.PickSession(cwd); id != "" {
+			o.resume = id
+		}
+	}
 	agentCleanup := installCLIAgents(o.agentsJSON, cwd)
 	if o.agentsJSON != "" {
 		os.Setenv("CLAUDE_GO_AGENTS_JSON", o.agentsJSON)
@@ -1691,4 +1704,31 @@ func setupTmuxSession(wtPath, wtName, sessionID string) {
 	}
 	os.Setenv("CLAUDE_CODE_TMUX_SESSION", name)
 	fmt.Fprintf(os.Stderr, "Created tmux session: %s\n", name)
+}
+
+// sessionForPR finds a local session transcript whose records link to the
+// given PR number/URL — mirrors real's --from-pr resolution.
+func sessionForPR(cwd, ref string) string {
+	slug := strings.NewReplacer("/", "-", ".", "-").Replace(filepath.Clean(cwd))
+	dir := filepath.Join(config.ClaudeDir(), "projects", slug)
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	want := strings.TrimPrefix(ref, "#")
+	for _, e := range ents {
+		if !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		for _, ln := range strings.Split(string(b), "\n") {
+			if strings.Contains(ln, "pull/"+want) || strings.Contains(ln, "#"+want) {
+				return strings.TrimSuffix(e.Name(), ".jsonl")
+			}
+		}
+	}
+	return ""
 }
