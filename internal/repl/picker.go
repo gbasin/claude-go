@@ -20,17 +20,26 @@ import (
 // Keys: ↑/↓/j/k navigate · enter resume · / or ctrl-f search · ctrl-r rename
 // · space preview pane · ctrl-b all projects · esc/ctrl-c cancel.
 func PickSession(cwd string) string {
-	return pickSession(cwd, nil)
+	return pickSession(cwd, nil, "")
 }
 
 // pickSession runs the picker against an existing keySource when the
 // caller is the REPL — a second stdin reader would race the REPL's and
 // starve the picker of arrows/enter (live-verified on m5p). nil starts
 // a standalone reader for the non-REPL -r path.
-func pickSession(cwd string, ks *keySource) string {
+func pickSession(cwd string, ks *keySource, selfID string) string {
 	infos, err := session.List(cwd)
 	if err != nil {
 		infos = nil
+	}
+	if selfID != "" {
+		kept := infos[:0]
+		for _, in := range infos {
+			if in.ID != selfID { // you can't resume the session you're in
+				kept = append(kept, in)
+			}
+		}
+		infos = kept
 	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		session.Print(cwd)
