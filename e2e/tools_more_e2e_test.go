@@ -607,3 +607,59 @@ func TestNotebookRead(t *testing.T) {
 	p.waitFor("print(1)", 30*time.Second)
 	p.exit()
 }
+
+// TestTaskTools: TaskCreate → TaskList → TaskGet → TaskUpdate lifecycle
+// through the deferred surface.
+func TestTaskTools(t *testing.T) {
+	s := newSession(t)
+	// task tools are gated behind CLAUDE_CODE_TASK_TOOLS / tasks.enabled
+	p := s.runPTY(t, []string{"CLAUDE_CODE_TASK_TOOLS=1"},
+		"--mock", "--permission-mode", "bypassPermissions")
+	p.waitFor("❯", 30*time.Second)
+
+	p.sendUntilEchoed(t,
+		`calls:[{"name":"ToolSearch","input":{"query":"select:TaskCreate,TaskList,TaskGet,TaskUpdate"}},`+
+			`{"name":"TaskCreate","input":{"subject":"e2e task","description":"do the thing"}},`+
+			`{"name":"TaskList","input":{}}]`+"\r",
+		"❯ calls:", 8)
+	p.waitFor("Task #", 30*time.Second)
+	p.waitFor("e2e task", 10*time.Second)
+
+	p.sendUntilEchoed(t,
+		`calls:[{"name":"TaskGet","input":{"taskId":"1"}},`+
+			`{"name":"TaskUpdate","input":{"taskId":"1","status":"completed"}},`+
+			`{"name":"TaskList","input":{}}]`+"\r",
+		"❯ calls:", 8)
+	p.waitFor("completed", 30*time.Second)
+	p.exit()
+}
+
+// TestTodoWrite: TodoWrite manages the checklist — /todos shows it.
+func TestTodoWrite(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p.sendUntilEchoed(t,
+		`calls:[{"name":"ToolSearch","input":{"query":"select:TodoWrite"}},`+
+			`{"name":"TodoWrite","input":{"todos":[{"content":"write the tests","status":"in_progress","activeForm":"writing tests"},{"content":"ship it","status":"pending","activeForm":"shipping"}]}}]`+"\r",
+		"❯ calls:", 8)
+	p.waitFor("Tool results received", 30*time.Second)
+	p.sendUntilEchoed(t, "/todos\r", "❯ /todos", 8)
+	p.waitFor("write the tests", 15*time.Second)
+	p.waitFor("ship it", 5*time.Second)
+	p.exit()
+}
+
+// TestTaskToolsGated: without the tasks.enabled gate the Task* tools are
+// absent from the wire surface (registration and surface stay in sync —
+// a surfaced-but-unregistered tool fails with "Unknown tool").
+func TestTaskToolsGated(t *testing.T) {
+	s := newSession(t)
+	r, bodies := recordRequests(t, s, "-p", "hi")
+	s.mustOK(t, r)
+	for _, b := range bodies {
+		if bytes.Contains(b, []byte(`"TaskCreate"`)) ||
+			bytes.Contains(b, []byte(`"TaskList"`)) {
+			t.Fatal("Task* tools on the wire without tasks.enabled")
+		}
+	}
+}

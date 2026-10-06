@@ -120,8 +120,13 @@ func All() []*Tool {
 		}
 		// real isEnabled gates: tengu_kairos_cron hides Cron*; the remote
 		// gate (Jn&&ft&&!remote&&allow_remote_sessions&&allow_routines)
-		// hides RemoteTrigger.
+		// hides RemoteTrigger; tasks.enabled / CLAUDE_CODE_TASK_TOOLS
+		// gates the Task* surface.
 		if (n == "CronCreate" || n == "CronDelete" || n == "CronList") && !cronEnabled() {
+			continue
+		}
+		if (n == "TaskCreate" || n == "TaskGet" || n == "TaskList" ||
+			n == "TaskUpdate") && !taskToolsEnabled() {
 			continue
 		}
 		if n == "RemoteTrigger" && !remoteTriggerEnabled() {
