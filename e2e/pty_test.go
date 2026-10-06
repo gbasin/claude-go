@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -99,6 +100,10 @@ func (s *sess) runPTYSize(t *testing.T, extraEnv []string, cols, rows int, args 
 	cmd.Stdin = slave
 	cmd.Stdout = slave
 	cmd.Stderr = slave
+	// own process group — what a job-control shell gives each launch. The
+	// suspend path signals the group (real's kill(0,SIGTSTP)); without this
+	// a ^Z inside a test would stop the whole go-test process tree.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		master.Close()
 		slave.Close()

@@ -65,11 +65,30 @@ func kittyCapable() bool {
 }
 
 func (ks *keySource) stop() {
+	ks.release()
+}
+
+// release hands the tty back to cooked mode — kitty flags and bracketed
+// paste popped, termios restored — so an external actor ($EDITOR, or the
+// shell while the process is SIGTSTP'd) owns a sane terminal. grab() undoes
+// it. The read goroutine is untouched: it stays blocked in Read while the
+// process is stopped and resumes with it.
+func (ks *keySource) release() {
 	if ks.kitty {
 		os.Stdout.WriteString("\x1b[<u") // pop kitty flags
 	}
 	os.Stdout.WriteString("\x1b[?2004l")
 	term.Restore(int(os.Stdin.Fd()), ks.old)
+}
+
+func (ks *keySource) grab() {
+	if st, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
+		ks.old = st
+	}
+	os.Stdout.WriteString("\x1b[?2004h")
+	if ks.kitty {
+		os.Stdout.WriteString("\x1b[>1u")
+	}
 }
 
 const (
