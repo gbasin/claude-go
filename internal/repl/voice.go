@@ -1,7 +1,10 @@
 package repl
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -274,9 +277,46 @@ func (e *editor) voiceHint() string {
 
 // renderedBuf returns e.buf with the interim voice range wrapped in dim
 // escapes — the interimRange styling from real's editor.
+// promptSuggestions are real's dim ghost hints in the empty input —
+// "Try "refactor <filepath>"" style, gated by promptSuggestionEnabled.
+var ghostIdx atomic.Int64
+var promptSuggestions = []string{
+	`Try "refactor <filepath>"`,
+	`Try "create a util logging.py that..."`,
+	`Try "edit <filepath> to..."`,
+	`Try "fix the type errors"`,
+	`Try "run the tests and fix failures"`,
+	`Try "summarize this codebase"`,
+}
+
+func promptSuggestionsEnabled() bool {
+	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
+	if err != nil {
+		return true
+	}
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil {
+		return true
+	}
+	if v, ok := m["promptSuggestionEnabled"].(bool); ok {
+		return v
+	}
+	return true
+}
+
+func ghostText() string {
+	if !promptSuggestionsEnabled() {
+		return ""
+	}
+	return dim + promptSuggestions[int(ghostIdx.Load())%len(promptSuggestions)] + reset
+}
+
 func (e *editor) renderedBuf() string {
 	vs := e.voice
 	if vs == nil || vs.interimLen == 0 {
+		if len(e.buf) == 0 && !e.histSearch {
+			return ghostText()
+		}
 		return string(e.buf)
 	}
 	s := vs.interimStart
