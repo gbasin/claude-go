@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"encoding/json"
 
@@ -41,6 +42,7 @@ type editor struct {
 	acItems        []string                     // filtered matches
 	acSel          int                          // selected index
 	leftArm        bool                         // ← pressed once on empty input
+	acAt           string                       // @-mention token being completed
 	cycleMode      func()                       // shift+tab -> permission mode cycle
 	keys           *keySource
 	pendingX       bool
@@ -461,7 +463,8 @@ func (e *editor) insertKey(k key) *readResult {
 		// menu open + input is still a strict prefix → Enter accepts the
 		// completion; an exact match already typed submits (real behavior)
 		if e.acOpen && len(e.acItems) > 0 &&
-			string(e.buf) != "/"+e.acItems[e.acSel] {
+			string(e.buf) != "/"+e.acItems[e.acSel] &&
+			!(e.acAt != "" && e.acAt == "@"+e.acItems[e.acSel]) {
 			e.acAccept()
 			e.redraw()
 			return nil
@@ -977,30 +980,83 @@ func (e *editor) closeBox() {
 	}
 }
 
-// acRefresh updates the autocomplete dropdown for the current buffer —
-// real opens the menu as soon as "/" is typed and filters live.
+// acRefresh updates the autocomplete dropdown — "/" filters commands,
+// "@<prefix>" lists file paths (real's file_suggestions at-mention).
 func (e *editor) acRefresh() {
-	if e.completer == nil || len(e.buf) == 0 || e.buf[0] != '/' ||
-		strings.ContainsRune(string(e.buf), ' ') {
-		e.acOpen, e.acItems = false, nil
-		return
+	e.acOpen, e.acItems, e.acAt = false, nil, ""
+	s := string(e.buf)
+	switch {
+	case e.completer != nil && len(s) > 0 && s[0] == '/' && !strings.ContainsRune(s, ' '):
+		e.acItems = e.completer(s[1:])
+	case len(s) > 0:
+		// @-mention: token under the cursor starts with @
+		before := s[:byteIdxOfRunePos(s, e.pos)]
+		at := strings.LastIndex(before, "@")
+		if at >= 0 && (at == 0 || before[at-1] == ' ') && !strings.ContainsAny(before[at:], " \t") {
+			e.acAt = before[at:]
+			e.acItems = fileSuggestions(e.voiceCWD, before[at+1:])
+		}
 	}
-	prefix := string(e.buf)[1:]
-	e.acItems = e.completer(prefix)
 	e.acOpen = len(e.acItems) > 0
 	if e.acSel >= len(e.acItems) {
 		e.acSel = 0
 	}
 }
 
+func byteIdxOfRunePos(s string, pos int) int {
+	i := 0
+	for n := 0; n < pos && i < len(s); n++ {
+		_, sz := utf8.DecodeRuneInString(s[i:])
+		i += sz
+	}
+	return i
+}
+
+// fileSuggestions fuzzy-prefix-matches cwd files — real caps the menu.
+func fileSuggestions(cwd, prefix string) []string {
+	var out []string
+	filepath.WalkDir(cwd, func(p string, d os.DirEntry, err error) error {
+		if err != nil || len(out) >= 40 {
+			return err
+		}
+		rel, err := filepath.Rel(cwd, p)
+		if err != nil || rel == "." {
+			return nil
+		}
+		if d.IsDir() {
+			if strings.HasPrefix(rel, ".git") || rel == "node_modules" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasPrefix(rel, prefix) || strings.HasPrefix(filepath.Base(rel), prefix) {
+			out = append(out, rel)
+		}
+		return nil
+	})
+	return out
+}
+
 // acAccept commits the selected completion into the buffer.
 func (e *editor) acAccept() {
-	if e.acOpen && len(e.acItems) > 0 {
+	if !e.acOpen || len(e.acItems) == 0 {
+		return
+	}
+	if e.acAt != "" {
+		// replace the partial @token with the completed path
+		s := string(e.buf)
+		before := s[:byteIdxOfRunePos(s, e.pos)]
+		at := strings.LastIndex(before, "@")
+		rest := s[byteIdxOfRunePos(s, e.pos):]
+		e.buf = []rune(s[:at] + "@" + e.acItems[e.acSel] + " " + rest)
+		e.pos = len([]rune(s[:at] + "@" + e.acItems[e.acSel] + " "))
+	} else {
 		e.buf = []rune("/" + e.acItems[e.acSel] + " ")
 		e.pos = len(e.buf)
 	}
 	e.acOpen = false
 	e.acItems = nil
+	e.acAt = ""
 }
 
 // acRows renders the dropdown — real draws it between the input line and
@@ -1026,12 +1082,16 @@ func (e *editor) acRows(w int) []string {
 	rows := make([]string, 0, len(show))
 	for i, m := range show {
 		desc := ""
-		if e.acDesc != nil {
+		if e.acAt == "" && e.acDesc != nil {
 			desc = " · " + dim + e.acDesc(m) + reset
 		}
-		line := "  /" + m + desc
+		disp := "/" + m
+		if e.acAt != "" {
+			disp = "@" + m
+		}
+		line := "  " + disp + desc
 		if i == sel {
-			line = "\x1b[38;5;153m❯ " + "/" + m + "\x1b[39m" + desc
+			line = "\x1b[38;5;153m❯ " + disp + "\x1b[39m" + desc
 		}
 		rows = append(rows, compClamp(line, w))
 	}
