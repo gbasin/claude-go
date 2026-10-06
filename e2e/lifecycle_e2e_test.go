@@ -588,3 +588,25 @@ func TestQueuedMessage(t *testing.T) {
 		t.Fatal("queued prompt never reached the wire")
 	}
 }
+
+// TestBracketedPaste: a multi-line paste collapses to a [Pasted text #N]
+// placeholder in the editor and expands to <pasted_content> on the wire.
+func TestBracketedPaste(t *testing.T) {
+	s := newSession(t)
+	rec := filepath.Join(t.TempDir(), "reqs")
+	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, "--mock")
+	p.waitFor("╭─╮", 30*time.Second)
+	p.send("\x1b[200~paste-one\npaste-two\npaste-three\x1b[201~\r")
+	p.waitFor("Mock response", 30*time.Second)
+	p.exit()
+
+	ents, _ := os.ReadDir(rec)
+	for _, e := range ents {
+		b, _ := os.ReadFile(filepath.Join(rec, e.Name()))
+		if bytes.Contains(b, []byte("pasted_content")) &&
+			bytes.Contains(b, []byte("paste-three")) {
+			return
+		}
+	}
+	t.Fatal("pasted_content block missing from the wire")
+}
