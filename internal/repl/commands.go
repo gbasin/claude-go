@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -146,13 +147,29 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		go l.Ask(context.Background(), body)
 	case "resume":
 		compSuspend() // the picker draws with \x1b[J — un-pin the live zone
-		id := pickSession(l.ToolCtx.CWD, ks)
+		id := pickSession(l.ToolCtx.CWD, ks, l.Client.SessionID)
 		compResume()
 		if id != "" {
 			if msgs, err := session.Load(l.ToolCtx.CWD, id); err == nil {
+				// real's /resume switches to the picked session — same
+				// transcript continues: rebind the store at <id>.jsonl so
+				// new turns append to it parented at the loaded leaf
+				path := filepath.Join(session.ProjectsDir(l.ToolCtx.CWD), id+".jsonl")
+				if ns, err2 := session.Open(l.ToolCtx.CWD, id); err2 == nil {
+					ns.SeedParent(session.LeafUUID(path))
+					if old, ok := currentStore.(io.Closer); ok {
+						old.Close()
+					}
+					currentStore = ns
+					l.Transcript = ns.Path
+				} else {
+					dprintln("  resume: couldn't open transcript:", err2)
+				}
+				l.Client.SessionID = id
+				l.ToolCtx.Session = id
 				l.Messages = msgs
 				l.MarkEnvSent()
-				l.MarkEnvSent()
+				logResync.Store(int32(len(msgs)))
 				dprintf("  resumed session %s (%d messages)\n", id, len(msgs))
 			}
 		}
@@ -381,6 +398,8 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		l.Messages = msgs
 		l.MarkEnvSent()
 		currentStore = nw
+		l.Transcript = nw.Path
+		logResync.Store(int32(len(msgs))) // fork already re-logged the chain
 		dprintf("  forked to session %s (%d messages carried)\n", nw.SessionID[:8], len(msgs))
 	case "rewind", "checkpoint", "undo":
 		if p, err := tools.Checkpoints.Rewind(); err != nil {

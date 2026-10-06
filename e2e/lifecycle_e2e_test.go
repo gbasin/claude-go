@@ -385,6 +385,23 @@ func TestResumePickerInteractive(t *testing.T) {
 	// resumed session answers normally
 	p.sendUntilEchoed(t, "resumed-alive\r", "❯ resumed-alive", 8)
 	p.waitFor("Mock response to: resumed-alive", 30*time.Second)
+
+	// same-transcript resume: the new turn lands in the SEED session's
+	// file, not the running session's — real's /resume switches sessions
+	seed, follow := "", ""
+	for _, tp := range s.transcriptPaths(t) {
+		b, _ := os.ReadFile(tp)
+		if strings.Contains(string(b), "seed prior session") {
+			seed = tp
+		}
+		if strings.Contains(string(b), "resumed-alive") {
+			follow = tp
+		}
+	}
+	if seed == "" || follow != seed {
+		t.Fatalf("in-REPL /resume must continue the picked session's transcript; seed=%q follow=%q\noutput:\n%s",
+			seed, follow, p.clean())
+	}
 	p.exit()
 }
 
