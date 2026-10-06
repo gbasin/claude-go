@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -20,6 +21,8 @@ type Info struct {
 	Slug     string // project slug (e.g. "-Users-x-Code-foo"); display suffix in all-projects mode
 	Modified time.Time
 	Title    string // custom title from <Dir>/<ID>/custom-title.json, if any
+	Size     int64  // transcript bytes — real's meta row shows it
+	Branch   string // git branch at session time ("" → HEAD)
 	Preview  string
 }
 
@@ -73,6 +76,8 @@ func listDir(d string) ([]Info, error) {
 			Path:     p,
 			Slug:     filepath.Base(d),
 			Modified: fi.ModTime(),
+			Size:     fi.Size(),
+			Branch:   gitBranchFor(d),
 			Title:    ReadTitle(d, id),
 			Preview:  firstUserText(p),
 		})
@@ -253,4 +258,14 @@ func Print(cwd string) {
 		}
 		fmt.Printf("  %s  %s  %s\n", in.Modified.Format("2006-01-02 15:04"), id, in.Label())
 	}
+}
+
+// gitBranchFor returns the project dir's current branch (session files
+// store none — the picker meta shows the checked-out one).
+func gitBranchFor(dir string) string {
+	out, err := exec.Command("git", "-C", dir, "branch", "--show-current").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
