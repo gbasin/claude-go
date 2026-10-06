@@ -73,6 +73,7 @@ type editor struct {
 	voiceBase      string            // api.BaseURL for the voice_stream ws
 	voiceCreds     *auth.Credentials // OAuth creds for Bearer auth
 	voiceCWD       string            // cwd for settings + keyterms
+	footer         string            // status row rendered under the box
 }
 
 func newEditor() *editor {
@@ -141,6 +142,9 @@ func (e *editor) boxFrame() (box []string, curRow, curCol int) {
 		all = append(all, strings.Repeat(" ", pw)+hint)
 	}
 	all = append(all, rule)
+	if e.footer != "" {
+		all = append(all, e.footer) // footer row below the bottom rule
+	}
 	e.boxAll = all
 	content := all[1 : len(all)-1]
 	// cursor's box row among content rows, and its column
@@ -281,7 +285,23 @@ func (e *editor) readLine(ks *keySource) readResult {
 			compExitEdit(e.boxAll)
 		}()
 	} else {
-		os.Stdout.WriteString(boxRule() + "\n" + e.prompt)
+		if eff := effortLabel(); eff != "" {
+			w := compW
+			if w <= 0 {
+				w = 80
+			}
+			os.Stdout.WriteString("\r\x1b[K" + strings.Repeat(" ", max(0, w-visWidth(eff))) + eff + "\n")
+		}
+		os.Stdout.WriteString(boxRule() + "\n" + e.prompt + "\n" + boxRule())
+		if e.footer != "" {
+			os.Stdout.WriteString("\n" + e.footer)
+		}
+		// cursor back to the input row
+		back := 1
+		if e.footer != "" {
+			back = 2
+		}
+		os.Stdout.WriteString(fmt.Sprintf("\x1b[%dA\r\x1b[%dC", back, visWidth(e.prompt)))
 	}
 	for {
 		var k key

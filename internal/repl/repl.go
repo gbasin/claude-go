@@ -241,12 +241,10 @@ func RunWithStore(l *agent.Loop, store Store) {
 		}
 	}
 
-	// real 2.1.289 session banner: compact 3-line mascot at every width
-	// (the tall starfield is a first-run path)
-	plan := "Claude"
+	// real 2.1.291 banner: compact 3-line mascot — "Model · Plan" on
+	// line 2 (effort moved to the ◐ pill above the composer)
+	plan := "API Usage Billing"
 	if l.Client != nil && l.Client.Creds != nil && l.Client.Creds.SubscriptionType != "" {
-		// real's mapping (mod_0132.js): enterprise→Claude Enterprise,
-		// team→Claude Team, max→Claude Max, pro→Claude Pro, else Claude API
 		switch l.Client.Creds.SubscriptionType {
 		case "max":
 			plan = "Claude Max"
@@ -256,8 +254,6 @@ func RunWithStore(l *agent.Loop, store Store) {
 			plan = "Claude Team"
 		case "enterprise":
 			plan = "Claude Enterprise"
-		default:
-			plan = "Claude API"
 		}
 	}
 	eff := l.Effort
@@ -275,7 +271,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 	}
 	enterAltScreen()
 	defer exitAltScreen()
-	compactBanner(api.Version, agent.ModelDisplay(l.Model), eff, plan, l.CWD, l.Client.SessionID)
+	compactBanner(api.Version, agent.ModelDisplay(l.Model), "", plan, l.CWD, l.Client.SessionID)
 	printAutoModeNotice(l.PermMode)
 
 	// transcript append cursor — session-scoped so each turn logs only
@@ -943,7 +939,7 @@ func (s *spinner) run() {
 			}
 			// real sweeps a bright band across the dim verb text —
 			// glimmerIndex advances ~every 90ms, band wraps over len+pad
-			txt := fmt.Sprintf("%s%s %s… %s(esc to interrupt · %s%s)",
+			txt := fmt.Sprintf("%s%s %s… %s(esc to interrupt · ← for agents · %s%s)",
 				claudeOrange, spinnerFrames[i%len(spinnerFrames)],
 				shimmerVerb(s.verb, i), claudeOrange, el, toks)
 			if compActive.Load() {
@@ -1171,7 +1167,8 @@ func printStatus(l *agent.Loop, ed *editor) {
 	if compActive.Load() {
 		compSetStatus(status) // pinned bottom row — real keeps it in the live region
 	} else {
-		dprintln(status)
+		ed.footer = status // rendered inside the box frame (below the rules)
+		ed.redraw()
 	}
 }
 
@@ -1601,3 +1598,4 @@ func builtinSlashCommands() []string {
 
 // currentStore is set by RunWithStore so slash commands can write records.
 var currentStore Store
+var sessionOnlyModel bool // /model "s" key — applies the pick without persisting

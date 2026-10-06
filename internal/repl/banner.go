@@ -4,6 +4,7 @@ import (
 	"claude-go/internal/config"
 	"encoding/json"
 	"fmt"
+	"golang.org/x/term"
 	"os"
 	"path/filepath"
 	"strings"
@@ -309,6 +310,51 @@ func screenReaderMode() bool {
 //	 ▐▛███▛█   Claude Code v2.1.289
 //	▝▜██████▀  Fable 5.1 with medium effort · Claude Max
 //	 ▝▝   ▝▝   ~/Code · /rc            (/rc is an OSC8 session link)
+//
+// mascotRows is real's 3-line Clawd block art (the compact banner form).
+var mascotRows = [3]string{" \u2590\u259b\u2588\u2588\u2588\u259b\u2588", "\u259d\u259c\u2588\u2588\u2588\u2588\u2588\u2588\u2580", " \u259d\u259d   \u259d\u259d"}
+
+// animateMascot paints the mascot cell-by-cell — real's startup does a
+// progressive sparkle fill (each frame reveals scattered block cells).
+// Skipped under prefers-reduced-motion or non-TTY.
+func animateMascot() {
+	if !term.IsTerminal(int(os.Stdout.Fd())) || os.Getenv("CLAUDE_GO_REDUCED_MOTION") != "" {
+		return
+	}
+	type cell struct {
+		r, col int // visual row + cell column
+		ch     rune
+	}
+	var cells []cell
+	for r := 0; r < 3; r++ {
+		col := 0
+		for _, ch := range mascotRows[r] {
+			if ch != ' ' {
+				cells = append(cells, cell{r, col, ch})
+			}
+			col++
+		}
+	}
+	var state uint64 = 0x9e3779b97f4a7c15
+	for i := len(cells) - 1; i > 0; i-- {
+		state ^= state << 13
+		state ^= state >> 7
+		state ^= state << 17
+		j := int(state % uint64(i+1))
+		cells[i], cells[j] = cells[j], cells[i]
+	}
+	fmt.Print("\x1b[?25l")
+	for i, cl := range cells {
+		fmt.Printf("\x1b[%d;1H\x1b[%dC%s%c%s", cl.r+1, cl.col, claudeOrange, cl.ch, reset)
+		if i%5 == 0 {
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
+	time.Sleep(30 * time.Millisecond)
+	// repaint cleanly — the scatter left the cursor mid-screen
+	fmt.Print("\x1b[1;1H\x1b[3B")
+}
+
 func compactBanner(version, name, effort, plan, cwd, sessionID string) {
 	home, _ := os.UserHomeDir()
 	short := cwd
@@ -318,9 +364,16 @@ func compactBanner(version, name, effort, plan, cwd, sessionID string) {
 	link := fmt.Sprintf("\x1b]8;id=%x;https://claude.ai/code/session_%s?from=cli\x07/rc\x1b]8;;\x07",
 		uint32(time.Now().UnixNano()&0xffffffff), sessionID)
 	// \r\n — the editor is in raw mode when the banner prints (ONLCR off,
-	// bare \n staircases)
+	// bare \n staircases). Reserve the three mascot rows, sparkle-fill,
+	// then write the header text beside them (real's start-up animation).
+	fmt.Print("\r\n\r\n\r\n\x1b[3A")
+	animateMascot()
 	fmt.Printf(" %s▐▛███▛█%s   %sClaude Code%s %sv%s%s\r\n", claudeOrange, reset, bold, reset, dim, version, reset)
-	fmt.Printf("%s▝▜██████▀%s  %s with %s effort · %s\r\n", claudeOrange, reset, name, effort, plan)
+	if effort != "" {
+		fmt.Printf("%s▝▜██████▀%s  %s with %s effort · %s\r\n", claudeOrange, reset, name, effort, plan)
+	} else {
+		fmt.Printf("%s▝▜██████▀%s  %s · %s\r\n", claudeOrange, reset, name, plan)
+	}
 	fmt.Printf(" %s▝▝   ▝▝%s   %s · %s\r\n", claudeOrange, reset, short, link)
 }
 
