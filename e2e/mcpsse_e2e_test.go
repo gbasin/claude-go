@@ -11,6 +11,7 @@ package e2e
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -29,6 +30,7 @@ type sseMCPServer struct {
 	mu      sync.Mutex
 	methods []string         // jsonrpc methods received, in order
 	extra   []map[string]any // extra tools served by tools/list
+	results []string         // client->server responses (roots/list etc)
 }
 
 func newSSEMCPServer(t *testing.T) *sseMCPServer {
@@ -64,16 +66,27 @@ func (m *sseMCPServer) handleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *sseMCPServer) handleMsg(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
 	var rpc struct {
 		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`
 	}
-	json.NewDecoder(r.Body).Decode(&rpc)
-	m.mu.Lock()
-	m.methods = append(m.methods, rpc.Method)
-	m.mu.Unlock()
+	json.Unmarshal(body, &rpc)
+	if rpc.Method != "" {
+		m.mu.Lock()
+		m.methods = append(m.methods, rpc.Method)
+		m.mu.Unlock()
+	}
 	if len(rpc.ID) == 0 || string(rpc.ID) == "null" {
 		w.WriteHeader(202) // notification — no response
+		return
+	}
+	if rpc.Method == "" {
+		// client->server response (e.g. roots/list reply) — record it
+		m.mu.Lock()
+		m.results = append(m.results, string(body))
+		m.mu.Unlock()
+		w.WriteHeader(202)
 		return
 	}
 	var result any
@@ -138,6 +151,20 @@ func (m *sseMCPServer) pushNotify(method string, params any) {
 	b, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "method": method, "params": params})
 	m.out <- b
+}
+
+// pushRequest streams a server->client JSON-RPC request (has an id — the
+// client answers via POST /msg with the same id).
+func (m *sseMCPServer) pushRequest(id int, method string, params any) {
+	b, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+	m.out <- b
+}
+
+func (m *sseMCPServer) sawResults() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string{}, m.results...)
 }
 
 // addTool appends to the dynamic tools/list result.
@@ -444,5 +471,56 @@ func TestMCPPromptSlash(t *testing.T) {
 
 	p.sendUntilEchoed(t, "/mcp__ssetest__greet\r", "❯ /mcp__ssetest__greet", 8)
 	p.waitFor("Mock response to: PROMPTBODY-E2E", 30*time.Second)
+	p.exit()
+}
+
+// TestMCPRootsList: a server→client roots/list request over SSE gets a
+// real answer — the workspace root, not -32601.
+func TestMCPRootsList(t *testing.T) {
+	srv := newSSEMCPServer(t)
+	s := newSession(t)
+	s.writeSettings(`{"enableAllProjectMcpServers":true}`)
+	s.writeFile(".mcp.json", fmt.Sprintf(
+		`{"mcpServers":{"ssetest":{"type":"sse","url":%q}}}`, srv.srv.URL+"/sse"))
+
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p.sendUntil("/mcp\r", "● ", 20)
+	p.send("\x1b")
+	time.Sleep(300 * time.Millisecond)
+
+	srv.pushRequest(77, "roots/list", map[string]any{})
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		res := srv.sawResults()
+		if len(res) > 0 {
+			if !strings.Contains(res[0], s.cwd) {
+				t.Fatalf("roots/list reply missing cwd %q: %s", s.cwd, res[0])
+			}
+			p.exit()
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	p.exit()
+	t.Fatalf("no roots/list response; methods=%v", srv.sawMethods())
+}
+
+// TestMCPNotificationMessage: a notifications/message from the server
+// prints a status note on the session output.
+func TestMCPNotificationMessage(t *testing.T) {
+	srv := newSSEMCPServer(t)
+	s := newSession(t)
+	s.writeSettings(`{"enableAllProjectMcpServers":true}`)
+	s.writeFile(".mcp.json", fmt.Sprintf(
+		`{"mcpServers":{"ssetest":{"type":"sse","url":%q}}}`, srv.srv.URL+"/sse"))
+
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p.sendUntil("/mcp\r", "● ", 20)
+	p.send("\x1b")
+	time.Sleep(300 * time.Millisecond)
+
+	srv.pushNotify("notifications/message",
+		map[string]any{"level": "info", "data": "SRV-LOG-LINE-e2e"})
+	p.waitFor("SRV-LOG-LINE-e2e", 15*time.Second)
 	p.exit()
 }
