@@ -309,6 +309,10 @@ func RunWithStore(l *agent.Loop, store Store) {
 			handleSlash(l, "/model", ed, ks)
 			continue
 		}
+		if res.agentsPane {
+			showAgentsPane(l, ks)
+			continue
+		}
 		if !res.ok {
 			continue
 		}
@@ -1200,57 +1204,95 @@ func termWidth() (int, error) {
 func (p *promptUI) askStructured(ks *keySource, header, question string, options []string, multi bool) ([]string, error) {
 	compSuspend() // modal menu — un-pin the live zone while it owns the screen
 	defer compResume()
-	// take over stdin — reading ks.ch here would race the turn busy-loop,
-	// which forwards every key into the dialog channel (same starvation
-	// bug as option-4 feedback)
 	dch := make(chan key, 16)
 	ks.dialog.Store(&dch)
 	defer ks.dialog.Store(nil)
-	dprintf("\n%s%s%s\n", bold, question, reset)
-	for i, o := range options {
-		dprintf("  %s%d.%s %s\n", bold, i+1, reset, o)
-	}
-	other := fmt.Sprintf("  %s%d.%s Other\n  ", bold, len(options)+1, reset)
-	fmt.Print(other)
-	var picked []string
+	// real's AskUserQuestion: cursor-select list + trailing "Other" row;
+	// multi-select toggles with space, Enter confirms
+	opts := append(append([]string{}, options...), "Other")
+	sel := 0
+	toggled := map[int]bool{}
 	var custom strings.Builder
-	for k := range dch {
-		c := k.b
-		if c >= '1' && c <= '9' {
-			idx := int(c - '1')
-			if idx == len(options) {
-				// Other: collect a line
-				p.customLine = &custom
-				continue
+	customMode := false
+	cyan := "\x1b[38;5;153m"
+	rows := len(opts) + 2
+	dprintf("\n  %s%s%s\n", bold, question, reset)
+	for range opts {
+		dprintln()
+	}
+	dprintf("  %s%s%s\n", dim, map[bool]string{true: "space to toggle · enter to submit · esc to cancel",
+		false: "enter to confirm · esc to cancel"}[multi], reset)
+	draw := func() {
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "\x1b[%dA", rows)
+		for i, o := range opts {
+			cur := "  "
+			if i == sel {
+				cur = cyan + "❯" + reset + " "
 			}
-			if idx >= 0 && idx < len(options) {
-				dprintln(string(c), "·", options[idx])
-				picked = append(picked, options[idx])
-				if !multi {
-					return picked, nil
+			check := ""
+			if multi {
+				check = "○ "
+				if toggled[i] {
+					check = "● "
 				}
-				continue
 			}
+			sb.WriteString(fmt.Sprintf("\x1b[K %s%s%s", cur, check, o))
+			if customMode && i == len(opts)-1 {
+				sb.WriteString(": " + custom.String())
+			}
+			sb.WriteString("\r\n")
 		}
-		if c == '\r' {
-			if p.customLine != nil {
-				picked = append(picked, custom.String())
-				p.customLine = nil
-				if !multi {
-					return picked, nil
-				}
+		fmt.Print(sb.String())
+	}
+	draw()
+	var picked []string
+	for k := range dch {
+		switch {
+		case k.seq == "[A" && !customMode:
+			if sel > 0 {
+				sel--
+				draw()
+			}
+		case k.seq == "[B" && !customMode:
+			if sel < len(opts)-1 {
+				sel++
+				draw()
+			}
+		case k.b == ' ' && multi && !customMode:
+			toggled[sel] = !toggled[sel]
+			draw()
+		case k.b == 0x1b || k.b == 3:
+			return nil, fmt.Errorf("cancelled")
+		case k.b == '\r':
+			if sel == len(opts)-1 && !customMode {
+				customMode = true // Other: collect free text on the row
+				draw()
 				continue
 			}
-			if len(picked) > 0 {
+			if customMode {
+				if s := strings.TrimSpace(custom.String()); s != "" {
+					picked = append(picked, s)
+				}
 				return picked, nil
 			}
-		}
-		if c == 0x1b || c == 3 {
-			return nil, fmt.Errorf("cancelled")
-		}
-		if p.customLine != nil && c >= 32 {
-			custom.WriteByte(c)
-			os.Stdout.WriteString(string(c))
+			if multi {
+				for i := range toggled {
+					picked = append(picked, opts[i])
+				}
+				return picked, nil
+			}
+			return []string{opts[sel]}, nil
+		case customMode && (k.b == 0x7f || k.b == 8):
+			s := []rune(custom.String())
+			if len(s) > 0 {
+				custom.Reset()
+				custom.WriteString(string(s[:len(s)-1]))
+			}
+			draw()
+		case customMode && k.b >= 32:
+			custom.WriteByte(k.b)
+			draw()
 		}
 	}
 	return nil, fmt.Errorf("cancelled")
@@ -1608,3 +1650,35 @@ func builtinSlashCommands() []string {
 // currentStore is set by RunWithStore so slash commands can write records.
 var currentStore Store
 var sessionOnlyModel bool // /model "s" key — applies the pick without persisting
+
+// showAgentsPane is real's ←← agents overlay — lists background tasks
+// with live status; esc/←/q close.
+func showAgentsPane(l *agent.Loop, ks *keySource) {
+	dch := make(chan key, 16)
+	ks.dialog.Store(&dch)
+	defer ks.dialog.Store(nil)
+	dprintf("\n  %sAgents%s\n", bold, reset)
+	tasks := l.ToolCtx.BgTasks.List()
+	if len(tasks) == 0 {
+		dprintf("  %sno background tasks%s\n", dim, reset)
+	}
+	for _, t := range tasks {
+		status := "running"
+		select {
+		case <-t.Done:
+			if t.Err != nil || t.TimedOut {
+				status = "failed"
+			} else {
+				status = "done"
+			}
+		default:
+		}
+		dprintf("  %s%s%s %s — %s (%s)\n", cyan, t.ID, reset, t.Command, status, fmtDur(time.Since(t.Started)))
+	}
+	dprintf("  %sesc to close%s\n", dim, reset)
+	for k := range dch {
+		if k.b == 0x1b || k.b == 3 || k.b == 'q' || k.seq == "[D" || k.seq == "[C" {
+			return
+		}
+	}
+}
