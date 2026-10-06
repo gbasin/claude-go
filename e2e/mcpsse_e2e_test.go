@@ -126,7 +126,7 @@ func TestMCPSSEToolCall(t *testing.T) {
 
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
 	// handshake is async — /mcp shows connected once initialize+tools/list done
-	p.sendUntil("/mcp\r", "connected", 20)
+	p.sendUntil("/mcp\r", "● ", 20)
 
 	// ToolSearch discovers the deferred schema, then the call dispatches
 	// over SSE. Both tool_use blocks run in one turn. Send-once semantics:
@@ -168,7 +168,7 @@ func TestMCPSSEDeferredRefusal(t *testing.T) {
 		`{"mcpServers":{"ssetest":{"type":"sse","url":%q}}}`, srv.srv.URL+"/sse"))
 
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
-	p.sendUntil("/mcp\r", "connected", 20)
+	p.sendUntil("/mcp\r", "● ", 20)
 
 	p.sendUntilEchoed(t, `tool:mcp__ssetest__ping {}`+"\r", "❯ tool:mcp__ssetest__ping", 8)
 	p.waitFor("InputValidationError", 30*time.Second)
@@ -257,7 +257,7 @@ func TestMCPHTTPToolCall(t *testing.T) {
 		`{"mcpServers":{"httptest":{"type":"http","url":%q}}}`, srv.srv.URL+"/mcp"))
 
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
-	p.sendUntil("/mcp\r", "connected", 20)
+	p.sendUntil("/mcp\r", "● ", 20)
 
 	p.sendUntilEchoed(t,
 		`calls:[{"name":"ToolSearch","input":{"query":"select:mcp__httptest__ping"}},`+
@@ -300,7 +300,7 @@ func TestMCPResources(t *testing.T) {
 		`{"mcpServers":{"ssetest":{"type":"sse","url":%q}}}`, srv.srv.URL+"/sse"))
 
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
-	p.sendUntil("/mcp\r", "connected", 20)
+	p.sendUntil("/mcp\r", "● ", 20)
 
 	p.sendUntilEchoed(t,
 		`calls:[{"name":"ToolSearch","input":{"query":"select:ListMcpResourcesTool,ReadMcpResourceTool"}},`+
