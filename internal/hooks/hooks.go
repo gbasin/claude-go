@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -228,6 +229,11 @@ type Result struct {
 
 // Run executes all matching hooks for an event. Input is the JSON payload
 // CC sends on stdin (session_id, transcript_path, cwd, tool_name, tool_input...).
+// Progress counts hook commands done/total for the current Run — the
+// REPL's "(running X hook… 0/2)" status.
+var Progress atomic.Int64 // hi 32 bits = total, lo = done
+var lastTotal atomic.Int64
+
 func Run(c Config, ev Event, payload map[string]any, cwd string) Result {
 	var res Result
 	matchers := c[string(ev)]
@@ -240,6 +246,12 @@ func Run(c Config, ev Event, payload map[string]any, cwd string) Result {
 		matchVal, _ = payload[field].(string)
 	}
 	stdin, _ := json.Marshal(payload)
+	total := 0
+	for _, m := range matchers {
+		total += len(m.Hooks)
+	}
+	Progress.Store(int64(total) << 32)
+	defer Progress.Store(0)
 	for _, m := range matchers {
 		if m.Matcher != "" && m.Matcher != "*" {
 			if field == "" {
@@ -272,6 +284,7 @@ func Run(c Config, ev Event, payload map[string]any, cwd string) Result {
 				continue
 			}
 			stdout, stderr, code := runCmd(h, stdin, cwd, ev)
+			Progress.Add(1)
 			var o Output
 			if json.Unmarshal(bytes.TrimSpace(stdout), &o) == nil && (len(o.Continue) > 0 || o.Decision != "" || o.Reason != "" || o.SystemMessage != "" || o.StopReason != "" || o.HookSpecificOutput != nil || len(o.UpdatedInput) > 0) {
 				applyOutput(&res, &o)

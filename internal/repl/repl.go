@@ -316,7 +316,8 @@ func RunWithStore(l *agent.Loop, store Store) {
 		// real shows "⎿ Task b1 finished: <cmd>" between turns
 		if l.ToolCtx.BgTasks != nil {
 			for _, n := range l.ToolCtx.BgTasks.DrainNotifications() {
-				dprintf("  %s⎿  %s%s\n", dim, n, reset)
+				// real renders the completion as a ⏺ line
+				dprintf("%s⏺%s %s\n", green, reset, n)
 			}
 		}
 		printStatus(l, ed)
@@ -404,6 +405,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			printedDot = false
 			thinkingSeen = false
 			spin := newSpinner()
+			spin.agents = func() int { return runningAgents(l) }
 			*spinRef = *spin
 			tools.SetPeerSessionBusy(true) // held-queue peer messages mid-turn
 			ctx, cancel := context.WithCancel(context.Background())
@@ -701,8 +703,9 @@ func (p *promptUI) ask(l *agent.Loop, ks *keySource, name, summary string) bool 
 // spinner: real CC's `<glyph> <Verb>… (Ns · ↓ Nk tokens)` — bounce frames
 // ·✢✳✶✻✽ at 150ms, claude-orange verb, whimsical gerund pool.
 type spinner struct {
-	done chan struct{}
-	verb string
+	done   chan struct{}
+	verb   string
+	agents func() int // running bg-agent count for the busy footer
 }
 
 // spinVerb exposes the active verb for the past-tense footer.
@@ -1023,13 +1026,27 @@ func (s *spinner) run() {
 			// "(running <hook> hook · Ns)" — real's hook-exec status
 			hookTxt := ""
 			if hn, el := agent.RunningHook(); hn != "" {
-				hookTxt = fmt.Sprintf(" · (running %s hook · %ds)", hn, int(el.Seconds()))
+				// real: "(running X hook… 0/2 · Ns)" — done/total + ellipsis
+				p := hooks.Progress.Load()
+				tot := int32(p >> 32)
+				done := int32(p & 0xffffffff)
+				if tot > 1 {
+					hookTxt = fmt.Sprintf(" · (running %s hook… %d/%d · %ds)", hn, done, tot, int(el.Seconds()))
+				} else {
+					hookTxt = fmt.Sprintf(" · (running %s hook · %ds)", hn, int(el.Seconds()))
+				}
 			}
 			// real sweeps a bright band across the dim verb text —
 			// glimmerIndex advances ~every 90ms, band wraps over len+pad
-			txt := fmt.Sprintf("%s%s %s… %s(esc to interrupt · ← for agents · %s%s)",
+			agentsHint := "← for agents"
+			if s.agents != nil {
+				if n := s.agents(); n > 0 {
+					agentsHint = fmt.Sprintf("← %d agents · ↑↓ to manage", n)
+				}
+			}
+			txt := fmt.Sprintf("%s%s %s… %s(esc to interrupt · %s · %s%s)",
 				claudeOrange, spinnerFrames[i%len(spinnerFrames)],
-				shimmerVerb(s.verb, i), claudeOrange, el, toks+hookTxt)
+				shimmerVerb(s.verb, i), claudeOrange, agentsHint, el, toks+hookTxt)
 			if compActive.Load() {
 				compFooter(txt) // pinned bottom row — doesn't scroll
 			} else {
