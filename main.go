@@ -91,7 +91,8 @@ Flags:
   -c, --continue                continue most recent session
   -r, --resume [id]             resume a session (picker if no id)
   --resume-session-at <uuid>    resume from a specific message
-  --resume-drops-turn <n>       (accepted)
+  --resume-drops-turn <uuid>    with --resume-session-at: declare the
+                                discarded tail belongs to that turn (refused otherwise)
   --fork-session                fork when resuming
   --no-session-persistence      don't write a transcript
   --rewind-files <mode>         (accepted)
@@ -390,6 +391,15 @@ func main() {
 		if !o.forkSess && resumeID != "" {
 			sessionID = resumeID
 		}
+	}
+	// real's flag wiring: these only make sense attached to a resume
+	if o.resumeAt != "" && resumeID == "" {
+		fmt.Fprintln(os.Stderr, "Error: --resume-session-at requires --resume")
+		os.Exit(1)
+	}
+	if o.dropsTurn != "" && o.resumeAt == "" {
+		fmt.Fprintln(os.Stderr, "Error: --resume-drops-turn requires --resume-session-at")
+		os.Exit(1)
 	}
 
 	agentCleanup := installCLIAgents(o.agentsJSON, cwd)
@@ -728,9 +738,9 @@ func main() {
 			var err error
 			switch {
 			case o.resumeAt != "" && loadPath != "":
-				msgs, leaf, err = loadSessionAtPath(loadPath, o.resumeAt)
+				msgs, leaf, err = loadSessionAtPath(loadPath, o.resumeAt, o.dropsTurn)
 			case o.resumeAt != "":
-				msgs, leaf, err = loadSessionAt(cwd, id, o.resumeAt)
+				msgs, leaf, err = loadSessionAt(cwd, id, o.resumeAt, o.dropsTurn)
 			case loadPath != "":
 				msgs, err = session.LoadPath(loadPath)
 				leaf = session.LeafUUID(loadPath)
