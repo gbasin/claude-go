@@ -1002,12 +1002,6 @@ func (s *spinner) run() {
 		case <-s.done:
 			return
 		case <-t.C:
-			if f := os.Getenv("CG_DBGSPIN"); f != "" {
-				if h, e := os.OpenFile(f, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); e == nil {
-					fmt.Fprintf(h, "tick active=%v\n", compActive.Load())
-					h.Close()
-				}
-			}
 			el := fmtDur(time.Since(start))
 			toks := ""
 			if n := spinTokens.Load(); n > 0 {
