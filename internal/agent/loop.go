@@ -59,6 +59,7 @@ type Loop struct {
 	User                  UserConfig
 	Messages              []api.Message
 	ToolCtx               *tools.Context
+	OnHookEvent           func(rec map[string]any) // --include-hook-events: stream-json hook records
 	Events                Events
 	MaxTurns              int // 0 = unlimited
 	started               bool
@@ -454,6 +455,25 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		return nil, fmt.Errorf("max turns (%d) reached", l.MaxTurns)
 	}
 	l.ToolCtx.Ctx = ctx
+	if l.ToolCtx.OnCwdChanged == nil {
+		// default CwdChanged hook — the REPL installs a transcript-logging
+		// variant; this covers -p and other non-interactive callers
+		l.ToolCtx.OnCwdChanged = func(nc string) {
+			l.runHook(hooks.CwdChanged, map[string]any{
+				"old_cwd": l.ToolCtx.CWD, "new_cwd": nc,
+			})
+		}
+	}
+	if l.ToolCtx.BgTasks != nil && l.ToolCtx.BgTasks.OnExit == nil {
+		// TaskCompleted fires when a background task finishes
+		l.ToolCtx.BgTasks.OnExit = func(t *tools.BgTask) {
+			l.runHook(hooks.TaskCompleted, map[string]any{
+				"task_id":   t.ID,
+				"command":   t.Command,
+				"timed_out": t.TimedOut,
+			})
+		}
+	}
 	resp, err := l.streamWithSanitizeRetry(ctx)
 	if err != nil {
 		return nil, err
@@ -660,7 +680,25 @@ func (l *Loop) runHook(ev hooks.Event, extra map[string]any) hooks.Result {
 	for k, v := range extra {
 		payload[k] = v
 	}
+	// --include-hook-events: real emits hook_started/hook_response
+	// system records into stream-json output
+	hookID := api.NewUUID()
+	if l.OnHookEvent != nil {
+		l.OnHookEvent(map[string]any{
+			"type": "system", "subtype": "hook_started",
+			"hook_event": string(ev), "hook_name": string(ev), "hook_id": hookID,
+			"uuid": api.NewUUID(), "session_id": l.Client.SessionID,
+		})
+	}
 	res := hooks.Run(l.Hooks, ev, payload, l.ToolCtx.CWD)
+	if l.OnHookEvent != nil {
+		l.OnHookEvent(map[string]any{
+			"type": "system", "subtype": "hook_response",
+			"hook_event": string(ev), "hook_name": string(ev), "hook_id": hookID,
+			"uuid": api.NewUUID(), "session_id": l.Client.SessionID,
+			"blocked": res.Block, "reason": res.Reason,
+		})
+	}
 	if res.NonBlockErr != "" {
 		fmt.Fprintf(os.Stderr, "  hook error (%s): %s\n", ev, strings.TrimSpace(res.NonBlockErr))
 	}
