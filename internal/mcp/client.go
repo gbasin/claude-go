@@ -390,9 +390,16 @@ func (c *Client) handleNotification(method string, params json.RawMessage) {
 			if err := c.call(ctx, "tools/list", nil, &res); err == nil {
 				c.mu.Lock()
 				c.Tools = res.Tools
+				oc := c.OnToolsChanged
 				c.mu.Unlock()
+				if oc != nil {
+					oc() // re-register mcp__<server>__<tool> on the new list
+				}
 			}
 		}()
+	case "notifications/resources/list_changed", "notifications/prompts/list_changed":
+		// real refreshes prompts/resources too — surface via OnNotification
+		// (callers already got the notification above)
 	}
 }
 
