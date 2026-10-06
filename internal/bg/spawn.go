@@ -1,6 +1,8 @@
 package bg
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -38,6 +40,12 @@ func Spawn(o SpawnOpts) (*exec.Cmd, error) {
 	cmd := exec.Command(exe, args...)
 	cmd.Env = os.Environ()
 	cmd.SysProcAttr = detachAttr()
+	// per-worker attach auth — real's CLAUDE_BG_PTY_AUTH: without it any
+	// local process that finds the rendezvous socket could drive the pty
+	var tok [16]byte
+	if _, err := rand.Read(tok[:]); err == nil {
+		cmd.Env = append(cmd.Env, "CLAUDE_BG_PTY_AUTH="+hex.EncodeToString(tok[:]))
+	}
 	cmd.Stdin = nil
 	devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {

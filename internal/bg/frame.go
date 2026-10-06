@@ -9,12 +9,13 @@ import (
 // Rendezvous socket framing — real runs a framed protocol over the session
 // UDS; ours is [1B op][4B BE len][payload]:
 //
-//	opHello  client → host: attach request (payload: JSON {cols,rows})
+//	opHello  client → host: attach request (payload: JSON {cols,rows,auth})
 //	opReady  host → client: attach accepted (payload: JSON {cols,rows,session})
 //	opData   both ways: raw pty bytes
 //	opResize client → host: terminal resize (payload: JSON {cols,rows})
 //	opDetach client → host: clean detach (host keeps running)
 //	opExit   host → client: session process exited (payload: exit note)
+//	opError  host → client: refused (payload: reason text)
 const (
 	opHello  byte = 1
 	opReady  byte = 2
@@ -22,6 +23,7 @@ const (
 	opResize byte = 4
 	opDetach byte = 5
 	opExit   byte = 6
+	opError  byte = 7
 )
 
 func writeFrame(w io.Writer, op byte, payload []byte) error {

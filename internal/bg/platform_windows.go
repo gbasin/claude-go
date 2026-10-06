@@ -20,3 +20,5 @@ func childAttr() *syscall.SysProcAttr { return &syscall.SysProcAttr{} }
 // signalHost asks a bg-pty-host worker to end its session — no pty workers
 // exist on windows, but keep the call safe.
 func signalHost(pid int) {}
+
+func killHost(pid int) {}
