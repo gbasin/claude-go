@@ -58,7 +58,8 @@ func onboardThemePicker() string {
 		{"Light mode (ANSI colors only)", "light-ansi"},
 	}
 	fmt.Printf("%sWelcome to Claude Code %sv%s%s\n\n", pink, gray, version, reset)
-	fmt.Println("Let's get started.\n")
+	fmt.Println("Let's get started.")
+	fmt.Println()
 	fmt.Printf("%sChoose the text style that looks best with your terminal%s\n", bold, unbold)
 	fmt.Printf("%sTo change this later, run /theme%s\n\n", gray, reset)
 
