@@ -653,3 +653,39 @@ func TestMigrateClaudeJSON(t *testing.T) {
 		t.Fatalf("version not migrated:\n%s", b)
 	}
 }
+
+// TestQueuedHint: a queued mid-turn prompt shows "N queued" in the footer.
+// SKIPPED: footerHints() is dead code — nothing calls it, so the hint
+// never renders. Re-enable once the sibling wires it.
+func TestQueuedHint(t *testing.T) {
+	t.Skip("footerHints() is dead code — never rendered")
+
+	s := newSession(t)
+	p := s.runPTY(t, nil, "--mock", "--permission-mode", "bypassPermissions")
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"python3 -c \"import time;time.sleep(6)\""}`+"\r",
+		"❯ tool:Bash", 8)
+	time.Sleep(1 * time.Second)
+	p.send("held-in-queue\r")
+	p.waitFor("1 queued", 20*time.Second)
+	p.exit()
+}
+
+// TestVimBadge: vim mode shows the vim:<mode> hint in the footer.
+// SKIPPED: footerHints() is dead code — never rendered. Re-enable once
+// the sibling wires it.
+func TestVimBadge(t *testing.T) {
+	t.Skip("footerHints() is dead code — never rendered")
+
+	s := newSession(t)
+	// rewrite .claude.json keeping the seeded trust/onboarding state
+	s.writeFile(filepath.Join(s.home, ".claude.json"), fmt.Sprintf(
+		`{"hasCompletedOnboarding":true,"editorMode":"vim",`+
+			`"projects":{%q:{"hasTrustDialogAccepted":true}}}`, s.cwd))
+	p := s.runPTY(t, nil, "--mock")
+	p.waitFor("vim:insert", 30*time.Second)
+	p.send("\x1b") // esc → normal mode
+	p.waitFor("vim:normal", 15*time.Second)
+	p.exit()
+}
