@@ -438,8 +438,9 @@ func TestModelPicker(t *testing.T) {
 	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, "--mock")
 	p.waitFor("❯", 30*time.Second)
 	p.sendUntilEchoed(t, "/model\r", "❯ /model", 8)
-	p.waitFor("number (esc keeps", 15*time.Second)
-	p.send("4\r") // claude-sonnet-5-5
+	p.waitFor("✔", 15*time.Second)
+	// cursor starts on the active model (fable); ↑×2 reaches Sonnet
+	p.send("\x1b[A\x1b[A\r")
 	p.waitFor("model → claude-sonnet-5-5", 15*time.Second)
 
 	p.sendUntilEchoed(t, "hi\r", "❯ hi", 8)
