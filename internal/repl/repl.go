@@ -267,6 +267,12 @@ func RunWithStore(l *agent.Loop, store Store) {
 	curEffort.Store(eff)
 	// real runs the session UI on the alternate screen with mouse
 	// tracking + a ✳ window title (entered post-trust/onboarding)
+	if os.Getenv("TMUX") != "" {
+		if out, err := exec.Command("tmux", "show", "-g", "focus-events").Output(); err == nil &&
+			!strings.Contains(string(out), " on") {
+			fmt.Fprintf(os.Stderr, "tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf\n")
+		}
+	}
 	enterAltScreen()
 	defer exitAltScreen()
 	compactBanner(api.Version, agent.ModelDisplay(l.Model), eff, plan, l.CWD, l.Client.SessionID)
@@ -495,15 +501,15 @@ func RunWithStore(l *agent.Loop, store Store) {
 				} else {
 					dprintf("%sError: %v%s\n", red, err, reset)
 				}
-			} else if d := time.Since(start); d >= time.Second {
-				// real prints "✻ Churned for 2m 9s" (past-tense verb)
+			} else {
+				// real always prints "✻ Churned for 0s · done 9:01 AM"
+				// (past-tense verb + elapsed + clock) — even sub-second
 				v, _ := spinVerb.v.Load().(string)
 				if v == "" {
 					v = "Working"
 				}
-				dprintf("%s✻ %s for %s%s\n\n", dim, pastTense(v), fmtDur(d), reset)
-			} else {
-				dprintln()
+				dprintf("%s✻ %s for %s · done %s%s\n\n", dim, pastTense(v),
+					fmtDur(time.Since(start)), time.Now().Format("3:04 PM"), reset)
 			}
 		}
 		for {
@@ -1131,6 +1137,9 @@ func printStatus(l *agent.Loop, ed *editor) {
 	} else {
 		// real's footer: cwd+branch left, mode pill + hints right
 		w, _ := termWidth()
+		if w <= 0 {
+			w = 80
+		}
 		cwdDisp := l.ToolCtx.CWD
 		if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(cwdDisp, home) {
 			cwdDisp = "~" + cwdDisp[len(home):] // real abbreviates $HOME
