@@ -98,6 +98,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			toggleBrief()
 			return nil
 		}
+		ed.runningAgents = func() int { return runningAgents(l) }
 		ed.onFastMode = func() {
 			l.SetFastMode(!l.FastMode)
 		}
