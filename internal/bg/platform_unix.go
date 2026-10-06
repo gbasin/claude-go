@@ -34,3 +34,10 @@ func signalHost(pid int) {
 		_ = syscall.Kill(pid, syscall.SIGTERM)
 	}
 }
+
+// killHost force-kills a wedged bg-pty-host the daemon couldn't TERM.
+func killHost(pid int) {
+	if pid > 0 {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+}

@@ -87,6 +87,7 @@ func RunHost(o HostOpts) int {
 		StartedAt: time.Now(),
 		Name:      o.Name,
 		Prompt:    o.Prompt,
+		Auth:      os.Getenv("CLAUDE_BG_PTY_AUTH"), // attach handshake token
 	}
 	if err := os.MkdirAll(job.dir(), 0o755); err != nil {
 		return fatalHost("job dir", err)
@@ -272,8 +273,14 @@ func serveAttach(conn net.Conn, master *os.File, job *Job,
 	}
 	var hello struct {
 		Cols, Rows int
+		Auth       string `json:"auth"`
 	}
 	_ = json.Unmarshal(payload, &hello)
+	if job.Auth != "" && hello.Auth != job.Auth {
+		// wrong/absent token — a stray process found the socket; refuse
+		_ = writeFrame(conn, opError, []byte("attach rejected: bad pty auth token"))
+		return
+	}
 	if hello.Cols > 0 {
 		setWinSize(master, hello.Cols, hello.Rows)
 		if job.ChildPID > 0 {
