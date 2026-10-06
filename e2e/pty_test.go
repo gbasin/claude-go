@@ -158,6 +158,9 @@ func (p *ptyProc) output() string {
 
 // stripANSI removes CSI/OSC escape sequences for substring matching.
 func stripANSI(s string) string {
+	// NBSP in the prompt (❯\u00a0) renders as a space-equivalent — normalize
+	// so "❯ hi" fragments match regardless
+	s = strings.ReplaceAll(s, "\u00a0", " ")
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); {
@@ -215,6 +218,7 @@ func (p *ptyProc) clean() string {
 // waitFor polls until substr appears in the cleaned output or timeout hits.
 func (p *ptyProc) waitFor(substr string, timeout time.Duration) string {
 	p.t.Helper()
+	substr = strings.ReplaceAll(substr, "\u00a0", " ")
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if strings.Contains(p.clean(), substr) {

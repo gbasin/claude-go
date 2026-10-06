@@ -1658,7 +1658,10 @@ func showAgentsPane(l *agent.Loop, ks *keySource) {
 	ks.dialog.Store(&dch)
 	defer ks.dialog.Store(nil)
 	dprintf("\n  %sAgents%s\n", bold, reset)
-	tasks := l.ToolCtx.BgTasks.List()
+	var tasks []*tools.BgTask
+	if l.ToolCtx.BgTasks != nil {
+		tasks = l.ToolCtx.BgTasks.List()
+	}
 	if len(tasks) == 0 {
 		dprintf("  %sno background tasks%s\n", dim, reset)
 	}
