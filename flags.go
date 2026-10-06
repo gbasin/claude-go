@@ -76,6 +76,8 @@ type cliOpts struct {
 	teleport     bool
 	teleportArg  string
 	stubs        []string // feature flags accepted but not wired
+	fromPR       string   // --from-pr <ref> — session linked to a PR
+	fromPRFlag   bool     // --from-pr passed at all (bare → picker)
 }
 
 // stubEnv records a parse-only flag as an env var so the value is at least
@@ -242,10 +244,10 @@ func parseCLI(args []string) *cliOpts {
 				o.resume = "-"
 			}
 		},
+		"--from-pr":        func(v string) { o.fromPRFlag = true; o.fromPR = v },
 		"-w":               func(v string) { o.worktreeSet = true; o.worktreeName = v },
 		"--worktree":       func(v string) { o.worktreeSet = true; o.worktreeName = v },
 		"--project":        func(v string) { o.projectDir = v },
-		"--from-pr":        func(v string) { o.stubs = append(o.stubs, "--from-pr") },
 		"--teleport":       func(v string) { o.teleport = true; o.teleportArg = v },
 		"--cloud":          func(v string) { o.stubs = append(o.stubs, "--cloud") },
 		"--remote":         func(v string) { o.stubs = append(o.stubs, "--remote") },
