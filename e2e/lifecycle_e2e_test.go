@@ -130,8 +130,8 @@ func TestAskUserQuestionDialog(t *testing.T) {
 	p.waitFor("Pick a color", 30*time.Second)
 	p.waitFor("Blue", 10*time.Second)
 
-	// digit keys forward into the dialog channel mid-turn
-	p.sendUntil("2", "Tool results received", 15)
+	// cursor-select dialog: down to Blue, Enter confirms
+	p.sendUntil("\x1b[B\r", "Tool results received", 15)
 	if !strings.Contains(p.clean(), "Blue") {
 		t.Fatalf("picked answer should appear in the tool result")
 	}

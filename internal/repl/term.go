@@ -40,6 +40,7 @@ type editor struct {
 	acDesc         func(name string) string     // per-item description
 	acItems        []string                     // filtered matches
 	acSel          int                          // selected index
+	leftArm        bool                         // ← pressed once on empty input
 	cycleMode      func()                       // shift+tab -> permission mode cycle
 	keys           *keySource
 	pendingX       bool
@@ -294,6 +295,7 @@ type readResult struct {
 	sendNow     bool // ctrl+enter / ctrl+x ctrl+s — deliver even while busy
 	queued      bool // ctrl+x enter — force queue
 	modelPicker bool // meta+p — open the /model picker
+	agentsPane  bool // ← ← on empty input — open the agents view
 }
 
 // readLine consumes keys until submit. Vim-normal mode supported.
@@ -487,6 +489,16 @@ func (e *editor) insertKey(k key) *readResult {
 		for e.pos > 0 && e.buf[e.pos-1] != ' ' {
 			e.del(true)
 		}
+	case k.seq == "[D" && len(e.buf) == 0 && e.mode == "insert":
+		// ← opens the agents pane — real requires a double-press hint
+		if e.leftArm {
+			e.leftArm = false
+			return &readResult{agentsPane: true}
+		}
+		e.leftArm = true
+		os.Stdout.WriteString("\r\x1b[K  " + dim + "Press ← again to open agents" + reset)
+		time.AfterFunc(1500*time.Millisecond, func() { e.leftArm = false })
+		return nil
 	case k.seq == "[A" && e.acOpen:
 		if e.acSel > 0 {
 			e.acSel--
