@@ -1240,7 +1240,7 @@ func (e *editor) interruptKey() *readResult {
 		return &readResult{quit: true}
 	} else {
 		e.lastCtrlC = time.Now()
-		compInline("\r\x1b[K  "+dim+"Press Ctrl-C again to exit"+reset)
+		compInline("\r\x1b[K  " + dim + "Press Ctrl-C again to exit" + reset)
 		e.redraw()
 	}
 	return nil

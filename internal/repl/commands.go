@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -3928,8 +3929,8 @@ var openURL = func(u string) bool {
 // /compact (real replaces the verb with this literal).
 var compactSpin atomic.Bool
 
-// spinnerTip returns a rotating tip for the ⎿ line (real's tipsFile
-// setting ships a fixed list — a starter set here).
+// Real's spinnerTipsOverride setting: {excludeDefault, tips[] or
+// tipsFile path, label prefix}; spinnerTipsEnabled gates them entirely.
 var tipsIdx atomic.Int64
 var spinnerTipsList = []string{
 	"Tip: Running multiple Claude sessions? Use /color and /rename to tell them apart at a glance.",
@@ -3942,11 +3943,91 @@ var spinnerTipsList = []string{
 	"Tip: meta+o toggles fast mode for quicker turns.",
 }
 
+var tipsOnce struct {
+	once sync.Once
+	list []string
+}
+
+func tips() []string {
+	tipsOnce.once.Do(func() {
+		b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
+		if err != nil {
+			tipsOnce.list = spinnerTipsList
+			return
+		}
+		var st struct {
+			Enabled  *bool `json:"spinnerTipsEnabled"`
+			Override struct {
+				ExcludeDefault bool   `json:"excludeDefault"`
+				Label          string `json:"label"`
+				Tips           []struct {
+					Text string `json:"text"`
+				} `json:"tips"`
+				TipsFile string `json:"tipsFile"`
+			} `json:"spinnerTipsOverride"`
+		}
+		if json.Unmarshal(b, &st) != nil {
+			tipsOnce.list = spinnerTipsList
+			return
+		}
+		if st.Enabled != nil && !*st.Enabled {
+			tipsOnce.list = nil
+			return
+		}
+		var custom []string
+		for _, t := range st.Override.Tips {
+			if t.Text != "" {
+				custom = append(custom, t.Text)
+			}
+		}
+		if st.Override.TipsFile != "" {
+			p := st.Override.TipsFile
+			if strings.HasPrefix(p, "~/") {
+				p = filepath.Join(config.Home(), p[2:])
+			}
+			if fb, err := os.ReadFile(p); err == nil {
+				var arr []struct {
+					Text string `json:"text"`
+				}
+				var flat []string
+				if json.Unmarshal(fb, &arr) == nil {
+					for _, t := range arr {
+						custom = append(custom, t.Text)
+					}
+				} else if json.Unmarshal(fb, &flat) == nil {
+					custom = append(custom, flat...)
+				}
+			}
+		}
+		lbl := st.Override.Label
+		if lbl == "" {
+			lbl = "Tip"
+		}
+		if st.Override.ExcludeDefault {
+			for i := range custom {
+				if !strings.Contains(custom[i], ":") {
+					custom[i] = lbl + ": " + custom[i]
+				}
+			}
+			tipsOnce.list = custom
+			return
+		}
+		for i := range custom {
+			if !strings.Contains(custom[i], ":") {
+				custom[i] = lbl + ": " + custom[i]
+			}
+		}
+		tipsOnce.list = append(append([]string{}, spinnerTipsList...), custom...)
+	})
+	return tipsOnce.list
+}
+
 func spinnerTip() string {
-	if len(spinnerTipsList) == 0 {
+	list := tips()
+	if len(list) == 0 {
 		return ""
 	}
-	return spinnerTipsList[int(tipsIdx.Add(1))%len(spinnerTipsList)]
+	return list[int(tipsIdx.Add(1))%len(list)]
 }
 
 // permissionsModal — real's /permissions: a tabbed modal with a bordered
@@ -4192,5 +4273,39 @@ func writeUserSetting(key string, v any) {
 	m[key] = v
 	if out, err := json.MarshalIndent(m, "", "  "); err == nil {
 		os.WriteFile(p, out, 0o644)
+	}
+}
+
+// clockNow renders the turn-end clock honoring timeFormat/timeZone
+// settings (real: "auto"|"12-hour"|"24-hour"|"24-hour-utc"|strftime).
+func clockNow() string {
+	b, _ := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
+	var st struct {
+		TF string `json:"timeFormat"`
+		TZ string `json:"timeZone"`
+	}
+	json.Unmarshal(b, &st)
+	now := time.Now()
+	if st.TZ != "" {
+		if loc, err := time.LoadLocation(st.TZ); err == nil {
+			now = now.In(loc)
+		}
+	}
+	switch st.TF {
+	case "24-hour":
+		return now.Format("15:04")
+	case "24-hour-utc":
+		return now.UTC().Format("15:04")
+	case "12-hour", "auto", "":
+		return now.Format("3:04 PM")
+	default:
+		// strftime pattern — translate the common verbs
+		f := st.TF
+		f = strings.ReplaceAll(f, "%H", "15")
+		f = strings.ReplaceAll(f, "%I", "03")
+		f = strings.ReplaceAll(f, "%M", "04")
+		f = strings.ReplaceAll(f, "%S", "05")
+		f = strings.ReplaceAll(f, "%p", "PM")
+		return now.Format(f)
 	}
 }

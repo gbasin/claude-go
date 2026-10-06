@@ -421,6 +421,11 @@ func RunWithStore(l *agent.Loop, store Store) {
 			thinkingSeen = false
 			spin := newSpinner()
 			spin.agents = func() int { return runningAgents(l) }
+			// real shows a rotating ⎿ Tip line under the spinner
+			// periodically (spinnerTipsOverride-able)
+			if tip := spinnerTip(); tip != "" && tipNth.Add(1)%3 == 0 {
+				streamPrint(dim + "  ⎿  " + tip + reset)
+			}
 			*spinRef = *spin
 			tools.SetPeerSessionBusy(true) // held-queue peer messages mid-turn
 			ctx, cancel := context.WithCancel(context.Background())
@@ -587,7 +592,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 					tail = fmt.Sprintf(" · %d shell still running", n)
 				}
 				dprintf("%s✻ %s for %s · done %s%s%s\n\n", dim, pastTense(v),
-					fmtDur(time.Since(start)), time.Now().Format("3:04 PM"), tail, reset)
+					fmtDur(time.Since(start)), clockNow(), tail, reset)
 			}
 		}
 		for {
@@ -730,6 +735,8 @@ type spinner struct {
 }
 
 // spinVerb exposes the active verb for the past-tense footer.
+var tipNth atomic.Int64
+
 var spinVerb struct{ v atomic.Value }
 
 // pastTense converts a spinner gerund ("Churning") to past ("Churned") —
