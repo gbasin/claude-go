@@ -252,10 +252,25 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 				}
 				continue
 			case k.b == '\t':
-				// Tab to amend — edit the command inline, Enter re-approves
-				if name == "Bash" {
-					if amended := amendCommand(dch, content, deadline); amended != "" {
-						input, _ = json.Marshal(map[string]string{"command": amended})
+				// Tab to amend — edit the tool's primary arg inline
+				// (command / file_path / pattern per tool type), Enter
+				// re-approves
+				field := map[string]string{
+					"Bash": "command", "Write": "file_path", "Edit": "file_path",
+					"MultiEdit": "file_path", "NotebookEdit": "notebook_path",
+					"Read": "file_path", "Glob": "pattern", "Grep": "pattern",
+					"WebFetch": "url",
+				}[name]
+				if field != "" {
+					var m map[string]any
+					json.Unmarshal(input, &m)
+					cur, _ := m[field].(string)
+					if cur == "" {
+						cur = content
+					}
+					if amended := amendCommand(dch, cur, deadline); amended != "" {
+						m[field] = amended
+						input, _ = json.Marshal(m)
 						content = amended
 						draw()
 					}

@@ -1395,6 +1395,9 @@ func (p *promptUI) askStructured(ks *keySource, header, question string, options
 				if customMode && i == nBase {
 					lbl = "Type something: " + custom.String()
 				}
+				if customMode && i == nBase+1 && sel == nBase+1 {
+					lbl = "Chat about this: " + custom.String()
+				}
 				put(fmt.Sprintf("   %s%s%s %s%s", gray, num, "\x1b[39m", check, lbl))
 			}
 			if o.desc != "" {
@@ -1427,6 +1430,14 @@ func (p *promptUI) askStructured(ks *keySource, header, question string, options
 		case k.b == '\r':
 			if sel == nBase && !customMode {
 				customMode = true // Type something: free text on the row
+				draw()
+				continue
+			}
+			if sel == nBase+1 && !customMode {
+				// "Chat about this": free-form reply instead of picking —
+				// real sends the typed text back as the answer
+				customMode = true
+				custom.Reset()
 				draw()
 				continue
 			}
