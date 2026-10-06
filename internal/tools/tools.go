@@ -2,6 +2,7 @@
 package tools
 
 import (
+	"claude-go/internal/config"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -135,6 +136,9 @@ func All() []*Tool {
 			continue
 		}
 		if n == "ToolSearch" && !toolSearchEnabled() {
+			continue
+		}
+		if n == "Workflow" && !workflowEnabled() {
 			continue
 		}
 		if t, ok := registry[n]; ok {
@@ -318,4 +322,30 @@ func DirAllowed(c *Context, p string) bool {
 // isTaskTool reports whether n is one of the tasks.enabled-gated tools.
 func isTaskTool(n string) bool {
 	return n == "TaskCreate" || n == "TaskGet" || n == "TaskList" || n == "TaskUpdate"
+}
+
+// workflowEnabled gates the Workflow tool on settings
+// enableWorkflows/disableWorkflows (real keys — disable wins).
+func workflowEnabled() bool {
+	if boolSetting("disableWorkflows") {
+		return false
+	}
+	if boolSetting("enableWorkflows") {
+		return true
+	}
+	return true // real default: workflows on
+}
+
+// boolSetting reads a boolean key from ~/.claude/settings.json.
+func boolSetting(key string) bool {
+	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
+	if err != nil {
+		return false
+	}
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil {
+		return false
+	}
+	v, _ := m[key].(bool)
+	return v
 }

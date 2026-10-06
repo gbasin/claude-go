@@ -693,6 +693,18 @@ func main() {
 					fmt.Fprintf(os.Stderr, "forked session %s → %s (%d messages)\n", id[:8], sessionID[:8], len(msgs))
 				} else {
 					fmt.Fprintf(os.Stderr, "resumed session %s (%d messages)\n", id, len(msgs))
+					// awaySummaryEnabled (default on): recap when the last
+					// message is 5+ minutes old — last assistant text
+					// as the "where you left off" line
+					if awaySummaryEnabled() {
+						if fi, e := os.Stat(loadPathOr(cwd, id, loadPath)); e == nil &&
+							time.Since(fi.ModTime()) > 5*time.Minute {
+							if recap := lastAssistantLine(msgs); recap != "" {
+								fmt.Fprintf(os.Stderr, "  %sSession recap:%s %s\n",
+									"\x1b[38;5;246m", "\x1b[39m", recap)
+							}
+						}
+					}
 				}
 			}
 		}
@@ -1784,4 +1796,50 @@ func sessionForPR(cwd, ref string) string {
 		}
 	}
 	return ""
+}
+
+func awaySummaryEnabled() bool {
+	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
+	if err != nil {
+		return true
+	}
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil {
+		return true
+	}
+	v, ok := m["awaySummaryEnabled"].(bool)
+	return !ok || v
+}
+
+// lastAssistantLine pulls the last assistant text for the away recap.
+func lastAssistantLine(msgs []api.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != "assistant" {
+			continue
+		}
+		var blocks []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(msgs[i].Content, &blocks) == nil {
+			for _, bl := range blocks {
+				if bl.Type == "text" && strings.TrimSpace(bl.Text) != "" {
+					line := strings.TrimSpace(strings.Split(bl.Text, "\n")[0])
+					if len(line) > 100 {
+						line = line[:100] + "…"
+					}
+					return line
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func loadPathOr(cwd, id, p string) string {
+	if p != "" {
+		return p
+	}
+	slug := session.Slug(cwd)
+	return filepath.Join(config.ClaudeDir(), "projects", slug, id+".jsonl")
 }
