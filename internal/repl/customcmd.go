@@ -173,6 +173,9 @@ func interpolateBang(s, cwd string) string {
 // real surfaces them as /mcp__<server>__<prompt>. get returns the
 // expanded prompt text (prompts/get's concatenated messages).
 func RegisterMCPPrompt(fullname, desc string, get func(args map[string]string) (string, error)) {
+	if customCommands == nil {
+		customCommands = map[string]customCmd{} // lazy init for tests
+	}
 	customCommands[fullname] = customCmd{
 		Name:        fullname,
 		Body:        "", // dynamic — expanded by expandMCPPrompt
