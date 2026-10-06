@@ -69,7 +69,7 @@ func TestSlashTable(t *testing.T) {
 		{"/usage-credits", "/login", ""},
 		{"/theme", "theme:", "daltonian"},
 		{"/chrome", "Chrome", ""},
-		{"/export", "exported to", "export failed"},
+		{"/export exp-out.jsonl", "exported to", "export failed"},
 		// fresh session has no message chain → fork fails deterministically
 		{"/fork", "fork failed", "cannot fork"},
 		{"/branch", "branched session", ""},

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 func init() {
@@ -493,6 +494,9 @@ type editInput struct {
 	NewString  string `json:"new_string"`
 	ReplaceAll bool   `json:"replace_all"`
 }
+
+// CodeChange tracks +/- lines for real's /cost "code changes" tally.
+var CodeChange struct{ Added, Removed atomic.Int64 }
 
 func execEdit(c *Context, raw json.RawMessage) Result {
 	Checkpoints.Snapshot(inFilePath(c, raw))
