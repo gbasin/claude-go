@@ -428,29 +428,36 @@ func RunWithStore(l *agent.Loop, store Store) {
 							if len(queueBuf) > 0 {
 								draftBack = append(draftBack, queueBuf...)
 							}
-						} else if k.b == '\r' || k.b == '\n' || ed.kb[keystroke(k)] == "chat:sendNow" {
-							if len(queueBuf) > 0 {
-								if ed.kb[keystroke(k)] == "chat:sendNow" {
-									// sendNow jumps ahead of queued messages
-									queued = append([]string{string(queueBuf)}, queued...)
-								} else {
-									queued = append(queued, string(queueBuf))
+						} else {
+							act := ed.busyAction(k)
+							if k.b == '\r' || k.b == '\n' || act == "chat:sendNow" {
+								if len(queueBuf) > 0 {
+									if act == "chat:sendNow" {
+										// sendNow jumps ahead of queued messages
+										queued = append([]string{string(queueBuf)}, queued...)
+									} else {
+										queued = append(queued, string(queueBuf))
+									}
+									queuedPending.Add(1)
+									queueBuf = nil
+									compQueueDraft("")
+									// tracked write — a raw stderr print lands
+									// at the hardware cursor but leaves
+									// compStreamCol stale, so the next stream
+									// write repositions and overwrites it
+									streamPrint("  " + dim + "➤ queued" + reset)
 								}
-								queuedPending.Add(1)
-								queueBuf = nil
-								compQueueDraft("")
-								// tracked write — a raw stderr print lands
-								// at the hardware cursor but leaves
-								// compStreamCol stale, so the next stream
-								// write repositions and overwrites it
-								streamPrint("  " + dim + "➤ queued" + reset)
+							} else if k.r != 0 {
+								queueBuf = append(queueBuf, k.r)
+								compQueueDraft(string(queueBuf))
+							} else if k.b >= 32 && k.b < 127 {
+								// printable ASCII arrives as b-only (r unset)
+								queueBuf = append(queueBuf, rune(k.b))
+								compQueueDraft(string(queueBuf))
+							} else if k.b == 0x7f && len(queueBuf) > 0 {
+								queueBuf = queueBuf[:len(queueBuf)-1]
+								compQueueDraft(string(queueBuf))
 							}
-						} else if k.r != 0 {
-							queueBuf = append(queueBuf, k.r)
-							compQueueDraft(string(queueBuf))
-						} else if k.b == 0x7f && len(queueBuf) > 0 {
-							queueBuf = queueBuf[:len(queueBuf)-1]
-							compQueueDraft(string(queueBuf))
 						}
 					}
 				}
@@ -569,12 +576,35 @@ func RunWithStore(l *agent.Loop, store Store) {
 				ed.pos = len(ed.buf)
 				draftBack = nil
 			}
+		nextQueued:
 			if len(queued) == 0 {
 				break
 			}
 			line = queued[0]
 			queued = queued[1:]
 			queuedPending.Add(-1)
+			// queued lines get the same local dispatch as typed ones —
+			// a "/clear" submitted mid-turn is a command, not a prompt
+			switch {
+			case strings.HasPrefix(line, "#"):
+				quickMemory(l, strings.TrimSpace(line[1:]))
+				goto nextQueued
+			case strings.HasPrefix(line, "!"):
+				runBang(l, line[1:])
+				goto nextQueued
+			case strings.HasPrefix(line, "/"):
+				if expanded := expandCustomSlash(line); expanded != "" {
+					line = expanded
+				} else {
+					if handleSlashLocal(l, line, ed, ks) {
+						goto nextQueued
+					}
+					if handleSlash(l, line, ed, ks) {
+						return
+					}
+					goto nextQueued
+				}
+			}
 		}
 		// EndConversation (or anything that set wantQuit mid-turn) takes
 		// effect at turn end — gating it on the next submitted line would
