@@ -283,3 +283,109 @@ func TestPluginHookDisabled(t *testing.T) {
 		t.Fatalf("disabled plugin hook fired: %q", r.stdout)
 	}
 }
+
+// hookMarker returns a settings.json hooks stanza writing a marker file.
+func hookMarker(event, matcher, marker string) string {
+	m := ""
+	if matcher != "" {
+		m = `"matcher":"` + matcher + `",`
+	}
+	return `{"hooks":{"` + event + `":[{` + m +
+		`"hooks":[{"type":"command","command":"touch ` + marker + `"}]}]}}`
+}
+
+// TestHookPreCompact / PostCompact: /compact fires both lifecycle hooks.
+func TestHookPreCompact(t *testing.T) {
+	s := newSession(t)
+	pre := filepath.Join(s.cwd, "precompact.marker")
+	post := filepath.Join(s.cwd, "postcompact.marker")
+	s.writeSettings(`{"hooks":{
+		"PreCompact":[{"matcher":"manual","hooks":[{"type":"command","command":"touch ` + pre + `"}]}],
+		"PostCompact":[{"matcher":"manual","hooks":[{"type":"command","command":"touch ` + post + `"}]}]}}`)
+
+	p := startREPL(t, s)
+	p.sendUntilEchoed(t, "seed turn\r", "> seed turn", 8)
+	p.waitFor("Mock response", 30*time.Second)
+	p.sendUntilEchoed(t, "/compact\r", "> /compact", 8)
+	p.waitFor("ompact", 20*time.Second)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		_, e1 := os.Stat(pre)
+		_, e2 := os.Stat(post)
+		if e1 == nil && e2 == nil {
+			p.exit()
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("PreCompact/PostCompact hooks did not fire (pre=%v post=%v)",
+		fileExists(pre), fileExists(post))
+}
+
+// TestHookSubagentStop: an Agent finishing fires SubagentStop.
+func TestHookSubagentStop(t *testing.T) {
+	s := newSession(t)
+	mark := filepath.Join(s.cwd, "substop.marker")
+	s.writeSettings(hookMarker("SubagentStop", "", mark))
+	r := s.run(t, "--mock", "-p",
+		`tool:Agent {"description":"e2e","prompt":"sub x","run_in_background":false}`,
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !fileExists(mark) {
+		t.Fatal("SubagentStop hook did not fire")
+	}
+}
+
+// TestHookCwdChanged: a persisted Bash cd fires the hook (interactive —
+// OnCwdChanged is REPL-wired).
+func TestHookCwdChanged(t *testing.T) {
+	s := newSession(t)
+	mark := filepath.Join(s.cwd, "cwd.marker")
+	s.writeSettings(hookMarker("CwdChanged", "", mark))
+	other := t.TempDir()
+
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p.sendUntilEchoed(t, `tool:Bash {"command":"cd `+other+`"}`+"\r", "> tool:Bash", 8)
+	// the cd result is empty — wait on the tool-result receipt, then the marker
+	p.waitFor("Tool results received", 30*time.Second)
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) && !fileExists(mark) {
+		time.Sleep(150 * time.Millisecond)
+	}
+	p.exit()
+	if !fileExists(mark) {
+		t.Fatal("CwdChanged hook did not fire")
+	}
+}
+
+// TestHookPermissionRequest: an interactive permission prompt fires
+// PermissionRequest + Notification hooks before the dialog.
+func TestHookPermissionRequest(t *testing.T) {
+	s := newSession(t)
+	preM := filepath.Join(s.cwd, "permreq.marker")
+	notM := filepath.Join(s.cwd, "notify.marker")
+	s.writeSettings(`{"hooks":{
+		"PermissionRequest":[{"matcher":"Bash","hooks":[{"type":"command","command":"touch ` + preM + `"}]}],
+		"Notification":[{"hooks":[{"type":"command","command":"touch ` + notM + `"}]}]}}`)
+
+	p := startREPL(t, s) // default mode — Bash needs permission
+	p.sendUntilEchoed(t, `tool:Bash {"command":"echo hi"}`+"\r", "> tool:Bash", 8)
+	p.waitFor("1. Yes", 30*time.Second)
+
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if fileExists(preM) && fileExists(notM) {
+			p.exit()
+			return
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	t.Fatalf("permission hooks missing (req=%v notif=%v)", fileExists(preM), fileExists(notM))
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
