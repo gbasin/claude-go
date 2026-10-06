@@ -3175,3 +3175,9 @@ func procStartTokenOf(pid int) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// ActiveSocketPath returns the bound inbox path ("" if messaging is off).
+func ActiveSocketPath() string {
+	s, _ := activeSock.Load().(string)
+	return s
+}
