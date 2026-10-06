@@ -913,6 +913,31 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 			}
 			// tools/list_changed: the client refreshes c.Tools; re-register
 			// the new entries so they surface (real reloads in place)
+			// prompts surface as /mcp__server__name slash commands (real
+			// parity) — expand via prompts/get when invoked
+			if ps, _, perr := c.ListPrompts(context.Background(), ""); perr == nil {
+				for _, pr := range ps {
+					pn := pr.Name
+					tools.RegisterMCPPrompt(prefix, pn,
+						func(ctx context.Context, args map[string]string) (string, error) {
+							res, err := c.GetPrompt(ctx, pn, args)
+							if err != nil {
+								return "", err
+							}
+							var parts []string
+							for _, m := range res.Messages {
+								var pc struct {
+									Type string `json:"type"`
+									Text string `json:"text"`
+								}
+								if json.Unmarshal(m.Content, &pc) == nil && pc.Text != "" {
+									parts = append(parts, pc.Text)
+								}
+							}
+							return strings.Join(parts, "\n\n"), nil
+						})
+				}
+			}
 			c.OnToolsChanged = func() {
 				var ents []tools.MCPToolEntry
 				for _, t := range c.ListTools() {

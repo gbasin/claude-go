@@ -594,6 +594,20 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			exec.Command("open", url).Start()
 		}
 	default:
+		if fetch, ok := tools.ResolveMCPPrompt(cmd); ok {
+			// MCP prompt → fetch its messages and run them as the turn
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				txt, err := fetch(ctx, map[string]string{"input": arg})
+				if err != nil {
+					dprintln("  prompt failed:", err)
+					return
+				}
+				l.Ask(context.Background(), txt)
+			}()
+			return false
+		}
 		if c, ok := hiddenCommands[cmd]; ok {
 			// hidden custom commands run but don't list in help/completion
 			go l.Ask(context.Background(), expandCustomCommand(c, arg))
