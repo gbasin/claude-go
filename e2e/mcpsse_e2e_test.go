@@ -91,6 +91,19 @@ func (m *sseMCPServer) handleMsg(w http.ResponseWriter, r *http.Request) {
 	case "resources/read":
 		result = map[string]any{"contents": []map[string]any{{
 			"uri": "mem://note1", "mimeType": "text/plain", "text": "RES-CONTENT-E2E"}}}
+	case "prompts/list":
+		result = map[string]any{"prompts": []map[string]any{{
+			"name":        "greet",
+			"description": "e2e prompt",
+			"arguments":   []map[string]any{{"name": "input", "required": false}},
+		}}}
+	case "prompts/get":
+		result = map[string]any{
+			"description": "e2e prompt",
+			"messages": []map[string]any{{
+				"role":    "user",
+				"content": map[string]any{"type": "text", "text": "PROMPTBODY-E2E say hello"},
+			}}}
 	case "tools/list":
 		m.mu.Lock()
 		toolList := append([]map[string]any{{
@@ -413,4 +426,23 @@ func TestMCPListChanged(t *testing.T) {
 	if count < 2 {
 		t.Fatalf("expected tools/list refresh after list_changed; methods: %v", srv.sawMethods())
 	}
+}
+
+// TestMCPPromptSlash: an MCP prompt surfaces as /mcp__server__name —
+// invoking it fetches prompts/get and runs the messages as a turn.
+func TestMCPPromptSlash(t *testing.T) {
+	srv := newSSEMCPServer(t)
+	s := newSession(t)
+	s.writeSettings(`{"enableAllProjectMcpServers":true}`)
+	s.writeFile(".mcp.json", fmt.Sprintf(
+		`{"mcpServers":{"ssetest":{"type":"sse","url":%q}}}`, srv.srv.URL+"/sse"))
+
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p.sendUntil("/mcp\r", "● ", 20)
+	p.send("\x1b")
+	time.Sleep(300 * time.Millisecond)
+
+	p.sendUntilEchoed(t, "/mcp__ssetest__greet\r", "❯ /mcp__ssetest__greet", 8)
+	p.waitFor("Mock response to: PROMPTBODY-E2E", 30*time.Second)
+	p.exit()
 }
