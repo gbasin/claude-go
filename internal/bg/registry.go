@@ -2,6 +2,7 @@ package bg
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -103,7 +104,8 @@ func List() []*Job {
 		}
 		if !j.Alive() {
 			if !pidAlive(j.PID) {
-				j.Remove() // pid gone — reap the dir
+				j.Remove()               // pid gone — reap the dir
+				os.Remove(j.SocketPath()) // and the dead rendezvous sock
 			}
 			continue
 		}
@@ -130,4 +132,26 @@ func Lookup(prefix string) (*Job, error) {
 		}
 	}
 	return match, nil
+}
+
+// Stop asks a live worker to end its session — real's `claude stop`-era
+// path: the host SIGTERM handler TERM's the child pgrp and removes the job.
+func Stop(prefix string) error {
+	j, err := Lookup(prefix)
+	if err != nil {
+		return err
+	}
+	if j == nil {
+		return fmt.Errorf("no running background session %q", prefix)
+	}
+	signalHost(j.PID)
+	for i := 0; i < 40 && pidAlive(j.PID); i++ {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if pidAlive(j.PID) {
+		return fmt.Errorf("worker %s did not stop", j.Short)
+	}
+	j.Remove()
+	os.Remove(j.SocketPath())
+	return nil
 }

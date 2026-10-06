@@ -82,6 +82,37 @@ func TestBgSessionLifecycle(t *testing.T) {
 	})
 }
 
+// TestBgStop covers `claude stop <id>` — the worker is SIGTERMed, the job
+// is reaped from `agents`, and the transcript survives on disk.
+func TestBgStop(t *testing.T) {
+	s := newSession(t)
+	mockEnv := []string{"CLAUDE_GO_MOCK=1"}
+	r := s.runEx(t, mockEnv, 30*time.Second, "--bg", "count to three")
+	s.mustOK(t, r)
+	m := regexp.MustCompile(`claude attach ([0-9a-f]{8})`).FindStringSubmatch(r.stdout)
+	if len(m) < 2 {
+		t.Fatalf("--bg output lacks attach hint: %q", r.stdout)
+	}
+	short := m[1]
+	poll(t, 10*time.Second, "worker in agents", func() bool {
+		return strings.Contains(s.run(t, "agents").stdout, short)
+	})
+	poll(t, 15*time.Second, "first turn logged", func() bool {
+		trans, _ := filepath.Glob(s.home + "/.claude/projects/*/*.jsonl")
+		return len(trans) > 0
+	})
+
+	r = s.run(t, "stop", short)
+	s.mustOK(t, r)
+	contains(t, r.stdout, "stopped", "stop output")
+	poll(t, 5*time.Second, "worker reaped after stop", func() bool {
+		return !strings.Contains(s.run(t, "agents").stdout, short)
+	})
+	if trans, _ := filepath.Glob(s.home + "/.claude/projects/*/*.jsonl"); len(trans) == 0 {
+		t.Fatal("stop removed the transcript — real keeps it")
+	}
+}
+
 // TestBackgroundSlashDetach covers /background inside a live REPL: the
 // interactive process exits, the session continues under a bg worker, and
 // attach reaches it.
