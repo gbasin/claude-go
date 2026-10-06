@@ -688,3 +688,19 @@ func TestFlagWorkload(t *testing.T) {
 	}
 	t.Fatal("--workload tag missing from the wire billing block")
 }
+
+// TestFlagProject: --project sets the session cwd context — the env
+// composite advertises the target dir.
+func TestFlagProject(t *testing.T) {
+	s := newSession(t)
+	target := t.TempDir()
+	r, bodies := recordRequests(t, s, "-p", "hi", "--project", target)
+	s.mustOK(t, r)
+	resolved, _ := filepath.EvalSymlinks(target)
+	for _, b := range bodies {
+		if bytes.Contains(b, []byte(resolved)) || bytes.Contains(b, []byte(target)) {
+			return
+		}
+	}
+	t.Fatal("--project dir missing from the wire env composite")
+}
