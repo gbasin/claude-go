@@ -555,3 +555,123 @@ func TestSettingsAskRule(t *testing.T) {
 	p.waitFor("1. Yes", 30*time.Second)
 	p.exit()
 }
+
+// TestFlagThinkingDisabled / EnabledBudget: thinking config on the wire.
+func TestFlagThinkingDisabled(t *testing.T) {
+	s := newSession(t)
+	r, bodies := recordRequests(t, s, "-p", "hi", "--thinking", "disabled")
+	s.mustOK(t, r)
+	for _, b := range bodies {
+		if bytes.Contains(b, []byte(`"type":"disabled"`)) {
+			return
+		}
+	}
+	t.Fatal("--thinking disabled missing from the wire")
+}
+
+func TestFlagThinkingBudget(t *testing.T) {
+	s := newSession(t)
+	r, bodies := recordRequests(t, s, "-p", "hi",
+		"--thinking", "enabled", "--max-thinking-tokens", "5000")
+	s.mustOK(t, r)
+	for _, b := range bodies {
+		if bytes.Contains(b, []byte(`"budget_tokens":5000`)) {
+			return
+		}
+	}
+	t.Fatal("--max-thinking-tokens not on the wire")
+}
+
+// TestFlagSystemPromptFile: file content replaces the system prompt.
+func TestFlagSystemPromptFile(t *testing.T) {
+	s := newSession(t)
+	f := s.writeFile("sysp.txt", "SYSFILE-E2E-CONTENT")
+	r, bodies := recordRequests(t, s, "-p", "hi", "--system-prompt-file", f)
+	s.mustOK(t, r)
+	for _, b := range bodies {
+		if bytes.Contains(b, []byte("SYSFILE-E2E-CONTENT")) {
+			return
+		}
+	}
+	t.Fatal("--system-prompt-file content missing from the wire")
+}
+
+// TestFlagAppendSystemPromptFile: appended file content lands in the
+// system array alongside the default blocks.
+func TestFlagAppendSystemPromptFile(t *testing.T) {
+	s := newSession(t)
+	f := s.writeFile("append.txt", "APPFILE-E2E-CONTENT")
+	r, bodies := recordRequests(t, s, "-p", "hi", "--append-system-prompt-file", f)
+	s.mustOK(t, r)
+	for _, b := range bodies {
+		if bytes.Contains(b, []byte("APPFILE-E2E-CONTENT")) {
+			return
+		}
+	}
+	t.Fatal("--append-system-prompt-file content missing from the wire")
+}
+
+// TestFlagName: --name writes a summary record naming the session.
+func TestFlagName(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p", "hi", "--name", "e2e-named-session")
+	s.mustOK(t, r)
+	dir := filepath.Join(s.home, ".claude", "projects")
+	files, _ := filepath.Glob(filepath.Join(dir, "*", "*.jsonl"))
+	for _, f := range files {
+		b, _ := os.ReadFile(f)
+		if bytes.Contains(b, []byte(`"summary":"e2e-named-session"`)) {
+			return
+		}
+	}
+	t.Fatalf("--name summary record missing from transcript %v", files)
+}
+
+// TestFlagPlanModeRequired: --plan-mode-required forces plan mode —
+// the env composite advertises it and writes are refused.
+func TestFlagPlanModeRequired(t *testing.T) {
+	s := newSession(t)
+	r, bodies := recordRequests(t, s, "-p",
+		`tool:Write {"file_path":"planref.txt","content":"x"}`,
+		"--plan-mode-required", "--output-format", "stream-json")
+	s.mustOK(t, r)
+	var planOnWire bool
+	for _, b := range bodies {
+		if bytes.Contains(b, []byte("plan")) &&
+			bytes.Contains(b, []byte("permission mode")) {
+			planOnWire = true
+		}
+	}
+	if !planOnWire {
+		t.Fatal("plan mode not advertised on the wire")
+	}
+	if _, err := os.Stat(filepath.Join(s.cwd, "planref.txt")); !os.IsNotExist(err) {
+		t.Fatal("plan mode should refuse writes")
+	}
+}
+
+// TestFlagDangerouslySkipPermissions: shortcut for bypassPermissions.
+func TestFlagDangerouslySkipPermissions(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p", `tool:Bash {"command":"echo dspok"}`,
+		"--dangerously-skip-permissions", "--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, `"content":"dspok"`) {
+		t.Fatalf("--dangerously-skip-permissions should allow: %s", truncStr(r.stdout, 1200))
+	}
+}
+
+// TestFlagAgents: --agents materializes CLI agent defs — the name joins
+// the agents dir and an Agent call with that type runs.
+func TestFlagAgents(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p",
+		`tool:Agent {"description":"e2e","prompt":"agents-json-e2e","subagent_type":"e2e-cli-agent","run_in_background":false}`,
+		"--agents", `[{"name":"e2e-cli-agent","description":"cli agent","prompt":"CLI-AGENT-P-E2E"}]`,
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "Mock response") {
+		t.Fatalf("--agents type did not run: %s", truncStr(r.stdout, 1500))
+	}
+}
