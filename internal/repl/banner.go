@@ -1,8 +1,11 @@
 package repl
 
 import (
+	"claude-go/internal/config"
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -319,4 +322,34 @@ func compactBanner(version, name, effort, plan, cwd, sessionID string) {
 	fmt.Printf(" %s▐▛███▛█%s   %sClaude Code%s %sv%s%s\r\n", claudeOrange, reset, bold, reset, dim, version, reset)
 	fmt.Printf("%s▝▜██████▀%s  %s with %s effort · %s\r\n", claudeOrange, reset, name, effort, plan)
 	fmt.Printf(" %s▝▝   ▝▝%s   %s · %s\r\n", claudeOrange, reset, short, link)
+}
+
+// printAutoModeNotice renders real's one-time auto-mode announcement —
+// a pink ▎ quote block with the permission-modes link. Shown once per
+// install (tracked via ~/.claude.json autoModeNoticeShown).
+func printAutoModeNotice(permMode string) {
+	if permMode != "auto" {
+		return
+	}
+	m, _ := config.ReadClaudeJSON()
+	if shown, _ := m["autoModeNoticeShown"].(bool); shown {
+		return
+	}
+	pink := "\x1b[38;5;174m"
+	gray := "\x1b[38;5;246m"
+	fmt.Printf("%s▎%s  %sAuto mode is now Claude Code's default permission mode.%s\n",
+		pink, reset, bold, "\x1b[22m"+reset)
+	for _, ln := range []string{
+		"Auto mode lets Claude handle permission prompts automatically. Claude checks",
+		"each tool call for risky actions and prompt injection before executing, runs",
+		"the ones it assesses as lower-risk, and blocks the rest.",
+	} {
+		fmt.Printf("%s▎%s  %s%s%s\n", pink, reset, gray, ln, reset)
+	}
+	fmt.Printf("%s▎%s  %s\x1b]8;;https://code.claude.com/docs/en/permission-modes\x07%shttps://code.claude.com/docs/en/permission-modes%s\x1b]8;;\x07%s\n",
+		pink, reset, gray, gray, reset, reset)
+	m["autoModeNoticeShown"] = true
+	if b, err := json.MarshalIndent(m, "", "  "); err == nil {
+		os.WriteFile(filepath.Join(config.Home(), ".claude.json"), b, 0o644)
+	}
 }

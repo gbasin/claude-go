@@ -135,7 +135,7 @@ func TestMCPSSEToolCall(t *testing.T) {
 	// so retry only while the editor echo hasn't appeared at all.
 	line := `calls:[{"name":"ToolSearch","input":{"query":"select:mcp__ssetest__ping"}},` +
 		`{"name":"mcp__ssetest__ping","input":{}}]`
-	p.sendUntilEchoed(t, line+"\r", `> calls:[{"name":"ToolSearch"`, 8)
+	p.sendUntilEchoed(t, line+"\r", `❯ calls:[{"name":"ToolSearch"`, 8)
 	p.waitFor("PONG-E2E", 30*time.Second)
 
 	// the handshake + call sequence actually happened on the wire
@@ -170,7 +170,7 @@ func TestMCPSSEDeferredRefusal(t *testing.T) {
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
 	p.sendUntil("/mcp\r", "connected", 20)
 
-	p.sendUntilEchoed(t, `tool:mcp__ssetest__ping {}`+"\r", "> tool:mcp__ssetest__ping", 8)
+	p.sendUntilEchoed(t, `tool:mcp__ssetest__ping {}`+"\r", "❯ tool:mcp__ssetest__ping", 8)
 	p.waitFor("InputValidationError", 30*time.Second)
 
 	// the deferred refusal happens client-side — no tools/call on the wire
@@ -262,7 +262,7 @@ func TestMCPHTTPToolCall(t *testing.T) {
 	p.sendUntilEchoed(t,
 		`calls:[{"name":"ToolSearch","input":{"query":"select:mcp__httptest__ping"}},`+
 			`{"name":"mcp__httptest__ping","input":{}}]`+"\r",
-		`> calls:[{"name":"ToolSearch"`, 8)
+		`❯ calls:[{"name":"ToolSearch"`, 8)
 	p.waitFor("PONG-HTTP-E2E", 30*time.Second)
 
 	// session id issued at initialize must be echoed on later requests
@@ -306,7 +306,7 @@ func TestMCPResources(t *testing.T) {
 		`calls:[{"name":"ToolSearch","input":{"query":"select:ListMcpResourcesTool,ReadMcpResourceTool"}},`+
 			`{"name":"ListMcpResourcesTool","input":{}},`+
 			`{"name":"ReadMcpResourceTool","input":{"server":"ssetest","uri":"mem://note1"}}]`+"\r",
-		`> calls:[{"name":"ToolSearch"`, 8)
+		`❯ calls:[{"name":"ToolSearch"`, 8)
 	p.waitFor("RES-CONTENT-E2E", 30*time.Second)
 	p.waitFor("mem://note1", 5*time.Second)
 	p.exit()

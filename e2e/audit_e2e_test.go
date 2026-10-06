@@ -304,9 +304,9 @@ func TestHookPreCompact(t *testing.T) {
 		"PostCompact":[{"matcher":"manual","hooks":[{"type":"command","command":"touch ` + post + `"}]}]}}`)
 
 	p := startREPL(t, s)
-	p.sendUntilEchoed(t, "seed turn\r", "> seed turn", 8)
+	p.sendUntilEchoed(t, "seed turn\r", "❯ seed turn", 8)
 	p.waitFor("Mock response", 30*time.Second)
-	p.sendUntilEchoed(t, "/compact\r", "> /compact", 8)
+	p.sendUntilEchoed(t, "/compact\r", "❯ /compact", 8)
 	p.waitFor("ompact", 20*time.Second)
 
 	deadline := time.Now().Add(10 * time.Second)
@@ -347,7 +347,7 @@ func TestHookCwdChanged(t *testing.T) {
 	other := t.TempDir()
 
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
-	p.sendUntilEchoed(t, `tool:Bash {"command":"cd `+other+`"}`+"\r", "> tool:Bash", 8)
+	p.sendUntilEchoed(t, `tool:Bash {"command":"cd `+other+`"}`+"\r", "❯ tool:Bash", 8)
 	// the cd result is empty — wait on the tool-result receipt, then the marker
 	p.waitFor("Tool results received", 30*time.Second)
 	deadline := time.Now().Add(8 * time.Second)
@@ -371,7 +371,7 @@ func TestHookPermissionRequest(t *testing.T) {
 		"Notification":[{"hooks":[{"type":"command","command":"touch ` + notM + `"}]}]}}`)
 
 	p := startREPL(t, s) // default mode — Bash needs permission
-	p.sendUntilEchoed(t, `tool:Bash {"command":"echo hi"}`+"\r", "> tool:Bash", 8)
+	p.sendUntilEchoed(t, `tool:Bash {"command":"echo hi"}`+"\r", "❯ tool:Bash", 8)
 	p.waitFor("1. Yes", 30*time.Second)
 
 	deadline := time.Now().Add(8 * time.Second)

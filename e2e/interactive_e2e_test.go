@@ -30,12 +30,12 @@ import (
 )
 
 // startREPL boots an interactive --mock session on a pty and waits for the
-// first prompt box (╭─╮). Onboarding/trust are pre-seeded in newSession.
+// first prompt box (─ rule + ❯). Onboarding/trust are pre-seeded in newSession.
 func startREPL(t *testing.T, s *sess, args ...string) *ptyProc {
 	t.Helper()
 	full := append([]string{"--mock"}, args...)
 	p := s.runPTY(t, nil, full...)
-	p.waitFor("╭─╮", 30*time.Second)
+	p.waitFor("❯", 30*time.Second)
 	return p
 }
 
@@ -43,7 +43,7 @@ func startREPL(t *testing.T, s *sess, args ...string) *ptyProc {
 // sent while a turn is running is dropped by the REPL's queue goroutine.
 func (p *ptyProc) sendAtPrompt(n int, keys string) {
 	p.t.Helper()
-	p.waitCount("╭─╮", n, 30*time.Second)
+	p.waitCount("❯", n, 30*time.Second)
 	p.send(keys)
 }
 
@@ -145,9 +145,9 @@ func TestInteractiveBanner(t *testing.T) {
 	p.waitFor("Mock response to: hi", 30*time.Second)
 	p.exit()
 	out = p.clean()
-	// box-drawing prompt chrome appeared
-	for _, ch := range []string{"╭", "│", "╰"} {
-		contains(t, out, ch, "box-drawing prompt chrome")
+	// prompt chrome appeared — real's box is full-width ─ rules + ❯
+	for _, ch := range []string{"─", "❯"} {
+		contains(t, out, ch, "prompt chrome")
 	}
 }
 
@@ -207,7 +207,7 @@ func TestSlashSmoke(t *testing.T) {
 	cmd := func(line, want string, timeout time.Duration) {
 		t.Helper()
 		if prompt > 1 {
-			p.waitCount("╭─╮", prompt, 30*time.Second)
+			p.waitCount("❯", prompt, 30*time.Second)
 		}
 		p.send(line)
 		p.waitFor(want, timeout)
