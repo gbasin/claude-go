@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -309,4 +310,39 @@ func TestMCPResources(t *testing.T) {
 	p.waitFor("RES-CONTENT-E2E", 30*time.Second)
 	p.waitFor("mem://note1", 5*time.Second)
 	p.exit()
+}
+
+// TestMCPOAuthNeedsAuth: a 401 with WWW-Authenticate resource_metadata
+// triggers OAuth discovery — the server's authorization endpoint surfaces
+// in the connect error.
+func TestMCPOAuthNeedsAuth(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth-meta":
+			json.NewEncoder(w).Encode(map[string]any{
+				"authorization_servers": []string{srv.URL}})
+		case "/.well-known/oauth-authorization-server":
+			json.NewEncoder(w).Encode(map[string]any{
+				"authorization_endpoint": srv.URL + "/authorize-e2e",
+				"token_endpoint":         srv.URL + "/token"})
+		default:
+			w.Header().Set("WWW-Authenticate",
+				`Bearer resource_metadata="`+srv.URL+`/oauth-meta"`)
+			w.WriteHeader(401)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	s := newSession(t)
+	cfg := s.writeFile("oauth-mcp.json", fmt.Sprintf(
+		`{"mcpServers":{"osrv":{"type":"http","url":%q}}}`, srv.URL))
+	r := s.run(t, "--mock", "-p", "hi", "--mcp-config", cfg)
+	s.mustOK(t, r)
+	if !strings.Contains(r.stderr, "authorization required") {
+		t.Fatalf("needs-auth error not surfaced: %s", r.stderr)
+	}
+	if !strings.Contains(r.stderr, "/authorize-e2e") {
+		t.Fatalf("discovered auth URL missing: %s", r.stderr)
+	}
 }

@@ -675,3 +675,16 @@ func TestFlagAgents(t *testing.T) {
 		t.Fatalf("--agents type did not run: %s", truncStr(r.stdout, 1500))
 	}
 }
+
+// TestFlagWorkload: --workload tags the billing header on the wire.
+func TestFlagWorkload(t *testing.T) {
+	s := newSession(t)
+	r, bodies := recordRequests(t, s, "-p", "hi", "--workload", "e2e-wl")
+	s.mustOK(t, r)
+	for _, b := range bodies {
+		if bytes.Contains(b, []byte("cc_workload=e2e-wl")) {
+			return
+		}
+	}
+	t.Fatal("--workload tag missing from the wire billing block")
+}
