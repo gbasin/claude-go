@@ -329,6 +329,7 @@ func main() {
 
 	client, cleanup := buildClient(o.mockMode, sessionID)
 	defer cleanup()
+	pruneOldSessions(cleanupPeriod())
 
 	// real's entrypoint is known at launch: interactive runs report
 	// "cli", -p reports "sdk-cli". Set it before any aux goroutine reads
@@ -1842,4 +1843,39 @@ func loadPathOr(cwd, id, p string) string {
 	}
 	slug := session.Slug(cwd)
 	return filepath.Join(config.ClaudeDir(), "projects", slug, id+".jsonl")
+}
+
+// cleanupPeriodDays — how long to keep transcripts (default 30, min 1).
+func cleanupPeriod() int {
+	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
+	if err != nil {
+		return 30
+	}
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil {
+		return 30
+	}
+	if f, ok := m["cleanupPeriodDays"].(float64); ok && f >= 1 {
+		return int(f)
+	}
+	return 30
+}
+
+// pruneOldSessions deletes transcript files older than the period —
+// real's startup cleanup (cleanupPeriodDays).
+func pruneOldSessions(days int) {
+	if days <= 0 {
+		return
+	}
+	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
+	root := filepath.Join(config.ClaudeDir(), "projects")
+	filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".jsonl") {
+			return nil
+		}
+		if fi, err := d.Info(); err == nil && fi.ModTime().Before(cutoff) {
+			os.Remove(p)
+		}
+		return nil
+	})
 }

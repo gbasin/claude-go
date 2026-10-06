@@ -141,6 +141,9 @@ func All() []*Tool {
 		if n == "Workflow" && !workflowEnabled() {
 			continue
 		}
+		if (n == "Artifact" || n == "ArtifactComments" || n == "ArtifactData") && !artifactEnabled() {
+			continue
+		}
 		if t, ok := registry[n]; ok {
 			if n == "CronCreate" || n == "CronDelete" || n == "CronList" {
 				t = cronToolDef(t)
@@ -348,4 +351,13 @@ func boolSetting(key string) bool {
 	}
 	v, _ := m[key].(bool)
 	return v
+}
+
+// artifactEnabled gates the Artifact tool family on settings
+// enableArtifact/disableArtifact (real keys — disable wins).
+func artifactEnabled() bool {
+	if boolSetting("disableArtifact") {
+		return false
+	}
+	return true
 }
