@@ -470,3 +470,88 @@ func TestFlagTeleportNoSessions(t *testing.T) {
 		t.Fatalf("teleport panicked: %s", r.stderr)
 	}
 }
+
+// TestFlagSettingsFile: --settings merges permissions rules — an allow
+// rule from the file lets Bash run in default-mode -p.
+func TestFlagSettingsFile(t *testing.T) {
+	s := newSession(t)
+	f := s.writeFile("custom-settings.json",
+		`{"permissions":{"allow":["Bash(echo settingsok)"]}}`)
+	r := s.run(t, "--mock", "-p",
+		`tool:Bash {"command":"echo settingsok"}`,
+		"--settings", f,
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, `"content":"settingsok"`) {
+		t.Fatalf("--settings allow rule not honored: %s", truncStr(r.stdout, 1500))
+	}
+}
+
+// TestFlagSettingsJSON: --settings also accepts inline JSON.
+func TestFlagSettingsJSON(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p",
+		`tool:Bash {"command":"echo inline-ok"}`,
+		"--settings", `{"permissions":{"allow":["Bash(echo inline-ok)"]}}`,
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, `"content":"inline-ok"`) {
+		t.Fatalf("inline --settings not honored: %s", truncStr(r.stdout, 1500))
+	}
+}
+
+// TestFlagFallbackModel: an overload error walks the fallback chain —
+// the retry request carries the fallback model. (error:503 fails
+// fast; 429 also walks but burns the ~30s retry floor.)
+func TestFlagFallbackModel(t *testing.T) {
+	s := newSession(t)
+	rec := filepath.Join(t.TempDir(), "reqs")
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 60*time.Second,
+		"--mock", "-p", "error:503",
+		"--fallback-model", "claude-haiku-4-5-20251001")
+	// both models fail — exit code may be nonzero; the request records are
+	// the assertion
+	_ = r
+	ents, _ := os.ReadDir(rec)
+	var sawMain, sawFallback bool
+	for _, e := range ents {
+		b, _ := os.ReadFile(filepath.Join(rec, e.Name()))
+		if bytes.Contains(b, []byte(`"model":"claude-fable-5-1"`)) {
+			sawMain = true
+		}
+		if bytes.Contains(b, []byte(`"model":"claude-haiku-4-5-20251001"`)) {
+			sawFallback = true
+		}
+	}
+	if !sawMain || !sawFallback {
+		t.Fatalf("expected main+fallback requests (main=%v fallback=%v)", sawMain, sawFallback)
+	}
+}
+
+// TestSettingsEnvInjection: settings.env injects vars into the process +
+// Bash children.
+func TestSettingsEnvInjection(t *testing.T) {
+	s := newSession(t)
+	s.writeSettings(`{"env":{"E2E_SETTINGS_VAR":"injected-e2e"}}`)
+	r := s.run(t, "--mock", "-p",
+		`tool:Bash {"command":"echo $E2E_SETTINGS_VAR"}`,
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "injected-e2e") {
+		t.Fatalf("settings env not in bash child: %s", truncStr(r.stdout, 1200))
+	}
+}
+
+// TestSettingsAskRule: an `ask` rule forces a permission prompt even when
+// a broad allow rule would match (PTY: dialog appears).
+func TestSettingsAskRule(t *testing.T) {
+	s := newSession(t)
+	s.writeSettings(`{"permissions":{
+		"allow":["Bash"],
+		"ask":["Bash(echo askme)"]}}`)
+	p := startREPL(t, s)
+	p.sendUntilEchoed(t, `tool:Bash {"command":"echo askme"}`+"\r", "> tool:Bash", 8)
+	p.waitFor("1. Yes", 30*time.Second)
+	p.exit()
+}
