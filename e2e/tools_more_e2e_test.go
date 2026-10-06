@@ -267,7 +267,7 @@ func TestCtrlCDoubleExit(t *testing.T) {
 	s := newSession(t)
 	p := startREPL(t, s)
 	p.send("\x03")
-	p.waitFor("ctrl-C again to exit", 15*time.Second)
+	p.waitFor("Press Ctrl-C again to exit", 15*time.Second)
 	p.send("\x03")
 	if err := p.waitExit(15 * time.Second); err != nil {
 		t.Fatalf("double ctrl-C should exit: %v", err)
