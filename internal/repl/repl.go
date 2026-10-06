@@ -991,6 +991,10 @@ func settingsVerbs() []string {
 }
 
 func newSpinner() *spinner {
+	// /compact overrides the verb with the literal "Compacting conversation"
+	if compactSpin.Load() {
+		return &spinner{done: make(chan struct{}), verb: "Compacting conversation"}
+	}
 	verbs := settingsVerbs()
 	s := &spinner{done: make(chan struct{}),
 		verb: verbs[time.Now().UnixNano()%int64(len(verbs))]}
