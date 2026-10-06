@@ -67,8 +67,10 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			dprintf("  Compacted · %d messages summarized (ctrl+o to see them)\n", before)
 		}
 	case "cost", "usage", "stats":
-		// real's /usage: window bars from the rate-limit headers + token
-		// totals for the session
+		// real's /cost: Session summary (cost, durations, code changes,
+		// usage) + plugin skill-listing footprint; /usage also gets the
+		// rate-limit bars below it
+		sessionCostBlock(l)
 		usageDisplay(l)
 	case "status":
 		statusOverlay(l, ks)
@@ -119,7 +121,11 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			}
 		}
 	case "export":
-		exportCmd(l, arg)
+		if arg == "" {
+			exportDialog(l, ks)
+		} else {
+			exportCmd(l, arg)
+		}
 	case "init":
 		dprintln("  analyzing codebase → CLAUDE.md …")
 		body := bundledInit
@@ -292,7 +298,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		if currentStore != nil {
 			currentStore.LogTitle(arg)
 		}
-		dprintln("  session renamed:", arg)
+		dprintf("  %s⎿%s  Session renamed to: %s\n", dim, reset, arg)
 	case "teleport":
 		teleportCmd(l)
 	case "remote-control":
@@ -3606,4 +3612,188 @@ func firstNonEmptyStr(ss ...string) string {
 		}
 	}
 	return ""
+}
+
+// sessionCostBlock prints real's /cost Session section (captured):
+// cost, API/wall durations, code-change tally, token usage, and the
+// plugin skill-listing footprint table.
+func sessionCostBlock(l *agent.Loop) {
+	u := l.UsageTotal
+	dprintf("  %sSession%s\n", bold, reset)
+	dprintf("  Total cost:            $%.4f\n", l.CostUSD())
+	dprintf("  Total duration (API):  %s\n", fmtDur(l.APIDuration()))
+	dprintf("  Total duration (wall): %s\n", fmtDur(time.Since(l.SessionStarted())))
+	dprintf("  Total code changes:    %d lines added, %d lines removed\n",
+		l.LinesAdded.Load(), l.LinesRemoved.Load())
+	dprintf("  Usage:                 %d input, %d output, %d cache read, %d cache write\n",
+		u.InputTokens, u.OutputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens)
+	if fp := pluginSkillFootprint(l); fp != "" {
+		dprintf("%s", fp)
+	}
+}
+
+// pluginSkillFootprint renders real's "Plugin skill-listing footprint"
+// section — per-plugin skill count + approx tokens/turn.
+func pluginSkillFootprint(l *agent.Loop) string {
+	if l.ToolCtx == nil {
+		return ""
+	}
+	return pluginFootprint(l.ToolCtx.CWD)
+}
+
+// exportDialog — real's "Export conversation / Select export method"
+// chooser: Copy to clipboard / Save to file.
+func exportDialog(l *agent.Loop, ks *keySource) {
+	compSuspend()
+	defer compResume()
+	dch := make(chan key, 8)
+	ks.dialog.Store(&dch)
+	defer ks.dialog.Store(nil)
+	cyan := "\x1b[38;5;153m"
+	gray := "\x1b[38;5;246m"
+	opts := [][2]string{
+		{"Copy to clipboard", "Copy the conversation to your system clipboard"},
+		{"Save to file", "Save the conversation to a file in the current directory"},
+	}
+	sel := 0
+	draw := func() {
+		var sb strings.Builder
+		sb.WriteString("\r\x1b[J  " + bold + "Export conversation" + unbold + "\n")
+		sb.WriteString("  " + "Select export method" + "\n\n")
+		for i, o := range opts {
+			if i == sel {
+				sb.WriteString(fmt.Sprintf(" %s❯%s %s%d.%s %s%s  %s%s%s\n", cyan, "\x1b[39m", gray, i+1, "\x1b[39m", cyan, o[0]+"\x1b[39m", gray, o[1], "\x1b[39m"))
+			} else {
+				sb.WriteString(fmt.Sprintf("   %s%d.%s %s  %s%s%s\n", gray, i+1, "\x1b[39m", o[0], gray, o[1], "\x1b[39m"))
+			}
+		}
+		sb.WriteString("\n " + gray + "Esc to cancel" + "\x1b[39m")
+		fmt.Print(sb.String())
+	}
+	draw()
+	for k := range dch {
+		switch {
+		case k.seq == "[A" && sel > 0:
+			sel--
+			draw()
+		case k.seq == "[B" && sel < len(opts)-1:
+			sel++
+			draw()
+		case k.b == 0x1b || k.b == 3:
+			dprintln()
+			return
+		case k.b >= '1' && k.b <= '0'+byte(len(opts)):
+			sel = int(k.b - '1')
+			fallthrough
+		case k.b == '\r':
+			dprintln()
+			switch sel {
+			case 0:
+				if copyToClipboardTranscript(l) {
+					dprintln("  copied to clipboard")
+				}
+			case 1:
+				exportCmd(l, "")
+			}
+			return
+		}
+	}
+}
+
+// copyToClipboardTranscript — clipboard export via pbcopy (macOS) or
+// xclip/xsel; real's "Copy to clipboard" does the same.
+func copyToClipboardTranscript(l *agent.Loop) bool {
+	if l.Transcript == "" {
+		dprintln("  no transcript")
+		return false
+	}
+	b, err := os.ReadFile(l.Transcript)
+	if err != nil {
+		dprintln("  export failed:", err)
+		return false
+	}
+	for _, cb := range [][]string{{"pbcopy"}, {"xclip", "-selection", "clipboard"}, {"xsel", "-b"}} {
+		cmd := exec.Command(cb[0], cb[1:]...)
+		cmd.Stdin = strings.NewReader(string(b))
+		if err := cmd.Run(); err == nil {
+			return true
+		}
+	}
+	dprintln("  no clipboard tool found")
+	return false
+}
+
+// pluginFootprint renders the "Plugin skill-listing footprint" section —
+// per-plugin skill count + approx token weight per turn.
+func pluginFootprint(cwd string) string {
+	rows := pluginSkillCounts()
+	if len(rows) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("  " + bold + "Plugin skill-listing footprint" + reset + "\n")
+	b.WriteString("  " + dim + "What each plugin's skill descriptions add to the system prompt (cached\n  input after the first turn). Agents and MCP tools not yet counted." + reset + "\n")
+	total := 0
+	for _, r := range rows {
+		fmt.Fprintf(&b, "  %s%-28s%s%d skill%s · ~%d tok/turn\n",
+			dim, r.name, reset, r.count, pluralize(r.count, "", "s"), r.toks)
+		total += r.toks
+	}
+	fmt.Fprintf(&b, "  %sTotal%s  ~%d tok/turn\n", bold, reset, total)
+	return b.String()
+}
+
+type pluginSkillRow struct {
+	name  string
+	count int
+	toks  int
+}
+
+// pluginSkillCounts tallies each installed plugin's SKILL.md description
+// footprint (~description length in tokens /turn, real's rough heuristic).
+func pluginSkillCounts() []pluginSkillRow {
+	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "plugins", "installed_plugins.json"))
+	if err != nil {
+		return nil
+	}
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil {
+		return nil
+	}
+	plug, _ := m["plugins"].(map[string]any)
+	var out []pluginSkillRow
+	for key := range plug {
+		name := strings.SplitN(key, "@", 2)[0]
+		n, toks := countPluginSkills(name)
+		if n > 0 {
+			out = append(out, pluginSkillRow{name, n, toks})
+		}
+	}
+	return out
+}
+
+// countPluginSkills counts SKILL.md files under a plugin's synced dir and
+// approximates their token weight (~len/4 like real's estimator).
+func countPluginSkills(plugin string) (n, toks int) {
+	root := filepath.Join(config.ClaudeDir(), "plugins", "synced")
+	filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() && strings.Contains(p, plugin) && strings.HasSuffix(p, string(filepath.Separator)+"skills") {
+			entries, _ := os.ReadDir(p)
+			for _, e := range entries {
+				if e.IsDir() {
+					if _, err := os.Stat(filepath.Join(p, e.Name(), "SKILL.md")); err == nil {
+						n++
+						if b, err2 := os.ReadFile(filepath.Join(p, e.Name(), "SKILL.md")); err2 == nil {
+							toks += len(b) / 4
+						}
+					}
+				}
+			}
+		}
+		return nil
+	})
+	return
 }

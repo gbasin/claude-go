@@ -92,6 +92,9 @@ type Loop struct {
 	ambientPending        bool   // current turn's ambient record is on the wire as tail block
 	firstPrompt           string
 	sessionStarted        time.Time
+	apiNanos              atomic.Int64 // sum of request round-trips
+	LinesAdded            atomic.Int64 // /cost code-change tally
+	LinesRemoved          atomic.Int64
 	envSent               bool   // env composite has been on the wire once
 	tokensLeft            int64  // <total_tokens> budget (starts 15000000)
 	SessionHookCtx        string // SessionStart hook context — wires as sys msg    // tail messages retained by the last compaction
@@ -617,6 +620,7 @@ func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
 		if mi > 0 {
 			l.Model = m // try the next fallback
 		}
+		reqStart := time.Now()
 		resp, err = l.Client.StreamMessage(ctx, l.buildRequest(), func(ev *api.StreamEvent) error {
 			if ev.Type == "content_block_delta" && ev.Delta != nil {
 				switch ev.Delta.Type {
@@ -643,6 +647,7 @@ func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
 			}
 			return nil
 		})
+		l.apiNanos.Add(int64(time.Since(reqStart)))
 		if err == nil {
 			break
 		}
@@ -651,6 +656,19 @@ func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
 		}
 	}
 	return resp, err
+}
+
+// SessionStarted returns the session's wall-clock start.
+func (l *Loop) SessionStarted() time.Time { return l.sessionStarted }
+
+// APIDuration returns cumulative API round-trip time.
+func (l *Loop) APIDuration() time.Duration { return time.Duration(l.apiNanos.Load()) }
+
+// CostUSD estimates session spend from token usage (displayed by /cost).
+func (l *Loop) CostUSD() float64 {
+	u := l.UsageTotal
+	return float64(u.InputTokens)*3e-6 + float64(u.OutputTokens)*15e-6 +
+		float64(u.CacheReadInputTokens)*3e-7 + float64(u.CacheCreationInputTokens)*3.75e-6
 }
 
 // SetFastMode toggles fast mode, firing Pre/PostModelSwitch hooks; a blocking
