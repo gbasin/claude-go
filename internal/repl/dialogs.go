@@ -334,7 +334,7 @@ func permContent(name string, input json.RawMessage) string {
 	}
 	b, _ := json.Marshal(m)
 	if len(b) > 200 {
-		b = append(b[:200], []byte("…")...)
+		b = []byte(truncRunes(string(b), 200))
 	}
 	return string(b)
 }

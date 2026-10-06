@@ -171,7 +171,7 @@ func pickSession(cwd string, ks *keySource) string {
 			if allProj {
 				sp := session.SlugPath(in.Slug)
 				if len(sp) > 40 {
-					sp = "…" + sp[len(sp)-40:]
+					sp = "…" + tailRunes(sp, 40)
 				}
 				line += fmt.Sprintf("  %s%s%s", dim, sp, reset)
 			}

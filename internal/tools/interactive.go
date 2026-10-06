@@ -32,6 +32,12 @@ func init() {
 
 const auqNotesOnly = "(notes only)" // EOt in the extracted module
 
+// AskOption is the label+description pair the host renders.
+type AskOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description"`
+}
+
 type auqOption struct {
 	Label       string `json:"label"`
 	Description string `json:"description"`
@@ -393,10 +399,10 @@ func execAskUser(c *Context, raw json.RawMessage) Result {
 			if kind == "" {
 				kind = "choice"
 			}
-			var opts []string
+			var opts []AskOption
 			if kind == "choice" {
 				for _, o := range q.Options {
-					opts = append(opts, o.Label)
+					opts = append(opts, AskOption{Label: o.Label, Description: o.Description})
 				}
 			}
 			sel, err := c.AskStructured(q.Header, auqDisplay(q), opts, q.MultiSelect)
