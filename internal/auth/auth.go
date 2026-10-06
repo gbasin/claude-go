@@ -241,7 +241,11 @@ func (c *Credentials) refreshLocked() error {
 		"refresh_token": c.RefreshToken,
 		"client_id":     clientID,
 	})
-	req, err := http.NewRequest("POST", tokenURL, bytes.NewReader(body))
+	u := tokenURL
+	if ov := os.Getenv("CLAUDE_GO_TOKEN_URL"); ov != "" {
+		u = ov
+	}
+	req, err := http.NewRequest("POST", u, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // TestNarrowTurn50: at 50 cols a wrapping streamed reply, a permission
@@ -42,7 +43,33 @@ func TestNarrowTurn50(t *testing.T) {
 	if !strings.Contains(out, "narrow-ok") {
 		t.Fatalf("tool output missing at 50 cols\noutput:\n%s", truncStr(out, 4000))
 	}
-	if !utf8OK(out) {
+	// in-flight writes can split a multibyte char at the buffer tail —
+	// poll until output settles; persistent corruption is the real bug
+	ok := false
+	for i := 0; i < 50 && !ok; i++ {
+		out = p.clean()
+		ok = utf8OK(out)
+		if !ok {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	if !ok {
+		// dump the offending byte + context so we can find the writer
+		for i := 0; i < len(out); {
+			r, n := utf8.DecodeRuneInString(out[i:])
+			if r == utf8.RuneError && n <= 1 {
+				lo := i - 40
+				if lo < 0 {
+					lo = 0
+				}
+				hi := i + 40
+				if hi > len(out) {
+					hi = len(out)
+				}
+				t.Fatalf("invalid utf8 at %d — context: %q", i, out[lo:hi])
+			}
+			i += n
+		}
 		t.Fatal("output is not valid utf8 at 50 cols")
 	}
 	p.exit()
