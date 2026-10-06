@@ -221,7 +221,7 @@ func TestSlashSmoke(t *testing.T) {
 	cmd("/model foo-model\r", "model → foo-model", 20*time.Second)
 	cmd("/clear\r", "context cleared", 20*time.Second)
 	cmd("/compact\r", "Compacted", 30*time.Second)
-	cmd("/rename e2e-title\r", "session renamed: e2e-title", 20*time.Second)
+	cmd("/rename e2e-title\r", "Session renamed to: e2e-title", 20*time.Second)
 	cmd("/rewind\r", "no checkpoints", 20*time.Second)
 
 	// still alive: a normal prompt still answers
