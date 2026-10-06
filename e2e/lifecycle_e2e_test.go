@@ -259,7 +259,8 @@ func TestEscEscRewindPicker(t *testing.T) {
 	if !strings.Contains(out, "first-msg") || !strings.Contains(out, "second-msg") {
 		t.Fatalf("picker should list both user messages\noutput:\n%s", truncStr(out, 3000))
 	}
-	p.send("1\r")
+	// cursor-select: ↑ picks the earlier message, Enter rewinds
+	p.send("\x1b[A\r")
 	p.waitFor("rewound to before", 15*time.Second)
 
 	// the picker can still own the key channel momentarily — resend

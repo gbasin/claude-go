@@ -3,113 +3,199 @@ package repl
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"claude-go/internal/agent"
 	"claude-go/internal/api"
 )
 
-// showTranscript is ctrl+o's real behavior: dump the full conversation to
-// scrollback — every message's text plus tool calls and results, no
-// truncation — then wait for ctrl+o (or esc/q) to return to the prompt.
-// The caller redraws the input box after we return.
-// showTranscript renders real's ctrl+o transcript — a scrollable overlay
-// over the screen; ↑↓ scroll, pgup/pgdn page, esc/q/ctrl+o close.
+// showTranscript is real's ctrl+o — a scrollable overlay listing the whole
+// conversation; ↑↓ scroll, pgup/pgdn (and ctrl+d/u half-page) page,
+// esc/q/ctrl+o close. ctrl+e toggles thinking-block detail (real's
+// transcript:toggleShowAll).
 func showTranscript(l *agent.Loop, ks *keySource) {
-	// materialize lines once
-	var lines []string
-	dprintf("\r\n%s── transcript ────────────────────────────────────────────%s\r\n", dim, reset)
-	for _, m := range l.Messages {
-		printTranscriptMessage(m)
+	lines := transcriptLines(l.Messages, true)
+	_, rows, _ := compGetSize()
+	viewH := rows - 6
+	if viewH < 4 {
+		viewH = 4
 	}
-	_ = lines
+	showAll := true
+	top := max(0, len(lines)-viewH) // start at the latest
 	dch := make(chan key, 16)
 	ks.dialog.Store(&dch)
 	defer ks.dialog.Store(nil)
-	dprintf("%s── end transcript · ctrl+o to return ─────────────────────%s\r\n", dim, reset)
+	compSuspend()
+	defer compResume()
+	draw := func() {
+		var sb strings.Builder
+		sb.WriteString("\x1b[H\x1b[2J") // home + clear — overlay owns the screen
+		sb.WriteString(fmt.Sprintf("%s── transcript · %d messages · ↑↓ scroll · esc close%s\r\n",
+			dim, len(l.Messages), reset))
+		end := top + viewH
+		if end > len(lines) {
+			end = len(lines)
+		}
+		for _, ln := range lines[top:end] {
+			sb.WriteString(ln + "\r\n")
+		}
+		fmt.Print(sb.String())
+	}
+	draw()
 	for k := range dch {
-		if k.b == 15 || k.b == 3 || (k.b == 0x1b && k.seq == "") || k.b == 'q' {
+		switch {
+		case k.b == 15 || k.b == 3 || k.b == 'q' || (k.b == 0x1b && k.seq == ""):
+			fmt.Print("\x1b[H\x1b[2J")
 			return
+		case k.seq == "[A" || k.b == 'k' || k.b == 0x10: // up / ctrl+p
+			if top > 0 {
+				top--
+				draw()
+			}
+		case k.seq == "[B" || k.b == 'j' || k.b == 0x0e: // down / ctrl+n
+			if top+viewH < len(lines) {
+				top++
+				draw()
+			}
+		case k.seq == "[5~" || k.b == 'b' || k.b == 2: // pgup / ctrl+b
+			top -= viewH
+			if top < 0 {
+				top = 0
+			}
+			draw()
+		case k.seq == "[6~" || k.b == 'f' || k.b == 6: // pgdn / ctrl+f
+			top += viewH
+			if top+viewH > len(lines) {
+				top = max(0, len(lines)-viewH)
+			}
+			draw()
+		case k.b == 4: // ctrl+d half-page
+			top += viewH / 2
+			if top+viewH > len(lines) {
+				top = max(0, len(lines)-viewH)
+			}
+			draw()
+		case k.b == 21: // ctrl+u half-page
+			top -= viewH / 2
+			if top < 0 {
+				top = 0
+			}
+			draw()
+		case k.b == 'g':
+			top = 0
+			draw()
+		case k.b == 'G':
+			top = max(0, len(lines)-viewH)
+			draw()
+		case k.b == 5: // ctrl+e — transcript:toggleShowAll
+			showAll = !showAll
+			lines = transcriptLines(l.Messages, showAll)
+			if top+viewH > len(lines) {
+				top = max(0, len(lines)-viewH)
+			}
+			draw()
 		}
 	}
 }
 
-func printTranscriptMessage(m api.Message) {
+// transcriptLines flattens messages into styled display rows. showAll=false
+// hides thinking blocks (real's default transcript detail toggle).
+func transcriptLines(msgs []api.Message, showAll bool) []string {
+	var out []string
+	for _, m := range msgs {
+		out = append(out, transcriptMessageLines(m, showAll)...)
+	}
+	return out
+}
+
+func transcriptMessageLines(m api.Message, showAll bool) []string {
+	var out []string
 	var blocks []api.ContentBlock
 	if json.Unmarshal(m.Content, &blocks) != nil {
 		var s string
 		if json.Unmarshal(m.Content, &s) == nil && s != "" {
-			printTranscriptText(m.Role, s)
+			out = append(out, transcriptTextLines(m.Role, s)...)
 		}
-		return
+		return out
 	}
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
-			printTranscriptText(m.Role, b.Text)
+			out = append(out, transcriptTextLines(m.Role, b.Text)...)
 		case "thinking":
-			printTranscriptDim("✻ thinking", b.Thinking)
+			if showAll && b.Thinking != "" {
+				out = append(out, "  "+dim+"✻ thinking:"+reset)
+				for _, ln := range strings.Split(b.Thinking, "\n") {
+					out = append(out, "  "+dim+ln+reset)
+				}
+			}
 		case "tool_use":
-			fmt.Printf("  %s⏺%s %s%s%s\r\n", green, reset, bold+b.Name+reset, summarize(b.Name, b.Input), "")
+			out = append(out, fmt.Sprintf("  %s⏺%s %s%s", green, reset, bold+b.Name+reset, summarize(b.Name, b.Input)))
 		case "tool_result":
-			printTranscriptResult(b)
+			out = append(out, transcriptResultLines(b)...)
 		case "image":
-			fmt.Printf("  %s⎿  [image]%s\r\n", dim, reset)
+			out = append(out, "  "+dim+"⎿  [image]"+reset)
 		}
 	}
+	return out
 }
 
-func printTranscriptText(role, text string) {
+func transcriptTextLines(role, text string) []string {
 	if text == "" {
-		return
+		return nil
 	}
+	var prefix string
 	switch role {
 	case "user":
-		fmt.Printf("%s>%s %s\r\n", cyan, reset, crlf(text))
+		prefix = cyan + ">" + reset + " "
 	case "system":
-		printTranscriptDim("system", text)
-	default: // assistant
-		fmt.Printf("%s⏺%s %s\r\n", reset, reset, crlf(text))
+		prefix = "  " + dim + "system: "
+	default:
+		prefix = "⏺ "
 	}
+	var out []string
+	for i, ln := range strings.Split(text, "\n") {
+		if i == 0 {
+			out = append(out, prefix+ln)
+		} else {
+			out = append(out, "  "+ln)
+		}
+	}
+	return out
 }
 
-func printTranscriptDim(label, text string) {
-	if text == "" {
-		return
-	}
-	fmt.Printf("  %s%s: %s%s\r\n", dim, label, crlf(text), reset)
-}
-
-func printTranscriptResult(b api.ContentBlock) {
+func transcriptResultLines(b api.ContentBlock) []string {
 	tag := "⎿"
 	if b.IsError {
 		tag = "⎿ error:"
 	}
+	var out []string
 	var blocks []api.ContentBlock
 	if json.Unmarshal(b.Content, &blocks) == nil && len(blocks) > 0 {
 		for _, rb := range blocks {
 			if rb.Type == "text" && rb.Text != "" {
-				fmt.Printf("  %s%s%s %s\r\n", dim, tag, reset, crlf(rb.Text))
+				for i, ln := range strings.Split(rb.Text, "\n") {
+					if i == 0 {
+						out = append(out, "  "+dim+tag+reset+" "+ln)
+					} else {
+						out = append(out, "    "+dim+ln+reset)
+					}
+				}
 			} else if rb.Type == "image" {
-				fmt.Printf("  %s%s [image]%s\r\n", dim, tag, reset)
+				out = append(out, "  "+dim+tag+" [image]"+reset)
 			}
 		}
-		return
+		return out
 	}
 	var s string
 	if json.Unmarshal(b.Content, &s) == nil && s != "" {
-		fmt.Printf("  %s%s%s %s\r\n", dim, tag, reset, crlf(s))
-	}
-}
-
-// crlf makes embedded newlines print correctly while the terminal is in
-// raw mode (no ONLCR translation).
-func crlf(s string) string {
-	out := make([]byte, 0, len(s)+8)
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			out = append(out, '\r')
+		for i, ln := range strings.Split(s, "\n") {
+			if i == 0 {
+				out = append(out, "  "+dim+tag+reset+" "+ln)
+			} else {
+				out = append(out, "    "+dim+ln+reset)
+			}
 		}
-		out = append(out, s[i])
 	}
-	return string(out)
+	return out
 }
