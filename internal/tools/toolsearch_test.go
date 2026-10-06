@@ -71,7 +71,7 @@ func TestToolSearchKeywordAndRequired(t *testing.T) {
 	// +term requires the term in the name (k5n A branch)
 	r2 := Dispatch(&Context{}, "ToolSearch", json.RawMessage(`{"query":"+notebook zzz"}`))
 	for _, n := range r2.Refs {
-		if n != "NotebookEdit" {
+		if n != "NotebookEdit" && n != "NotebookRead" {
 			t.Fatalf("+notebook matched %q", n)
 		}
 	}
