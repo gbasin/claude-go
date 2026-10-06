@@ -4,6 +4,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"golang.org/x/term"
@@ -19,6 +20,8 @@ type keySource struct {
 	// owns stdin while open so the turn's busy-queue goroutine can't eat
 	// the user's answer.
 	dialog atomic.Pointer[chan key]
+	pendMu sync.Mutex
+	pending []key // requeued mid-turn keys — delivered before new stdin
 }
 
 // modifier bits carried on a key (kitty/CSI-u encoding: param-1).
@@ -100,6 +103,10 @@ func (ks *keySource) read() {
 	var buf [512]byte
 	var pasting []byte
 	for {
+		if k, ok := ks.popPending(); ok {
+			ks.push(k)
+			continue
+		}
 		n, err := os.Stdin.Read(buf[:])
 		if err != nil {
 			close(ks.ch)
@@ -261,4 +268,25 @@ func (ks *keySource) push(k key) {
 	if !ks.forward(k) {
 		ks.ch <- k
 	}
+}
+
+// requeue returns keys to the head of the stream — the post-turn drain uses
+// it so mid-turn keystrokes aren't lost or reordered ahead of bytes still
+// arriving on stdin.
+func (ks *keySource) requeue(keys ...key) {
+	ks.pendMu.Lock()
+	ks.pending = append(keys, ks.pending...)
+	ks.pendMu.Unlock()
+}
+
+// popPending takes one requeued key, in original order.
+func (ks *keySource) popPending() (key, bool) {
+	ks.pendMu.Lock()
+	defer ks.pendMu.Unlock()
+	if len(ks.pending) == 0 {
+		return key{}, false
+	}
+	k := ks.pending[0]
+	ks.pending = ks.pending[1:]
+	return k, true
 }
