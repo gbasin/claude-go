@@ -31,9 +31,9 @@ func TestSlashTable(t *testing.T) {
 	}{
 		{"/status", "Version:", ""},
 		{"/context", "context tokens", ""},
-		{"/cost", "input:", ""},
-		{"/usage", "cache-read:", ""},
-		{"/stats", "cache-write:", ""},
+		{"/cost", "this session:", ""},
+		{"/usage", "this session:", ""},
+		{"/stats", "this session:", ""},
 		{"/agents", "general-purpose", ""},
 		{"/todos", "no todo tool", ""},
 		{"/vim", "moved to /config", ""},

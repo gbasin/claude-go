@@ -289,6 +289,13 @@ func RunWithStore(l *agent.Loop, store Store) {
 	loggedTo := len(l.Messages)
 
 	for {
+		// drain background-task notifications above the status line —
+		// real shows "⎿ Task b1 finished: <cmd>" between turns
+		if l.ToolCtx.BgTasks != nil {
+			for _, n := range l.ToolCtx.BgTasks.DrainNotifications() {
+				dprintf("  %s⎿  %s%s\n", dim, n, reset)
+			}
+		}
 		printStatus(l, ed)
 		tools.UserActive.Store(true)
 		res := ed.readLine(ks)
