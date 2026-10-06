@@ -22,6 +22,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -707,5 +709,81 @@ func TestSubagentWire(t *testing.T) {
 	if !bytes.Contains(sub, []byte("SUB-E2E-PROMPT")) ||
 		!bytes.Contains(sub, []byte("SubagentHandback")) {
 		t.Fatal("subagent msg0 should carry the prompt + handback reminder")
+	}
+}
+
+// TestTokenRefreshRace: an expired OAuth cred + concurrent applyAuth
+// calls (main request + aux burst) must trigger exactly ONE refresh —
+// the rotated refresh token is what stays in the creds file.
+func TestTokenRefreshRace(t *testing.T) {
+	var mu sync.Mutex
+	var refreshCalls int
+	var grantType, refreshSent string
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		refreshCalls++
+		grantType = body["grant_type"]
+		refreshSent = body["refresh_token"]
+		mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "e2e-fresh-token",
+			"refresh_token": "e2e-fresh-refresh",
+			"expires_in":    3600,
+		})
+	}))
+	defer tokenSrv.Close()
+
+	var mu2 sync.Mutex
+	var auths []string
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu2.Lock()
+		auths = append(auths, r.Header.Get("Authorization"))
+		mu2.Unlock()
+		if r.URL.Path == "/v1/messages" {
+			writeSSE(w, "refreshed reply")
+			return
+		}
+		w.WriteHeader(200)
+	}))
+	defer apiSrv.Close()
+
+	s := newSession(t)
+	// expired oauth creds in our private store (not borrowed → refreshable)
+	credsFile := filepath.Join(s.home, ".claude-go", ".credentials.json")
+	os.MkdirAll(filepath.Dir(credsFile), 0o700)
+	os.WriteFile(credsFile, []byte(`{"claudeAiOauth":{`+
+		`"accessToken":"e2e-old-token","refreshToken":"e2e-old-refresh",`+
+		`"expiresAt":1,"subscriptionType":"max"}}`), 0o600)
+
+	r := s.runEx(t, []string{
+		"CLAUDE_GO_CREDS_FILE=" + credsFile,
+		"CLAUDE_GO_TOKEN_URL=" + tokenSrv.URL,
+		"CLAUDE_GO_RAW_HTTP=0",
+	}, 30*time.Second, "--sdk-url", apiSrv.URL, "-p", "hi",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "refreshed reply") {
+		t.Fatalf("expected refreshed reply: %s", truncStr(r.stdout, 800))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if refreshCalls != 1 {
+		t.Fatalf("refresh should happen exactly once, got %d", refreshCalls)
+	}
+	if grantType != "refresh_token" || refreshSent != "e2e-old-refresh" {
+		t.Fatalf("bad refresh grant: type=%q refresh=%q", grantType, refreshSent)
+	}
+	// wire requests carry the new bearer
+	for _, a := range auths {
+		if strings.Contains(a, "e2e-old-token") {
+			t.Fatalf("stale token sent on the wire: %q", a)
+		}
+	}
+	// rotated refresh token persisted
+	b, _ := os.ReadFile(credsFile)
+	if !strings.Contains(string(b), "e2e-fresh-refresh") {
+		t.Fatalf("creds file missing rotated refresh token: %s", b)
 	}
 }
