@@ -53,6 +53,14 @@ func RunWithStore(l *agent.Loop, store Store) {
 	currentStore = store
 	l.Entrypoint = "cli"
 	ed := newEditor()
+	// viewMode: default|verbose|focus — real's startup transcript mode
+	switch strings.ToLower(readUserSettingStr("viewMode")) {
+	case "focus":
+		focusMode.Store(true)
+	case "verbose":
+		briefMode.Store(false)
+		verboseMode.Store(true)
+	}
 	ed.voiceBase = l.Client.BaseURL
 	ed.voiceCreds = l.Client.Creds
 	ed.voiceCWD = l.ToolCtx.CWD
@@ -735,6 +743,7 @@ type spinner struct {
 }
 
 // spinVerb exposes the active verb for the past-tense footer.
+var verboseMode atomic.Bool
 var tipNth atomic.Int64
 
 var spinVerb struct{ v atomic.Value }
@@ -1139,8 +1148,32 @@ func runBang(l *agent.Loop, cmd string) {
 	raw, _ := json.Marshal(map[string]any{"command": cmd, "description": "run in bash mode"})
 	res := tools.Dispatch(l.ToolCtx, "Bash", raw)
 	dprintln("  ⎿ ", strings.TrimSpace(res.Content))
-	l.PushUser([]api.ContentBlock{{Type: "text",
-		Text: "<bash-input>\n" + cmd + "\n</bash-input>\n\n<local-command-stdout>\n" + res.Content + "\n</local-command-stdout>"}})
+	msg := "<bash-input>\n" + cmd + "\n</bash-input>\n\n<local-command-stdout>\n" + res.Content + "\n</local-command-stdout>"
+	if respondToBash(l) {
+		// respondToBashCommands (default true): Claude responds to !cmd —
+		// the bash-input block becomes this turn's user message
+		if _, err := l.Ask(context.Background(), msg); err != nil {
+			dprintf("\n  Error: %v\n", err)
+		}
+		return
+	}
+	l.PushUser([]api.ContentBlock{{Type: "text", Text: msg}})
+}
+
+// respondToBash — settings.respondToBashCommands, real default true.
+func respondToBash(l *agent.Loop) bool {
+	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
+	if err != nil {
+		return true
+	}
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil {
+		return true
+	}
+	if v, ok := m["respondToBashCommands"].(bool); ok {
+		return v
+	}
+	return true
 }
 
 // runPipe handles non-TTY stdin: each line is a prompt (like `claude < in.txt`).
@@ -2201,4 +2234,17 @@ func (p *promptUI) askStructuredMulti(ks *keySource, qs []tools.AskQuestion) (ma
 		}
 	}
 	return nil, fmt.Errorf("cancelled")
+}
+
+func readUserSettingStr(key string) string {
+	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
+	if err != nil {
+		return ""
+	}
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil {
+		return ""
+	}
+	s, _ := m[key].(string)
+	return s
 }
