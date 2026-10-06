@@ -909,6 +909,45 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 			for _, t := range c.Tools {
 				tools.RegisterMCP(prefix, c, t.Name, t.Description, t.InputSchema)
 			}
+			// tools/list_changed → refresh the deferred surface (the
+			// client's internal list already updated)
+			// MCP prompts surface as /mcp__<server>__<prompt> slash
+			// commands (real's vn() prompt expansion)
+			if pr, _, perr := c.ListPrompts(context.Background(), ""); perr == nil {
+				for _, p := range pr {
+					pname := p.Name
+					repl.RegisterMCPPrompt(prefix+"__"+pname, p.Description,
+						func(args map[string]string) (string, error) {
+							res, err := c.GetPrompt(context.Background(), pname, args)
+							if err != nil {
+								return "", err
+							}
+							var sb strings.Builder
+							for _, m := range res.Messages {
+								var blocks []struct {
+									Type string `json:"type"`
+									Text string `json:"text"`
+								}
+								json.Unmarshal(m.Content, &blocks)
+								for _, b := range blocks {
+									if b.Text != "" {
+										if sb.Len() > 0 {
+											sb.WriteString("\n\n")
+										}
+										sb.WriteString(b.Text)
+									}
+								}
+							}
+							return sb.String(), nil
+						})
+				}
+			}
+			c.OnToolsChanged = func() {
+				tools.UnregisterMCPServer(prefix)
+				for _, t := range c.Tools {
+					tools.RegisterMCP(prefix, c, t.Name, t.Description, t.InputSchema)
+				}
+			}
 			tools.RegisterMCPServer(name, c)
 			mu.Lock()
 			clients = append(clients, c)

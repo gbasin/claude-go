@@ -191,6 +191,9 @@ type Client struct {
 	// notifications (notifications/progress, notifications/*/list_changed,
 	// notifications/message, ...). Called on a separate goroutine.
 	OnNotification func(method string, params json.RawMessage)
+	// OnToolsChanged fires after a tools/list_changed refresh lands —
+	// the app re-registers the new surface.
+	OnToolsChanged func()
 
 	tr      transport
 	cmd     *exec.Cmd // stdio only
