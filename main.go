@@ -225,6 +225,9 @@ func main() {
 		case "attach":
 			attachSub(args[1:])
 			return
+		case "stop":
+			stopSub(args[1:])
+			return
 		case "bg-host":
 			bgHostSub(args[1:])
 			return
@@ -290,11 +293,15 @@ func main() {
 	if o.bgMode {
 		// real's --bg (v2.1.198+): start the session as a background agent
 		// and return — prints the id + management commands
-		if _, err := bg.Spawn(bg.SpawnOpts{
+		opts := bg.SpawnOpts{
 			SessionID: sessionID,
 			CWD:       cwd,
 			Prompt:    strings.Join(o.prompt, " "),
-		}); err != nil {
+		}
+		if o.resume != "" && o.resume != "-" {
+			opts.ResumeFrom = o.resume // --bg -r <id> backgrounds an existing session
+		}
+		if _, err := bg.Spawn(opts); err != nil {
 			fmt.Fprintln(os.Stderr, "--bg:", err)
 			os.Exit(1)
 		}
