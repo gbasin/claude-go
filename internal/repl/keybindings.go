@@ -108,6 +108,7 @@ var kbActions = map[string]func(*editor) *readResult{
 	"chat:fastMode":       func(e *editor) *readResult { e.toggleFastMode(); return nil },
 	"chat:thinkingToggle": func(e *editor) *readResult { e.toggleThinking(); return nil },
 	"chat:stash":          func(e *editor) *readResult { e.stashLine(); return nil },
+	"chat:yank":           func(e *editor) *readResult { e.yankLine(); return nil },
 	"app:toggleBrief":     func(e *editor) *readResult { toggleBrief(); return nil },
 	// voice:pushToTalk — real binds space in Chat; the space-press path is
 	// handled in insertKey (printable chars aren't keystrokes). This entry
@@ -140,6 +141,7 @@ var defaultKeybindings = []struct {
 	{"Chat", "ctrl+_", "chat:undo"},
 	{"Chat", "ctrl+-", "chat:undo"},
 	{"Chat", "ctrl+s", "chat:stash"},
+	{"Chat", "ctrl+y", "chat:yank"},
 	{"Chat", "meta+p", "chat:modelPicker"},
 	{"Chat", "meta+o", "chat:fastMode"},
 	{"Chat", "meta+t", "chat:thinkingToggle"},
