@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -296,5 +297,176 @@ func TestFlagInitOnly(t *testing.T) {
 	// init-only exits before any model call — no turn output expected
 	if strings.Contains(r.stdout, "Mock response") {
 		t.Fatalf("init-only should not hit the model: %s", truncStr(r.stdout, 800))
+	}
+}
+
+// TestFlagWorktree: --worktree creates a git worktree and the session's
+// writes land inside it.
+func TestFlagWorktree(t *testing.T) {
+	s := newSession(t)
+	git := func(args ...string) {
+		out, err := exec.Command("git", append([]string{"-C", s.cwd}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	git("config", "user.email", "e2e@test")
+	git("config", "user.name", "e2e")
+	s.writeFile("seed.txt", "x")
+	git("add", "seed.txt")
+	git("commit", "-qm", "init")
+
+	// --worktree creates <cwd>/.claude/worktrees/e2e-wt and cds the session
+	// there — an absolute write inside the worktree lands on disk.
+	target := filepath.Join(s.cwd, ".claude", "worktrees", "e2e-wt", "wt-marker.txt")
+	r := s.run(t, "--mock", "-p",
+		`tool:Write {"file_path":"`+target+`","content":"in-worktree"}`,
+		"--worktree", "e2e-wt",
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	b, err := os.ReadFile(target)
+	if err != nil || !strings.Contains(string(b), "in-worktree") {
+		t.Fatalf("write should land in the worktree: %v", err)
+	}
+}
+
+// TestFlagForkSession: -r + --fork-session resumes history into a NEW
+// session id and logs the fork record.
+func TestFlagForkSession(t *testing.T) {
+	s := newSession(t)
+	r1 := s.run(t, "--mock", "-p", "hi", "--output-format", "stream-json")
+	s.mustOK(t, r1)
+	var init struct {
+		SessionID string `json:"session_id"`
+	}
+	for _, line := range strings.Split(r1.stdout, "\n") {
+		if strings.Contains(line, `"subtype":"init"`) {
+			json.Unmarshal([]byte(line), &init)
+		}
+	}
+	if init.SessionID == "" {
+		t.Fatal("no session id in first run")
+	}
+
+	r2 := s.run(t, "--mock", "-r", init.SessionID, "--fork-session",
+		"-p", "hi", "--output-format", "stream-json")
+	s.mustOK(t, r2)
+	if !strings.Contains(r2.stderr, "forked session") {
+		t.Fatalf("expected fork notice on stderr: %q", r2.stderr)
+	}
+	var init2 struct {
+		SessionID string `json:"session_id"`
+	}
+	for _, line := range strings.Split(r2.stdout, "\n") {
+		if strings.Contains(line, `"subtype":"init"`) {
+			json.Unmarshal([]byte(line), &init2)
+		}
+	}
+	if init2.SessionID == init.SessionID {
+		t.Fatal("--fork-session should mint a new session id")
+	}
+}
+
+// TestFlagEffort: --effort lands in output_config on the wire.
+func TestFlagEffort(t *testing.T) {
+	s := newSession(t)
+	r, bodies := recordRequests(t, s, "-p", "hi", "--effort", "low")
+	s.mustOK(t, r)
+	for _, b := range bodies {
+		var req struct {
+			OutputConfig json.RawMessage `json:"output_config"`
+		}
+		if json.Unmarshal(b, &req) == nil &&
+			bytes.Contains(req.OutputConfig, []byte(`"effort":"low"`)) {
+			return
+		}
+	}
+	t.Fatal("--effort low did not reach output_config")
+}
+
+// TestFlagResumeSessionAt: --resume-session-at <uuid> truncates the
+// resumed chain at that message — the follow-up request only carries
+// history up to the cut.
+func TestFlagResumeSessionAt(t *testing.T) {
+	s := newSession(t)
+	// two-turn session: turn1 "first-marker", turn2 "second-marker"
+	r1 := s.run(t, "--mock", "-p", "first-marker")
+	s.mustOK(t, r1)
+	r2 := s.run(t, "--mock", "-c", "-p", "second-marker")
+	s.mustOK(t, r2)
+
+	// find the transcript + the uuid of the user message carrying
+	// first-marker so resume-at cuts before second-marker
+	dir := filepath.Join(s.home, ".claude", "projects")
+	files, _ := filepath.Glob(filepath.Join(dir, "*", "*.jsonl"))
+	var cutUUID, seen string
+	for _, f := range files {
+		b, _ := os.ReadFile(f)
+		lines := strings.Split(string(b), "\n")
+		for _, ln := range lines {
+			var rec struct {
+				UUID    string `json:"uuid"`
+				Message struct {
+					Content json.RawMessage `json:"content"`
+				} `json:"message"`
+			}
+			if json.Unmarshal([]byte(ln), &rec) != nil || rec.UUID == "" {
+				continue
+			}
+			if bytes.Contains(rec.Message.Content, []byte("first-marker")) {
+				cutUUID = rec.UUID
+				seen = filepath.Base(f)
+			}
+		}
+	}
+	if cutUUID == "" {
+		t.Fatalf("no uuid found for first-marker message in %v", files)
+	}
+	sid := strings.TrimSuffix(seen, ".jsonl")
+
+	rec := filepath.Join(t.TempDir(), "reqs")
+	r3 := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 60*time.Second,
+		"--mock", "-r", sid, "--resume-session-at", cutUUID,
+		"-p", "after-cut")
+	s.mustOK(t, r3)
+
+	ents, _ := os.ReadDir(rec)
+	var hasSecond, hasFirst bool
+	for _, e := range ents {
+		b, _ := os.ReadFile(filepath.Join(rec, e.Name()))
+		if bytes.Contains(b, []byte("second-marker")) {
+			hasSecond = true
+		}
+		if bytes.Contains(b, []byte("first-marker")) {
+			hasFirst = true
+		}
+	}
+	if !hasFirst || hasSecond {
+		t.Fatalf("resume-at should carry first-marker but not second-marker (first=%v second=%v)",
+			hasFirst, hasSecond)
+	}
+}
+
+// TestFlagDebugFile: --debug-file captures the debug log on disk.
+func TestFlagDebugFile(t *testing.T) {
+	s := newSession(t)
+	f := filepath.Join(s.cwd, "dbg.log")
+	r := s.run(t, "--mock", "-p", "hi", "--debug-file", f)
+	s.mustOK(t, r)
+	if _, err := os.Stat(f); err != nil {
+		t.Fatalf("debug file not created: %v", err)
+	}
+}
+
+// TestFlagTeleportNoSessions: --teleport with no cloud sessions exits
+// cleanly with a message.
+func TestFlagTeleportNoSessions(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--teleport")
+	// no cloud sessions → graceful message or exit, never a panic
+	if strings.Contains(r.stderr, "panic") {
+		t.Fatalf("teleport panicked: %s", r.stderr)
 	}
 }
