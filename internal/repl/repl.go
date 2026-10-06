@@ -974,11 +974,16 @@ func (s *spinner) run() {
 			if n := spinTokens.Load(); n > 0 {
 				toks = " · ↓ " + compactTokens(int(n)) + " tokens"
 			}
+			// "(running <hook> hook · Ns)" — real's hook-exec status
+			hookTxt := ""
+			if hn, el := agent.RunningHook(); hn != "" {
+				hookTxt = fmt.Sprintf(" · (running %s hook · %ds)", hn, int(el.Seconds()))
+			}
 			// real sweeps a bright band across the dim verb text —
 			// glimmerIndex advances ~every 90ms, band wraps over len+pad
 			txt := fmt.Sprintf("%s%s %s… %s(esc to interrupt · ← for agents · %s%s)",
 				claudeOrange, spinnerFrames[i%len(spinnerFrames)],
-				shimmerVerb(s.verb, i), claudeOrange, el, toks)
+				shimmerVerb(s.verb, i), claudeOrange, el, toks+hookTxt)
 			if compActive.Load() {
 				compFooter(txt) // pinned bottom row — doesn't scroll
 			} else {
@@ -1385,7 +1390,7 @@ func statusLineCmdReal(l *agent.Loop) string {
 		"session_id":      l.Client.SessionID,
 		"transcript_path": l.Transcript,
 		"cwd":             l.ToolCtx.CWD,
-		"version":         "2.1.288",
+		"version":         "2.1.292",
 		"model":           map[string]string{"id": l.Model, "display_name": l.Model},
 		"workspace":       map[string]any{"current_dir": l.ToolCtx.CWD, "project_dir": l.ToolCtx.CWD},
 		"output_style":    map[string]string{"name": outputStyle(l)},

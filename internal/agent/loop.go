@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"claude-go/internal/api"
@@ -669,10 +670,28 @@ func (l *Loop) SetFastMode(on bool) {
 	})
 }
 
+// hooksRunning exposes the currently-executing hook event for the REPL's
+// spinner status line (real shows "(running X hook · Ns)").
+var hooksRunning atomic.Value   // stores string
+var hooksRunningAt atomic.Value // stores time.Time
+
+// RunningHook returns the in-flight hook event + elapsed ("" if none).
+func RunningHook() (string, time.Duration) {
+	n, _ := hooksRunning.Load().(string)
+	if n == "" {
+		return "", 0
+	}
+	at, _ := hooksRunningAt.Load().(time.Time)
+	return n, time.Since(at)
+}
+
 func (l *Loop) runHook(ev hooks.Event, extra map[string]any) hooks.Result {
 	if len(l.Hooks) == 0 {
 		return hooks.Result{}
 	}
+	hooksRunning.Store(string(ev))
+	hooksRunningAt.Store(time.Now())
+	defer hooksRunning.Store("")
 	payload := map[string]any{
 		"session_id":      l.Client.SessionID,
 		"transcript_path": l.Transcript,

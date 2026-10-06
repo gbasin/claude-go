@@ -131,35 +131,62 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 	rule := cyan153 + strings.Repeat("─", width)
 	dot := gray239 + strings.Repeat("╌", width)
 
-	title := name + " command"
-	if name != "Bash" {
-		title = name
-	}
-	tip := ""
-	if l.PermMode != "auto" {
-		tip = `Tip: auto mode handles these prompts for you — choose "switch to auto mode" below`
+	// titles + questions are per-tool (captured):
+	//   Bash  → "Bash command" / "Do you want to proceed?"
+	//   Write → "Create file"  / "Do you want to create <file>?"
+	//   Edit/MultiEdit → "Edit file" / "Do you want to edit <file>?"
+	title := name
+	question := "Do you want to proceed?"
+	fname := permFilePath(input)
+	switch name {
+	case "Bash":
+		title = "Bash command"
+	case "Write":
+		title = "Create file"
+		question = "Do you want to create " + fname + "?"
+	case "Edit", "MultiEdit":
+		title = "Edit file"
+		question = "Do you want to edit " + fname + "?"
 	}
 	desc := permDesc(name, input, summary)
+	if desc == "" && isFileTool(name) {
+		desc = permFilePath(input) // real shows the path as the gray line
+	}
 	content := permContent(name, input)
 
-	// option list — real: Yes / always-allow-<spec> / switch-to-auto / No
+	// the tip rides with the switch-to-auto option (captured: it shows on
+	// the Bash dialog, not the Write one)
+	tip := ""
+	if l.PermMode != "auto" && !isFileTool(name) {
+		tip = `Tip: auto mode handles these prompts for you — choose "switch to auto mode" below`
+	}
+	// options are per-tool-class (captured):
+	//   Bash:        Yes / always-allow-<grant> / switch-to-auto / No
+	//   file tools:  Yes / switch-to-acceptEdits / No
 	alwaysSpec := ruleSuggestion(name, summary)
-	// real's option-2 label describes the GRANT in user terms ("always
-	// allow access to /tmp"), not the rule syntax
 	alwaysLabel := alwaysSpec
 	if dir := outsideDir(name, input, l.ToolCtx.CWD); dir != "" {
 		alwaysLabel = "access to " + dir
 	}
-	type opt struct{ label string }
+	type opt struct {
+		label  string
+		action string
+	}
 	var opts []opt
-	opts = append(opts, opt{"Yes"})
-	if alwaysSpec != "" {
-		opts = append(opts, opt{fmt.Sprintf("Yes, and always allow %s from this project", alwaysLabel)})
+	opts = append(opts, opt{label: "Yes", action: "yes"})
+	if isFileTool(name) && l.PermMode != "acceptEdits" {
+		opts = append(opts, opt{
+			label:  "Yes, and switch to accept edits (auto-approve file edits and common file \n      commands) for this session (shift+tab)",
+			action: "acceptedits"})
+	} else if !isFileTool(name) {
+		if alwaysSpec != "" {
+			opts = append(opts, opt{label: fmt.Sprintf("Yes, and always allow %s from this project", alwaysLabel), action: "always"})
+		}
+		if l.PermMode != "auto" {
+			opts = append(opts, opt{label: "Yes, and switch to auto mode" + gray246 + " · auto mode handles these prompts for you" + "\x1b[39m", action: "automode"})
+		}
 	}
-	if l.PermMode != "auto" {
-		opts = append(opts, opt{"Yes, and switch to auto mode" + gray246 + " · auto mode handles these prompts for you" + "\x1b[39m"})
-	}
-	opts = append(opts, opt{"No"})
+	opts = append(opts, opt{label: "No", action: "no"})
 
 	sel := 0
 	renderRows := 0
@@ -182,9 +209,11 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 			put(" " + gray246 + desc + reset)
 		}
 		put(dot)
-		put(" " + content + reset)
+		for _, cl := range permContentLines(name, input, content) {
+			put(cl)
+		}
 		put(dot)
-		put(" " + "Do you want to proceed?")
+		put(" " + question)
 		for i, o := range opts {
 			if i == sel {
 				put(fmt.Sprintf(" %s❯%s %s%d. %s%s%s", cyan153, "\x1b[39m", gray246, i+1, cyan153, o.label, "\x1b[39m"))
@@ -238,21 +267,22 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 				sel = int(k.b - '1')
 				fallthrough
 			case k.b == '\r':
-				switch sel {
-				case 0:
+				switch opts[sel].action {
+				case "yes":
 					dprintln("  ✔ " + title + " approved")
 					return true, ""
-				default:
-					if opts[sel].label == "No" {
-						dprintln("  ✗ No")
-						return false, ""
-					}
-					if strings.HasPrefix(opts[sel].label, "Yes, and switch to auto mode") {
-						l.PermMode = "auto"
-						dprintln("  switched to auto mode — " + title + " approved")
-						return true, ""
-					}
-					// always-allow
+				case "no":
+					dprintln("  ✗ No")
+					return false, ""
+				case "automode":
+					l.PermMode = "auto"
+					dprintln("  switched to auto mode — " + title + " approved")
+					return true, ""
+				case "acceptedits":
+					l.PermMode = "acceptEdits"
+					dprintln("  switched to accept edits — " + title + " approved")
+					return true, ""
+				case "always":
 					p.always[name] = true
 					if alwaysSpec != "" {
 						addLocalPermissionRule(l.ToolCtx.CWD, alwaysSpec)
@@ -786,4 +816,46 @@ func outsideDir(name string, input json.RawMessage, cwd string) string {
 		}
 	}
 	return ""
+}
+
+// permFilePath extracts the file_path input field.
+func permFilePath(input json.RawMessage) string {
+	var m map[string]any
+	json.Unmarshal(input, &m)
+	s, _ := m["file_path"].(string)
+	return s
+}
+
+// permContentLines returns the framed content rows — Write shows the new
+// file's content with line numbers; Edit a diff preview; others the
+// single summary line.
+func permContentLines(name string, input json.RawMessage, single string) []string {
+	var m map[string]any
+	json.Unmarshal(input, &m)
+	switch name {
+	case "Write":
+		if body, _ := m["content"].(string); body != "" {
+			var out []string
+			for i, ln := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
+				if i >= 10 {
+					out = append(out, " "+dim+"…")
+					break
+				}
+				out = append(out, fmt.Sprintf("%s%2d%s %s", dim, i+1, reset, ln))
+			}
+			if len(out) > 0 {
+				return out
+			}
+		}
+	}
+	return []string{" " + single + reset}
+}
+
+// isFileTool — the dialog class that offers "switch to accept edits".
+func isFileTool(name string) bool {
+	switch name {
+	case "Write", "Edit", "MultiEdit", "NotebookEdit":
+		return true
+	}
+	return false
 }
