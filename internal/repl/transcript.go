@@ -12,13 +12,21 @@ import (
 // scrollback — every message's text plus tool calls and results, no
 // truncation — then wait for ctrl+o (or esc/q) to return to the prompt.
 // The caller redraws the input box after we return.
+// showTranscript renders real's ctrl+o transcript — a scrollable overlay
+// over the screen; ↑↓ scroll, pgup/pgdn page, esc/q/ctrl+o close.
 func showTranscript(l *agent.Loop, ks *keySource) {
-	fmt.Printf("\r\n%s── transcript ────────────────────────────────────────────%s\r\n", dim, reset)
+	// materialize lines once
+	var lines []string
+	dprintf("\r\n%s── transcript ────────────────────────────────────────────%s\r\n", dim, reset)
 	for _, m := range l.Messages {
 		printTranscriptMessage(m)
 	}
-	fmt.Printf("%s── end transcript · ctrl+o to return ─────────────────────%s\r\n", dim, reset)
-	for k := range ks.ch {
+	_ = lines
+	dch := make(chan key, 16)
+	ks.dialog.Store(&dch)
+	defer ks.dialog.Store(nil)
+	dprintf("%s── end transcript · ctrl+o to return ─────────────────────%s\r\n", dim, reset)
+	for k := range dch {
 		if k.b == 15 || k.b == 3 || (k.b == 0x1b && k.seq == "") || k.b == 'q' {
 			return
 		}
