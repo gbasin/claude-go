@@ -7,6 +7,7 @@
 package e2e
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -391,5 +392,139 @@ func TestSendNow(t *testing.T) {
 	if idxSN < 0 || idxQ < 0 || idxSN > idxQ {
 		t.Fatalf("sendNow should answer first (sendnow=%d, queued=%d)", idxSN, idxQ)
 	}
+	p.exit()
+}
+
+// TestFastModeKey: meta+o toggles fast mode — the next request carries
+// output_config.speed:"fast" on the wire.
+func TestFastModeKey(t *testing.T) {
+	s := newSession(t)
+	rec := filepath.Join(t.TempDir(), "reqs")
+	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, "--mock")
+	p.waitFor("❯", 30*time.Second)
+	p.send("\x1bo") // meta+o — chat:fastMode
+	time.Sleep(400 * time.Millisecond)
+	p.send("hi\r")
+	p.waitFor("Mock response", 30*time.Second)
+	p.exit()
+
+	ents, _ := os.ReadDir(rec)
+	for _, e := range ents {
+		b, _ := os.ReadFile(filepath.Join(rec, e.Name()))
+		if bytes.Contains(b, []byte(`"speed":"fast"`)) {
+			return
+		}
+	}
+	t.Fatal("meta+o fast mode missing speed:fast on the wire")
+}
+
+// TestMetaModelPicker: meta+p opens the model picker directly.
+func TestMetaModelPicker(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.send("\x1bp") // meta+p — chat:modelPicker
+	p.waitFor("Select model", 15*time.Second)
+	p.send("\x1b")
+	p.exit()
+}
+
+// TestShortcutsOverlay: '?' on empty input shows the shortcuts overlay.
+func TestShortcutsOverlay(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.send("?")
+	p.waitFor("submit", 10*time.Second)
+	if !strings.Contains(p.clean(), "interrupt") {
+		t.Fatalf("shortcuts overlay missing:\n%s", truncStr(p.clean(), 1200))
+	}
+	p.exit()
+}
+
+// TestSlashAutocomplete: typing /xxx shows the live completion dropdown.
+func TestSlashAutocomplete(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.send("/mode")
+	p.waitFor("model", 10*time.Second)
+	p.exit()
+}
+
+// TestThemePersist: /theme <name> writes the choice to
+// .claude/settings.local.json.
+func TestThemePersist(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.sendUntilEchoed(t, "/theme light-ansi\r", "❯ /theme", 8)
+	p.waitFor("theme set to light-ansi", 15*time.Second)
+	p.exit()
+
+	b, err := os.ReadFile(filepath.Join(s.cwd, ".claude", "settings.local.json"))
+	if err != nil || !strings.Contains(string(b), `"theme"`) ||
+		!strings.Contains(string(b), "light-ansi") {
+		t.Fatalf("theme not persisted: %s err=%v", b, err)
+	}
+}
+
+// TestTranscriptOnDisk: a completed turn writes session jsonl records
+// with real's shape — type, uuid chain, sessionId, cwd, version.
+func TestTranscriptOnDisk(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.send("transcript-marker\r")
+	p.waitFor("Mock response to: transcript-marker", 30*time.Second)
+	p.exit()
+
+	dir := filepath.Join(s.home, ".claude", "projects")
+	var file string
+	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && strings.HasSuffix(path, ".jsonl") {
+			file = path
+		}
+		return nil
+	})
+	if file == "" {
+		t.Fatal("no session transcript written")
+	}
+	b, _ := os.ReadFile(file)
+	for _, want := range []string{
+		`"type":"user"`, `"type":"assistant"`, `"uuid"`, `"parentUuid"`,
+		`"sessionId"`, `"timestamp"`, `"version"`, `"userType":"external"`,
+		`"entrypoint":"cli"`, "transcript-marker",
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("transcript missing %q\nfile:\n%s", want, truncStr(string(b), 2000))
+		}
+	}
+}
+
+// TestPermDialogWrite: a Write ask shows the "Do you want to create"
+// question plus the numbered content preview — the file-tool variant.
+func TestPermDialogWrite(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s) // default mode → file writes ask
+	p.sendUntilEchoed(t,
+		`tool:Write {"file_path":"newfile.txt","content":"line-alpha\nline-beta"}`+"\r",
+		"❯ tool:Write", 8)
+	p.waitFor("Do you want to create newfile.txt?", 30*time.Second)
+	out := p.clean()
+	if !strings.Contains(out, "line-alpha") || !strings.Contains(out, "line-beta") {
+		t.Fatalf("Write dialog should preview the file content:\n%s", truncStr(out, 1500))
+	}
+	p.send("3\r") // deny — safest option
+	p.exit()
+}
+
+// TestPermDialogEdit: an Edit ask shows "Do you want to edit <file>?".
+func TestPermDialogEdit(t *testing.T) {
+	s := newSession(t)
+	f := s.writeFile("edit-dlg.txt", "old text\n")
+	_ = f
+	p := startREPL(t, s)
+	// Edit on a file straight away — the ask renders the file-tool variant
+	p.sendUntilEchoed(t,
+		`tool:Edit {"file_path":"`+f+`","old_string":"old","new_string":"new"}`+"\r",
+		"❯ tool:Edit", 8)
+	p.waitFor("Do you want to edit", 30*time.Second)
+	p.send("3\r")
 	p.exit()
 }
