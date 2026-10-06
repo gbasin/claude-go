@@ -787,3 +787,37 @@ func TestTokenRefreshRace(t *testing.T) {
 		t.Fatalf("creds file missing rotated refresh token: %s", b)
 	}
 }
+
+// TestDeferredToolMaterializes: after ToolSearch serves select:Glob, the
+// NEXT request's tools[] carries Glob's full schema (MarkDiscovered).
+func TestDeferredToolMaterializes(t *testing.T) {
+	s := newSession(t)
+	r, bodies := recordRequests(t, s, "-p",
+		`calls:[{"name":"ToolSearch","input":{"query":"select:Glob"}}]`)
+	s.mustOK(t, r)
+	if len(bodies) < 2 {
+		t.Fatalf("expected a follow-up request after ToolSearch, got %d", len(bodies))
+	}
+	last := bodies[len(bodies)-1]
+	var req struct {
+		Tools []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(last, &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var names []string
+	for _, tl := range req.Tools {
+		names = append(names, tl.Name)
+	}
+	found := false
+	for _, n := range names {
+		if n == "Glob" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Glob should materialize on the wire after select:Glob; tools=%v", names)
+	}
+}
