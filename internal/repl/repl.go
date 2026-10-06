@@ -1236,6 +1236,10 @@ func printStatus(l *agent.Loop, ed *editor) {
 			// real: "← N agents" when background agents are running
 			right = strings.Replace(right, "← for agents", fmt.Sprintf("← %d agents", n), 1)
 			right = strings.Replace(right, "? for shortcuts", "? for shortcuts · ← "+fmt.Sprint(n)+" agents", 1)
+			if !strings.Contains(right, " agents") {
+				// bypass mode's right side has neither needle — append
+				right = right + " · ← " + fmt.Sprint(n) + " agents"
+			}
 		}
 		if right == "" {
 			right = "? for shortcuts"
