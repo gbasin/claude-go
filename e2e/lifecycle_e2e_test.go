@@ -439,3 +439,103 @@ func TestWebSearchBudget(t *testing.T) {
 		t.Fatalf("second search should hit the session budget: %s", truncStr(r.stdout, 2000))
 	}
 }
+
+// TestAutoCompact: a tiny autoCompactWindow forces an auto-compact — the
+// transcript gains a compact boundary + summary record.
+func TestAutoCompact(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.sendUntilEchoed(t, "turn one\r", "> turn one", 8)
+	p.waitFor("Mock response", 30*time.Second)
+	p.exit()
+
+	// reopen with a tiny window — next turn auto-compacts
+	rec := filepath.Join(t.TempDir(), "reqs")
+	r := s.runEx(t, []string{"CLAUDE_CODE_AUTO_COMPACT_WINDOW=32000",
+		"CLAUDE_GO_MOCK_RECORD=" + rec}, 60*time.Second,
+		"--mock", "-c", "-p", "turn two")
+	s.mustOK(t, r)
+
+	// transcript carries a compact boundary/summary marker
+	dir := filepath.Join(s.home, ".claude", "projects")
+	files, _ := filepath.Glob(filepath.Join(dir, "*", "*.jsonl"))
+	var sawCompact bool
+	for _, f := range files {
+		b, _ := os.ReadFile(f)
+		if bytes.Contains(b, []byte("isCompactSummary")) ||
+			bytes.Contains(b, []byte(`"compact"`)) {
+			sawCompact = true
+		}
+	}
+	if !sawCompact {
+		t.Fatalf("auto-compact should leave a compact record; transcript files: %v", files)
+	}
+}
+
+// TestCustomSlashCommand: .claude/commands/*.md expand at submit — the
+// body + $ARGUMENTS substitution reaches the model.
+func TestCustomSlashCommand(t *testing.T) {
+	s := newSession(t)
+	s.writeFile(".claude/commands/greet.md",
+		"---\ndescription: greet someone\n---\nSay hi to $ARGUMENTS\n")
+
+	rec := filepath.Join(t.TempDir(), "reqs")
+	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, "--mock")
+	p.waitFor("╭─╮", 30*time.Second)
+	p.sendUntilEchoed(t, "/greet Bob\r", "> /greet Bob", 8)
+	p.waitFor("Mock response", 30*time.Second)
+	p.exit()
+
+	ents, _ := os.ReadDir(rec)
+	for _, e := range ents {
+		b, _ := os.ReadFile(filepath.Join(rec, e.Name()))
+		if bytes.Contains(b, []byte("Say hi to Bob")) {
+			return
+		}
+	}
+	t.Fatal("custom slash expansion did not reach the wire")
+}
+
+// TestToolSearchKeyword: a non-select ToolSearch query returns ranked
+// tool references instead of loading schemas.
+func TestToolSearchKeyword(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p",
+		`tool:ToolSearch {"query":"notebook"}`,
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "NotebookEdit") {
+		t.Fatalf("keyword search should rank NotebookEdit: %s", truncStr(r.stdout, 1500))
+	}
+}
+
+// TestHookPromptType: a PreToolUse type:"prompt" hook calls the Judge
+// (haiku lane) — the judge request hits the API. An OK verdict is not a
+// permission grant: the call still asks → denies non-interactively.
+func TestHookPromptType(t *testing.T) {
+	s := newSession(t)
+	s.writeSettings(`{"hooks":{"PreToolUse":[{"matcher":"Bash",
+		"hooks":[{"type":"prompt","prompt":"Is this command fine? JUDGE-PROMPT-E2E"}]}]}}`)
+
+	rec := filepath.Join(t.TempDir(), "reqs")
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 60*time.Second,
+		"--mock", "-p", `tool:Bash {"command":"echo judged"}`,
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, `"is_error":true`) {
+		t.Fatalf("judge-OK should still resolve through perms → deny in -p: %s",
+			truncStr(r.stdout, 1500))
+	}
+	ents, _ := os.ReadDir(rec)
+	var sawJudge bool
+	for _, e := range ents {
+		b, _ := os.ReadFile(filepath.Join(rec, e.Name()))
+		if bytes.Contains(b, []byte("JUDGE-PROMPT-E2E")) {
+			sawJudge = true
+		}
+	}
+	if !sawJudge {
+		t.Fatal("prompt-hook judge call did not hit the API")
+	}
+}
