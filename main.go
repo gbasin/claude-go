@@ -915,27 +915,49 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 			// the new entries so they surface (real reloads in place)
 			// prompts surface as /mcp__server__name slash commands (real
 			// parity) — expand via prompts/get when invoked
-			if ps, _, perr := c.ListPrompts(context.Background(), ""); perr == nil {
-				for _, pr := range ps {
-					pn := pr.Name
-					tools.RegisterMCPPrompt(prefix, pn,
-						func(ctx context.Context, args map[string]string) (string, error) {
-							res, err := c.GetPrompt(ctx, pn, args)
-							if err != nil {
-								return "", err
-							}
-							var parts []string
-							for _, m := range res.Messages {
-								var pc struct {
-									Type string `json:"type"`
-									Text string `json:"text"`
+			registerPrompts := func() {
+				if ps, _, perr := c.ListPrompts(context.Background(), ""); perr == nil {
+					for _, pr := range ps {
+						pn := pr.Name
+						tools.RegisterMCPPrompt(prefix, pn,
+							func(ctx context.Context, args map[string]string) (string, error) {
+								res, err := c.GetPrompt(ctx, pn, args)
+								if err != nil {
+									return "", err
 								}
-								if json.Unmarshal(m.Content, &pc) == nil && pc.Text != "" {
-									parts = append(parts, pc.Text)
+								var parts []string
+								for _, m := range res.Messages {
+									var pc struct {
+										Type string `json:"type"`
+										Text string `json:"text"`
+									}
+									if json.Unmarshal(m.Content, &pc) == nil && pc.Text != "" {
+										parts = append(parts, pc.Text)
+									}
 								}
-							}
-							return strings.Join(parts, "\n\n"), nil
-						})
+								return strings.Join(parts, "\n\n"), nil
+							})
+					}
+				}
+			}
+			registerPrompts()
+			c.OnPromptsChanged = registerPrompts // prompts/list_changed
+			c.SetNotificationHandler(func(method string, params json.RawMessage) {
+				// notifications/message = server log lines — real shows
+				// them as dim status notes above the prompt
+				if method == "notifications/message" {
+					var p struct {
+						Level string `json:"level"`
+						Data  string `json:"data"`
+					}
+					if json.Unmarshal(params, &p) == nil && p.Data != "" {
+						fmt.Fprintf(os.Stderr, "  [mcp %s] %s: %s\n", name, p.Level, p.Data)
+					}
+				}
+			})
+			c.Roots = func() []map[string]string {
+				return []map[string]string{
+					{"uri": "file://" + cwd, "name": cwd},
 				}
 			}
 			c.OnToolsChanged = func() {

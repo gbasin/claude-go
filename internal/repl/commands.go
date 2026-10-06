@@ -47,6 +47,14 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		dprintln("  ⏸ plan mode — explore read-only, then ExitPlanMode to implement")
 	case "clear", "reset", "new":
 		l.Messages = nil
+		// /clear ends the session before starting the next — real fires
+		// SessionEnd(reason=clear) then SessionStart(source=clear)
+		l.SessionEndReason = "clear"
+		hooks.Run(l.Hooks, hooks.SessionEnd, map[string]any{
+			"session_id": l.Client.SessionID, "transcript_path": l.Transcript,
+			"cwd": l.ToolCtx.CWD, "hook_event_name": "SessionEnd",
+			"reason": "clear", "permission_mode": l.PermMode,
+		}, l.ToolCtx.CWD)
 		l.ResetForNewSession()
 		l.SessionStartSource = "clear"
 		hooks.Run(l.Hooks, hooks.SessionStart, map[string]any{
