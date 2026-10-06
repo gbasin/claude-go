@@ -67,9 +67,9 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			dprintf("  Compacted · %d messages summarized (ctrl+o to see them)\n", before)
 		}
 	case "cost", "usage", "stats":
-		u := l.UsageTotal
-		dprintf("  input: %d  output: %d  cache-read: %d  cache-write: %d\n",
-			u.InputTokens, u.OutputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens)
+		// real's /usage: window bars from the rate-limit headers + token
+		// totals for the session
+		usageDisplay(l)
 	case "status":
 		statusOverlay(l, ks)
 	case "context":
@@ -3533,4 +3533,52 @@ func statusOverlay(l *agent.Loop, ks *keySource) {
 			return
 		}
 	}
+}
+
+// usageDisplay renders real's /usage — "Current session" / "Current week"
+// bars driven by the unified rate-limit headers, plus token totals.
+func usageDisplay(l *agent.Loop) {
+	bar := func(f float64) string {
+		const n = 20
+		fill := int(f * n)
+		if fill > n {
+			fill = n
+		}
+		return strings.Repeat("█", fill) + dim + strings.Repeat("░", n-fill) + reset
+	}
+	row := func(label string, util float64, resetAt time.Time) {
+		pct := int(util * 100)
+		line := fmt.Sprintf("  %-24s %s  %d%% used", label, bar(util), pct)
+		if !resetAt.IsZero() {
+			line += dim + " · Resets " + resetAt.Local().Format("Mon 3:04 PM") + reset
+		}
+		dprintln(line)
+	}
+	rl := l.Client.LastRateLimit()
+	dprintln("  " + bold + "Usage" + reset)
+	if rl != nil {
+		if rl.SlowStatus != "" || rl.SlowBudgetUtilization > 0 {
+			row("Current session", rl.SlowBudgetUtilization, rl.SlowBudgetResetsAt)
+		}
+		if rl.OverageInUse || rl.OverageMonthlyUtilization > 0 {
+			row("Extra usage (month)", rl.OverageMonthlyUtilization, rl.OverageResetsAt)
+		}
+		if rl.Status == "rejected" || rl.Status == "allowed_warning" {
+			dprintf("  %s⚠ %s%s\n", yellow, firstNonEmptyStr(rl.RepresentativeClaim, rl.Status), reset)
+		}
+	} else {
+		dprintln("  " + dim + "no rate-limit data yet" + reset)
+	}
+	u := l.UsageTotal
+	dprintf("  %sthis session: %d in · %d out · %d cache-read%s\n",
+		dim, u.InputTokens, u.OutputTokens, u.CacheReadInputTokens, reset)
+}
+
+func firstNonEmptyStr(ss ...string) string {
+	for _, s := range ss {
+		if s != "" {
+			return s
+		}
+	}
+	return ""
 }

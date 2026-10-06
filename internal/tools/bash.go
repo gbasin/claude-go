@@ -397,6 +397,18 @@ func execTaskStop(c *Context, raw json.RawMessage) Result {
 	return Result{Content: fmt.Sprintf("Task %s stopped", id)}
 }
 
+// Notify queues a "Task <id> finished/failed" status note (real shows
+// these as ⎿-prefixed reminders on the next input row).
+func (b *Background) Notify(t *BgTask) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	status := "finished"
+	if t.TimedOut || t.Err != nil || t.ExitCode != 0 {
+		status = "failed"
+	}
+	b.notif = append(b.notif, fmt.Sprintf("Task %s %s: %s", t.ID, status, t.Command))
+}
+
 // DrainNotifications returns and clears queued task-exit notes.
 func (b *Background) DrainNotifications() []string {
 	b.mu.Lock()
