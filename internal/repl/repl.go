@@ -98,6 +98,9 @@ func RunWithStore(l *agent.Loop, store Store) {
 			toggleBrief()
 			return nil
 		}
+		ed.onFastMode = func() {
+			l.SetFastMode(!l.FastMode)
+		}
 		ed.onKillAgents = func() {
 			compInline("\r\x1b[2K  killing background tasks…\r\n")
 			n := l.ToolCtx.BgTasks.KillAll()
