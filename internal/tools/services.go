@@ -755,9 +755,14 @@ var heartbeat struct {
 	stop chan struct{}
 }
 
+var heartbeatMu sync.Mutex
+
 func startSessionHeartbeat() {
+	heartbeatMu.Lock()
+	defer heartbeatMu.Unlock()
 	heartbeat.once.Do(func() {
-		heartbeat.stop = make(chan struct{})
+		stop := make(chan struct{})
+		heartbeat.stop = stop
 		go func() {
 			t := time.NewTicker(30 * time.Second)
 			defer t.Stop()
@@ -765,7 +770,7 @@ func startSessionHeartbeat() {
 				select {
 				case <-t.C:
 					updateSessionFile(map[string]any{"updatedAt": time.Now().UnixMilli()})
-				case <-heartbeat.stop:
+				case <-stop: // captured: closing+nil'ing heartbeat.stop races the read
 					return
 				}
 			}
@@ -774,6 +779,8 @@ func startSessionHeartbeat() {
 }
 
 func stopSessionHeartbeat() {
+	heartbeatMu.Lock()
+	defer heartbeatMu.Unlock()
 	if heartbeat.stop != nil {
 		close(heartbeat.stop)
 		heartbeat.stop = nil
