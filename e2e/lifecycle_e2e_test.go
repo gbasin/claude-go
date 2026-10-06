@@ -539,3 +539,52 @@ func TestHookPromptType(t *testing.T) {
 		t.Fatal("prompt-hook judge call did not hit the API")
 	}
 }
+
+// TestHistorySearch: ctrl+r opens the search prompt and matches a past
+// prompt by substring.
+func TestHistorySearch(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.sendUntilEchoed(t, "searchable-marker-99\r", "> searchable-marker-99", 8)
+	p.waitFor("Mock response", 30*time.Second)
+	// ctrl+r → type the query — resend until the search prompt renders
+	for i := 0; i < 12; i++ {
+		p.send("\x12") // ctrl+r
+		p.send("searchable")
+		if strings.Contains(p.clean(), "search prompts") {
+			break
+		}
+		time.Sleep(600 * time.Millisecond)
+	}
+	p.waitFor("search prompts `searchable`", 10*time.Second)
+	p.waitFor("searchable-marker-99", 10*time.Second)
+	p.exit()
+}
+
+// TestQueuedMessage: a prompt submitted while a turn is running queues
+// and fires after the turn ends.
+func TestQueuedMessage(t *testing.T) {
+	s := newSession(t)
+	rec := filepath.Join(t.TempDir(), "reqs")
+	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec},
+		"--mock", "--permission-mode", "bypassPermissions")
+	p.waitFor("╭─╮", 30*time.Second)
+	// a 3s Bash gives a wide mid-turn window to submit the queued prompt
+	p.sendUntilEchoed(t, `tool:Bash {"command":"sleep 3"}`+"\r", "> tool:Bash", 8)
+	time.Sleep(800 * time.Millisecond) // well inside the sleep window
+	p.send("queued-marker-e2e\r")
+	p.waitFor("Mock response to: queued-marker-e2e", 30*time.Second)
+	p.exit()
+
+	var sawQueued bool
+	ents, _ := os.ReadDir(rec)
+	for _, e := range ents {
+		b, _ := os.ReadFile(filepath.Join(rec, e.Name()))
+		if bytes.Contains(b, []byte("queued-marker-e2e")) {
+			sawQueued = true
+		}
+	}
+	if !sawQueued {
+		t.Fatal("queued prompt never reached the wire")
+	}
+}

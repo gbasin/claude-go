@@ -389,3 +389,73 @@ func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
 }
+
+// TestHookPostToolUseFailure: a failing tool fires PostToolUseFailure
+// (distinct from PostToolUse).
+func TestHookPostToolUseFailure(t *testing.T) {
+	s := newSession(t)
+	mark := filepath.Join(s.cwd, "fail.marker")
+	s.writeSettings(hookMarker("PostToolUseFailure", "Bash", mark))
+	r := s.run(t, "--mock", "-p",
+		`tool:Bash {"command":"exit 3"}`,
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !fileExists(mark) {
+		t.Fatal("PostToolUseFailure hook did not fire")
+	}
+}
+
+// TestHookTaskCompleted: a background task exiting fires TaskCompleted.
+func TestHookTaskCompleted(t *testing.T) {
+	s := newSession(t)
+	mark := filepath.Join(s.cwd, "taskdone.marker")
+	s.writeSettings(hookMarker("TaskCompleted", "", mark))
+	r := s.run(t, "--mock", "-p",
+		`tool:Bash {"command":"true","run_in_background":true}`,
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) && !fileExists(mark) {
+		time.Sleep(150 * time.Millisecond)
+	}
+	if !fileExists(mark) {
+		t.Fatal("TaskCompleted hook did not fire on bg-task exit")
+	}
+}
+
+// TestHookCwdChangedPrint: CwdChanged is wired outside the REPL too — a
+// Bash cd in -p fires it.
+func TestHookCwdChangedPrint(t *testing.T) {
+	s := newSession(t)
+	mark := filepath.Join(s.cwd, "cwdprint.marker")
+	s.writeSettings(hookMarker("CwdChanged", "", mark))
+	other := t.TempDir()
+	r := s.run(t, "--mock", "-p",
+		`tool:Bash {"command":"cd `+other+`"}`,
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !fileExists(mark) {
+		t.Fatal("CwdChanged did not fire in -p")
+	}
+}
+
+// TestIncludeHookEvents: --include-hook-events emits hook run records in
+// stream-json output.
+func TestIncludeHookEvents(t *testing.T) {
+	s := newSession(t)
+	mark := filepath.Join(s.cwd, "x.marker")
+	s.writeSettings(hookMarker("PostToolUse", "Bash", mark))
+	r := s.run(t, "--mock", "-p",
+		`tool:Bash {"command":"echo hooked"}`,
+		"--permission-mode", "bypassPermissions",
+		"--include-hook-events",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "hook_started") &&
+		!strings.Contains(r.stdout, "hook_response") {
+		t.Fatalf("hook events missing from stream-json: %s", truncStr(r.stdout, 1500))
+	}
+}
