@@ -4,8 +4,11 @@ package perms
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
+
+	"claude-go/internal/config"
 )
 
 type Mode string
@@ -39,10 +42,15 @@ func Check(mode Mode, rules *Rules, toolName string, input json.RawMessage, cwd 
 	if mode == ModeBypass {
 		return Allow
 	}
-	// plan mode: only read-only tools
+	// plan mode: only read-only tools — unless useAutoModeDuringPlan
+	// (default true) hands non-read-only calls to the auto-eval lane,
+	// which decides allow/ask/deny like auto mode
 	if mode == ModePlan {
 		if readOnly(toolName) {
 			return Allow
+		}
+		if autoModeDuringPlan() {
+			return Ask
 		}
 		return Deny
 	}
@@ -353,4 +361,21 @@ func fileInsideWorkspace(input json.RawMessage, cwd string) bool {
 		}
 	}
 	return false
+}
+
+// autoModeDuringPlan honors settings.useAutoModeDuringPlan (real default
+// true — plan mode uses auto semantics when auto mode is available).
+func autoModeDuringPlan() bool {
+	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
+	if err != nil {
+		return true
+	}
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil {
+		return true
+	}
+	if v, ok := m["useAutoModeDuringPlan"].(bool); ok {
+		return v
+	}
+	return true
 }

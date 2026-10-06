@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -1165,15 +1166,7 @@ func runBang(l *agent.Loop, cmd string) {
 
 // respondToBash — settings.respondToBashCommands, real default true.
 func respondToBash(l *agent.Loop) bool {
-	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
-	if err != nil {
-		return true
-	}
-	var m map[string]any
-	if json.Unmarshal(b, &m) != nil {
-		return true
-	}
-	if v, ok := m["respondToBashCommands"].(bool); ok {
+	if v, ok := userSetting("respondToBashCommands").(bool); ok {
 		return v
 	}
 	return true
@@ -2243,14 +2236,27 @@ func (p *promptUI) askStructuredMulti(ks *keySource, qs []tools.AskQuestion) (ma
 }
 
 func readUserSettingStr(key string) string {
-	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
-	if err != nil {
-		return ""
-	}
-	var m map[string]any
-	if json.Unmarshal(b, &m) != nil {
-		return ""
-	}
-	s, _ := m[key].(string)
+	s, _ := userSetting(key).(string)
 	return s
 }
+
+// userSettings caches ~/.claude/settings.json once per process — real
+// reads it once at startup too (restart to pick up edits).
+var userSettingsOnce struct {
+	once sync.Once
+	m    map[string]any
+}
+
+func userSettings() map[string]any {
+	userSettingsOnce.once.Do(func() {
+		b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
+		if err != nil {
+			userSettingsOnce.m = map[string]any{}
+			return
+		}
+		json.Unmarshal(b, &userSettingsOnce.m)
+	})
+	return userSettingsOnce.m
+}
+
+func userSetting(key string) any { return userSettings()[key] }

@@ -4218,7 +4218,7 @@ func configEntryValue(e configEntry, l *agent.Loop) string {
 		}
 		return "false"
 	}
-	v := readUserSetting(e.key)
+	v := userSetting(e.key)
 	if e.enum != nil {
 		s, _ := v.(string)
 		if s == "" {
@@ -4238,7 +4238,7 @@ func toggleConfigEntry(e configEntry, l *agent.Loop) {
 		return
 	}
 	if e.enum != nil {
-		cur, _ := readUserSetting(e.key).(string)
+		cur, _ := userSetting(e.key).(string)
 		next := e.enum[0]
 		for i, o := range e.enum {
 			if o == cur {
@@ -4248,20 +4248,14 @@ func toggleConfigEntry(e configEntry, l *agent.Loop) {
 		writeUserSetting(e.key, next)
 		return
 	}
-	cur, _ := readUserSetting(e.key).(bool)
+	cur, _ := userSetting(e.key).(bool)
 	writeUserSetting(e.key, !cur)
+	invalidateUserSettings() // the Config tab reads live values
 }
 
 // readUserSetting/writeUserSetting hit ~/.claude/settings.json — the same
 // file real's Config tab edits.
-func readUserSetting(key string) any {
-	b, _ := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
-	var m map[string]any
-	if json.Unmarshal(b, &m) != nil || m == nil {
-		return nil
-	}
-	return m[key]
-}
+func readUserSetting(key string) any { return userSetting(key) }
 
 func writeUserSetting(key string, v any) {
 	p := filepath.Join(config.ClaudeDir(), "settings.json")
@@ -4274,17 +4268,27 @@ func writeUserSetting(key string, v any) {
 	if out, err := json.MarshalIndent(m, "", "  "); err == nil {
 		os.WriteFile(p, out, 0o644)
 	}
+	invalidateUserSettings()
+}
+
+// invalidateUserSettings drops the cache so a Config-tab edit shows.
+func invalidateUserSettings() {
+	userSettingsOnce.once = sync.Once{}
 }
 
 // clockNow renders the turn-end clock honoring timeFormat/timeZone
 // settings (real: "auto"|"12-hour"|"24-hour"|"24-hour-utc"|strftime).
 func clockNow() string {
-	b, _ := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
 	var st struct {
 		TF string `json:"timeFormat"`
 		TZ string `json:"timeZone"`
 	}
-	json.Unmarshal(b, &st)
+	if v, ok := userSetting("timeFormat").(string); ok {
+		st.TF = v
+	}
+	if v, ok := userSetting("timeZone").(string); ok {
+		st.TZ = v
+	}
 	now := time.Now()
 	if st.TZ != "" {
 		if loc, err := time.LoadLocation(st.TZ); err == nil {
