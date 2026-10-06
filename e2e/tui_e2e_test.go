@@ -524,7 +524,7 @@ func TestPermDialogEdit(t *testing.T) {
 	p.sendUntilEchoed(t,
 		`tool:Edit {"file_path":"`+f+`","old_string":"old","new_string":"new"}`+"\r",
 		"❯ tool:Edit", 8)
-	p.waitFor("Do you want to edit", 30*time.Second)
+	p.waitFor("Do you want to make this edit", 30*time.Second)
 	p.send("3\r")
 	p.exit()
 }

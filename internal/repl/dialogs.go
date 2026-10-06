@@ -146,7 +146,7 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 		question = "Do you want to create " + fname + "?"
 	case "Edit", "MultiEdit":
 		title = "Edit file"
-		question = "Do you want to edit " + fname + "?"
+		question = "Do you want to make this edit to " + bold + fname + unbold + "?"
 	}
 	desc := permDesc(name, input, summary)
 	if desc == "" && isFileTool(name) {
@@ -175,8 +175,9 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 	var opts []opt
 	opts = append(opts, opt{label: "Yes", action: "yes"})
 	if isFileTool(name) && l.PermMode != "acceptEdits" {
+		// captured: "accept edits (...) commands)" + "(shift+tab)" bold
 		opts = append(opts, opt{
-			label:  "Yes, and switch to accept edits (auto-approve file edits and common file \n      commands) for this session (shift+tab)",
+			label:  "Yes, and switch to " + bold + "accept edits (auto-approve file edits and common file \n      commands)" + unbold + " for this session " + bold + "(shift+tab)" + unbold,
 			action: "acceptedits"})
 	} else if !isFileTool(name) {
 		if alwaysSpec != "" {
@@ -833,6 +834,30 @@ func permContentLines(name string, input json.RawMessage, single string) []strin
 	var m map[string]any
 	json.Unmarshal(input, &m)
 	switch name {
+	case "Edit", "MultiEdit":
+		// captured: " 1 -old" fg-167/bg-52, " 1 +new" fg-77/bg-22,
+		// white-231 text, padded to fill (bg spans the row)
+		oldS, _ := m["old_string"].(string)
+		newS, _ := m["new_string"].(string)
+		if oldS != "" || newS != "" {
+			pad := func(s string) string {
+				return s + strings.Repeat(" ", max(0, 78-visWidth(s)))
+			}
+			var out []string
+			if oldS != "" {
+				for _, ln := range strings.Split(strings.TrimRight(oldS, "\n"), "\n") {
+					out = append(out, "\x1b[38;5;167m\x1b[48;5;52m"+pad(" 1 -"+ln)+"\x1b[49m\x1b[39m")
+				}
+			}
+			if newS != "" {
+				for _, ln := range strings.Split(strings.TrimRight(newS, "\n"), "\n") {
+					out = append(out, "\x1b[38;5;77m\x1b[48;5;22m"+pad(" 1 +"+ln)+"\x1b[49m\x1b[39m")
+				}
+			}
+			if len(out) > 0 {
+				return out
+			}
+		}
 	case "Write":
 		if body, _ := m["content"].(string); body != "" {
 			var out []string
