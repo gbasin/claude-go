@@ -577,8 +577,13 @@ func RunWithStore(l *agent.Loop, store Store) {
 				if v == "" {
 					v = "Working"
 				}
-				dprintf("%s✻ %s for %s · done %s%s\n\n", dim, pastTense(v),
-					fmtDur(time.Since(start)), time.Now().Format("3:04 PM"), reset)
+				// real appends "· N shell still running" when bg tasks live on
+				tail := ""
+				if n := runningAgents(l); n > 0 {
+					tail = fmt.Sprintf(" · %d shell still running", n)
+				}
+				dprintf("%s✻ %s for %s · done %s%s%s\n\n", dim, pastTense(v),
+					fmtDur(time.Since(start)), time.Now().Format("3:04 PM"), tail, reset)
 			}
 		}
 		for {
@@ -1865,28 +1870,54 @@ func showAgentsPane(l *agent.Loop, ks *keySource) {
 	dch := make(chan key, 16)
 	ks.dialog.Store(&dch)
 	defer ks.dialog.Store(nil)
-	dprintf("\n  %sAgents%s\n", bold, reset)
 	var tasks []*tools.BgTask
 	if l.ToolCtx.BgTasks != nil {
 		tasks = l.ToolCtx.BgTasks.List()
 	}
-	if len(tasks) == 0 {
-		dprintf("  %sno background tasks%s\n", dim, reset)
-	}
+	// real's agents view (captured 2.1.292): banner, "N awaiting input ·
+	// M working · K completed" counts, Needs input + Completed sections,
+	// a "describe a task for a new session" input row, mode-pill footer
+	var running, done int
 	for _, t := range tasks {
-		status := "running"
 		select {
 		case <-t.Done:
-			if t.Err != nil || t.TimedOut {
-				status = "failed"
-			} else {
-				status = "done"
-			}
+			done++
 		default:
+			running++
 		}
-		dprintf("  %s%s%s %s — %s (%s)\n", cyan, t.ID, reset, t.Command, status, fmtDur(time.Since(t.Started)))
 	}
-	dprintf("  %sesc to close%s\n", dim, reset)
+	dprintf("\n  %d awaiting input · %d working · %d completed\n", running, 0, done)
+	dprintf("  %sYour conversation moved to the background — enter opens it · esc returns to it · ctrl+c twice quits%s\n", dim, reset)
+	if running > 0 {
+		dprintf("\n  %sNeeds input%s\n", bold, reset)
+		for _, t := range tasks {
+			select {
+			case <-t.Done:
+				continue
+			default:
+			}
+			dprintf("  %s✻%s %-36s %s%s%s  %s%s\n", claudeOrange, reset,
+				truncRunes(t.Command, 36), dim, "", reset, relAgo(t.Started), reset)
+		}
+	}
+	if done > 0 {
+		dprintf("\n  %sCompleted%s\n", bold, reset)
+		for _, t := range tasks {
+			select {
+			case <-t.Done:
+			default:
+				continue
+			}
+			st := "stopped"
+			if t.Err == nil && !t.TimedOut {
+				st = "done"
+			}
+			dprintf("  %s∙%s %-36s %s%s%s  %s%s\n", dim, reset,
+				truncRunes(t.Command, 36), dim, st, reset, relAgo(t.Started), reset)
+		}
+	}
+	dprintf("\n  %s❯%s %sdescribe a task for a new session%s\n", "\x1b[38;5;153m", reset, dim, reset)
+	dprintf("  %senter to return · space to reply · esc to close%s\n", dim, reset)
 	for k := range dch {
 		if k.b == 0x1b || k.b == 3 || k.b == 'q' || k.seq == "[D" || k.seq == "[C" {
 			return
