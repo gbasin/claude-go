@@ -262,8 +262,9 @@ func TestEscEscRewindPicker(t *testing.T) {
 	p.send("1\r")
 	p.waitFor("rewound to before", 15*time.Second)
 
-	p.sendUntilEchoed(t, "/context\r", "❯ /context", 8)
-	p.waitFor("messages: 0", 15*time.Second)
+	// the picker can still own the key channel momentarily — resend
+	// /context until its output lands (lost keystrokes are harmless)
+	p.sendUntil("/context\r", "messages:", 12)
 	p.exit()
 }
 

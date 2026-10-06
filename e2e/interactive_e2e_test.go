@@ -52,6 +52,7 @@ func (p *ptyProc) sendAtPrompt(n int, keys string) {
 // we just press again).
 func (p *ptyProc) sendUntil(keys, want string, tries int) {
 	p.t.Helper()
+	want = strings.ReplaceAll(want, "\u00a0", " ")
 	for i := 0; i < tries; i++ {
 		p.send(keys)
 		deadline := time.Now().Add(1200 * time.Millisecond)
@@ -77,6 +78,7 @@ func (p *ptyProc) sendUntil(keys, want string, tries int) {
 // line was submitted and we stop.
 func (p *ptyProc) sendUntilEchoed(t *testing.T, keys, echoFrag string, tries int) {
 	t.Helper()
+	echoFrag = strings.ReplaceAll(echoFrag, "\u00a0", " ")
 	mark := len(p.output())
 	for i := 0; i < tries; i++ {
 		p.send(keys)
