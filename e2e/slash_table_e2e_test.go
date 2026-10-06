@@ -15,6 +15,7 @@
 package e2e
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +23,11 @@ import (
 
 func TestSlashTable(t *testing.T) {
 	s := newSession(t)
-	p := startREPL(t, s)
+	// stub `open` so /radio can't launch a real browser tab
+	stubDir := t.TempDir()
+	os.WriteFile(stubDir+"/open", []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	p := s.runPTY(t, []string{"PATH=" + stubDir + ":" + os.Getenv("PATH")}, "--mock")
+	p.waitFor("❯", 30*time.Second)
 
 	table := []struct {
 		cmd  string
