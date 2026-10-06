@@ -704,3 +704,29 @@ func TestDebugToolCall(t *testing.T) {
 	p.waitFor("dbg-marker", 15*time.Second)
 	p.exit()
 }
+
+// TestClearSessionHookSequence: /clear fires SessionEnd(reason=clear)
+// then SessionStart(source=clear) — the real end/start pair.
+func TestClearSessionHookSequence(t *testing.T) {
+	s := newSession(t)
+	dump := filepath.Join(s.cwd, "clear-hooks.jsonl")
+	s.writeFile(".claude/settings.json",
+		`{"hooks":{`+
+			`"SessionEnd":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}],`+
+			`"SessionStart":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}]`+
+			`}}`)
+	p := startREPL(t, s)
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t, "/clear\r", "❯ /clear", 8)
+	p.waitFor("context cleared", 15*time.Second)
+	p.exit()
+
+	b, _ := os.ReadFile(dump)
+	out := string(b)
+	if !strings.Contains(out, `"reason":"clear"`) {
+		t.Fatalf("no SessionEnd(reason=clear):\n%s", out)
+	}
+	if !strings.Contains(out, `"source":"clear"`) {
+		t.Fatalf("no SessionStart(source=clear):\n%s", out)
+	}
+}
