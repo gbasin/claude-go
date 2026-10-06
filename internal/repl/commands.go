@@ -127,7 +127,11 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "permissions", "allowed-tools":
 		permissionsModal(l, ks)
 	case "config", "settings":
-		configCmd(l, arg)
+		if arg == "" {
+			statusOverlayAt(l, ks, 2) // real opens the overlay on Config
+		} else {
+			configCmd(l, arg)
+		}
 	case "agents":
 		dprintln("  builtin: general-purpose, Explore, Plan, claude, code-reviewer, code-simplifier, debugger, statusline-setup")
 		dprintln("  custom agents load from ~/.claude/agents/ and .claude/agents/")
@@ -3507,7 +3511,9 @@ func ideCmd() {
 // statusOverlay renders real's /status — a tabbed panel (Settings /
 // Status / Config / UsageStats) with session fields + diagnostics.
 // Esc/enter/q closes; ←/→ move between tabs (Status is the default).
-func statusOverlay(l *agent.Loop, ks *keySource) {
+func statusOverlay(l *agent.Loop, ks *keySource) { statusOverlayAt(l, ks, 1) }
+
+func statusOverlayAt(l *agent.Loop, ks *keySource, tab int) {
 	compSuspend()
 	defer compResume()
 	dch := make(chan key, 16)
@@ -3516,7 +3522,8 @@ func statusOverlay(l *agent.Loop, ks *keySource) {
 		defer ks.dialog.Store(nil)
 	}
 	tabs := []string{"Settings", "Status", "Config", "UsageStats"}
-	tab := 1
+	var cfgQuery []rune
+	cfgSel, cfgScroll := 0, 0
 	draw := func() {
 		var sb strings.Builder
 		sb.WriteString("\n")
@@ -3563,13 +3570,60 @@ func statusOverlay(l *agent.Loop, ks *keySource) {
 		case 0:
 			sb.WriteString("  " + dim + "settings sources: user + project + local" + reset + "\n")
 		case 2:
-			sb.WriteString(fmt.Sprintf("  effort: %s\n  theme: %s\n", effortLabel(), themeSetting(l.ToolCtx.CWD)))
+			// real's Config tab: ⌕ search box + scrollable settings list,
+			// "↓ N more" indicator, filter-on-type
+			w, _, _ := term.GetSize(int(os.Stdout.Fd()))
+			if w <= 0 {
+				w = 80
+			}
+			sb.WriteString("\n  " + bold + "Config" + reset + "\n")
+			sb.WriteString("  " + "\x1b[38;5;239m╭" + strings.Repeat("─", w-8) + "╮\x1b[39m" + "\n")
+			sl := "⌕ Search settings…"
+			if len(cfgQuery) > 0 {
+				sl = "⌕ " + string(cfgQuery)
+			}
+			sb.WriteString("  " + "\x1b[38;5;239m│\x1b[39m" + sl + "\n")
+			sb.WriteString("  " + "\x1b[38;5;239m╰" + strings.Repeat("─", w-8) + "╯\x1b[39m" + "\n")
+			list := filteredConfigEntries(string(cfgQuery))
+			_, h, _ := term.GetSize(int(os.Stdout.Fd()))
+			vis := h - 14
+			if vis < 4 {
+				vis = 4
+			}
+			if cfgSel >= len(list) {
+				cfgSel = max(0, len(list)-1)
+			}
+			if cfgSel < cfgScroll {
+				cfgScroll = cfgSel
+			}
+			if cfgSel >= cfgScroll+vis {
+				cfgScroll = cfgSel - vis + 1
+			}
+			for i := cfgScroll; i < len(list) && i < cfgScroll+vis; i++ {
+				e := list[i]
+				val := configEntryValue(e, l)
+				if i == cfgSel {
+					sb.WriteString(fmt.Sprintf(" %s❯%s%s %s%s\n", "\x1b[38;5;153m", "\x1b[39m", e.name, "\x1b[38;5;246m", val+"\x1b[39m"))
+				} else {
+					sb.WriteString(fmt.Sprintf("   %s %s%s%s\n", e.name, "\x1b[38;5;246m", val, "\x1b[39m"))
+				}
+				if e.note != "" {
+					sb.WriteString("     " + dim + e.note + reset + "\n")
+				}
+			}
+			if more := len(list) - (cfgScroll + vis); more > 0 {
+				sb.WriteString(fmt.Sprintf("  %s↓ %d more%s\n", dim, more, reset))
+			}
 		case 3:
 			u := l.UsageTotal
 			sb.WriteString(fmt.Sprintf("  input: %d · output: %d · cache read: %d\n",
 				u.InputTokens, u.OutputTokens, u.CacheReadInputTokens))
 		}
-		sb.WriteString("\n" + dim + "←→ tabs · Esc to cancel" + reset + "\n")
+		if tab == 2 {
+			sb.WriteString("\n" + dim + "Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear" + reset + "\n")
+		} else {
+			sb.WriteString("\n" + dim + "←→ tabs · Esc to cancel" + reset + "\n")
+		}
 		fmt.Print(sb.String())
 	}
 	draw()
@@ -3579,6 +3633,40 @@ func statusOverlay(l *agent.Loop, ks *keySource) {
 	rows := 24
 	_ = rows
 	for k := range dch {
+		if tab == 2 {
+			// Config tab: ↑/↓ select, typing filters, ←/→ still tab-switch,
+			// Enter toggles the selected entry
+			switch {
+			case k.seq == "[A":
+				if cfgSel > 0 {
+					cfgSel--
+				}
+				draw()
+				continue
+			case k.seq == "[B":
+				if cfgSel < len(filteredConfigEntries(string(cfgQuery)))-1 {
+					cfgSel++
+				}
+				draw()
+				continue
+			case k.b == 0x7f || k.b == 8:
+				if len(cfgQuery) > 0 {
+					cfgQuery = cfgQuery[:len(cfgQuery)-1]
+				}
+				draw()
+				continue
+			case k.b == '\r':
+				toggleConfigEntry(filteredConfigEntries(string(cfgQuery))[cfgSel], l)
+				draw()
+				continue
+			case k.b >= 0x20 && k.b < 0x7f && k.b != 'q':
+				cfgQuery = append(cfgQuery, rune(k.b))
+				cfgSel = 0
+				cfgScroll = 0
+				draw()
+				continue
+			}
+		}
 		switch {
 		case k.seq == "[C" && tab < len(tabs)-1:
 			tab++
@@ -3999,5 +4087,110 @@ func permissionsModal(l *agent.Loop, ks *keySource) {
 			sel = 0
 			draw()
 		}
+	}
+}
+
+// configEntry is one row in the Config tab's settings list.
+type configEntry struct {
+	name, note string
+	key        string // settings.json key
+	enum       []string
+}
+
+// configEntries mirrors real's Config tab ordering (captured 2.1.292).
+var configEntries = []configEntry{
+	{name: "Auto-compact", key: "autoCompactEnabled"},
+	{name: "Continue automatically at usage limit", key: "continueAtUsageLimit"},
+	{name: "Switch models when a message is flagged", key: "modelOnFlagged", enum: []string{"Ask each time", "Always switch", "Never"}},
+	{name: "Show tips", key: "showTips"},
+	{name: "Claude-drafted feedback", key: "claudeDraftedFeedback", enum: []string{"notify", "auto", "off"}},
+	{name: "Reduce motion", key: "reduceMotion"},
+	{name: "Thinking mode", key: "thinking", note: "Thinking can't be turned off for this model"},
+	{name: "Fast mode", key: "fastMode"},
+	{name: "Prompt suggestions", key: "promptSuggestions"},
+	{name: "Session recap", key: "sessionRecap"},
+	{name: "Rewind code (checkpoints)", key: "checkpoints"},
+	{name: "Notifications", key: "notifications", enum: []string{"off", "notify", "iterm2", "terminal_bell"}},
+	{name: "Auto updates", key: "autoUpdates"},
+	{name: "Verbose output", key: "verbose"},
+	{name: "Terminal progress bar", key: "terminalProgressBar"},
+	{name: "Show turn duration", key: "showTurnDuration"},
+	{name: "Cleanup period (days)", key: "cleanupPeriodDays"},
+	{name: "Co-authored-by", key: "includeCoAuthoredBy"},
+}
+
+func filteredConfigEntries(q string) []configEntry {
+	q = strings.ToLower(q)
+	var out []configEntry
+	for _, e := range configEntries {
+		if q == "" || strings.Contains(strings.ToLower(e.name), q) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func configEntryValue(e configEntry, l *agent.Loop) string {
+	if e.key == "fastMode" {
+		if l.FastMode {
+			return "true"
+		}
+		return "false"
+	}
+	v := readUserSetting(e.key)
+	if e.enum != nil {
+		s, _ := v.(string)
+		if s == "" {
+			s = e.enum[0]
+		}
+		return s + " ›"
+	}
+	if b, ok := v.(bool); ok && !b {
+		return "false"
+	}
+	return "true"
+}
+
+func toggleConfigEntry(e configEntry, l *agent.Loop) {
+	if e.key == "fastMode" {
+		l.SetFastMode(!l.FastMode)
+		return
+	}
+	if e.enum != nil {
+		cur, _ := readUserSetting(e.key).(string)
+		next := e.enum[0]
+		for i, o := range e.enum {
+			if o == cur {
+				next = e.enum[(i+1)%len(e.enum)]
+			}
+		}
+		writeUserSetting(e.key, next)
+		return
+	}
+	cur, _ := readUserSetting(e.key).(bool)
+	writeUserSetting(e.key, !cur)
+}
+
+// readUserSetting/writeUserSetting hit ~/.claude/settings.json — the same
+// file real's Config tab edits.
+func readUserSetting(key string) any {
+	b, _ := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil || m == nil {
+		return nil
+	}
+	return m[key]
+}
+
+func writeUserSetting(key string, v any) {
+	p := filepath.Join(config.ClaudeDir(), "settings.json")
+	var m map[string]any
+	b, _ := os.ReadFile(p)
+	if json.Unmarshal(b, &m) != nil || m == nil {
+		m = map[string]any{}
+	}
+	m[key] = v
+	if out, err := json.MarshalIndent(m, "", "  "); err == nil {
+		os.WriteFile(p, out, 0o644)
 	}
 }
