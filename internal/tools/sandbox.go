@@ -677,7 +677,7 @@ func (c *Context) sandboxedScript(command, script string, s *SandboxSettings, wa
 				px.SetPromptAllow(func(host string, port int) bool {
 					sel, err := c.AskStructured("Blocked host",
 						fmt.Sprintf("The sandboxed command tried to reach %s:%d, which is not in sandbox.network.allowedDomains.", host, port),
-						[]string{"Allow for this session", "Deny"}, false)
+						[]AskOption{{Label: "Allow for this session"}, {Label: "Deny"}}, false)
 					return err == nil && len(sel) > 0 && strings.HasPrefix(sel[0], "Allow")
 				})
 			} else {

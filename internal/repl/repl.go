@@ -158,7 +158,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 	l.ToolCtx.PlanApprove = func() bool {
 		return pr.ask(l, ks, "ExitPlanMode", "Approve the plan above?")
 	}
-	l.ToolCtx.AskStructured = func(header, question string, options []string, multi bool) ([]string, error) {
+	l.ToolCtx.AskStructured = func(header, question string, options []tools.AskOption, multi bool) ([]string, error) {
 		return pr.askStructured(ks, header, question, options, multi)
 	}
 	if err != nil {
@@ -403,9 +403,11 @@ func RunWithStore(l *agent.Loop, store Store) {
 			ctx, cancel := context.WithCancel(context.Background())
 			start := time.Now()
 			respDone := make(chan struct{})
+			busyExited := make(chan struct{})
 			var queueBuf []rune
 			var sawInput atomic.Bool // any keystroke during the turn = user present
 			go func() {
+				defer close(busyExited)
 				// while the agent runs: esc interrupts, other keys queue a message
 				for {
 					select {
@@ -498,6 +500,12 @@ func RunWithStore(l *agent.Loop, store Store) {
 			md.Close()
 			close(respDone)
 			cancel()
+			<-busyExited // join — a late key append must not race the drain
+			// text typed mid-turn but never submitted returns to the editor
+			if len(queueBuf) > 0 {
+				draftBack = append(draftBack, queueBuf...)
+				compQueueDraft("")
+			}
 			// drain buffered interrupt keys from the turn — a stale Esc
 			// would otherwise fire cancel() instantly on the NEXT turn's
 			// loop. Printable keys stay queued for the editor.
@@ -508,8 +516,10 @@ func RunWithStore(l *agent.Loop, store Store) {
 						goto drained
 					}
 					if k.b != 0x1b && k.b != 3 {
+						// replay channel — re-pushing to ks.ch reorders
+						// behind keys still buffered
 						select {
-						case ks.ch <- k:
+						case ks.replay <- k:
 						default:
 						}
 						goto drained
@@ -772,7 +782,7 @@ var spinnerVerbs = []string{
 	"Fermenting",
 	"Fiddle-faddling",
 	"Finagling",
-	"Flamb\xE9ing",
+	"Flambéing",
 	"Flibbertigibbeting",
 	"Flowing",
 	"Flummoxing",
@@ -854,7 +864,7 @@ var spinnerVerbs = []string{
 	"Reticulating",
 	"Roosting",
 	"Ruminating",
-	"Saut\xE9ing",
+	"Sautéing",
 	"Scampering",
 	"Schlepping",
 	"Scurrying",
@@ -1058,7 +1068,7 @@ func expandMentions(l *agent.Loop, line string) string {
 			continue
 		}
 		if len(b) > 100000 {
-			b = b[:100000]
+			b = []byte(truncRunes(string(b), 100000))
 		}
 		fmt.Fprintf(&attach, "\n\nContents of %s:\n%s", p, string(b))
 	}
@@ -1267,48 +1277,84 @@ func termWidth() (int, error) {
 }
 
 // askStructured renders a numbered options menu (AskUserQuestion tool).
-func (p *promptUI) askStructured(ks *keySource, header, question string, options []string, multi bool) ([]string, error) {
+func (p *promptUI) askStructured(ks *keySource, header, question string, options []tools.AskOption, multi bool) ([]string, error) {
 	compSuspend() // modal menu — un-pin the live zone while it owns the screen
 	defer compResume()
 	dch := make(chan key, 16)
 	ks.dialog.Store(&dch)
 	defer ks.dialog.Store(nil)
-	// real's AskUserQuestion: cursor-select list + trailing "Other" row;
-	// multi-select toggles with space, Enter confirms
-	opts := append(append([]string{}, options...), "Other")
+	// real 2.1.292's AskUserQuestion (captured bytes):
+	//   black-16 on cyan-153 " ☐ <header> " chip · blank · bold-231
+	//   question · numbered options with gray-246 description rows ·
+	//   builtin "N+1. Type something." · ╌ rule · "N+2. Chat about
+	//   this" below the rule · "Enter to select · ↑/↓ to navigate ·
+	//   Esc to cancel" footer
+	cyan := "\x1b[38;5;153m"
+	gray := "\x1b[38;5;246m"
+	white := "\x1b[38;5;231m"
+	if header == "" {
+		header = map[bool]string{true: "Pick any", false: "Pick one"}[multi]
+	}
+	type row struct{ label, desc string }
+	opts := make([]row, 0, len(options)+2)
+	for _, o := range options {
+		opts = append(opts, row{o.Label, o.Description})
+	}
+	nBase := len(opts)
+	opts = append(opts, row{"Type something.", ""}, row{"Chat about this", ""})
+
 	sel := 0
 	toggled := map[int]bool{}
 	var custom strings.Builder
 	customMode := false
-	cyan := "\x1b[38;5;153m"
-	rows := len(opts) + 2
-	dprintf("\n  %s%s%s\n", bold, question, reset)
-	for range opts {
-		dprintln()
+	drawnRows := 0
+	width, _, _ := term.GetSize(int(os.Stdout.Fd()))
+	if width <= 0 {
+		width = 80
 	}
-	dprintf("  %s%s%s\n", dim, map[bool]string{true: "space to toggle · enter to submit · esc to cancel",
-		false: "enter to confirm · esc to cancel"}[multi], reset)
 	draw := func() {
 		var sb strings.Builder
-		fmt.Fprintf(&sb, "\x1b[%dA", rows)
-		for i, o := range opts {
-			cur := "  "
-			if i == sel {
-				cur = cyan + "❯" + reset + " "
-			}
-			check := ""
-			if multi {
-				check = "○ "
-				if toggled[i] {
-					check = "● "
-				}
-			}
-			sb.WriteString(fmt.Sprintf("\x1b[K %s%s%s", cur, check, o))
-			if customMode && i == len(opts)-1 {
-				sb.WriteString(": " + custom.String())
-			}
-			sb.WriteString("\r\n")
+		if drawnRows > 0 {
+			fmt.Fprintf(&sb, "\x1b[%dA", drawnRows)
 		}
+		drawnRows = 0
+		put := func(s string) {
+			sb.WriteString("\r\x1b[K" + s + "\r\n")
+			drawnRows++
+		}
+		put("") // leading blank under the composer rule
+		put(" \x1b[48;5;153m\x1b[38;5;16m ☐ " + header + " \x1b[49m")
+		put("")
+		put(" " + white + bold + question + reset + "\x1b[39m")
+		put("")
+		for i, o := range opts {
+			if i == nBase+1 {
+				// "Chat about this" sits below the box rule
+				put(" " + gray + strings.Repeat("─", width) + "\x1b[39m")
+			}
+			num := fmt.Sprintf("%d.", i+1)
+			if i == sel {
+				put(fmt.Sprintf(" %s❯%s %s%s%s %s%s", cyan, "\x1b[39m", gray, num, "\x1b[39m", cyan, o.label+"\x1b[39m"))
+			} else {
+				check := ""
+				if multi && i < nBase {
+					check = "○ "
+					if toggled[i] {
+						check = "● "
+					}
+				}
+				lbl := o.label
+				if customMode && i == nBase {
+					lbl = "Type something: " + custom.String()
+				}
+				put(fmt.Sprintf("   %s%s%s %s%s", gray, num, "\x1b[39m", check, lbl))
+			}
+			if o.desc != "" {
+				put("      " + gray + o.desc + "\x1b[39m")
+			}
+		}
+		put("")
+		put(" " + gray + "Enter to select · ↑/↓ to navigate · Esc to cancel" + "\x1b[39m")
 		fmt.Print(sb.String())
 	}
 	draw()
@@ -1325,14 +1371,14 @@ func (p *promptUI) askStructured(ks *keySource, header, question string, options
 				sel++
 				draw()
 			}
-		case k.b == ' ' && multi && !customMode:
+		case k.b == ' ' && multi && !customMode && sel < nBase:
 			toggled[sel] = !toggled[sel]
 			draw()
 		case k.b == 0x1b || k.b == 3:
 			return nil, fmt.Errorf("cancelled")
 		case k.b == '\r':
-			if sel == len(opts)-1 && !customMode {
-				customMode = true // Other: collect free text on the row
+			if sel == nBase && !customMode {
+				customMode = true // Type something: free text on the row
 				draw()
 				continue
 			}
@@ -1342,22 +1388,27 @@ func (p *promptUI) askStructured(ks *keySource, header, question string, options
 				}
 				return picked, nil
 			}
-			if multi {
+			if multi && sel < nBase {
 				for i := range toggled {
-					picked = append(picked, opts[i])
+					picked = append(picked, opts[i].label)
 				}
 				return picked, nil
 			}
-			return []string{opts[sel]}, nil
-		case customMode && (k.b == 0x7f || k.b == 8):
-			s := []rune(custom.String())
-			if len(s) > 0 {
-				custom.Reset()
-				custom.WriteString(string(s[:len(s)-1]))
+			picked = append(picked, opts[sel].label)
+			return picked, nil
+		case customMode:
+			switch k.b {
+			case 0x7f, 8:
+				s := []rune(custom.String())
+				if len(s) > 0 {
+					custom.Reset()
+					custom.WriteString(string(s[:len(s)-1]))
+				}
+			default:
+				if k.r != 0 {
+					custom.WriteRune(k.r)
+				}
 			}
-			draw()
-		case customMode && k.b >= 32:
-			custom.WriteByte(k.b)
 			draw()
 		}
 	}
@@ -1783,4 +1834,22 @@ func runningAgents(l *agent.Loop) int {
 		}
 	}
 	return n
+}
+
+// truncRunes/tailRunes clamp a string to n runes from the start/end —
+// byte slicing splits multi-byte UTF-8 (the TestNarrowTurn50 flake class).
+func truncRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
+func tailRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[len(r)-n:])
 }
