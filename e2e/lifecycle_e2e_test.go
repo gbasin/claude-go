@@ -183,7 +183,7 @@ func TestExitPlanModeApproval(t *testing.T) {
 		`❯ calls:[{"name":"ToolSearch"`, 8)
 	// approval renders as the numbered permission dialog ("don't ask again
 	// for ExitPlanMode in <dir>") — 1 = Yes
-	p.waitFor("don't ask again for ExitPlanMode", 30*time.Second)
+	p.waitFor("Do you want to proceed?", 30*time.Second)
 	p.sendUntil("1", "Tool results received", 15)
 	if !strings.Contains(p.clean(), "Exited Plan Mode") {
 		t.Fatalf("approval should exit plan mode\noutput:\n%s", truncStr(p.clean(), 3000))
