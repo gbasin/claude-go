@@ -20,7 +20,7 @@ import (
 	"claude-go/internal/config"
 )
 
-const Version = "2.1.291"
+const Version = "2.1.292"
 
 // betaFlags in real's exact wire order (captured from claude 2.1.289
 // default-model request through the mitm relay).

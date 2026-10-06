@@ -693,7 +693,7 @@ func RegisterSession(sessionID, cwd, name string) error {
 		Entrypoint:          os.Getenv("CLAUDE_CODE_ENTRYPOINT"),
 		StartedAt:           now,
 		UpdatedAt:           now,
-		Version:             "2.1.288",
+		Version:             "2.1.292",
 		PeerProtocol:        peerProtoVersion, // Onr — real peer-protocol version gate
 		PeerFeatures:        peerFeatures(),
 		PidDomain:           pidDomain(),
