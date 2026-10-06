@@ -149,7 +149,9 @@ func TestBackgroundSlashDetach(t *testing.T) {
 
 	// attach reaches the resumed session; ^Z detaches
 	r := s.runStdin(t, "\x1a", "attach", short)
-	contains(t, r.stdout, "detached — session "+short+" keeps running", "detach message")
+	if !strings.Contains(r.stdout, "detached — session "+short+" keeps running") {
+		t.Fatalf("attach failed — stderr: %s", r.stderr)
+	}
 
 	// clean up the worker so it doesn't outlive the test session
 	s.runStdin(t, "/exit\r", "attach", short)

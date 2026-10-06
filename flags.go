@@ -512,18 +512,19 @@ func setupWorktree(cwd, name, sessionID string) string {
 // loadSessionAt rebuilds the message chain ending at a specific message
 // uuid — session.Load always starts from the leaf; --resume-session-at
 // resumes mid-chain.
-func loadSessionAt(cwd, sessionID, atUUID string) ([]api.Message, error) {
+func loadSessionAt(cwd, sessionID, atUUID string) ([]api.Message, string, error) {
 	return loadSessionAtPath(filepath.Join(config.ClaudeDir(), "projects",
 		strings.ReplaceAll(filepath.Clean(cwd), "/", "-"), sessionID+".jsonl"), atUUID)
 }
 
 // loadSessionAtPath is loadSessionAt on an arbitrary transcript file —
 // needed when -r takes a path and --resume-session-at targets a uuid
-// inside it.
-func loadSessionAtPath(p, atUUID string) ([]api.Message, error) {
+// inside it. Also returns the leaf uuid — the parentUuid anchor a
+// same-transcript resume continues from.
+func loadSessionAtPath(p, atUUID string) ([]api.Message, string, error) {
 	f, err := os.Open(p)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer f.Close()
 	type rec struct {
@@ -557,7 +558,7 @@ func loadSessionAtPath(p, atUUID string) ([]api.Message, error) {
 		}
 	}
 	if target == nil {
-		return nil, fmt.Errorf("message %s not found in %s", atUUID, p)
+		return nil, "", fmt.Errorf("message %s not found in %s", atUUID, p)
 	}
 	var chain []rec
 	seen := map[string]bool{}
@@ -579,5 +580,5 @@ func loadSessionAtPath(p, atUUID string) ([]api.Message, error) {
 		}
 		msgs = append(msgs, api.Message{Role: r.Message.Role, Content: r.Message.Content})
 	}
-	return msgs, nil
+	return msgs, target.UUID, nil
 }

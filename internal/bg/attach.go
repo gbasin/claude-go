@@ -34,7 +34,19 @@ func Attach(prefix string, stdin, stdout *os.File) error {
 	if j == nil {
 		return fmt.Errorf("no running background session %q — `claude agents` lists live ones", prefix)
 	}
-	conn, err := net.Dial("unix", j.SocketPath())
+	// the registry write lands before the rendezvous socket binds — retry
+	// the dial too, same window as the lookup
+	var conn net.Conn
+	for i := 0; i < 40; i++ {
+		conn, err = net.Dial("unix", j.SocketPath())
+		if err == nil {
+			break
+		}
+		if !j.Alive() {
+			return fmt.Errorf("session %s is not running anymore", j.Short)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	if err != nil {
 		return fmt.Errorf("attach %s: %w", j.Short, err)
 	}

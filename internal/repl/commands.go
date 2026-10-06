@@ -3348,10 +3348,10 @@ func backgroundCmd(l *agent.Loop, arg string) bool {
 		dprintln("  already running in the background")
 		return false
 	}
-	// -r resumes into a new session id here, so the bg worker gets a fresh
-	// id carrying this conversation — registry, `claude attach`, and the
-	// picker's bg marks all key on it
-	sid := api.NewUUID()
+	// the worker resumes THIS session id — same-transcript resume keeps the
+	// conversation in one file, and `agents`/`attach`/picker marks all key
+	// on the live id
+	sid := l.Client.SessionID
 	if _, err := bg.Spawn(bg.SpawnOpts{
 		SessionID:  sid,
 		CWD:        l.ToolCtx.CWD,

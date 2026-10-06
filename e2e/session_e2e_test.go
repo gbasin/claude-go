@@ -4,9 +4,9 @@
 //   - ~/.claude/projects/<slug>/<sid>.jsonl written in print mode
 //   - record fields (type, uuid, parentUuid chain, sessionId, message)
 //   - --session-id honored (file named <sid>.jsonl)
-//   - -r <sid> resume: continuation lands in a NEW transcript containing
-//     the full resumed chain + the new turn (claude-go resumes into a
-//     fresh session id — the source file is not appended to)
+//   - -r <sid> resume: continuation lands in the SAME transcript —
+//     the new turn appends to <sid>.jsonl parentUuid-chained to the
+//     loaded branch's leaf (real's -r semantics)
 //   - -c continue (pins current shadowed-by-new-transcript behavior)
 //   - --fork-session writes a forkedFrom marker into the new transcript
 //   - --no-session-persistence writes nothing
@@ -14,9 +14,11 @@ package e2e
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -107,9 +109,9 @@ func TestSessionIDFlag(t *testing.T) {
 	}
 }
 
-// TestResume: -r <sid> loads prior messages and continues — claude-go
-// resumes into a NEW session file (same project dir) that contains the
-// whole chain including the follow-up turn.
+// TestResume: -r <sid> loads prior messages and continues — real continues
+// the SAME transcript: the follow-up turn appends to <sid>.jsonl with
+// parentUuid chained to the loaded branch's leaf.
 func TestResume(t *testing.T) {
 	s := newSession(t)
 	sid := newUUID()
@@ -121,24 +123,35 @@ func TestResume(t *testing.T) {
 	contains(t, r2.stderr, "resumed session", "resume notice")
 
 	paths := s.transcriptPaths(t)
-	if len(paths) < 2 {
-		t.Fatalf("expected a second transcript after resume; found %v", paths)
+	if len(paths) != 1 {
+		t.Fatalf("resume should continue the same transcript; found %v", paths)
 	}
-	// find the new transcript (not the seed sid)
-	var cont string
-	for _, p := range paths {
-		if filepath.Base(p) != sid+".jsonl" {
-			cont = p
+	raw := mustReadFile(t, paths[0])
+	contains(t, raw, "seed-prompt-e2e", "continued transcript keeps history")
+	contains(t, raw, "follow-up-e2e", "continued transcript gets the new turn")
+
+	// the follow-up's user record is parentUuid-chained to the seed leaf —
+	// real links the branch rather than starting a new root
+	type rec struct {
+		UUID       string `json:"uuid"`
+		ParentUUID string `json:"parentUuid"`
+		Text       string `json:"-"`
+	}
+	uuids := map[string]bool{}
+	var followParent string
+	for _, line := range strings.Split(raw, "\n") {
+		var r rec
+		if json.Unmarshal([]byte(line), &r) != nil || r.UUID == "" {
+			continue
+		}
+		uuids[r.UUID] = true
+		if strings.Contains(line, "follow-up-e2e") && followParent == "" {
+			followParent = r.ParentUUID
 		}
 	}
-	if cont == "" {
-		t.Fatalf("no new transcript; found %v", paths)
+	if followParent == "" || !uuids[followParent] {
+		t.Fatalf("follow-up not chained into the resumed branch (parentUuid=%q)", followParent)
 	}
-	raw := mustReadFile(t, cont)
-	contains(t, raw, "follow-up-e2e", "resumed transcript")
-	contains(t, raw, "seed-prompt-e2e", "resumed transcript (prior chain re-logged)")
-	// source file still exists with the seed
-	contains(t, mustReadFile(t, s.transcriptPath(t, sid)), "seed-prompt-e2e", "source transcript")
 }
 
 // TestContinue: -c resumes the latest session — session.Latest skips
