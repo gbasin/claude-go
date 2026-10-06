@@ -3,11 +3,13 @@
 package e2e
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -32,7 +34,8 @@ func poll(t *testing.T, d time.Duration, what string, cond func() bool) {
 func TestBgSessionLifecycle(t *testing.T) {
 	s := newSession(t)
 	mockEnv := []string{"CLAUDE_GO_MOCK=1", // propagates to the bg child
-		"CLAUDE_GO_BG_DEBUG=/tmp/e2e-bghost.log"}
+		"CLAUDE_GO_BG_DEBUG=/tmp/e2e-bghost.log",
+		"CLAUDE_GO_BG_NODAEMON=1"} // lifecycle test manages the worker directly
 
 	// --bg: spawn the session, print the id + management commands
 	r := s.runEx(t, mockEnv, 30*time.Second, "--bg", "count to three")
@@ -86,7 +89,7 @@ func TestBgSessionLifecycle(t *testing.T) {
 // is reaped from `agents`, and the transcript survives on disk.
 func TestBgStop(t *testing.T) {
 	s := newSession(t)
-	mockEnv := []string{"CLAUDE_GO_MOCK=1"}
+	mockEnv := []string{"CLAUDE_GO_MOCK=1", "CLAUDE_GO_BG_NODAEMON=1"}
 	r := s.runEx(t, mockEnv, 30*time.Second, "--bg", "count to three")
 	s.mustOK(t, r)
 	m := regexp.MustCompile(`claude attach ([0-9a-f]{8})`).FindStringSubmatch(r.stdout)
@@ -113,12 +116,75 @@ func TestBgStop(t *testing.T) {
 	}
 }
 
+// TestDaemonRespawn covers the supervisor sweep: a killed bg worker is
+// respawned — the session resumes its own transcript under a new host and
+// attach keeps working.
+func TestDaemonRespawn(t *testing.T) {
+	s := newSession(t)
+	mockEnv := []string{"CLAUDE_GO_MOCK=1", "CLAUDE_GO_BG_NODAEMON=1"}
+	r := s.runEx(t, mockEnv, 30*time.Second, "--bg", "count to three")
+	s.mustOK(t, r)
+	m := regexp.MustCompile(`claude attach ([0-9a-f]{8})`).FindStringSubmatch(r.stdout)
+	if len(m) < 2 {
+		t.Fatalf("--bg output lacks attach hint: %q", r.stdout)
+	}
+	short := m[1]
+	poll(t, 10*time.Second, "worker in agents", func() bool {
+		return strings.Contains(s.run(t, "agents").stdout, short)
+	})
+
+	// kill the host — the job dir survives (no clean exit), the daemon
+	// respawns it on its next sweep
+	jobFile := filepath.Join(s.home, ".claude", "bg", "jobs", short, "job.json")
+	var j struct {
+		PID int `json:"pid"`
+	}
+	b, err := os.ReadFile(jobFile)
+	if err != nil || json.Unmarshal(b, &j) != nil || j.PID == 0 {
+		t.Fatalf("job record unreadable: %v", err)
+	}
+	syscall.Kill(j.PID, syscall.SIGKILL)
+
+	dcmd := exec.Command(binPath, "daemon", "run")
+	dcmd.Dir = s.cwd
+	dcmd.Env = append(append([]string{}, s.env...), "CLAUDE_GO_MOCK=1", "CLAUDE_GO_BG_SWEEP_MS=150")
+	if err := dcmd.Start(); err != nil {
+		t.Fatalf("daemon run: %v", err)
+	}
+	t.Cleanup(func() { dcmd.Process.Kill() })
+
+	poll(t, 15*time.Second, "worker respawned", func() bool {
+		return strings.Contains(s.run(t, "agents").stdout, short)
+	})
+
+	// the respawned session is attachable and answers — the transcript
+	// continues under the same id
+	r = s.runStdin(t, "still-there?\r\x1a", "attach", short)
+	if !strings.Contains(r.stdout, "keeps running") {
+		t.Fatalf("attach to respawned session failed: %s", r.stderr)
+	}
+	poll(t, 10*time.Second, "respawned turn logged", func() bool {
+		trans, _ := filepath.Glob(s.home + "/.claude/projects/*/*.jsonl")
+		for _, tp := range trans {
+			b, _ := os.ReadFile(tp)
+			if strings.Contains(string(b), "still-there?") {
+				return true
+			}
+		}
+		return false
+	})
+
+	// cleanup: /exit ends the respawned session; stop the daemon
+	s.runStdin(t, "/exit\r", "attach", short)
+	s.run(t, "daemon", "stop")
+}
+
 // TestBackgroundSlashDetach covers /background inside a live REPL: the
 // interactive process exits, the session continues under a bg worker, and
 // attach reaches it.
 func TestBackgroundSlashDetach(t *testing.T) {
 	s := newSession(t)
-	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK=1"}, "--mock")
+	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK=1", "CLAUDE_GO_BG_NODAEMON=1"}, "--mock")
 	p.waitFor("❯", 20*time.Second)
 
 	// give the session a transcript first — the worker resumes from it

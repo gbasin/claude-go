@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -468,6 +469,51 @@ func stopSub(args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("session %s stopped\n", short)
+}
+
+// daemonSub is `claude daemon` — the background-session supervisor:
+// `run` foreground-sweeps respawning dead workers; `start` detaches one;
+// `status`/`stop` manage it. Real's daemon is the service arm of the bg
+// architecture — ours is a single-process supervisor.
+func daemonSub(args []string) {
+	sub := "status"
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch sub {
+	case "run":
+		sweep := 0
+		if v := os.Getenv("CLAUDE_GO_BG_SWEEP_MS"); v != "" {
+			sweep, _ = strconv.Atoi(v)
+		}
+		os.Exit(bg.RunDaemon(version, time.Duration(sweep)*time.Millisecond))
+	case "start":
+		if bg.DaemonAlive() {
+			fmt.Println("daemon already running")
+			return
+		}
+		if _, err := bg.StartDaemon(); err != nil {
+			fmt.Fprintln(os.Stderr, "daemon start:", err)
+			os.Exit(1)
+		}
+		fmt.Println("daemon started")
+	case "stop":
+		if err := bg.StopDaemon(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println("daemon stopped")
+	case "status":
+		if pid := bg.DaemonPID(); pid != 0 {
+			jobs := bg.List()
+			fmt.Printf("daemon running (pid %d) — %d background session(s)\n", pid, len(jobs))
+		} else {
+			fmt.Println("daemon not running — `claude daemon start`")
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "usage: claude daemon [run|start|status|stop]\n")
+		os.Exit(2)
+	}
 }
 
 func quickFrontmatter(s string) map[string]string {
