@@ -368,6 +368,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 					continue
 				}
 				if handleSlash(l, line, ed, ks) {
+					l.SessionEndReason = "prompt_input_exit"
 					return
 				}
 				continue
@@ -628,6 +629,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 						goto nextQueued
 					}
 					if handleSlash(l, line, ed, ks) {
+						l.SessionEndReason = "prompt_input_exit"
 						return
 					}
 					goto nextQueued
@@ -1456,6 +1458,10 @@ func fireSessionEndHook(l *agent.Loop) {
 	if l.Hooks == nil {
 		return
 	}
+	if l.SessionEndFired {
+		return // once — the REPL quit path and main both reach this
+	}
+	l.SessionEndFired = true
 	hooks.Run(l.Hooks, hooks.SessionEnd, map[string]any{
 		"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
 		"hook_event_name": "SessionEnd", "permission_mode": l.PermMode,

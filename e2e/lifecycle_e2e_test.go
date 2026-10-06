@@ -615,3 +615,31 @@ func TestBracketedPaste(t *testing.T) {
 	}
 	t.Fatal("pasted_content block missing from the wire")
 }
+
+// TestBangInterpolation: !`cmd` inside a custom command expands to the
+// command's output before the prompt hits the wire.
+func TestBangInterpolation(t *testing.T) {
+	s := newSession(t)
+	s.writeFile(".claude/commands/bang.md",
+		"the answer is !`echo BANG-RESULT-42`")
+	rec := filepath.Join(t.TempDir(), "reqs")
+	r := s.run(t, "--mock", "-p", "/bang",
+		"CLAUDE_GO_MOCK_RECORD="+rec)
+	_ = r
+
+	// expand happens in the REPL, not -p — drive it via PTY
+	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, "--mock")
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t, "/bang\r", "❯ /bang", 8)
+	p.waitFor("Mock response", 30*time.Second)
+	p.exit()
+
+	ents, _ := os.ReadDir(rec)
+	for _, e := range ents {
+		b, _ := os.ReadFile(filepath.Join(rec, e.Name()))
+		if strings.Contains(string(b), "BANG-RESULT-42") {
+			return
+		}
+	}
+	t.Fatal("!`echo` output never reached the wire")
+}

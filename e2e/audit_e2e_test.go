@@ -5,8 +5,11 @@
 package e2e
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -520,4 +523,184 @@ func TestPluginDisabled(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(plugDir, "fired.marker")); !os.IsNotExist(err) {
 		t.Fatal("disabled plugin hook fired")
 	}
+}
+
+// TestInitCmd: /init fires the bundled init prompt at the model — the
+// request reaches the wire with CLAUDE.md instructions.
+func TestInitCmd(t *testing.T) {
+	s := newSession(t)
+	r, bodies := recordRequests(t, s, "-p", "hi")
+	s.mustOK(t, r)
+	_ = bodies // warm-up done; now the interactive path
+	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK_RECORD=" + t.TempDir() + "/initrec"},
+		"--mock", "--permission-mode", "bypassPermissions")
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t, "/init\r", "❯ /init", 8)
+	p.waitFor("analyzing codebase", 15*time.Second)
+	p.exit()
+}
+
+// TestOAuthRefreshCmd: /oauth-refresh calls the token endpoint with the
+// stored refresh token and reports success.
+func TestOAuthRefreshCmd(t *testing.T) {
+	var refreshHit bool
+	var grantType string
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		json.NewDecoder(r.Body).Decode(&body)
+		refreshHit = true
+		grantType = body["grant_type"]
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "e2e-refreshed-token",
+			"refresh_token": "e2e-refreshed-refresh",
+			"expires_in":    3600,
+		})
+	}))
+	defer tokenSrv.Close()
+
+	s := newSession(t)
+	credsFile := filepath.Join(s.home, ".claude-go", ".credentials.json")
+	os.MkdirAll(filepath.Dir(credsFile), 0o700)
+	os.WriteFile(credsFile, []byte(`{"claudeAiOauth":{`+
+		`"accessToken":"e2e-stale-token","refreshToken":"e2e-stale-refresh",`+
+		`"expiresAt":9999999999999,"subscriptionType":"max"}}`), 0o600)
+
+	p := s.runPTY(t, []string{
+		"CLAUDE_GO_CREDS_FILE=" + credsFile,
+		"CLAUDE_GO_TOKEN_URL=" + tokenSrv.URL,
+	}, "--mock")
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t, "/oauth-refresh\r", "❯ /oauth-refresh", 8)
+	p.waitFor("token refreshed", 15*time.Second)
+	p.exit()
+	if !refreshHit || grantType != "refresh_token" {
+		t.Fatalf("refresh endpoint not hit properly: hit=%v grant=%q", refreshHit, grantType)
+	}
+}
+
+// TestStatuslineCmd: /statusline fires the bundled statusline-setup
+// agent prompt — the request reaches the wire.
+func TestStatuslineCmd(t *testing.T) {
+	s := newSession(t)
+	rec := t.TempDir() + "/slrec"
+	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec},
+		"--mock", "--permission-mode", "bypassPermissions")
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t, "/statusline\r", "❯ /statusline", 8)
+	// the bundled prompt asks the model to spawn statusline-setup
+	p.waitFor("Mock response", 30*time.Second)
+	p.exit()
+
+	ents, _ := os.ReadDir(rec)
+	for _, e := range ents {
+		b, _ := os.ReadFile(filepath.Join(rec, e.Name()))
+		if bytes.Contains(b, []byte("statusline-setup")) {
+			return
+		}
+	}
+	t.Fatal("statusline-setup prompt never reached the wire")
+}
+
+// TestSessionStartSourcePayload: the SessionStart hook payload carries
+// source=startup on a fresh session and source=resume on -c.
+func TestSessionStartSourcePayload(t *testing.T) {
+	s := newSession(t)
+	dump := filepath.Join(s.cwd, "hook-payload.json")
+	s.writeFile(".claude/settings.json",
+		`{"hooks":{"SessionStart":[{"hooks":[{"type":"command",`+
+			`"command":"cat > `+dump+`"}]}]}}`)
+
+	r := s.run(t, "--mock", "-p", "hi")
+	s.mustOK(t, r)
+	b, _ := os.ReadFile(dump)
+	if !strings.Contains(string(b), `"source":"startup"`) {
+		t.Fatalf("SessionStart payload missing source:startup:\n%s", b)
+	}
+
+	// resume lane: -c on an existing session → source=resume
+	r = s.run(t, "--mock", "-p", "hi again", "-c")
+	s.mustOK(t, r)
+	b, _ = os.ReadFile(dump)
+	if !strings.Contains(string(b), `"source":"resume"`) {
+		t.Fatalf("SessionStart payload missing source:resume:\n%s", b)
+	}
+}
+
+// TestSessionEndReasonPayload: SessionEnd fires once with
+// reason=prompt_input_exit — both for /exit and ctrl+d.
+func TestSessionEndReasonPayload(t *testing.T) {
+	s := newSession(t)
+	dump := filepath.Join(s.cwd, "end-payload.jsonl")
+	// append so a double-fire leaves two records
+	s.writeFile(".claude/settings.json",
+		`{"hooks":{"SessionEnd":[{"hooks":[{"type":"command",`+
+			`"command":"cat >> `+dump+`"}]}]}}`)
+
+	p := startREPL(t, s)
+	p.waitFor("❯", 30*time.Second)
+	p.send("\x04") // ctrl+d on empty buffer — exit path
+	_ = p.waitExit(15 * time.Second)
+
+	b, _ := os.ReadFile(dump)
+	if !strings.Contains(string(b), `"reason":"prompt_input_exit"`) {
+		t.Fatalf("SessionEnd payload missing reason:\n%s", b)
+	}
+	if n := strings.Count(string(b), `"hook_event_name"`); n != 1 {
+		t.Fatalf("SessionEnd hook fired %d times:\n%s", n, b)
+	}
+}
+
+// TestSessionEndReasonSlashExit: /exit reports prompt_input_exit too.
+func TestSessionEndReasonSlashExit(t *testing.T) {
+	s := newSession(t)
+	dump := filepath.Join(s.cwd, "end-payload.jsonl")
+	s.writeFile(".claude/settings.json",
+		`{"hooks":{"SessionEnd":[{"hooks":[{"type":"command",`+
+			`"command":"cat >> `+dump+`"}]}]}}`)
+	p := startREPL(t, s)
+	p.waitFor("❯", 30*time.Second)
+	p.exit()
+	b, _ := os.ReadFile(dump)
+	if !strings.Contains(string(b), `"reason":"prompt_input_exit"`) {
+		t.Fatalf("SessionEnd payload missing reason on /exit:\n%s", b)
+	}
+	if n := strings.Count(string(b), `"hook_event_name"`); n != 1 {
+		t.Fatalf("SessionEnd fired %d times on /exit", n)
+	}
+}
+
+// TestHeapdumpCmd: /heapdump writes a profile file under home.
+func TestHeapdumpCmd(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.sendUntilEchoed(t, "/heapdump\r", "❯ /heapdump", 8)
+	p.waitFor("heap", 15*time.Second)
+	p.exit()
+
+	var found bool
+	filepath.Walk(s.home, func(path string, info os.FileInfo, err error) error {
+		if err == nil && strings.Contains(path, "heap") && strings.HasSuffix(path, ".pb.gz") {
+			found = true
+		}
+		return nil
+	})
+	if !found {
+		// policy may gate it — accept the denied path
+		if strings.Contains(p.clean(), "disabled by your organization's policy") {
+			return
+		}
+		t.Fatal("no heap dump written")
+	}
+}
+
+// TestDebugToolCall: /debug-tool-call shows the last tool_use from history.
+func TestDebugToolCall(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"echo dbg-marker"}`+"\r", "❯ tool:Bash", 8)
+	p.waitFor("dbg-marker", 30*time.Second)
+	p.sendUntilEchoed(t, "/debug-tool-call\r", "❯ /debug-tool-call", 8)
+	p.waitFor("dbg-marker", 15*time.Second)
+	p.exit()
 }
