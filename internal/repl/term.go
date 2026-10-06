@@ -55,6 +55,7 @@ type editor struct {
 	onToggleExpand func()
 	onToggleTodos  func()
 	onKillAgents   func()
+	onFastMode     func()
 	insertRemaps   []string // vimInsertModeRemaps: 2-char sequences -> <Esc>
 	lastIns        rune
 	vimOp          rune
@@ -1898,7 +1899,14 @@ func (e *editor) modelPickerKey() *readResult {
 	return &readResult{line: "/model", modelPicker: true}
 }
 
-func (e *editor) toggleFastMode() { fastModeFlag.Store(!fastModeFlag.Load()) }
+// toggleFastMode is chat:fastMode (meta+o) — flips the loop's fast-mode
+// lane via the onFastMode callback (the loop owns the wire field).
+func (e *editor) toggleFastMode() {
+	fastModeFlag.Store(!fastModeFlag.Load())
+	if e.onFastMode != nil {
+		e.onFastMode()
+	}
+}
 
 func (e *editor) toggleThinking() { thinkingHidden.Store(!thinkingHidden.Load()) }
 
