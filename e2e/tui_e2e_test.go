@@ -305,3 +305,91 @@ func TestBgTaskNotification(t *testing.T) {
 	p.waitFor("Task b1 finished", 15*time.Second)
 	p.exit()
 }
+
+// TestStashDraft: ctrl+s clears the buffer and reports the stash.
+func TestStashDraft(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.send("a draft to stash")
+	time.Sleep(400 * time.Millisecond)
+	p.send("\x13") // ctrl+s — chat:stash
+	p.waitFor("stashed draft", 15*time.Second)
+	p.exit()
+}
+
+// TestKillAgents: ctrl+x ctrl+k stops running background tasks.
+func TestKillAgents(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"sleep 30","run_in_background":true}`+"\r",
+		"❯ tool:Bash", 8)
+	p.waitFor("background", 30*time.Second)
+	time.Sleep(400 * time.Millisecond)
+	p.send("\x18\x0b") // ctrl+x ctrl+k — chat:killAgents
+	p.waitFor("background tasks stopped", 15*time.Second)
+	p.exit()
+}
+
+// TestToggleTodos: ctrl+t shows the todo list above the prompt.
+func TestToggleTodos(t *testing.T) {
+	s := newSession(t)
+	p := s.runPTY(t, []string{"CLAUDE_CODE_TASK_TOOLS=1"},
+		"--mock", "--permission-mode", "bypassPermissions")
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t,
+		`calls:[{"name":"ToolSearch","input":{"query":"select:TodoWrite"}},`+
+			`{"name":"TodoWrite","input":{"todos":[{"content":"toggle-me todo","status":"pending","activeForm":"toggling"}]}}]`+"\r",
+		"❯ calls:", 8)
+	p.waitFor("Tool results received", 30*time.Second)
+	time.Sleep(400 * time.Millisecond)
+	p.send("\x14") // ctrl+t — app:toggleTodos
+	p.waitFor("toggle-me todo", 15*time.Second)
+	p.exit()
+}
+
+// TestExternalEditor: ctrl+g opens $EDITOR; the file's content becomes
+// the draft.
+func TestExternalEditor(t *testing.T) {
+	s := newSession(t)
+	ed := s.writeFile("fake-editor.sh", "#!/bin/sh\nprintf 'from-editor-content' > \"$1\"\n")
+	os.Chmod(ed, 0o755)
+	p := s.runPTY(t, []string{"EDITOR=" + ed, "VISUAL=" + ed}, "--mock")
+	p.waitFor("❯", 30*time.Second)
+	p.send("\x07") // ctrl+g — chat:externalEditor
+	p.waitFor("from-editor-content", 15*time.Second)
+	p.send("\r") // submit the imported draft
+	p.waitFor("Mock response to: from-editor-content", 30*time.Second)
+	p.exit()
+}
+
+// TestSendNow: ctrl+x ctrl+s (sendNow) pushes a mid-turn line ahead of
+// already-queued prompts — the sendNow'd message is answered first.
+func TestSendNow(t *testing.T) {
+	s := newSession(t)
+	p := s.runPTY(t, nil, "--mock", "--permission-mode", "bypassPermissions")
+	p.waitFor("❯", 30*time.Second)
+	// slow first turn keeps the loop busy (foreground sleep is blocked —
+	// python burns the same wall time without tripping the guard)
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"python3 -c \"import time;time.sleep(5)\""}`+"\r",
+		"❯ tool:Bash", 8)
+	time.Sleep(800 * time.Millisecond) // let the turn engage
+
+	// first queued prompt — lands at the back of the queue
+	p.send("queued-first\r")
+	time.Sleep(600 * time.Millisecond)
+	// then the sendNow line — must jump ahead of queued-first
+	p.send("sendnow-marker")
+	p.send("\x18\x13")
+
+	p.waitFor("Mock response to: sendnow-marker", 45*time.Second)
+	// the queued line answers after — both resolve; order is the assertion
+	idxSN := strings.Index(p.clean(), "Mock response to: sendnow-marker")
+	p.waitFor("Mock response to: queued-first", 45*time.Second)
+	idxQ := strings.Index(p.clean(), "Mock response to: queued-first")
+	if idxSN < 0 || idxQ < 0 || idxSN > idxQ {
+		t.Fatalf("sendNow should answer first (sendnow=%d, queued=%d)", idxSN, idxQ)
+	}
+	p.exit()
+}

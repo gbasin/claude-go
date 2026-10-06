@@ -571,8 +571,11 @@ func TestQueuedMessage(t *testing.T) {
 	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec},
 		"--mock", "--permission-mode", "bypassPermissions")
 	p.waitFor("❯", 30*time.Second)
-	// a 3s Bash gives a wide mid-turn window to submit the queued prompt
-	p.sendUntilEchoed(t, `tool:Bash {"command":"sleep 3"}`+"\r", "❯ tool:Bash", 8)
+	// a 5s python sleep gives a wide mid-turn window (foreground `sleep`
+	// is refused by the Bash guard, which would make this a false pass)
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"python3 -c \"import time;time.sleep(5)\""}`+"\r",
+		"❯ tool:Bash", 8)
 	time.Sleep(800 * time.Millisecond) // well inside the sleep window
 	p.send("queued-marker-e2e\r")
 	p.waitFor("Mock response to: queued-marker-e2e", 30*time.Second)
