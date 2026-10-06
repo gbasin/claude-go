@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"claude-go/internal/api"
 )
@@ -35,4 +36,19 @@ func RegisterMCP(server string, caller MCPCaller, name, desc string, schema json
 	// registry membership is what Dispatch resolves — deferred tools stay
 	// refused in the loop until ToolSearch discovery, then must dispatch.
 	registry[full] = t
+}
+
+// UnregisterMCPServer drops a server's registered tools (list_changed
+// refresh replaces them via ReregisterMCPServer).
+func UnregisterMCPServer(server string) {
+	prefix := "mcp__" + server + "__"
+	var keep []*Tool
+	for _, t := range mcpTools {
+		if strings.HasPrefix(t.Def.Name, prefix) {
+			delete(registry, t.Def.Name)
+			continue
+		}
+		keep = append(keep, t)
+	}
+	mcpTools = keep
 }

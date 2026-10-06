@@ -1515,8 +1515,35 @@ func expandCustomSlash(line string) string {
 		return ""
 	}
 	arg := strings.TrimSpace(strings.TrimPrefix(line, "/"+name))
+	if c.mcp != nil {
+		dprintf("  %s/%s%s\n", dim, name, reset)
+		return expandMCPPrompt(c, arg)
+	}
 	dprintf("  %s/%s%s\n", dim, name, reset)
 	return expandCustomCommand(c, arg)
+}
+
+// expandMCPPrompt resolves an MCP server prompt: /mcp__s__p a=b c=d —
+// args pass as key=value pairs; bare words join positionally.
+func expandMCPPrompt(c customCmd, arg string) string {
+	args := map[string]string{}
+	var bare []string
+	for _, f := range strings.Fields(arg) {
+		if k, v, ok := strings.Cut(f, "="); ok {
+			args[k] = v
+		} else {
+			bare = append(bare, f)
+		}
+	}
+	if len(bare) > 0 {
+		args["arguments"] = strings.Join(bare, " ")
+	}
+	out, err := c.mcp(args)
+	if err != nil {
+		dprintf("  %s/%s: %v%s\n", red, c.Name, err, reset)
+		return "/nop" // expand to a no-op turn? no — report and drop
+	}
+	return out
 }
 
 // quickMemory: "# text" appends to the project memory index (CC's # prefix).
