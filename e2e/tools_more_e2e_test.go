@@ -536,3 +536,74 @@ func TestClaudeMDOnWire(t *testing.T) {
 		t.Fatal("CLAUDE.md content did not reach the wire")
 	}
 }
+
+// TestSearchTools: Glob/Grep/LS dispatch end-to-end — pattern match,
+// content search, directory listing all return real results.
+func TestSearchTools(t *testing.T) {
+	s := newSession(t)
+	s.writeFile("alpha-unique.go", "package x\n// MARKER-GREP-E2E\n")
+	s.writeFile("beta-unique.go", "package x\n")
+
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+
+	// Glob
+	p.sendUntilEchoed(t,
+		`calls:[{"name":"ToolSearch","input":{"query":"select:Glob"}},`+
+			`{"name":"Glob","input":{"pattern":"*-unique.go"}}]`+"\r",
+		"❯ calls:", 8)
+	p.waitFor("alpha-unique.go", 30*time.Second)
+	p.waitFor("beta-unique.go", 5*time.Second)
+
+	// Grep content mode
+	p.sendUntilEchoed(t,
+		`calls:[{"name":"ToolSearch","input":{"query":"select:Grep"}},`+
+			`{"name":"Grep","input":{"pattern":"MARKER-GREP-E2E","output_mode":"content"}}]`+"\r",
+		"❯ calls:", 8)
+	p.waitFor("MARKER-GREP-E2E", 30*time.Second)
+
+	// LS
+	p.sendUntilEchoed(t,
+		`calls:[{"name":"ToolSearch","input":{"query":"select:LS"}},`+
+			`{"name":"LS","input":{"path":"`+s.cwd+`"}}]`+"\r",
+		"❯ calls:", 8)
+	p.waitFor("alpha-unique.go", 30*time.Second)
+	p.exit()
+}
+
+// TestMultiEdit: MultiEdit applies ordered find-replace pairs in one call.
+func TestMultiEdit(t *testing.T) {
+	s := newSession(t)
+	f := s.writeFile("editme.txt", "hello one\nhello two\n")
+	// Read first — Write-family tools require it
+
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p.sendUntilEchoed(t,
+		`calls:[{"name":"ToolSearch","input":{"query":"select:MultiEdit"}},`+
+			`{"name":"Read","input":{"file_path":"`+f+`"}},`+
+			`{"name":"MultiEdit","input":{"file_path":"`+f+`","edits":[`+
+			`{"old_string":"hello one","new_string":"bye one"},`+
+			`{"old_string":"hello two","new_string":"bye two"}]}}]`+"\r",
+		"❯ calls:", 8)
+	p.waitFor("Tool results received", 30*time.Second)
+	b, _ := os.ReadFile(f)
+	if string(b) != "bye one\nbye two\n" {
+		t.Fatalf("MultiEdit didn't apply both edits: %q", b)
+	}
+	p.exit()
+}
+
+// TestNotebookRead: NotebookRead returns cell content for an .ipynb file.
+func TestNotebookRead(t *testing.T) {
+	s := newSession(t)
+	nb := s.writeFile("book.ipynb",
+		`{"cells":[{"cell_type":"code","execution_count":1,`+
+			`"source":["print(1)"],"outputs":[],"metadata":{}}],`+
+			`"nbformat":4,"nbformat_minor":5,"metadata":{}}`)
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p.sendUntilEchoed(t,
+		`calls:[{"name":"ToolSearch","input":{"query":"select:NotebookRead"}},`+
+			`{"name":"NotebookRead","input":{"notebook_path":"`+nb+`"}}]`+"\r",
+		"❯ calls:", 8)
+	p.waitFor("print(1)", 30*time.Second)
+	p.exit()
+}
