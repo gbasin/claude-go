@@ -154,6 +154,52 @@ func TestResume(t *testing.T) {
 	}
 }
 
+// TestResumeDropsTurn: --resume-drops-turn <uuid> is real's safety guard —
+// resuming at an anchor discards the tail; the flag declares that tail is
+// exactly the declared turn. Wrong declaration → refused.
+func TestResumeDropsTurn(t *testing.T) {
+	s := newSession(t)
+	sid := newUUID()
+	r := s.run(t, "--mock", "-p", "guard-turn-one", "--session-id", sid)
+	s.mustOK(t, r)
+	r = s.run(t, "--mock", "-r", sid, "-p", "guard-turn-two")
+	s.mustOK(t, r)
+
+	// pull uuids: turn1's assistant reply (the anchor) + turn2's user prompt
+	var asst1, user2 string
+	recs := readRecords(t, s.transcriptPath(t, sid))
+	for i, rec := range recs {
+		line, _ := json.Marshal(rec)
+		if strings.Contains(string(line), "guard-turn-one") && i+1 < len(recs) {
+			asst1, _ = recs[i+1]["uuid"].(string) // the reply after turn one
+		}
+		if strings.Contains(string(line), "guard-turn-two") {
+			user2, _ = rec["uuid"].(string)
+		}
+	}
+	if asst1 == "" || user2 == "" {
+		t.Fatalf("missing anchor/turn uuids in transcript (asst=%q user=%q)", asst1, user2)
+	}
+
+	// guard satisfied: the discarded tail is exactly turn two
+	r = s.run(t, "--mock", "-r", sid, "--resume-session-at", asst1,
+		"--resume-drops-turn", user2, "-p", "redo-turn-two")
+	s.mustOK(t, r)
+	contains(t, r.stderr, "resumed session", "guarded resume notice")
+
+	// guard refused: declared id isn't the tail's turn
+	r = s.run(t, "--mock", "-r", sid, "--resume-session-at", asst1,
+		"--resume-drops-turn", asst1, "-p", "redo-turn-two")
+	contains(t, r.stderr, "not attributable to turn", "guard refusal")
+
+	// wiring: drops-turn without resume-session-at is rejected outright
+	r = s.run(t, "--mock", "-r", sid, "--resume-drops-turn", user2, "-p", "x")
+	contains(t, r.stderr, "requires --resume-session-at", "wiring error")
+	if r.code == 0 {
+		t.Fatal("drops-turn without resume-session-at should exit nonzero")
+	}
+}
+
 // TestContinue: -c resumes the latest session — session.Latest skips
 // transcripts with no conversation records, so the fresh empty .jsonl
 // created this session can't shadow the real latest.
