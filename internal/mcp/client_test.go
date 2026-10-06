@@ -282,3 +282,69 @@ func TestNotificationDispatch(t *testing.T) {
 		t.Fatal("no notification received")
 	}
 }
+
+// tools/list_changed: the client refetches tools/list and fires
+// OnToolsChanged so the registry re-registers mcp__server__tool rows.
+func TestToolsChangedRefresh(t *testing.T) {
+	changed := make(chan struct{}, 2)
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	postCh := make(chan []byte, 16)
+	mux.HandleFunc("/sse", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		fmt.Fprintf(w, "event: endpoint\ndata: /msg\n\n")
+		fl.Flush()
+		for msg := range postCh {
+			fmt.Fprintf(w, "event: message\ndata: %s\n\n", msg)
+			fl.Flush()
+		}
+	})
+	mux.HandleFunc("/msg", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var probe struct {
+			ID     int64  `json:"id"`
+			Method string `json:"method"`
+		}
+		json.Unmarshal(body, &probe)
+		if probe.Method == "tools/list" {
+			// second tools/list returns a DIFFERENT set — the registry
+			// must see the updated list via OnToolsChanged
+			out, _ := json.Marshal(map[string]any{
+				"jsonrpc": "2.0", "id": probe.ID,
+				"result": map[string]any{"tools": []map[string]any{
+					{"name": "t2", "description": "d2", "inputSchema": map[string]any{"type": "object"}},
+				}},
+			})
+			postCh <- out
+		} else if probe.ID != 0 {
+			postCh <- rpcHandler(body)
+		}
+		w.WriteHeader(http.StatusAccepted)
+	})
+	defer close(postCh)
+
+	c, err := Connect("n", ServerConfig{Type: "sse", URL: srv.URL + "/sse"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.OnToolsChanged = func() { changed <- struct{}{} }
+	// simulate the server sending the notification via the stream
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		postCh <- []byte(`{"jsonrpc":"2.0","method":"notifications/tools/list_changed","params":{}}`)
+	}()
+	select {
+	case <-changed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnToolsChanged never fired after tools/list_changed")
+	}
+	c.mu.Lock()
+	got := c.Tools
+	c.mu.Unlock()
+	if len(got) != 1 || got[0].Name != "t2" {
+		t.Fatalf("tools not refreshed: %+v", got)
+	}
+}
