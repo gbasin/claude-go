@@ -218,7 +218,10 @@ func RunWithStore(l *agent.Loop, store Store) {
 		streamWrite(dim + t + reset)
 	}
 	l.Events.OnToolUse = func(name string, input json.RawMessage) {
-		spinRef.stop()
+		// real's spinner keeps animating through tool execution — the
+		// tool card streams above the pinned footer row; stopping here
+		// killed the "(running X hook)" status AND esc-to-interrupt for
+		// the entire tool phase
 		if focusMode.Load() {
 			return // focus view hides tool lines (real's viewMode:"focus")
 		}

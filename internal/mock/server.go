@@ -31,6 +31,7 @@ import (
 )
 
 type Server struct {
+	seq atomic.Int64
 	*http.Server
 	Addr     string
 	Requests atomic.Int64
@@ -136,9 +137,11 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "invalid_request_error", "bad calls directive: "+err.Error())
 			return
 		}
-		for i, c := range calls {
+		for _, c := range calls {
 			blocks = append(blocks, map[string]any{
-				"type": "tool_use", "id": fmt.Sprintf("toolu_mock_%d", i),
+				// ids must be unique across the whole session — two turns
+				// with the same directive otherwise collide on wire
+				"type": "tool_use", "id": fmt.Sprintf("toolu_mock_%d", s.seq.Add(1)),
 				"name": c.Name, "input": c.Input,
 			})
 		}
@@ -151,7 +154,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			input = json.RawMessage(js)
 		}
 		blocks = append(blocks, map[string]any{
-			"type": "tool_use", "id": "toolu_mock_0", "name": name, "input": input,
+			"type": "tool_use", "id": fmt.Sprintf("toolu_mock_%d", s.seq.Add(1)), "name": name, "input": input,
 		})
 		stopReason = "tool_use"
 	case hasToolResult:
