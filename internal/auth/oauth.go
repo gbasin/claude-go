@@ -189,8 +189,15 @@ func (p *Profile) SubscriptionType() string {
 }
 
 // FetchProfile GETs /api/oauth/profile with the access token.
+// CLAUDE_GO_PROFILE_URL is the test seam (same pattern as
+// CLAUDE_GO_TOKEN_URL) — tests route it at a stub or leave it empty to
+// skip the call entirely so creds-load never touches the real API.
 func FetchProfile(token string) *Profile {
-	req, _ := http.NewRequest("GET", "https://api.anthropic.com/api/oauth/profile", nil)
+	url := os.Getenv("CLAUDE_GO_PROFILE_URL")
+	if url == "" {
+		url = "https://api.anthropic.com/api/oauth/profile"
+	}
+	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)

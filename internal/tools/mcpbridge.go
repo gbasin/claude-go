@@ -52,3 +52,24 @@ func UnregisterMCPServer(server string) {
 	}
 	mcpTools = keep
 }
+
+// MCPToolEntry is the minimal shape SyncMCPTools needs (kept local —
+// tools doesn't import the mcp package).
+type MCPToolEntry struct {
+	Name        string
+	Description string
+	InputSchema json.RawMessage
+}
+
+// SyncMCPTools registers any tool in the list that isn't registered
+// yet — called after a tools/list_changed notification refreshes the
+// client's tool list (real reloads the surface in place).
+func SyncMCPTools(server string, caller MCPCaller, list []MCPToolEntry) {
+	for _, t := range list {
+		full := "mcp__" + server + "__" + t.Name
+		if _, ok := registry[full]; ok {
+			continue
+		}
+		RegisterMCP(server, caller, t.Name, t.Description, t.InputSchema)
+	}
+}
