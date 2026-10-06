@@ -800,7 +800,9 @@ func main() {
 		}
 	}
 	repl.RunWithStore(loop, st2)
-	fireHook(loop, hooks.SessionEnd)
+	if !loop.SessionEndFired {
+		fireHook(loop, hooks.SessionEnd)
+	}
 	stampProjectState(cwd, sessionID, loop.Model, true)
 }
 
