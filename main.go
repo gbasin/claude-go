@@ -121,6 +121,8 @@ Flags:
   --forward-home-settings <v>   (accepted)
   --project-config-root <dir>   (accepted)
   --sdk-url <url>               API base URL (sets ANTHROPIC_BASE_URL)
+  --bg, --background            run this session as a background agent
+                                (claude attach <id> rejoins, claude agents lists)
   --attach-serve <target>       (accepted)
   --init-only                   run onboarding/migrations then exit
   --autocompact <mode>          (accepted)
@@ -152,7 +154,10 @@ Flags:
   -h, --help                    this help
 
 Subcommands:
-  agents                        list agent types + background tasks
+  agents                        list agent types + background sessions
+  attach <id>                   attach to a running background session (^Z detaches)
+  daemon run|start|status|stop  background-session supervisor (respawns dead workers)
+  stop <id>                     stop a running background session
   auth login|status|logout      credential management
   config get|set|list           settings.json
   doctor                        diagnostics
