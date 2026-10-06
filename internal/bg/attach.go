@@ -57,13 +57,18 @@ func Attach(prefix string, stdin, stdout *os.File) error {
 	if cols == 0 {
 		cols, rows = 120, 40
 	}
-	hello, _ := json.Marshal(map[string]int{"cols": cols, "rows": rows})
+	hello, _ := json.Marshal(map[string]any{
+		"cols": cols, "rows": rows, "auth": j.Auth,
+	})
 	if err := writeFrame(conn, opHello, hello); err != nil {
 		return err
 	}
-	op, _, err := readFrame(conn)
+	op, payload, err := readFrame(conn)
 	if err != nil {
 		return fmt.Errorf("attach %s: %w", j.Short, err)
+	}
+	if op == opError {
+		return fmt.Errorf("attach %s: %s", j.Short, payload)
 	}
 	if op != opReady {
 		return fmt.Errorf("attach %s: unexpected handshake op %d", j.Short, op)

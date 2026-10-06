@@ -25,6 +25,7 @@ type Job struct {
 	Heartbeat time.Time `json:"heartbeat"`
 	Name      string    `json:"name,omitempty"`   // optional session name
 	Prompt    string    `json:"prompt,omitempty"` // first prompt (agents listing)
+	Auth      string    `json:"auth,omitempty"`   // CLAUDE_BG_PTY_AUTH — attach handshake token
 }
 
 const heartbeatStale = 15 * time.Second // real heartbeat is 5s; triple it
@@ -53,7 +54,7 @@ func (j *Job) Write() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(j.dir(), "job.json"), b, 0o644)
+	return os.WriteFile(filepath.Join(j.dir(), "job.json"), b, 0o600) // holds the attach token
 }
 
 // Beat refreshes the heartbeat timestamp in place.
