@@ -2,13 +2,10 @@ package repl
 
 import (
 	"claude-go/internal/api"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
-	"claude-go/internal/config"
 	"golang.org/x/term"
 )
 
@@ -123,23 +120,4 @@ func runThemePicker(ks *keySource) string {
 		_ = syntaxOn
 	}
 	return ""
-}
-
-// maybeOnboard runs the first-run flow: theme picker → trust gate → done.
-// Real shows it only when hasCompletedOnboarding is unset.
-func MaybeOnboard(cwd string) {
-	m, path := config.ReadClaudeJSON()
-	if done, _ := m["hasCompletedOnboarding"].(bool); done {
-		return
-	}
-	pick := runThemePicker(nil)
-	if pick != "" {
-		applyTheme(pick, cwd)
-		persistTheme(cwd, pick)
-	}
-	m["hasCompletedOnboarding"] = true
-	if b, err := json.MarshalIndent(m, "", "  "); err == nil {
-		os.WriteFile(path, b, 0o644)
-	}
-	time.Sleep(50 * time.Millisecond)
 }
