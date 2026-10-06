@@ -12,19 +12,15 @@ import (
 // and ANSI themes for dumb terminals. Our palette is minimal — remap the
 // accent colors per theme.
 
+// activeTokens is the resolved token palette (real's 72-token theme
+// object — generated in palettes_gen.go).
+var activeTokens = themeTokenPalettes["dark"]
+
+// token fetches a semantic color from the active palette.
+func token(k string) string { return activeTokens.get(k) }
+
 type palette struct {
 	Dim, Bold, Accent, Accent2, Warn, Err, Ok string
-}
-
-var themePalettes = map[string]palette{
-	// Accent = real `claude` brand token rgb(215,119,87) orange
-	"dark":  {"\x1b[2m", "\x1b[1m", "\x1b[38;2;215;119;87m", "\x1b[36m", "\x1b[33m", "\x1b[31m", "\x1b[32m"},
-	"light": {"\x1b[2m", "\x1b[1m", "\x1b[38;2;174;84;55m", "\x1b[34m", "\x1b[35m", "\x1b[31m", "\x1b[32m"},
-	"daltonian": { // deuteranopia-safe: avoid red/green pairs
-		"\x1b[2m", "\x1b[1m", "\x1b[34m", "\x1b[36m", "\x1b[35m", "\x1b[33m", "\x1b[34m"},
-	"ansi":     {"\x1b[2m", "\x1b[1m", "\x1b[34m", "\x1b[36m", "\x1b[33m", "\x1b[31m", "\x1b[32m"},
-	"none":     {"", "", "", "", "", "", ""},
-	"no-color": {"", "", "", "", "", "", ""},
 }
 
 // applyTheme remaps the package color vars. Called once at REPL start.
@@ -42,18 +38,23 @@ func applyTheme(name string, cwd string) {
 	if name == "" || name == "auto" {
 		name = autoTheme()
 	}
-	p, ok := themePalettes[name]
-	if !ok {
-		// custom theme file: ~/.claude/themes/<name>.json with color overrides
-		if cp := loadCustomTheme(name); cp != nil {
-			p = *cp
-		} else {
-			p = themePalettes["dark"]
-		}
+	if tp, ok := themeTokenPalettes[name]; ok {
+		activeTokens = tp
+	} else {
+		activeTokens = themeTokenPalettes["dark"]
 	}
-	dim, bold = p.Dim, p.Bold
-	blue, cyan = p.Accent, p.Accent2
-	yellow, red, green = p.Warn, p.Err, p.Ok
+	// custom theme file: ~/.claude/themes/<name>.json overrides tokens
+	applyCustomTokens(name)
+	dim = token("subtle")
+	if dim == "" {
+		dim = "\x1b[2m"
+	}
+	bold = "\x1b[1m"
+	blue = token("claudeBlue_FOR_SYSTEM_SPINNER")
+	cyan = token("claude")
+	yellow = token("warning")
+	red = token("error")
+	green = token("success")
 	_ = cwd
 }
 
@@ -98,34 +99,19 @@ func themeSetting(cwd string) string {
 	return ""
 }
 
-// loadCustomTheme reads ~/.claude/themes/<name>.json — {"dim":"\u001b[2m",...}
-func loadCustomTheme(name string) *palette {
+// applyCustomTokens overlays ~/.claude/themes/<name>.json onto activeTokens.
+func applyCustomTokens(name string) {
 	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "themes", name+".json"))
 	if err != nil {
-		return nil
+		return
 	}
 	var m map[string]string
 	if json.Unmarshal(b, &m) != nil {
-		return nil
+		return
 	}
-	p := themePalettes["dark"]
 	for k, v := range m {
-		switch strings.ToLower(k) {
-		case "dim":
-			p.Dim = v
-		case "bold":
-			p.Bold = v
-		case "accent", "blue":
-			p.Accent = v
-		case "accent2", "cyan":
-			p.Accent2 = v
-		case "warn", "yellow":
-			p.Warn = v
-		case "error", "red":
-			p.Err = v
-		case "ok", "green":
-			p.Ok = v
-		}
+		activeTokens[k] = v
 	}
-	return &p
 }
+
+// loadCustomTheme reads ~/.claude/themes/<name>.json — {"dim":"\u001b[2m",...}

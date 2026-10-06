@@ -1047,6 +1047,12 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 	if sj {
 		emitStreamJSONInit(l)
 	}
+	if sj && os.Getenv("CLAUDE_GO_INCLUDE_HOOK_EVENTS") == "1" {
+		l.OnHookEvent = func(rec map[string]any) {
+			ev, _ := json.Marshal(rec)
+			fmt.Println(string(ev))
+		}
+	}
 	l.Events.OnTextDelta = func(t string) {
 		switch format {
 		case "text":
