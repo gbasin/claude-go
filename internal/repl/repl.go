@@ -358,7 +358,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			continue
 		}
 		if strings.HasPrefix(line, "/") {
-			if expanded := expandCustomSlash(line); expanded != "" {
+			if expanded := expandCustomSlash(l, line); expanded != "" {
 				line = expanded
 			} else {
 				if handleSlashLocal(l, line, ed, ks) {
@@ -426,9 +426,6 @@ func RunWithStore(l *agent.Loop, store Store) {
 							continue // modal dialog owns the key
 						}
 						if (k.b == 0x1b || k.b == 3) && k.seq == "" {
-							if os.Getenv("CG_DBGKEY") != "" {
-								fmt.Fprintf(os.Stderr, "[dbgkey cancel b=%x seq=%q]", k.b, k.seq)
-							}
 							cancel()
 							// popQueuedIntoDraft: unfinished queued text returns to the editor
 							if len(queueBuf) > 0 {
@@ -602,7 +599,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 				runBang(l, line[1:])
 				goto nextQueued
 			case strings.HasPrefix(line, "/"):
-				if expanded := expandCustomSlash(line); expanded != "" {
+				if expanded := expandCustomSlash(l, line); expanded != "" {
 					line = expanded
 				} else {
 					if handleSlashLocal(l, line, ed, ks) {
@@ -1474,7 +1471,7 @@ func statusLineCmdReal(l *agent.Loop) string {
 }
 
 // expandCustomSlash resolves /name args to a prompt if it's a custom command.
-func expandCustomSlash(line string) string {
+func expandCustomSlash(l *agent.Loop, line string) string {
 	fields := strings.Fields(line)
 	name := strings.TrimPrefix(fields[0], "/")
 	c, ok := customCommands[name]
@@ -1483,6 +1480,11 @@ func expandCustomSlash(line string) string {
 	}
 	arg := strings.TrimSpace(strings.TrimPrefix(line, "/"+name))
 	dprintf("  %s/%s%s\n", dim, name, reset)
+	// real fires UserPromptExpansion when a custom command expands
+	hooks.Run(l.Hooks, hooks.UserPromptExpansion, map[string]any{
+		"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+		"command_name": name, "hook_event_name": "UserPromptExpansion",
+	}, l.ToolCtx.CWD)
 	return expandCustomCommand(c, arg)
 }
 
