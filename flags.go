@@ -64,6 +64,7 @@ type cliOpts struct {
 	dropsTurn    string
 	rewindFiles  string
 	autoCompact  string
+	correlationID string
 	advisor      string
 	planModeInstr string
 	worktreeSet  bool
@@ -158,6 +159,7 @@ func parseCLI(args []string) *cliOpts {
 		"--resume-drops-turn":  func(v string) { o.dropsTurn = v },
 		"--rewind-files":       func(v string) { o.rewindFiles = v },
 		"--autocompact":        func(v string) { o.autoCompact = v },
+		"--correlation-id":      func(v string) { o.correlationID = v },
 		"--advisor":            func(v string) { o.advisor = v },
 		"--append-subagent-system-prompt": func(v string) {
 			os.Setenv("CLAUDE_GO_APPEND_SUBAGENT_SYS", v) // agent.effectiveSystemPrompt
@@ -193,9 +195,9 @@ func parseCLI(args []string) *cliOpts {
 		"--channels", "--dangerously-load-development-channels",
 		"--plugin-dir", "--plugin-dir-no-mcp", "--plugin-url",
 		"--remote-control-session-name-prefix",
-		"--task-budget", "--teammate-mode", "--messaging-socket-path",
+		"--task-budget", "--teammate-mode",
 		"--environment", "--pool", "--ref", "--on-branch",
-		"--correlation-id", "--forward-home-settings", "--project-config-root",
+		"--forward-home-settings", "--project-config-root",
 		"--attach-serve",
 	} {
 		flag := f
