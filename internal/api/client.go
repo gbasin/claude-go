@@ -60,18 +60,19 @@ const (
 )
 
 type Client struct {
-	BaseURL    string
-	HTTP       *http.Client
-	Creds      *auth.Credentials // nil for bedrock/vertex/foundry
-	SessionID  string
-	Entrypoint Entrypoint
-	Provider   Provider
-	Model      string // drives model-conditional betas (1m family)
-	Wants1m    bool   // [1m] suffix on configured model → context-1m beta
-	RemoteEnv  bool   // eval hasRemoteEnvironment attr
-	evalFailed bool   // eval returned empty features (fallback state)
-	RetryCount int    // exposed for x-stainless-retry-count
-	UnixSocket string // ANTHROPIC_UNIX_SOCKET path, when set
+	BaseURL         string
+	HTTP            *http.Client
+	Creds           *auth.Credentials // nil for bedrock/vertex/foundry
+	SessionID       string
+	ParentSessionID string // --parent-session-id — aux events carry lineage
+	Entrypoint      Entrypoint
+	Provider        Provider
+	Model           string // drives model-conditional betas (1m family)
+	Wants1m         bool   // [1m] suffix on configured model → context-1m beta
+	RemoteEnv       bool   // eval hasRemoteEnvironment attr
+	evalFailed      bool   // eval returned empty features (fallback state)
+	RetryCount      int    // exposed for x-stainless-retry-count
+	UnixSocket      string // ANTHROPIC_UNIX_SOCKET path, when set
 
 	mu              sync.Mutex
 	RateLimit       *RateLimit // headers from the most recent response

@@ -214,12 +214,41 @@ func (s *Store) LogCompactBoundaryTrig(preTokens, kept int, trigger string) erro
 // LogInit writes the {type:"system",subtype:"init"} record CC emits at
 // session start.
 func (s *Store) LogInit(model string) error {
-	return s.LogRecord(map[string]any{
+	return s.LogInitMode(model, "")
+}
+
+// LogInitMode is LogInit carrying the session's permission mode — resume
+// with --inherit-permission-mode restores it.
+func (s *Store) LogInitMode(model, permMode string) error {
+	rec := map[string]any{
 		"type": "system", "subtype": "init",
 		"model": model, "cwd": s.CWD,
 		"version": "2.1.292", "userType": "external",
 		"gitBranch": currentGitBranch(s.CWD), "entrypoint": "cli",
-	})
+		"permissionMode": permMode,
+	}
+	if p := os.Getenv("CLAUDE_GO_PARENT_SESSION_ID"); p != "" {
+		rec["parentSessionId"] = p // --parent-session-id lineage
+	}
+	return s.LogRecord(rec)
+}
+
+// InitMode reads the init record's permissionMode back (resume restore).
+func InitMode(cwd, sessionID string) string {
+	b, err := os.ReadFile(filepath.Join(dir(cwd), sessionID+".jsonl"))
+	if err != nil {
+		return ""
+	}
+	for _, ln := range strings.Split(string(b), "\n") {
+		var rec struct {
+			Subtype string `json:"subtype"`
+			Mode    string `json:"permissionMode"`
+		}
+		if json.Unmarshal([]byte(ln), &rec) == nil && rec.Subtype == "init" {
+			return rec.Mode
+		}
+	}
+	return ""
 }
 
 // LogAttachment appends an attachment record
