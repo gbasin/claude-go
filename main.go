@@ -78,8 +78,8 @@ Flags:
   --system-prompt <s>           extra system prompt text
   --system-prompt-file <f>      extra system prompt from file
   --system-prompt-snapshot <s>  (accepted)
-  --append-subagent-system-prompt(-file)  (accepted)
-  --plan-mode-instructions <s>  (accepted)
+  --append-subagent-system-prompt(-file)  append to every subagent system prompt
+  --plan-mode-instructions <s>  custom plan-mode workflow body
   --add-dir <dir>               grant access to an additional directory
   --allowedTools "Bash,Read"    add permission allow rules
   --disallowedTools "Bash(rm*)" add permission deny rules
@@ -132,16 +132,17 @@ Flags:
   --proactivity <level>         (accepted)
   --prompt-suggestions [mode]   (accepted)
   --prefill <text>              seed the input buffer without submitting
-  --prefill-b64 <b64>           (accepted)
+  --prefill-b64 <b64>           base64url --prefill (deep-link safe)
   --teammate-mode <mode>        (accepted)
-  --messaging-socket-path <p>   (accepted)
+  --messaging-socket-path <p>   peer-messaging inbox socket
   --team-name, --agent-id, --agent-name, --agent-color, --agent-type <v>
                                 teammate identity fields (accepted)
   --parent-session-id <id>      (accepted)
   --remote-control-session-name-prefix <s>  (accepted)
   --deep-link-* <v>             deep link params (accepted)
   --handle-uri <uri>            (accepted)
-  --watch-artifact*, --correlation-id, --ref, --on-branch, --routine <v>
+  --correlation-id <id>         output_config correlation id
+  --watch-artifact*, --ref, --on-branch, --routine <v>
                                 (accepted)
   --workload <name>             workload tag (env CLAUDE_GO_WORKLOAD)
   --json-schema <json>          structured output schema (print mode)
@@ -571,6 +572,7 @@ func main() {
 	if o.autoCompact != "" {
 		loop.AutoCompactWindow = o.autoCompact // --autocompact <auto|tokens>
 	}
+	loop.CorrelationID = o.correlationID // --correlation-id (server-side telemetry)
 	loop.AdvisorModel = st.AdvisorModel
 	if o.advisor != "" {
 		loop.AdvisorModel = o.advisor // --advisor <model> (alias or full ID)
