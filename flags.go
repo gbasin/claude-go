@@ -62,6 +62,7 @@ type cliOpts struct {
 	sessionName  string
 	resumeAt     string
 	dropsTurn    string
+	rewindFiles  string
 	worktreeSet  bool
 	worktreeName string
 	tmux         string // "" | "auto" | "classic"
@@ -152,6 +153,7 @@ func parseCLI(args []string) *cliOpts {
 		"--thinking-display":   func(v string) { o.thinkingDisp = v },
 		"--resume-session-at":  func(v string) { o.resumeAt = v },
 		"--resume-drops-turn":  func(v string) { o.dropsTurn = v },
+		"--rewind-files":       func(v string) { o.rewindFiles = v },
 		"--workload":           func(v string) { o.workload = v; os.Setenv("CLAUDE_GO_WORKLOAD", v) },
 		"--session-id":         func(v string) { o.sessID = v },
 		"--settings":           func(v string) { o.settingsF = v },
@@ -172,7 +174,7 @@ func parseCLI(args []string) *cliOpts {
 		"--channels", "--dangerously-load-development-channels",
 		"--plugin-dir", "--plugin-dir-no-mcp", "--plugin-url",
 		"--remote-control-session-name-prefix",
-		"--autocompact", "--rewind-files",
+		"--autocompact",
 		"--task-budget", "--teammate-mode", "--messaging-socket-path",
 		"--environment", "--pool", "--ref", "--on-branch",
 		"--correlation-id", "--forward-home-settings", "--project-config-root",
