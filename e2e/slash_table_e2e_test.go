@@ -94,7 +94,7 @@ func TestSlashTable(t *testing.T) {
 		{"/pause-memory", "memory paused", ""},
 		{"/focus", "Focus view", ""},
 		{"/brief", "brief mode", ""},
-		{"/sandbox", "sandbox on", ""},
+		{"/sandbox", "Sandbox Mode Overrides Config", ""},
 		{"/fast", "fast mode", ""},
 	}
 

@@ -857,7 +857,17 @@ func queueBoxRows(draft string) []string {
 		mid = " ❯\u00a0…" + draft[start:]
 	}
 	rule := "\x1b[38;5;244m" + strings.Repeat("─", w) + "\x1b[39m"
-	return []string{rule, mid, rule}
+	rows := []string{rule, mid, rule}
+	// real's queue chrome under the box (captured): "Press up to edit
+	// queued messages" once something is queued, and "ctrl+x ctrl+s to
+	// send now" while a draft accumulates
+	if queuedPending.Load() > 0 {
+		rows = append(rows, dim+"    Press up to edit queued messages"+reset)
+	}
+	if draft != "" {
+		rows = append(rows, dim+"    ctrl+x ctrl+s to send now"+reset)
+	}
+	return rows
 }
 
 // compQueueDraft renders queued input into the pinned box while the agent
