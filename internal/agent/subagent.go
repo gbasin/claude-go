@@ -441,15 +441,21 @@ func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, m
 		IsSubagent:   true,
 		AllowedTools: def.resolveAllowed(extraAllowed),
 		AppendSysP:   def.effectiveSystemPrompt(),
-		Client:       r.Client,
-		Model:        m,
-		MaxTokens:    defaultMaxTokens,
-		Effort:       "medium",
-		Entrypoint:   r.Entrypoint,
-		PermMode:     r.PermMode,
-		CWD:          c.CWD,
-		User:         r.User,
-		PermRules:    r.PermRules,
+		ExtraSystem: func() []string {
+			if v := os.Getenv("CLAUDE_GO_APPEND_SUBAGENT_SYSTEM_PROMPT"); v != "" {
+				return []string{v}
+			}
+			return nil
+		}(),
+		Client:     r.Client,
+		Model:      m,
+		MaxTokens:  defaultMaxTokens,
+		Effort:     "medium",
+		Entrypoint: r.Entrypoint,
+		PermMode:   r.PermMode,
+		CWD:        c.CWD,
+		User:       r.User,
+		PermRules:  r.PermRules,
 		ToolCtx: &tools.Context{
 			Subagent:   true,
 			Ctx:        c.Ctx,

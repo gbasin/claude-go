@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestVersionFlag(t *testing.T) {
@@ -229,4 +230,25 @@ func TestSandboxSub(t *testing.T) {
 	if !strings.Contains(r.stderr+r.stdout, "unknown sandbox") {
 		t.Fatalf("sandbox bogus should fail: %s %s", r.stdout, r.stderr)
 	}
+}
+
+// TestTmuxFlag: --tmux requires --worktree — error path.
+func TestTmuxFlag(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "--tmux", "sess", "-p", "hi")
+	if r.code == 0 {
+		t.Fatal("--tmux without --worktree should fail")
+	}
+	if !strings.Contains(r.stderr, "requires --worktree") {
+		t.Fatalf("tmux error text missing: %s", r.stderr)
+	}
+}
+
+// TestPlanModeRequired: --plan-mode-required starts in plan mode —
+// a Write directive still prompts (plan blocks the dispatch).
+func TestPlanModeRequired(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s, "--plan-mode-required")
+	p.waitFor("⏸", 30*time.Second) // plan-mode badge in the status line
+	p.exit()
 }

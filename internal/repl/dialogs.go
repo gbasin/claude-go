@@ -97,6 +97,26 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 			return false, pr.Reason
 		}
 	}
+	// --permission-prompt-tool: an MCP tool answers the prompt headlessly —
+	// real delegates {tool_name, tool_input} and honors {behavior}
+	if tn := os.Getenv("CLAUDE_GO_PERMISSION_PROMPT_TOOL"); tn != "" {
+		in, _ := json.Marshal(map[string]any{
+			"tool_name": name, "tool_input": json.RawMessage(input)})
+		r := tools.Dispatch(l.ToolCtx, tn, in)
+		var ans struct {
+			Behavior string `json:"behavior"`
+			Message  string `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(r.Content), &ans); err == nil {
+			switch ans.Behavior {
+			case "allow":
+				return true, ""
+			case "deny":
+				return false, ans.Message
+			}
+		}
+		// malformed/no-answer → fall through to the interactive dialog
+	}
 	// take over stdin for the dialog (turn busy-loop forwards to us)
 	dch := make(chan key, 16)
 	ks.dialog.Store(&dch)
