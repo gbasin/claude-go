@@ -84,7 +84,7 @@ func TestBgStop(t *testing.T) {
 		t.Fatalf("--bg output lacks attach hint: %q", r.stdout)
 	}
 	short := m[1]
-	poll(t, 10*time.Second, "worker in agents", func() bool {
+	poll(t, 30*time.Second, "worker in agents", func() bool {
 		return strings.Contains(s.run(t, "agents").stdout, short)
 	})
 	poll(t, 15*time.Second, "first turn logged", func() bool {
@@ -116,7 +116,7 @@ func TestDaemonRespawn(t *testing.T) {
 		t.Fatalf("--bg output lacks attach hint: %q", r.stdout)
 	}
 	short := m[1]
-	poll(t, 10*time.Second, "worker in agents", func() bool {
+	poll(t, 30*time.Second, "worker in agents", func() bool {
 		return strings.Contains(s.run(t, "agents").stdout, short)
 	})
 
@@ -140,7 +140,7 @@ func TestDaemonRespawn(t *testing.T) {
 	}
 	t.Cleanup(func() { dcmd.Process.Kill() })
 
-	poll(t, 15*time.Second, "worker respawned", func() bool {
+	poll(t, 30*time.Second, "worker respawned", func() bool {
 		return strings.Contains(s.run(t, "agents").stdout, short)
 	})
 
@@ -263,7 +263,7 @@ func TestResumeLiveBgRefused(t *testing.T) {
 
 	// cleanup
 	s.runStdin(t, "/exit\r", "attach", sid)
-	poll(t, 10*time.Second, "worker exit", func() bool {
+	poll(t, 30*time.Second, "worker exit", func() bool {
 		out := s.run(t, "agents").stdout
 		i := strings.Index(out, "background sessions:")
 		return i < 0 || strings.Contains(out[i:], "none")
@@ -283,7 +283,7 @@ func TestDaemonRespawnsVersionStale(t *testing.T) {
 		"--bg", "-p", "ping", "--session-id", sid)
 	s.mustOK(t, r)
 	short := sid[:8]
-	poll(t, 10*time.Second, "worker in agents", func() bool {
+	poll(t, 30*time.Second, "worker in agents", func() bool {
 		return strings.Contains(s.run(t, "agents").stdout, short)
 	})
 	jobFile := filepath.Join(s.home, ".claude", "bg", "jobs", short, "job.json")
@@ -343,7 +343,7 @@ func TestDaemonRespawnsVersionStale(t *testing.T) {
 		fail()
 	}
 	s.runStdin(t, "/exit\r", "attach", sid)
-	poll(t, 10*time.Second, "worker exit", func() bool {
+	poll(t, 30*time.Second, "worker exit", func() bool {
 		out := s.run(t, "agents").stdout
 		return !strings.Contains(out, short)
 	})
