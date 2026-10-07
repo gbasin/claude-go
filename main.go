@@ -255,6 +255,7 @@ func main() {
 			return
 		}
 	}
+
 	// `claude <root flags> remote-control`: real refuses root options that
 	// wouldn't carry into spawned sessions (mod_0690.js k()/D()).
 	if len(args) > 0 && strings.HasPrefix(args[0], "-") {
@@ -269,6 +270,35 @@ func main() {
 	}
 
 	o := parseCLI(args)
+	// --handle-uri <uri>: real's deep-link entry — must be the last pair
+	if uri := handleURIArgCheck(os.Args[1:]); uri != "" {
+		dl, err := parseDeepLink(uri)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Deep link error:", err)
+			os.Exit(1)
+		}
+		switch dl.action {
+		case "open":
+			// repo → resolve local clone else home; cwd overrides
+			if dl.cwd != "" {
+				if err := os.Chdir(dl.cwd); err != nil {
+					fmt.Fprintln(os.Stderr, "Deep link error:", err)
+					os.Exit(1)
+				}
+			}
+			if dl.query != "" {
+				o.prompt = []string{dl.query} // prefill the prompt
+			}
+		case "install-plugin":
+			fmt.Printf("installing plugin %s", dl.plugin)
+			if dl.marketplace != "" {
+				fmt.Printf(" from %s", dl.marketplace)
+			}
+			fmt.Println()
+			pluginSub([]string{"install", dl.plugin})
+			return
+		}
+	}
 
 	// --autocompact <auto|tokens>: real's argParser — 'auto' or 100k–1M
 	if o.autoCompact != "" && o.autoCompact != "auto" {
@@ -451,6 +481,25 @@ func main() {
 		}
 		fmt.Println(")")
 		return
+	}
+
+	// --forward-home-settings without a cloud/env target is rejected
+	// (real: "pass --cloud (a new session, or one to attach to) or
+	// --environment")
+	if os.Getenv("CLAUDE_GO_FORWARD_HOME_SETTINGS") != "" &&
+		!o.cloud && !o.teleport && os.Getenv("CLAUDE_GO_ENVIRONMENT") == "" {
+		fmt.Fprintln(os.Stderr, "Error: --forward-home-settings says whether this machine's settings go into a cloud session; pass --cloud (a new session, or one to attach to) or --environment")
+		os.Exit(2)
+	}
+
+	// --plugin-url <url>: ad-hoc marketplace for the session (real
+	// registers it like `plugin marketplace add`)
+	if u := os.Getenv("CLAUDE_GO_PLUGIN_URL"); u != "" {
+		if name, err := plugins.AddMarketplace(u); err != nil {
+			fmt.Fprintf(os.Stderr, "plugin-url: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "  marketplace %s registered\n", name)
+		}
 	}
 
 	// --attach-serve <session-id>: run this process as the session's
