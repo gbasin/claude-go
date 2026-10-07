@@ -51,6 +51,14 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		dprintln("  ⏸ plan mode — explore read-only, then ExitPlanMode to implement")
 	case "clear", "reset", "new":
 		l.Messages = nil
+		// /clear ends the session before starting the next — real fires
+		// SessionEnd(reason=clear) then SessionStart(source=clear)
+		l.SessionEndReason = "clear"
+		hooks.Run(l.Hooks, hooks.SessionEnd, map[string]any{
+			"session_id": l.Client.SessionID, "transcript_path": l.Transcript,
+			"cwd": l.ToolCtx.CWD, "hook_event_name": "SessionEnd",
+			"reason": "clear", "permission_mode": l.PermMode,
+		}, l.ToolCtx.CWD)
 		l.ResetForNewSession()
 		l.SessionStartSource = "clear"
 		hooks.Run(l.Hooks, hooks.SessionStart, map[string]any{
@@ -120,6 +128,11 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			break
 		}
 		l.AddDirs = append(l.AddDirs, p)
+		hooks.Run(l.Hooks, hooks.DirectoryAdded, map[string]any{
+			"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+			"directory": p, "source": "user_command",
+			"hook_event_name": "DirectoryAdded",
+		}, l.ToolCtx.CWD)
 		dprintln("  added", p)
 	case "memory":
 		memoryCmd(l, arg)
@@ -287,7 +300,15 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		out, _ := exec.Command("git", "-C", l.ToolCtx.CWD, "ls-files").CombinedOutput()
 		dprintf("%s", string(out))
 	case "todos":
-		dprintln("  (no todo tool in this version)")
+		// real's /todos view: the live TodoWrite list (ctrl+t overlay too)
+		if txt := tools.TodosText(); txt != "" {
+			dprintln("  Todos:")
+			for _, ln := range strings.Split(txt, "\n") {
+				dprintln("   ", ln)
+			}
+		} else {
+			dprintln("  no todos")
+		}
 	case "release-notes":
 		dprintln("  claude-go", api.Version)
 	case "terminal-setup":
@@ -662,6 +683,20 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		dprintln("  file an issue at", url)
 		openURL(url)
 	default:
+		if fetch, ok := tools.ResolveMCPPrompt(cmd); ok {
+			// MCP prompt → fetch its messages and run them as the turn
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				txt, err := fetch(ctx, map[string]string{"input": arg})
+				if err != nil {
+					dprintln("  prompt failed:", err)
+					return
+				}
+				l.Ask(context.Background(), txt)
+			}()
+			return false
+		}
 		if c, ok := hiddenCommands[cmd]; ok {
 			// hidden custom commands run but don't list in help/completion
 			go l.Ask(context.Background(), expandCustomCommand(c, arg))

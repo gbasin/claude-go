@@ -194,6 +194,12 @@ type Client struct {
 	// OnToolsChanged fires after a tools/list_changed refresh lands —
 	// the app re-registers the new surface.
 	OnToolsChanged func()
+	// OnPromptsChanged, if set, fires after prompts/list_changed — callers
+	// re-run ListPrompts and rebuild the /mcp__*__ prompt commands.
+	OnPromptsChanged func()
+	// Roots, if set, answers roots/list server requests with the session's
+	// workspace roots (project dir + add-dirs).
+	Roots func() []map[string]string
 
 	tr      transport
 	cmd     *exec.Cmd // stdio only
@@ -390,6 +396,13 @@ func (c *Client) handleNotification(method string, params json.RawMessage) {
 		go fn(method, params)
 	}
 	switch method {
+	case "notifications/prompts/list_changed":
+		c.mu.Lock()
+		cb := c.OnPromptsChanged
+		c.mu.Unlock()
+		if cb != nil {
+			go cb()
+		}
 	case "notifications/tools/list_changed":
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -407,8 +420,8 @@ func (c *Client) handleNotification(method string, params json.RawMessage) {
 				}
 			}
 		}()
-	case "notifications/resources/list_changed", "notifications/prompts/list_changed":
-		// real refreshes prompts/resources too — surface via OnNotification
+	case "notifications/resources/list_changed":
+		// real refreshes resources too — surface via OnNotification
 		// (callers already got the notification above)
 	}
 }
@@ -417,7 +430,16 @@ func (c *Client) handleNotification(method string, params json.RawMessage) {
 // is understood; everything else gets -32601 (method not found).
 func (c *Client) handleServerRequest(id json.RawMessage, method string, _ json.RawMessage) {
 	var resp map[string]any
-	if method == "ping" {
+	if method == "logging/setLevel" {
+		resp = map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "result": map[string]any{}}
+	} else if method == "roots/list" {
+		var roots []map[string]string
+		if c.Roots != nil {
+			roots = c.Roots()
+		}
+		resp = map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id),
+			"result": map[string]any{"roots": roots}}
+	} else if method == "ping" {
 		resp = map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "result": map[string]any{}}
 	} else {
 		resp = map[string]any{

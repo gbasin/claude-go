@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -724,5 +725,33 @@ func TestTaskToolsSettingsGate(t *testing.T) {
 	s.mustOK(t, r)
 	if !strings.Contains(r.stdout, "Task") {
 		t.Fatalf("TaskList didn't dispatch under settings gate: %s", truncStr(r.stdout, 1500))
+	}
+}
+
+// TestSandboxDenyWrite: sandbox.filesystem.denyWrite re-denies a path
+// inside the workspace — the write is refused before touching the FS.
+func TestSandboxDenyWrite(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("seatbelt profile is macOS-only")
+	}
+	s := newSession(t)
+	os.MkdirAll(filepath.Join(s.cwd, "protected"), 0o755)
+	s.writeSettings(`{"sandbox":{"enabled":true,"filesystem":{"denyWrite":["protected/**"]}}}`)
+	p := s.runPTY(t, nil, "--mock", "--permission-mode", "bypassPermissions")
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"touch protected/x && echo SHOULD-NOT-PRINT"}`+"\r",
+		"❯ tool:Bash", 8)
+	p.waitFor("Tool results received", 30*time.Second)
+	if _, err := os.Stat(filepath.Join(s.cwd, "protected", "x")); err == nil {
+		t.Fatal("denyWrite path was written — sandbox didn't block it")
+	}
+	// counter-case: a sibling path stays writable under the sandbox
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"touch allowed-x"}`+"\r", "❯ tool:Bash", 8)
+	p.waitFor("Tool results received", 30*time.Second)
+	p.exit()
+	if _, err := os.Stat(filepath.Join(s.cwd, "allowed-x")); err != nil {
+		t.Fatal("sandbox blocked a write outside denyWrite")
 	}
 }

@@ -40,7 +40,7 @@ func TestSlashTable(t *testing.T) {
 		{"/usage", "this session:", ""},
 		{"/stats", "this session:", ""},
 		{"/agents", "wizard has been removed", ""},
-		{"/todos", "no todo tool", ""},
+		{"/todos", "no todos", ""},
 		{"/vim", "moved to /config", ""},
 		{"/keybindings", "keybindings.json", ""},
 		{"/ide", "no IDE detected", "IDE connected"},

@@ -229,11 +229,19 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 	deadline := time.Now().Add(permAskTimeout)
 	timeout := time.NewTimer(permAskTimeout)
 	defer timeout.Stop()
+	deny := func() (bool, string) {
+		hooks.Run(l.Hooks, hooks.PermissionDenied, map[string]any{
+			"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+			"tool_name": name, "tool_input": json.RawMessage(input),
+			"hook_event_name": "PermissionDenied", "permission_mode": l.PermMode,
+		}, l.ToolCtx.CWD)
+		return false, ""
+	}
 	for {
 		select {
 		case <-timeout.C:
 			dprintf("\n  %s⏵ auto-denied — unattended for %s%s\n", dim, permAskTimeout, reset)
-			return false, ""
+			return deny()
 		case k, ok := <-dch:
 			if !ok {
 				return false, ""
@@ -278,7 +286,7 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 				continue
 			case k.b == 0x1b || k.b == 3:
 				dprintln("  Esc — denied")
-				return false, ""
+				return deny()
 			case k.b >= '1' && k.b <= '9' && int(k.b-'1') < len(opts):
 				sel = int(k.b - '1')
 				fallthrough
@@ -289,7 +297,7 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 					return true, ""
 				case "no":
 					dprintln("  ✗ No")
-					return false, ""
+					return deny()
 				case "automode":
 					l.PermMode = "auto"
 					dprintln("  switched to auto mode — " + title + " approved")
