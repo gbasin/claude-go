@@ -202,6 +202,9 @@ type Client struct {
 	// OnPromptsChanged, if set, fires after prompts/list_changed — callers
 	// re-run ListPrompts and rebuild the /mcp__*__ prompt commands.
 	OnPromptsChanged func()
+	// Elicit answers elicitation/create — returns {"action","content"}
+	// (nil → decline). Real renders a form dialog; REPL installs one.
+	Elicit func(params json.RawMessage) map[string]any
 	// Roots, if set, answers roots/list server requests with the session's
 	// workspace roots (project dir + add-dirs).
 	Roots func() []map[string]string
@@ -433,7 +436,7 @@ func (c *Client) handleNotification(method string, params json.RawMessage) {
 
 // handleServerRequest answers server->client JSON-RPC requests. Only ping
 // is understood; everything else gets -32601 (method not found).
-func (c *Client) handleServerRequest(id json.RawMessage, method string, _ json.RawMessage) {
+func (c *Client) handleServerRequest(id json.RawMessage, method string, params json.RawMessage) {
 	var resp map[string]any
 	if method == "logging/setLevel" {
 		resp = map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "result": map[string]any{}}
@@ -446,6 +449,13 @@ func (c *Client) handleServerRequest(id json.RawMessage, method string, _ json.R
 			"result": map[string]any{"roots": roots}}
 	} else if method == "ping" {
 		resp = map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "result": map[string]any{}}
+	} else if method == "elicitation/create" {
+		// real renders a form (Elicit hook); nil handler → decline
+		action := map[string]any{"action": "decline"}
+		if c.Elicit != nil {
+			action = c.Elicit(params)
+		}
+		resp = map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "result": action}
 	} else {
 		resp = map[string]any{
 			"jsonrpc": "2.0", "id": json.RawMessage(id),

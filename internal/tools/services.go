@@ -521,7 +521,14 @@ func (a *AgentRecord) Finish(result string) {
 	a.result = result
 	a.mu.Unlock()
 	close(a.Done)
+	if cb := OnAgentIdle; cb != nil {
+		cb(a) // TeammateIdle hook fires from the agent package (loop context)
+	}
 }
+
+// OnAgentIdle fires when a registered agent finishes — the REPL sets it
+// to run TeammateIdle hooks with the loop's session context.
+var OnAgentIdle func(*AgentRecord)
 
 // agentBus is the per-process registry of spawned agents.
 var agentBus = struct {

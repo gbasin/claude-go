@@ -1137,6 +1137,10 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 			}
 			registerPrompts()
 			c.OnPromptsChanged = registerPrompts // prompts/list_changed
+			serverName := name
+			c.Elicit = func(params json.RawMessage) map[string]any {
+				return tools.HandleElicit(serverName, params)
+			}
 			c.SetNotificationHandler(func(method string, params json.RawMessage) {
 				// notifications/message = server log lines — real shows
 				// them as dim status notes above the prompt
