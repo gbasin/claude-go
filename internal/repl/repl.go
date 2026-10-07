@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -1359,7 +1358,7 @@ var slashCommands = []string{
 	"keybindings", "login", "logout", "mcp", "memory", "model", "output-style",
 	"permissions", "plugin", "privacy-settings", "quit", "radio", "release-notes",
 	"resume", "review", "status", "statusline", "tasks", "terminal-setup",
-	"theme", "todos", "usage", "vim", "voice",
+	"theme", "todos", "usage", "voice",
 }
 
 func termWidth() (int, error) {
@@ -1550,17 +1549,15 @@ func statusLineCmd(l *agent.Loop) string {
 }
 
 func statusLineCmdReal(l *agent.Loop) string {
-	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
-	if err != nil {
-		return ""
-	}
 	var st struct {
-		StatusLine struct {
-			Type    string `json:"type"`
-			Command string `json:"command"`
-		} `json:"statusLine"`
+		Command string `json:"command"`
 	}
-	if json.Unmarshal(b, &st) != nil || st.StatusLine.Command == "" {
+	if raw := config.UserSetting("statusLine"); raw != nil {
+		if jb, err := json.Marshal(raw); err == nil {
+			json.Unmarshal(jb, &st)
+		}
+	}
+	if st.Command == "" {
 		return ""
 	}
 	u := l.UsageTotal
@@ -1599,7 +1596,7 @@ func statusLineCmdReal(l *agent.Loop) string {
 	if sh == "" {
 		sh = "/bin/bash"
 	}
-	cmd := exec.Command(sh, "-c", st.StatusLine.Command)
+	cmd := exec.Command(sh, "-c", st.Command)
 	cmd.Dir = l.ToolCtx.CWD
 	cmd.Stdin = strings.NewReader(string(payload))
 	out, err := cmd.Output()
@@ -1911,7 +1908,7 @@ func SlashCommandNames() []string {
 }
 
 func builtinSlashCommands() []string {
-	return []string{"add-dir", "advisor", "agents", "alias", "allowed-tools", "ant-trace", "artifacts", "auto", "autocompact", "background", "batch", "bg", "branch", "break-reminder", "breaks", "brief", "btw", "bug", "cd", "checkpoint", "checkup", "chrome", "clear", "cloud-plugins", "code-review", "color", "compact", "config", "context", "copy", "cost", "debug", "debug-tool-call", "design-consent", "design-login", "design-revoke", "diff", "doctor", "downtime", "effort", "env", "exit", "experiments", "export", "extra-usage", "fast", "feedback", "fewer-permission-prompts", "files", "focus", "fork", "goal", "heapdump", "help", "high", "hooks", "ide", "import", "init", "insights", "install-github-app", "issue", "keybindings", "keybindings-help", "login", "logout", "loop", "low", "max", "mcp", "medium", "memory", "memory-pause", "memory-types", "model", "new", "oauth-refresh", "output-style", "pause-memory", "permissions", "plan", "plugin", "powerup", "pr", "privacy-settings", "proactive", "quit", "radio", "release-notes", "reload-plugins", "reload-skills", "remote-control", "remote-env", "rename", "reset", "restart", "resume", "review", "rewind", "routines", "run", "sandbox", "schedule", "scroll-speed", "security-review", "settings", "settings-review", "setup-bedrock", "setup-vertex", "skills", "stats", "status", "statusline", "stop", "subtask", "tasks", "teleport", "terminal-setup", "theme", "todos", "toggle-memory", "ultraplan", "ultrareview", "undo", "update-config", "usage", "usage-credits", "vim", "voice", "wellbeing", "xhigh"}
+	return []string{"add-dir", "advisor", "agents", "alias", "allowed-tools", "ant-trace", "artifacts", "auto", "autocompact", "background", "batch", "bg", "branch", "break-reminder", "breaks", "brief", "btw", "bug", "cd", "checkpoint", "checkup", "chrome", "clear", "cloud-plugins", "code-review", "color", "compact", "config", "context", "copy", "cost", "debug", "debug-tool-call", "design-consent", "design-login", "design-revoke", "diff", "doctor", "downtime", "effort", "env", "exit", "experiments", "export", "extra-usage", "fast", "feedback", "fewer-permission-prompts", "files", "focus", "fork", "goal", "heapdump", "help", "high", "hooks", "ide", "import", "init", "insights", "install-github-app", "issue", "keybindings", "keybindings-help", "login", "logout", "loop", "low", "max", "mcp", "medium", "memory", "memory-pause", "memory-types", "model", "new", "oauth-refresh", "output-style", "pause-memory", "permissions", "plan", "plugin", "powerup", "pr", "privacy-settings", "proactive", "quit", "radio", "release-notes", "reload-plugins", "reload-skills", "remote-control", "remote-env", "rename", "reset", "restart", "resume", "review", "rewind", "routines", "run", "sandbox", "schedule", "scroll-speed", "security-review", "settings", "settings-review", "setup-bedrock", "setup-vertex", "skills", "stats", "status", "statusline", "stop", "subtask", "tasks", "teleport", "terminal-setup", "theme", "todos", "toggle-memory", "ultraplan", "ultrareview", "undo", "update-config", "usage", "usage-credits", "voice", "wellbeing", "xhigh"}
 }
 
 // currentStore is set by RunWithStore so slash commands can write records.
@@ -2240,23 +2237,6 @@ func readUserSettingStr(key string) string {
 	return s
 }
 
-// userSettings caches ~/.claude/settings.json once per process — real
-// reads it once at startup too (restart to pick up edits).
-var userSettingsOnce struct {
-	once sync.Once
-	m    map[string]any
-}
-
-func userSettings() map[string]any {
-	userSettingsOnce.once.Do(func() {
-		b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
-		if err != nil {
-			userSettingsOnce.m = map[string]any{}
-			return
-		}
-		json.Unmarshal(b, &userSettingsOnce.m)
-	})
-	return userSettingsOnce.m
-}
-
-func userSetting(key string) any { return userSettings()[key] }
+// userSetting reads a key from ~/.claude/settings.json via config's cache —
+// real reads it once at startup too (restart to pick up edits).
+func userSetting(key string) any { return config.UserSetting(key) }

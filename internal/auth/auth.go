@@ -295,23 +295,13 @@ func (c *Credentials) refreshLocked() error {
 }
 
 func apiKeyHelper() string {
-	for _, p := range []string{
-		filepath.Join(config.ClaudeDir(), "settings.json"),
-	} {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		var st struct {
-			ApiKeyHelper string `json:"apiKeyHelper"`
-		}
-		if json.Unmarshal(b, &st) != nil || st.ApiKeyHelper == "" {
-			continue
-		}
-		out, err := exec.Command("sh", "-c", st.ApiKeyHelper).Output()
-		if err == nil && len(out) > 0 {
-			return strings.TrimSpace(string(out))
-		}
+	helper, _ := config.UserSetting("apiKeyHelper").(string)
+	if helper == "" {
+		return ""
+	}
+	out, err := exec.Command("sh", "-c", helper).Output()
+	if err == nil && len(out) > 0 {
+		return strings.TrimSpace(string(out))
 	}
 	return ""
 }

@@ -1802,15 +1802,7 @@ func sessionForPR(cwd, ref string) string {
 }
 
 func awaySummaryEnabled() bool {
-	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
-	if err != nil {
-		return true
-	}
-	var m map[string]any
-	if json.Unmarshal(b, &m) != nil {
-		return true
-	}
-	v, ok := m["awaySummaryEnabled"].(bool)
+	v, ok := config.UserSetting("awaySummaryEnabled").(bool)
 	return !ok || v
 }
 
@@ -1849,15 +1841,7 @@ func loadPathOr(cwd, id, p string) string {
 
 // cleanupPeriodDays — how long to keep transcripts (default 30, min 1).
 func cleanupPeriod() int {
-	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
-	if err != nil {
-		return 30
-	}
-	var m map[string]any
-	if json.Unmarshal(b, &m) != nil {
-		return 30
-	}
-	if f, ok := m["cleanupPeriodDays"].(float64); ok && f >= 1 {
+	if f, ok := config.UserSetting("cleanupPeriodDays").(float64); ok && f >= 1 {
 		return int(f)
 	}
 	return 30

@@ -522,15 +522,7 @@ func (c *Context) runForegroundTimed(command string, timeoutMs, autoAfterMs int,
 
 // intSetting reads a numeric key from ~/.claude/settings.json.
 func intSetting(key string, def int) int {
-	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
-	if err != nil {
-		return def
-	}
-	var m map[string]any
-	if json.Unmarshal(b, &m) != nil {
-		return def
-	}
-	if f, ok := m[key].(float64); ok {
+	if f, ok := config.UserSetting(key).(float64); ok {
 		return int(f)
 	}
 	return def

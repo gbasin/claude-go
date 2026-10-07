@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -409,21 +408,7 @@ func printAutoModeNotice(permMode string) {
 }
 
 // reducedMotionSetting honors settings.prefersReducedMotion (real's key).
-var reducedMotionOnce struct {
-	once sync.Once
-	v    bool
-}
-
 func reducedMotionSetting() bool {
-	reducedMotionOnce.once.Do(func() {
-		b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
-		if err != nil {
-			return
-		}
-		var m map[string]any
-		if json.Unmarshal(b, &m) == nil {
-			reducedMotionOnce.v, _ = m["prefersReducedMotion"].(bool)
-		}
-	})
-	return reducedMotionOnce.v
+	v, _ := config.UserSetting("prefersReducedMotion").(bool)
+	return v
 }
