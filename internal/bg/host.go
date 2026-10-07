@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"os/signal"
 	"sync"
 	"syscall"
@@ -210,9 +211,10 @@ func RunHost(o HostOpts) int {
 
 	// host lifecycle: child exit or SIGTERM ends the session
 	done := make(chan struct{})
+	var waitErr error
 	go func() {
-		err := cmd.Wait()
-		dbgf("child exited err=%v", err)
+		waitErr = cmd.Wait()
+		dbgf("child exited err=%v", waitErr)
 		close(done)
 	}()
 	sigc := make(chan os.Signal, 2)
@@ -254,6 +256,16 @@ func RunHost(o HostOpts) int {
 	mu.Unlock()
 	ln.Close()
 	master.Close()
+	// last-exit breadcrumb survives the job dir removal — invaluable when
+	// a worker dies for no visible reason
+	mu.Lock()
+	outTail := append([]byte(nil), tail...)
+	mu.Unlock()
+	if n := len(outTail); n > 600 {
+		outTail = outTail[n-600:]
+	}
+	_ = os.WriteFile(filepath.Join(jobsRoot(), "last-exit.log"),
+		[]byte(fmt.Sprintf("%s %s exited: child=%v\n%s", time.Now().Format(time.RFC3339), job.SessionID, waitErr, outTail)), 0o644)
 	job.Remove()
 	return 0
 }

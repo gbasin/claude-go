@@ -195,7 +195,14 @@ func parseCLI(args []string) *cliOpts {
 	boolFlags := map[string]func(){
 		"-p":                                   func() { o.printMode = true },
 		"--print":                              func() { o.printMode = true },
-		"--mock":                               func() { o.mockMode = true },
+		"--mock": func() {
+			o.mockMode = true
+			// env is the propagation contract for spawned children (bg
+			// workers, daemon respawns read CLAUDE_GO_MOCK to add --mock);
+			// a flag-only --mock silently spawned an unmocked worker that
+			// died on credentials
+			os.Setenv("CLAUDE_GO_MOCK", "1")
+		},
 		"-d":                                   func() { o.debug = true },
 		"--debug":                              func() { o.debug = true },
 		"-d2e":                                 func() { o.debug = true },
