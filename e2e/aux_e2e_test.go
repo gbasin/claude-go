@@ -1264,3 +1264,16 @@ func TestCorrelationID(t *testing.T) {
 		t.Fatalf("x-correlation-id = %q", cid)
 	}
 }
+
+// TestMaxBudget: --max-budget-usd stops the turn with an error when the
+// cumulative cost exceeds it.
+func TestMaxBudget(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p", "hi", "--max-budget-usd", "0.0000000001")
+	if r.code == 0 {
+		t.Fatal("--max-budget-usd should have errored out")
+	}
+	if !strings.Contains(r.stderr, "budget exceeded") {
+		t.Fatalf("budget error missing: %s", r.stderr)
+	}
+}

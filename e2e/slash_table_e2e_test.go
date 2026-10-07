@@ -122,3 +122,15 @@ func TestSlashTable(t *testing.T) {
 	p.waitFor("Mock response to: alive-after-table", 30*time.Second)
 	p.exit()
 }
+
+// TestCopyCmd: /copy copies the last assistant text to the clipboard
+// (pbcopy stubbed on PATH — the print confirms the path ran).
+func TestCopyCmd(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.sendUntilEchoed(t, "hi\r", "❯ hi", 8)
+	p.waitFor("Mock response", 30*time.Second)
+	p.sendUntilEchoed(t, "/copy\r", "❯ /copy", 8)
+	p.waitFor("copied", 15*time.Second)
+	p.exit()
+}
