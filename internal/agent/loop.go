@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"claude-go/internal/api"
+	"claude-go/internal/config"
 	"claude-go/internal/hooks"
 	"claude-go/internal/tools"
 )
@@ -98,6 +99,9 @@ type Loop struct {
 	LinesAdded            atomic.Int64 // /cost code-change tally
 	LinesRemoved          atomic.Int64
 	envSent               bool   // env composite has been on the wire once
+	instrHookFired        bool   // InstructionsLoaded hooks fired once
+	Prefill               string // --prefill: assistant continuation text appended after the first user message
+	OutputSchema          string // --json-schema: structured-output schema JSON
 	tokensLeft            int64  // <total_tokens> budget (starts 15000000)
 	SessionHookCtx        string // SessionStart hook context — wires as sys msg    // tail messages retained by the last compaction
 	announcedDeferred     string // last announced deferred-tool name set (sorted join)
@@ -177,6 +181,19 @@ func (l *Loop) buildRequest() *api.Request {
 			oc["correlation_id"] = l.CorrelationID // real sends it inside output_config
 		}
 		ocRaw, _ = json.Marshal(oc)
+	}
+	if l.OutputSchema != "" {
+		// --json-schema: structured-output format rides output_config.format
+		var sch any
+		if json.Unmarshal([]byte(l.OutputSchema), &sch) == nil {
+			var oc map[string]any
+			json.Unmarshal(ocRaw, &oc)
+			if oc == nil {
+				oc = map[string]any{}
+			}
+			oc["format"] = map[string]any{"type": "json_schema", "schema": sch}
+			ocRaw, _ = json.Marshal(oc)
+		}
 	}
 	l.syncDeferredPool()
 	msgs := l.withEphemeralBreakpoint(l.wireMessages())
@@ -356,6 +373,7 @@ func (l *Loop) MarkEnvSent() { l.envSent = true; l.started = true }
 func (l *Loop) ResetForNewSession() {
 	l.envSent = false
 	l.started = false
+	l.instrHookFired = false
 	l.envIdx = 0
 	l.ambientPending = false
 	l.turnCount = 0
@@ -376,6 +394,22 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 	}
 	var msg api.Message
 	if !l.started {
+		// InstructionsLoaded fires once per CLAUDE.md actually read into
+		// the first-turn preamble (real's memory-load hook event)
+		if !l.instrHookFired {
+			l.instrHookFired = true
+			for _, p := range claudeMDPaths(l.CWD) {
+				if fi, err := os.Stat(p); err == nil && fi.Size() > 0 {
+					mt := "project"
+					if strings.HasPrefix(p, config.ClaudeDir()) {
+						mt = "user"
+					}
+					l.runHook(hooks.InstructionsLoaded, map[string]any{
+						"file_path": p, "memory_type": mt, "load_reason": "session_start",
+					})
+				}
+			}
+		}
 		msg = FirstUserMessage(prompt, l.CWD, l.User.Email, l.MemoryPaused)
 		if l.handbackTail {
 			var blks []api.ContentBlock
@@ -411,6 +445,10 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 		}
 		l.Messages = append(l.Messages, msg, envBlocks)
 		l.envIdx = len(l.Messages) - 1
+		if l.Prefill != "" {
+			l.Messages = append(l.Messages, api.BlocksMessage("assistant",
+				[]api.ContentBlock{{Type: "text", Text: l.Prefill}}))
+		}
 	} else {
 		// real sends subsequent user prompts as bare-string content
 		// (captured); only the first message carries context blocks
@@ -1286,11 +1324,17 @@ func (l *Loop) subagentSystemBlocks(msgs []api.Message) []api.SystemBlock {
 		"x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s; cch=%s; cc_is_subagent=true; cc_prompt_id=%s;",
 		version(), ccVersionSuffix(bill.FirstPrompt), l.Entrypoint,
 		cchHash(bill.ReqSeed), bill.PromptID)
-	return []api.SystemBlock{
+	out := []api.SystemBlock{
 		{Type: "text", Text: billing},
 		{Type: "text", Text: `You are a Claude agent, built on Anthropic's Claude Agent SDK.`, CacheControl: &api.CacheControl{Type: "ephemeral"}},
 		{Type: "text", Text: l.AppendSysP, CacheControl: &api.CacheControl{Type: "ephemeral"}},
 	}
+	// --append-subagent-system-prompt rides as a trailing block
+	for _, s := range l.ExtraSystem {
+		out = append(out, api.SystemBlock{Type: "text", Text: s,
+			CacheControl: &api.CacheControl{Type: "ephemeral"}})
+	}
+	return out
 }
 
 // subPromptID: subagent requests carry their own prompt-id (captured —

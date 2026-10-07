@@ -84,6 +84,7 @@ type editor struct {
 	voiceBase      string            // api.BaseURL for the voice_stream ws
 	voiceCreds     *auth.Credentials // OAuth creds for Bearer auth
 	voiceCWD       string            // cwd for settings + keyterms
+	deferredKeys   []key             // bound commands pressed mid-turn — replay at idle
 	footer         string            // status row rendered under the box
 }
 
@@ -322,6 +323,14 @@ type readResult struct {
 
 // readLine consumes keys until submit. Vim-normal mode supported.
 func (e *editor) readLine(ks *keySource) readResult {
+	if len(e.deferredKeys) > 0 {
+		// a bound command pressed while the turn ran — replay now
+		k := e.deferredKeys[0]
+		e.deferredKeys = e.deferredKeys[1:]
+		if r := e.insertKey(k); r != nil {
+			return *r
+		}
+	}
 	if e.zoneEdit = compInputActive(); e.zoneEdit {
 		// Ink model: the box lives in the compositor live zone. On return
 		// (any readResult) the zone shrinks back to spinner+status and the

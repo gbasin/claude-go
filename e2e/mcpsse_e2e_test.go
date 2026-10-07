@@ -14,6 +14,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -138,6 +140,11 @@ func (m *sseMCPServer) handleMsg(w http.ResponseWriter, r *http.Request) {
 			result = map[string]any{
 				"isError": true,
 				"content": []map[string]any{{"type": "text", "text": "MCP-FAIL-E2E"}},
+			}
+		} else if call.Params.Name == "perm_gate" {
+			result = map[string]any{
+				"content": []map[string]any{{"type": "text",
+					"text": `{"behavior":"deny","message":"gate says no"}`}},
 			}
 		} else {
 			result = map[string]any{"content": []map[string]any{{
@@ -559,4 +566,52 @@ func TestMCPToolError(t *testing.T) {
 	p.sendUntilEchoed(t, line+"\r", `❯ calls:[{"name":"ToolSearch"`, 8)
 	p.waitFor("MCP-FAIL-E2E", 30*time.Second)
 	p.exit()
+}
+
+// TestSettingSourcesSkipsMCP: --setting-sources user skips project-scope
+// .mcp.json — the server never connects.
+func TestSettingSourcesSkipsMCP(t *testing.T) {
+	srv := newSSEMCPServer(t)
+	s := newSession(t)
+	s.writeSettings(`{"enableAllProjectMcpServers":true}`)
+	s.writeFile(".mcp.json", fmt.Sprintf(
+		`{"mcpServers":{"ssetest":{"type":"sse","url":%q}}}`, srv.srv.URL+"/sse"))
+
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions",
+		"--setting-sources", "user")
+	p.sendUntil("/mcp\r", "none configured", 20)
+	p.exit()
+
+	if slices.Contains(srv.sawMethods(), "initialize") {
+		t.Fatal("MCP server connected despite --setting-sources user")
+	}
+}
+
+// TestPermPromptTool: --permission-prompt-tool delegates the dialog to an
+// MCP tool — its {behavior:"deny"} refuses without prompting.
+func TestPermPromptTool(t *testing.T) {
+	srv := newSSEMCPServer(t)
+	srv.addTool("perm_gate", "answers permission prompts")
+	s := newSession(t)
+	s.writeSettings(`{"enableAllProjectMcpServers":true}`)
+	s.writeFile(".mcp.json", fmt.Sprintf(
+		`{"mcpServers":{"ssetest":{"type":"sse","url":%q}}}`, srv.srv.URL+"/sse"))
+
+	p := startREPL(t, s,
+		"--permission-prompt-tool", "mcp__ssetest__perm_gate")
+	p.waitFor("❯", 30*time.Second)
+	// wait for the async MCP connect before the Write prompt
+	p.sendUntil("/mcp\r", "● ", 20)
+	p.send("\x1b")
+	time.Sleep(300 * time.Millisecond)
+	p.sendUntilEchoed(t,
+		`tool:Write {"file_path":"`+filepath.Join(s.cwd, "ppt.txt")+`","content":"x"}`+"\r",
+		"❯ tool:Write", 8)
+	p.waitFor("Tool results received", 30*time.Second)
+	p.exit()
+
+	// perm_gate returns {"behavior":"deny"} — no dialog, no file
+	if fileExists(filepath.Join(s.cwd, "ppt.txt")) {
+		t.Fatal("perm-prompt-tool deny path still wrote the file")
+	}
 }

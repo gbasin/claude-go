@@ -75,6 +75,11 @@ func LoadConfigs(cwd string) map[string]ServerConfig {
 		filepath.Join(home, ".claude.json"),
 		filepath.Join(cwd, ".mcp.json"),
 	} {
+		// .mcp.json is project scope — --setting-sources without "project" skips it
+		if strings.HasSuffix(p, ".mcp.json") && !config.SettingSourceOK(cwd,
+			filepath.Join(cwd, ".claude", "settings.json")) {
+			continue
+		}
 		b, err := os.ReadFile(p)
 		if err != nil {
 			continue

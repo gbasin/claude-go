@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -75,32 +75,14 @@ func Load(cwd string) *Settings {
 			merged.Permissions = &Permissions{DefaultMode: managed.Permissions.DefaultMode}
 		}
 	}
-	// --setting-sources user,project,local picks which tiers load —
-	// managed/policy settings still apply (real can't opt out of those)
-	tierOK := func(tier string) bool {
-		s := os.Getenv("CLAUDE_GO_SETTING_SOURCES")
-		if s == "" {
-			return true
-		}
-		for _, want := range strings.Split(s, ",") {
-			if strings.EqualFold(strings.TrimSpace(want), tier) {
-				return true
-			}
-		}
-		return false
-	}
-	tiers := []struct {
-		name, path string
-	}{
-		{"user", filepath.Join(ClaudeDir(), "settings.json")},
-		{"project", filepath.Join(cwd, ".claude", "settings.json")},
-		{"local", filepath.Join(cwd, ".claude", "settings.local.json")},
-	}
-	for _, tier := range tiers {
-		if !tierOK(tier.name) {
+	for _, p := range []string{
+		filepath.Join(ClaudeDir(), "settings.json"),
+		filepath.Join(cwd, ".claude", "settings.json"),
+		filepath.Join(cwd, ".claude", "settings.local.json"),
+	} {
+		if !SettingSourceOK(cwd, p) {
 			continue
 		}
-		p := tier.path
 		var s Settings
 		if b, err := os.ReadFile(p); err == nil {
 			if json.Unmarshal(b, &s) == nil {
@@ -206,6 +188,9 @@ func OrganizationUUID() string {
 
 // managedSettingsPath: enterprise-managed settings (CC reads these too).
 func managedSettingsPath() string {
+	if p := os.Getenv("CLAUDE_GO_MANAGED_SETTINGS"); p != "" {
+		return p // --managed-settings
+	}
 	if runtime.GOOS == "darwin" {
 		return "/Library/Application Support/ClaudeCode/managed-settings.json"
 	}
@@ -394,3 +379,32 @@ func GBFeature(name string) any {
 	}
 	return cur[name]
 }
+
+// SettingSourceOK reports whether a settings file's layer is enabled by
+// --setting-sources (CLAUDE_GO_SETTING_SOURCES, comma list of
+// user/project/local/managed). Unset = all layers load.
+func SettingSourceOK(cwd, path string) bool {
+	raw := os.Getenv("CLAUDE_GO_SETTING_SOURCES")
+	if raw == "" {
+		return true
+	}
+	layer := "project"
+	switch path {
+	case filepath.Join(ClaudeDir(), "settings.json"):
+		layer = "user"
+	case filepath.Join(cwd, ".claude", "settings.local.json"):
+		layer = "local"
+	case filepath.Join(cwd, ".claude", "settings.json"):
+		layer = "project"
+	default:
+		layer = "managed"
+	}
+	for _, s := range strings.Split(raw, ",") {
+		if strings.TrimSpace(s) == layer {
+			return true
+		}
+	}
+	return false
+}
+
+// LoadPermissions merges permissions across enabled settings layers.

@@ -474,22 +474,12 @@ func RunWithStore(l *agent.Loop, store Store) {
 							}
 						} else {
 							act := ed.busyAction(k)
-							// global keys fire mid-turn (real's meta+o
-							// works while a turn runs — the sibling's
-							// teardown-eats-chord bug came from dropping
-							// these into the text queue)
-							switch act {
-							case "chat:fastMode":
-								ed.toggleFastMode()
-								continue
-							case "chat:thinkingToggle":
-								ed.toggleThinking()
-								continue
-							case "chat:killAgents":
-								ed.killAgents() // mid-turn task kill (real allows it)
-								continue
-							}
-							if k.b == '\r' || k.b == '\n' || act == "chat:sendNow" {
+							if act != "" && act != "chat:sendNow" {
+								// a bound command (meta+o etc.) pressed mid-turn —
+								// replay it at idle rather than eating it or
+								// queueing the letter as text
+								ed.deferredKeys = append(ed.deferredKeys, k)
+							} else if k.b == '\r' || k.b == '\n' || act == "chat:sendNow" {
 								if len(queueBuf) > 0 {
 									if act == "chat:sendNow" {
 										// sendNow jumps ahead of queued messages
