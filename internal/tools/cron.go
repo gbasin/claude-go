@@ -66,29 +66,12 @@ func settingAny(cwd, key string) (any, bool) {
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
-	for _, p := range []string{
-		filepath.Join(cwd, ".claude", "settings.json"),
-		filepath.Join(cwd, ".claude", "settings.local.json"),
-		filepath.Join(config.ClaudeDir(), "settings.json"),
+	for _, m := range []map[string]any{
+		config.ReadJSONMap(filepath.Join(cwd, ".claude", "settings.json")),
+		config.ReadJSONMap(filepath.Join(cwd, ".claude", "settings.local.json")),
+		config.UserSettings(),
 	} {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		var m map[string]any
-		if json.Unmarshal(b, &m) != nil {
-			continue
-		}
-		v := any(m)
-		for _, k := range strings.Split(key, ".") {
-			mm, ok := v.(map[string]any)
-			if !ok {
-				v = nil
-				break
-			}
-			v = mm[k]
-		}
-		if v != nil {
+		if v := dottedSetting(m, key); v != nil {
 			return v, true
 		}
 	}

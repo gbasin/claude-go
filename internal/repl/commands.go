@@ -134,15 +134,17 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			configCmd(l, arg)
 		}
 	case "agents":
-		dprintln("  builtin: general-purpose, Explore, Plan, claude, code-reviewer, code-simplifier, debugger, statusline-setup")
-		dprintln("  custom agents load from ~/.claude/agents/ and .claude/agents/")
+		// real 2.1.292: the wizard was removed — it prints a pointer
+		dprintln("  ⎿  The /agents wizard has been removed.")
+		dprintln(`  Ask Claude to create or update subagents for you (e.g. "create a`)
+		dprintln(`  code-reviewer subagent that..."), or edit the files directly:`)
+		dprintln("   • .claude/agents/  (this project)")
+		dprintln("   • ~/.claude/agents/  (all projects)")
+		dprintln("  Docs: https://code.claude.com/docs/en/sub-agents")
 	case "hooks":
-		// hooks documentation (update-config's hooks-only branch in real CC)
-		body := bundledHooksDocs
-		if arg != "" {
-			body += "\n\n## Task\n\n" + arg
-		}
-		go l.Ask(context.Background(), body)
+		// real's /hooks: read-only menu of configured hooks grouped by
+		// event ("Enter to view · Esc to close"), not a doc prompt
+		hooksMenu(l, ks)
 	case "resume":
 		compSuspend() // the picker draws with \x1b[J — un-pin the live zone
 		id := pickSession(l.ToolCtx.CWD, ks)
@@ -451,16 +453,18 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		}
 	case "model":
 		if arg == "" {
-			// real's picker: "Select model" dialog — arrow list with the
-			// active model marked, ←→ adjust effort, s = session-only
+			// real's picker (captured 2.1.292): title + 2-line description,
+			// numbered rows with ❯ cursor + ✔ current, "… +N models" overflow,
+			// effort row, "s = session only" footer
 			type mo struct{ id, label, desc string }
 			models := []mo{
-				{"claude-opus-5-5", "Opus 5.5", "Most capable for complex work"},
-				{"claude-sonnet-5-5", "Sonnet 5.5", "Best for everyday tasks"},
-				{"claude-haiku-4-5", "Haiku 4.5", "Fastest for quick answers"},
-				{"claude-fable-5-1", "Fable 5.1", "Latest model"},
-				{"claude-fable-5-1[1m]", "Fable 5.1 (1M context)", "Latest model, extended context"},
+				{"default", "Default (recommended)", "Opus 5.5 · Best for everyday, complex tasks"},
+				{"claude-opus-5-5", "Opus 5.5", "For complex work and everyday tasks"},
+				{"claude-sonnet-5-5", "Sonnet 5.5", "Most efficient for simpler tasks"},
+				{"claude-haiku-4-5-20251001", "Haiku 4.5", "Fastest for quick answers"},
+				{"claude-fable-5-1", "Fable 5.1", "For your toughest challenges"},
 			}
+			const extra = 9 // real: "… +9 models" (older/legacy rows)
 			sel := 0
 			for i, m := range models {
 				if l.Model == m.id {
@@ -468,23 +472,35 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 				}
 			}
 			cyan := "\x1b[38;5;153m"
-			rows := len(models) + 2
+			rows := len(models) + 6 // title+desc+models+overflow+effort+footer
 			draw := func() {
 				var sb strings.Builder
 				sb.WriteString(fmt.Sprintf("\x1b[%dA\r", rows))
 				sb.WriteString(fmt.Sprintf("\x1b[K  %sSelect model%s\r\n", bold, reset))
+				sb.WriteString("\x1b[K  " + dim + "Switch between Claude models. Your pick becomes the default for new" + reset + "\r\n")
+				sb.WriteString("\x1b[K  " + dim + "sessions. For other/previous model names, specify with --model." + reset + "\r\n")
 				for i, m := range models {
-					cur := "  "
+					cur := fmt.Sprintf("%d. ", i+1)
+					pad := "   "
 					if i == sel {
-						cur = cyan + "❯" + reset + " "
+						cur = menuCyan + "❯" + reset + fmt.Sprintf(" %d. ", i+1)
+						pad = " "
 					}
 					mark := ""
-					if l.Model == m.id {
-						mark = cyan + " ✔" + reset
+					if l.Model == m.id || (m.id == "default" && l.Model == "") {
+						mark = " " + cyan + "✔" + reset
 					}
-					sb.WriteString(fmt.Sprintf("\x1b[K %s%s%s %s%s\r\n", cur, m.label, mark, dim, m.desc+reset))
+					sb.WriteString(fmt.Sprintf("\x1b[K %s %s%s%s %s%s%s\r\n",
+						pad, cur, m.label, mark, dim, m.desc, reset))
 				}
-				sb.WriteString(fmt.Sprintf("\x1b[K  %sEnter to confirm · Esc to cancel · ←→ effort · s session-only%s\r\n", dim, reset))
+				sb.WriteString(fmt.Sprintf("\x1b[K  %s… +%d models%s\r\n", dim, extra, reset))
+				eff := l.Effort
+				if eff == "" {
+					eff = "medium"
+				}
+				eff = strings.ToUpper(eff[:1]) + eff[1:]
+				sb.WriteString(fmt.Sprintf("\x1b[K  %s◐ %s effort ←/→ to adjust%s\r\n", dim, eff, reset))
+				sb.WriteString(fmt.Sprintf("\x1b[K  %sEnter to set as default · s to use this session only · Esc to cancel%s\r\n", dim, reset))
 				fmt.Print(sb.String())
 			}
 			compSuspend()
@@ -493,11 +509,16 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			ks.dialog.Store(&dch)
 			defer ks.dialog.Store(nil)
 			dprintf("  %sSelect model%s\n", bold, reset)
+			dprintln("  " + dim + "Switch between Claude models. Your pick becomes the default for new" + reset)
+			dprintln("  " + dim + "sessions. For other/previous model names, specify with --model." + reset)
 			for range models {
 				dprintln()
 			}
-			dprintf("  %sEnter to confirm · Esc to cancel · ←→ effort · s session-only%s\n", dim, reset)
+			dprintln()
+			dprintln()
+			dprintln()
 			draw()
+			efforts := []string{"low", "medium", "high", "xhigh", "max"}
 			for k := range dch {
 				switch {
 				case k.seq == "[A" || k.b == 'k':
@@ -509,6 +530,22 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 					if sel < len(models)-1 {
 						sel++
 						draw()
+					}
+				case k.seq == "[D": // ← effort down
+					for i, e := range efforts {
+						if e == l.Effort && i > 0 {
+							l.Effort = efforts[i-1]
+							draw()
+							break
+						}
+					}
+				case k.seq == "[C": // → effort up
+					for i, e := range efforts {
+						if e == l.Effort && i < len(efforts)-1 {
+							l.Effort = efforts[i+1]
+							draw()
+							break
+						}
 					}
 				case k.b == 0x1b || k.b == 3:
 					dprintln()
@@ -533,14 +570,13 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 					return false
 				}
 			}
-			return false
 		}
 		l.Model = arg
 		dprintln("  model →", l.Model)
 	case "voice":
 		voiceCmd(l, ed, arg)
 	case "effort":
-		effortCmd(l, arg)
+		effortCmd(l, arg, ks)
 	case "fast":
 		if arg == "off" || arg == "" {
 			l.SetFastMode(false)
@@ -869,16 +905,7 @@ func remoteEnvCmd(l *agent.Loop, arg string) {
 // readDefaultEnvironment returns remote.defaultEnvironmentId from
 // ~/.claude/settings.json.
 func readDefaultEnvironment() string {
-	p := filepath.Join(config.ClaudeDir(), "settings.json")
-	b, err := os.ReadFile(p)
-	if err != nil {
-		return ""
-	}
-	var m map[string]any
-	if json.Unmarshal(b, &m) != nil {
-		return ""
-	}
-	if r, ok := m["remote"].(map[string]any); ok {
+	if r, ok := config.UserSetting("remote").(map[string]any); ok {
 		s, _ := r["defaultEnvironmentId"].(string)
 		return s
 	}
@@ -890,13 +917,7 @@ func writeDefaultEnvironment(id string) bool {
 	dir := config.ClaudeDir()
 	os.MkdirAll(dir, 0o755)
 	p := filepath.Join(dir, "settings.json")
-	var m map[string]any
-	if b, err := os.ReadFile(p); err == nil {
-		json.Unmarshal(b, &m)
-	}
-	if m == nil {
-		m = map[string]any{}
-	}
+	m := config.ReadJSONMap(p)
 	if id == "" {
 		if r, ok := m["remote"].(map[string]any); ok {
 			delete(r, "defaultEnvironmentId")
@@ -916,7 +937,11 @@ func writeDefaultEnvironment(id string) bool {
 	if err != nil {
 		return false
 	}
-	return os.WriteFile(p, b, 0o600) == nil
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		return false
+	}
+	config.InvalidateUserSettings()
+	return true
 }
 
 // ---------------------------------------------------------------------------
@@ -2269,7 +2294,6 @@ var helpTable = map[string]helpEntry{
 	"statusline":       {"Config", "configure the status line (spawns statusline-setup)", false},
 	"terminal-setup":   {"Config", "install terminal keybindings", false},
 	"theme":            {"Config", "set theme", false},
-	"vim":              {"Config", "editor mode moved to /config", false},
 	"voice":            {"Config", "[hold|tap|off] toggle voice dictation", false},
 	// Tools (prompt skills + tool-ish builtins)
 	"ant-trace":                {"Tools", "toggle per-request trace output", false},
@@ -2458,20 +2482,12 @@ func configCmd(l *agent.Loop, arg string) {
 		dprintln("  usage: /config <key> <value>")
 		return
 	}
-	var m map[string]any
-	b, _ := os.ReadFile(p)
-	json.Unmarshal(b, &m)
-	if m == nil {
-		m = map[string]any{}
-	}
 	var parsed any
 	if json.Unmarshal([]byte(v), &parsed) == nil {
-		m[k] = parsed
+		config.WriteUserSetting(k, parsed)
 	} else {
-		m[k] = v
+		config.WriteUserSetting(k, v)
 	}
-	out, _ := json.MarshalIndent(m, "", "  ")
-	os.WriteFile(p, out, 0o644)
 	dprintf("  set %s = %s\n", k, v)
 }
 
@@ -2611,13 +2627,42 @@ var builtinStyles = map[string]string{
 		"without being asked.",
 }
 
+// styleDescs mirrors real's /output-style listing (captured 2.1.292).
+var styleDescs = map[string]string{
+	"default":     "",
+	"Proactive":   "Claude executes immediately, minimizes interruptions, and prefers action over planning",
+	"Concise":     "Claude responds tersely, leading with results and skipping preamble and narration",
+	"Explanatory": "Claude explains its implementation choices and codebase patterns",
+	"Learning":    "Claude pauses and asks you to write small pieces of code for hands-on practice",
+}
+
 func outputStyleCmd(l *agent.Loop, arg string) {
 	if arg == "" {
-		dprintln("  usage: /output-style <name|default> — this changes how Claude communicates")
-		dprintln("   - default")
-		for n := range builtinStyles {
-			dprintln("   -", n)
+		cur := "default"
+		if l.AppendSysP != "" {
+			for n, b := range builtinStyles {
+				if b == l.AppendSysP {
+					cur = n
+				}
+			}
 		}
+		dprintln("  ⎿  Output style:", cur)
+		dprintln()
+		dprintln("  Available styles:")
+		order := []string{"default", "Proactive", "Concise", "Explanatory", "Learning"}
+		for _, n := range order {
+			suf := ""
+			if n == cur || (n == "default" && cur == "default") {
+				suf = " (current)"
+			}
+			d := styleDescs[n]
+			if d != "" {
+				dprintln("   - " + n + suf + ": " + d)
+			} else {
+				dprintln("   - " + n + suf)
+			}
+		}
+		// user styles
 		for _, base := range []string{
 			filepath.Join(config.ClaudeDir(), "output-styles"),
 			filepath.Join(l.CWD, ".claude", "output-styles"),
@@ -2627,6 +2672,7 @@ func outputStyleCmd(l *agent.Loop, arg string) {
 				dprintln("   -", strings.TrimSuffix(e.Name(), ".md"))
 			}
 		}
+		dprintln("    Usage: /output-style <style>")
 		return
 	}
 	if arg == "default" {
@@ -2634,6 +2680,15 @@ func outputStyleCmd(l *agent.Loop, arg string) {
 		persistOutputStyle(l.CWD, "")
 		dprintln("  output style reset")
 		return
+	}
+	// real's names are capitalized — accept case-insensitive
+	if _, ok := builtinStyles[arg]; !ok {
+		for n := range builtinStyles {
+			if strings.EqualFold(n, arg) {
+				arg = n
+				break
+			}
+		}
 	}
 	if body, ok := builtinStyles[arg]; ok {
 		l.AppendSysP = body
@@ -2707,14 +2762,13 @@ func aliasCmd(l *agent.Loop, arg string) {
 	dprintf("  alias /%s -> %s\n", strings.TrimSpace(name), m[strings.TrimSpace(name)])
 }
 
-func effortCmd(l *agent.Loop, arg string) {
+func effortCmd(l *agent.Loop, arg string, ks *keySource) {
 	switch strings.ToLower(arg) {
 	case "low", "medium", "high", "xhigh", "max", "auto":
 		l.Effort = strings.ToLower(arg)
 		dprintln("  effort set to", l.Effort)
 	case "":
-		dprintln("  current effort:", l.Effort)
-		dprintln("  levels: low | medium | high | xhigh | max | auto")
+		effortSlider(l, ks)
 	default:
 		dprintln("  effort levels: low | medium | high | xhigh | max | auto")
 	}
@@ -2756,13 +2810,7 @@ func persistOutputStyle(cwd, style string) {
 	os.MkdirAll(dir, 0o755)
 	p := filepath.Join(dir, "settings.local.json")
 	ensureGitignoreLocal() // real adds **/.claude/settings.local.json to excludes
-	var st map[string]any
-	if b, err := os.ReadFile(p); err == nil {
-		json.Unmarshal(b, &st)
-	}
-	if st == nil {
-		st = map[string]any{}
-	}
+	st := config.ReadJSONMap(p)
 	if style == "" {
 		delete(st, "outputStyle")
 	} else {
@@ -2776,13 +2824,7 @@ func persistTheme(cwd, theme string) {
 	dir := filepath.Join(cwd, ".claude")
 	os.MkdirAll(dir, 0o755)
 	p := filepath.Join(dir, "settings.local.json")
-	var st map[string]any
-	if b, err := os.ReadFile(p); err == nil {
-		json.Unmarshal(b, &st)
-	}
-	if st == nil {
-		st = map[string]any{}
-	}
+	st := config.ReadJSONMap(p)
 	st["theme"] = theme
 	b, _ := json.MarshalIndent(st, "", "  ")
 	os.WriteFile(p, b, 0o600)
@@ -2825,13 +2867,7 @@ func persistLocalSetting(cwd, key string, val any) {
 	os.MkdirAll(dir, 0o755)
 	p := filepath.Join(dir, "settings.local.json")
 	ensureGitignoreLocal()
-	var st map[string]any
-	if b, err := os.ReadFile(p); err == nil {
-		json.Unmarshal(b, &st)
-	}
-	if st == nil {
-		st = map[string]any{}
-	}
+	st := config.ReadJSONMap(p)
 	if val == nil {
 		delete(st, key)
 	} else {
@@ -3044,13 +3080,7 @@ func setupProviderCmd(ks *keySource, provider string) {
 func writeUserSettingsEnv(kv map[string]string) {
 	os.MkdirAll(config.ClaudeDir(), 0o755)
 	p := filepath.Join(config.ClaudeDir(), "settings.json")
-	var st map[string]any
-	if b, err := os.ReadFile(p); err == nil {
-		json.Unmarshal(b, &st)
-	}
-	if st == nil {
-		st = map[string]any{}
-	}
+	st := config.ReadJSONMap(p)
 	env, _ := st["env"].(map[string]any)
 	if env == nil {
 		env = map[string]any{}
@@ -3065,6 +3095,7 @@ func writeUserSettingsEnv(kv map[string]string) {
 	st["env"] = env
 	b, _ := json.MarshalIndent(st, "", "  ")
 	os.WriteFile(p, b, 0o600)
+	config.InvalidateUserSettings()
 }
 
 // readLineKeys reads one line from the key channel — the REPL holds stdin in
@@ -3950,13 +3981,12 @@ var tipsOnce struct {
 
 func tips() []string {
 	tipsOnce.once.Do(func() {
-		b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
-		if err != nil {
-			tipsOnce.list = spinnerTipsList
+		m := config.UserSettings()
+		if v, ok := m["spinnerTipsEnabled"].(bool); ok && !v {
+			tipsOnce.list = nil
 			return
 		}
 		var st struct {
-			Enabled  *bool `json:"spinnerTipsEnabled"`
 			Override struct {
 				ExcludeDefault bool   `json:"excludeDefault"`
 				Label          string `json:"label"`
@@ -3964,15 +3994,12 @@ func tips() []string {
 					Text string `json:"text"`
 				} `json:"tips"`
 				TipsFile string `json:"tipsFile"`
-			} `json:"spinnerTipsOverride"`
+			}
 		}
-		if json.Unmarshal(b, &st) != nil {
-			tipsOnce.list = spinnerTipsList
-			return
-		}
-		if st.Enabled != nil && !*st.Enabled {
-			tipsOnce.list = nil
-			return
+		if raw, ok := m["spinnerTipsOverride"]; ok {
+			if b, err := json.Marshal(raw); err == nil {
+				json.Unmarshal(b, &st.Override)
+			}
 		}
 		var custom []string
 		for _, t := range st.Override.Tips {
@@ -4245,35 +4272,12 @@ func toggleConfigEntry(e configEntry, l *agent.Loop) {
 				next = e.enum[(i+1)%len(e.enum)]
 			}
 		}
-		writeUserSetting(e.key, next)
+		config.WriteUserSetting(e.key, next)
 		return
 	}
 	cur, _ := userSetting(e.key).(bool)
-	writeUserSetting(e.key, !cur)
-	invalidateUserSettings() // the Config tab reads live values
-}
-
-// readUserSetting/writeUserSetting hit ~/.claude/settings.json — the same
-// file real's Config tab edits.
-func readUserSetting(key string) any { return userSetting(key) }
-
-func writeUserSetting(key string, v any) {
-	p := filepath.Join(config.ClaudeDir(), "settings.json")
-	var m map[string]any
-	b, _ := os.ReadFile(p)
-	if json.Unmarshal(b, &m) != nil || m == nil {
-		m = map[string]any{}
-	}
-	m[key] = v
-	if out, err := json.MarshalIndent(m, "", "  "); err == nil {
-		os.WriteFile(p, out, 0o644)
-	}
-	invalidateUserSettings()
-}
-
-// invalidateUserSettings drops the cache so a Config-tab edit shows.
-func invalidateUserSettings() {
-	userSettingsOnce.once = sync.Once{}
+	config.WriteUserSetting(e.key, !cur)
+	config.InvalidateUserSettings() // the Config tab reads live values
 }
 
 // clockNow renders the turn-end clock honoring timeFormat/timeZone
@@ -4313,3 +4317,209 @@ func clockNow() string {
 		return now.Format(f)
 	}
 }
+
+// hooksMenu renders real's read-only hooks viewer — event groups with
+// commands truncated to the width, ↓ N more overflow, Enter expands a
+// hook's detail, Esc closes.
+func hooksMenu(l *agent.Loop, ks *keySource) {
+	cfg := hooks.Load(l.CWD)
+	if len(cfg) == 0 {
+		dprintln("  No hooks configured. Edit settings.json to add one.")
+		return
+	}
+	eventOrder := []string{
+		"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest",
+		"PostToolUse", "PostToolUseFailure", "Notification", "PreCompact",
+		"PostCompact", "Stop", "SubagentStop", "SessionEnd", "TeammateIdle",
+	}
+	eventDesc := map[string]string{
+		"SessionStart":       "when a new session is started",
+		"UserPromptSubmit":   "when the user submits a prompt",
+		"PreToolUse":         "before a tool runs",
+		"PermissionRequest":  "when a permission prompt would show",
+		"PostToolUse":        "after tool execution",
+		"PostToolUseFailure": "after a tool fails",
+		"Notification":       "on notifications",
+		"PreCompact":         "before compaction",
+		"PostCompact":        "after compaction",
+		"Stop":               "right before Claude concludes its response",
+		"SubagentStop":       "when a subagent finishes",
+		"SessionEnd":         "when the session ends",
+		"TeammateIdle":       "when a teammate goes idle",
+	}
+	total := 0
+	for _, ms := range cfg {
+		for _, m := range ms {
+			total += len(m.Hooks)
+		}
+	}
+	compSuspend()
+	defer compResume()
+	dch := make(chan key, 16)
+	ks.dialog.Store(&dch)
+	defer ks.dialog.Store(nil)
+	seen := map[string]bool{}
+	var events []string
+	for _, e := range eventOrder {
+		if _, ok := cfg[e]; ok {
+			events = append(events, e)
+			seen[e] = true
+		}
+	}
+	for e := range cfg {
+		if !seen[e] {
+			events = append(events, e)
+		}
+	}
+	sel := 0
+	rows := 0
+	draw := func() {
+		var sb strings.Builder
+		if rows > 0 {
+			sb.WriteString(fmt.Sprintf("\x1b[%dA\r", rows))
+		}
+		rows = 0
+		emit := func(s string) {
+			sb.WriteString("\x1b[K" + s + "\r\n")
+			rows++
+		}
+		emit(fmt.Sprintf("   %sHooks%s", bold, reset))
+		emit(fmt.Sprintf("   %d hooks on %d events", total, len(events)))
+		emit("   " + dim + "This menu is read-only. To add or change a hook, edit settings.json or ask Claude." + reset)
+		emit("")
+		i := 0
+		for _, ev := range events {
+			emit(fmt.Sprintf("  %s%s%s  %s%s%s", bold, ev, reset, dim, eventDesc[ev], reset))
+			for _, m := range cfg[ev] {
+				for _, h := range m.Hooks {
+					cur := "  "
+					if i == sel {
+						cur = menuCyan + "❯" + reset
+					}
+					cmd := h.Command
+					if len(cmd) > 44 {
+						cmd = cmd[:44] + "…"
+					}
+					emit(fmt.Sprintf("  %s %s%s", cur, cmd, reset))
+					i++
+				}
+			}
+			emit("")
+		}
+		emit("  " + dim + "Enter to view · Esc to close" + reset)
+		fmt.Print(sb.String())
+	}
+	draw()
+	for k := range dch {
+		switch {
+		case k.seq == "[A":
+			if sel > 0 {
+				sel--
+				draw()
+			}
+		case k.seq == "[B":
+			if sel < total-1 {
+				sel++
+				draw()
+			}
+		case k.b == 0x1b || k.b == 3 || k.b == 'q':
+			dprintln()
+			return
+		case k.b == '\r':
+			// expand the selected hook's full command inline
+			i := 0
+			for _, ev := range events {
+				for _, m := range cfg[ev] {
+					for _, h := range m.Hooks {
+						if i == sel {
+							dprintln()
+							dprintln("  ⎿ ", h.Command)
+							return
+						}
+						i++
+					}
+				}
+			}
+		}
+	}
+}
+
+// effortSlider renders real's /effort gauge — Faster◄─────►Smarter with a
+// ▲ marker over low|medium|high|xhigh|max, Ultracode toggle on Tab,
+// ←/→ adjust, Enter confirm, s session-only, Esc cancel.
+func effortSlider(l *agent.Loop, ks *keySource) {
+	levels := []string{"low", "medium", "high", "xhigh", "max"}
+	cur := 1
+	for i, e := range levels {
+		if e == l.Effort {
+			cur = i
+		}
+	}
+	ultra := l.Effort == "ultracode"
+	compSuspend()
+	defer compResume()
+	dch := make(chan key, 16)
+	ks.dialog.Store(&dch)
+	defer ks.dialog.Store(nil)
+	rows := 0
+	draw := func() {
+		var sb strings.Builder
+		if rows > 0 {
+			sb.WriteString(fmt.Sprintf("\x1b[%dA\r", rows))
+		}
+		rows = 0
+		emit := func(s string) { sb.WriteString("\x1b[K" + s + "\r\n"); rows++ }
+		emit("  " + bold + "Effort" + reset)
+		emit("        Faster" + dim + "                                    " + reset + "Smarter")
+		// gauge: marker position proportional across the level count
+		const width = 46
+		pos := 8 + cur*(width-8)/(len(levels)-1)
+		var bar strings.Builder
+		for i := 0; i < width; i++ {
+			if i == pos {
+				bar.WriteString(menuCyan + "▲" + reset)
+			} else {
+				bar.WriteString("─")
+			}
+		}
+		emit("  " + bar.String() + dim + " Ultracode  " + reset + map[bool]string{true: "on", false: "off"}[ultra])
+		lbl := "         " + strings.Join(levels, "     ") + dim + "  Tab to toggle" + reset
+		emit("  " + lbl)
+		emit("")
+		emit("  " + dim + " ←/→ to adjust · Enter to confirm · s for this session only · Esc to cancel" + reset)
+		fmt.Print(sb.String())
+	}
+	draw()
+	for k := range dch {
+		switch {
+		case k.seq == "[D":
+			if cur > 0 {
+				cur--
+				draw()
+			}
+		case k.seq == "[C":
+			if cur < len(levels)-1 {
+				cur++
+				draw()
+			}
+		case k.b == '\t':
+			ultra = !ultra
+			draw()
+		case k.b == 0x1b || k.b == 3:
+			dprintln()
+			return
+		case k.b == 's', k.b == '\r':
+			if ultra {
+				l.Effort = "ultracode"
+			} else {
+				l.Effort = levels[cur]
+			}
+			dprintln()
+			dprintln("  effort →", l.Effort)
+			return
+		}
+	}
+}
+
+// menuCyan is the 153-cyan real uses for ❯ cursors and gauges.
+const menuCyan = "\x1b[38;5;153m"

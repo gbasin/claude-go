@@ -123,25 +123,15 @@ func configSub(args []string) {
 	if len(args) < 1 {
 		fatal("usage: claude-go config get|set|list [key] [value]")
 	}
-	p := filepath.Join(config.ClaudeDir(), "settings.json")
-	read := func() map[string]any {
-		var m map[string]any
-		b, _ := os.ReadFile(p)
-		json.Unmarshal(b, &m)
-		if m == nil {
-			m = map[string]any{}
-		}
-		return m
-	}
 	switch args[0] {
 	case "list":
-		b, _ := json.MarshalIndent(read(), "", "  ")
+		b, _ := json.MarshalIndent(config.UserSettings(), "", "  ")
 		fmt.Println(string(b))
 	case "get":
 		if len(args) < 2 {
 			fatal("usage: claude-go config get <key>")
 		}
-		if v, ok := read()[args[1]]; ok {
+		if v, ok := config.UserSettings()[args[1]]; ok {
 			out, _ := json.Marshal(v)
 			fmt.Println(string(out))
 		}
@@ -149,15 +139,12 @@ func configSub(args []string) {
 		if len(args) < 3 {
 			fatal("usage: claude-go config set <key> <value>")
 		}
-		m := read()
 		var v any
 		if json.Unmarshal([]byte(args[2]), &v) == nil {
-			m[args[1]] = v
+			config.WriteUserSetting(args[1], v)
 		} else {
-			m[args[1]] = args[2]
+			config.WriteUserSetting(args[1], args[2])
 		}
-		out, _ := json.MarshalIndent(m, "", "  ")
-		os.WriteFile(p, out, 0o644)
 		fmt.Printf("set %s\n", args[1])
 	default:
 		fatal("unknown config subcommand: %s", args[0])

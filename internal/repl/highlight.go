@@ -1,11 +1,6 @@
 package repl
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
-	"sync"
-
 	"claude-go/internal/config"
 	"regexp"
 	"strings"
@@ -166,22 +161,9 @@ func highlightLine(line, lang string) string {
 	return out.String()
 }
 
-// syntaxDisabled reads settings.syntaxHighlightingDisabled once.
-var syntaxOff struct {
-	once sync.Once
-	v    bool
-}
-
+// syntaxDisabled reads settings.syntaxHighlightingDisabled via config's
+// cached user settings.
 func syntaxDisabled() bool {
-	syntaxOff.once.Do(func() {
-		b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
-		if err != nil {
-			return
-		}
-		var m map[string]any
-		if json.Unmarshal(b, &m) == nil {
-			syntaxOff.v, _ = m["syntaxHighlightingDisabled"].(bool)
-		}
-	})
-	return syntaxOff.v
+	v, _ := config.UserSetting("syntaxHighlightingDisabled").(bool)
+	return v
 }
