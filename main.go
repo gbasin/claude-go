@@ -367,7 +367,7 @@ func main() {
 	// connect MCP servers in background (like CC's async init)
 	mcp.SetSessionID(sessionID)
 	chromeSysP, chromeMCP := chromeSessionSetup(o, lastCreds)
-	mcpClients := startMCP(cwd, o.mcpConfig, o.strictMCP, chromeMCP)
+	mcpClients := startMCP(cwd, o.mcpConfig, o.strictMCP, chromeMCP, o.addDirs)
 	defer func() {
 		for _, c := range mcpClients {
 			c.Close()
@@ -839,7 +839,7 @@ func fireHook(l *agent.Loop, ev hooks.Event) {
 // dynamic carries host-side additions (real's scope:"dynamic" entries —
 // gme() puts `claude-in-chrome` there), merged last so a configured server
 // of the same name wins, like real's explicit mcpConfigs beat dynamic.
-func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.ServerConfig) (clients []*mcp.Client) {
+func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.ServerConfig, addDirs []string) (clients []*mcp.Client) {
 	var cfgs map[string]mcp.ServerConfig
 	if strict {
 		// --strict-mcp-config: only the --mcp-config file's servers load
@@ -955,10 +955,13 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 					}
 				}
 			})
+			roots := append([]string{cwd}, addDirs...)
 			c.Roots = func() []map[string]string {
-				return []map[string]string{
-					{"uri": "file://" + cwd, "name": cwd},
+				out := make([]map[string]string, 0, len(roots))
+				for _, d := range roots {
+					out = append(out, map[string]string{"uri": "file://" + d, "name": d})
 				}
+				return out
 			}
 			c.OnToolsChanged = func() {
 				var ents []tools.MCPToolEntry

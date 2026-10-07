@@ -127,16 +127,22 @@ func (m *sseMCPServer) handleMsg(w http.ResponseWriter, r *http.Request) {
 		m.mu.Unlock()
 		result = map[string]any{"tools": toolList}
 	case "tools/call":
-		var in struct {
-			Name string `json:"name"`
+		// decode params.name — error replies carry isError:true
+		var call struct {
+			Params struct {
+				Name string `json:"name"`
+			} `json:"params"`
 		}
-		var rpcIn struct{ Params json.RawMessage }
-		// re-read the raw body for the tool name — cheap decode again
-		txt := "PONG-E2E"
-		_ = in
-		_ = rpcIn
-		result = map[string]any{"content": []map[string]any{{
-			"type": "text", "text": txt}}}
+		json.Unmarshal(body, &call)
+		if call.Params.Name == "fail" {
+			result = map[string]any{
+				"isError": true,
+				"content": []map[string]any{{"type": "text", "text": "MCP-FAIL-E2E"}},
+			}
+		} else {
+			result = map[string]any{"content": []map[string]any{{
+				"type": "text", "text": "PONG-E2E"}}}
+		}
 	default:
 		result = map[string]any{}
 	}
@@ -166,6 +172,9 @@ func (m *sseMCPServer) sawResults() []string {
 	defer m.mu.Unlock()
 	return append([]string{}, m.results...)
 }
+
+// addToolAt registers a second tool immediately (for error-path tests).
+func (m *sseMCPServer) addToolAt(name string) { m.addTool(name, "e2e "+name) }
 
 // addTool appends to the dynamic tools/list result.
 func (m *sseMCPServer) addTool(name, desc string) {
@@ -483,7 +492,9 @@ func TestMCPRootsList(t *testing.T) {
 	s.writeFile(".mcp.json", fmt.Sprintf(
 		`{"mcpServers":{"ssetest":{"type":"sse","url":%q}}}`, srv.srv.URL+"/sse"))
 
-	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p := s.runPTY(t, nil, "--mock", "--permission-mode", "bypassPermissions",
+		"--add-dir", "/tmp")
+	p.waitFor("❯", 30*time.Second)
 	p.sendUntil("/mcp\r", "● ", 20)
 	p.send("\x1b")
 	time.Sleep(300 * time.Millisecond)
@@ -495,6 +506,9 @@ func TestMCPRootsList(t *testing.T) {
 		if len(res) > 0 {
 			if !strings.Contains(res[0], s.cwd) {
 				t.Fatalf("roots/list reply missing cwd %q: %s", s.cwd, res[0])
+			}
+			if !strings.Contains(res[0], "/tmp") {
+				t.Fatalf("roots/list reply missing --add-dir /tmp: %s", res[0])
 			}
 			p.exit()
 			return
@@ -522,5 +536,27 @@ func TestMCPNotificationMessage(t *testing.T) {
 	srv.pushNotify("notifications/message",
 		map[string]any{"level": "info", "data": "SRV-LOG-LINE-e2e"})
 	p.waitFor("SRV-LOG-LINE-e2e", 15*time.Second)
+	p.exit()
+}
+
+// TestMCPToolError: a tools/call isError result lands as an errored
+// tool_result — the mock sees it on the wire.
+func TestMCPToolError(t *testing.T) {
+	srv := newSSEMCPServer(t)
+	srv.addTool("fail", "always errors")
+	s := newSession(t)
+	s.writeSettings(`{"enableAllProjectMcpServers":true}`)
+	s.writeFile(".mcp.json", fmt.Sprintf(
+		`{"mcpServers":{"ssetest":{"type":"sse","url":%q}}}`, srv.srv.URL+"/sse"))
+
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p.sendUntil("/mcp\r", "● ", 20)
+	p.send("\x1b")
+	time.Sleep(300 * time.Millisecond)
+
+	line := `calls:[{"name":"ToolSearch","input":{"query":"select:mcp__ssetest__fail"}},` +
+		`{"name":"mcp__ssetest__fail","input":{}}]`
+	p.sendUntilEchoed(t, line+"\r", `❯ calls:[{"name":"ToolSearch"`, 8)
+	p.waitFor("MCP-FAIL-E2E", 30*time.Second)
 	p.exit()
 }
