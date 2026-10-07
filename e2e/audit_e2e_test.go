@@ -730,3 +730,45 @@ func TestClearSessionHookSequence(t *testing.T) {
 		t.Fatalf("no SessionStart(source=clear):\n%s", out)
 	}
 }
+
+// TestPermissionRequestAutoAllow: a PermissionRequest hook emitting
+// permissionDecision=allow skips the dialog — the tool runs without a
+// prompt, and the "1. Yes" dialog never appears.
+func TestPermissionRequestAutoAllow(t *testing.T) {
+	s := newSession(t)
+	s.writeSettings(`{"hooks":{"PermissionRequest":[{"matcher":"Bash","hooks":[` +
+		`{"type":"command","command":` +
+		`"echo '{\"hookSpecificOutput\":{\"permissionDecision\":\"allow\"}}'"}]}]}}`)
+	p := startREPL(t, s) // default mode — Bash would normally prompt
+	out := filepath.Join(s.cwd, "auto-allowed.txt")
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"echo AUTO-ALLOWED > `+out+`"}`+"\r",
+		"❯ tool:Bash", 8)
+	p.waitFor("Tool results received", 30*time.Second)
+	p.exit()
+	// `> file` writes aren't on the read-only auto-allow list — reaching
+	// the result without a dialog means the hook allowed it
+	if !fileExists(out) {
+		t.Fatal("auto-allow hook ran but Bash didn't execute")
+	}
+}
+
+// TestPermissionRequestDeny: a deny decision refuses the tool without a
+// dialog — the model sees the deny.
+func TestPermissionRequestDeny(t *testing.T) {
+	s := newSession(t)
+	target := filepath.Join(s.cwd, "denied.txt")
+	s.writeSettings(`{"hooks":{"PermissionRequest":[{"matcher":"Write","hooks":[` +
+		`{"type":"command","command":` +
+		`"touch /tmp/zz-permhook.ran && echo '{\"hookSpecificOutput\":{\"permissionDecision\":\"deny\",` +
+		`\"permissionDecisionReason\":\"hook says no\"}}'"}]}]}}`)
+	p := startREPL(t, s) // default mode — the deny answers the prompt
+	p.sendUntilEchoed(t,
+		`tool:Write {"file_path":"`+target+`","content":"x"}`+"\r",
+		"❯ tool:Write", 8)
+	p.waitFor("Tool results received", 30*time.Second)
+	p.exit()
+	if fileExists(target) {
+		t.Fatalf("denied Write still ran (hookFired=%v)", fileExists(target+".hookran"))
+	}
+}
