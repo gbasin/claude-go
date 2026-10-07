@@ -200,6 +200,50 @@ func TestResumeDropsTurn(t *testing.T) {
 	}
 }
 
+// TestRewindFiles: --rewind-files <user-msg-uuid> restores tracked files
+// to their state at that message — real's standalone resume op.
+func TestRewindFiles(t *testing.T) {
+	s := newSession(t)
+	sid := newUUID()
+	track := s.writeFile("track.txt", "v1")
+
+	// scripted Read+Write (Write refuses unread files) → snapshot + backup
+	r := s.run(t, "--mock", "-p",
+		`calls:[{"name":"Read","input":{"file_path":"`+track+`"}},`+
+			`{"name":"Write","input":{"file_path":"`+track+`","content":"v2"}}]`,
+		"--session-id", sid, "--permission-mode", "bypassPermissions")
+	s.mustOK(t, r)
+	contains(t, mustReadFile(t, filepath.Join(s.cwd, "track.txt")), "v2", "write applied")
+
+	// anchor: the user prompt that kicked the turn
+	var userUUID, asstUUID string
+	for _, rec := range readRecords(t, s.transcriptPath(t, sid)) {
+		if rec["type"] == "user" && userUUID == "" {
+			userUUID, _ = rec["uuid"].(string)
+		}
+		if rec["type"] == "assistant" && asstUUID == "" {
+			asstUUID, _ = rec["uuid"].(string)
+		}
+	}
+	if userUUID == "" || asstUUID == "" {
+		t.Fatal("transcript missing user/assistant uuids")
+	}
+
+	// anchor is a user message → rewinds, file back to v1, exits clean
+	r = s.run(t, "-r", sid, "--rewind-files", userUUID)
+	s.mustOK(t, r)
+	contains(t, r.stdout, "Files rewound to state at message", "rewind output")
+	contains(t, mustReadFile(t, filepath.Join(s.cwd, "track.txt")), "v1", "file rewound")
+
+	// refusals — non-user anchor, missing --resume, prompt attached
+	r = s.run(t, "-r", sid, "--rewind-files", asstUUID)
+	contains(t, r.stderr, "not a user message", "assistant anchor refused")
+	r = s.run(t, "--rewind-files", userUUID)
+	contains(t, r.stderr, "requires --resume", "no-resume refused")
+	r = s.run(t, "-r", sid, "--rewind-files", userUUID, "-p", "x")
+	contains(t, r.stderr, "standalone operation", "prompt refused")
+}
+
 // TestContinue: -c resumes the latest session — session.Latest skips
 // transcripts with no conversation records, so the fresh empty .jsonl
 // created this session can't shadow the real latest.
