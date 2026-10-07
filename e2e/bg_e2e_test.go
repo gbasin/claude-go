@@ -1,4 +1,4 @@
-//go:build e2e
+//go:build e2e && !windows
 
 package e2e
 
@@ -13,19 +13,6 @@ import (
 	"testing"
 	"time"
 )
-
-// poll re-runs cond until it holds or the deadline passes.
-func poll(t *testing.T, d time.Duration, what string, cond func() bool) {
-	t.Helper()
-	end := time.Now().Add(d)
-	for time.Now().Before(end) {
-		if cond() {
-			return
-		}
-		time.Sleep(150 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", what)
-}
 
 // TestBgSessionLifecycle exercises the --bg → agents → attach → ^Z-detach
 // spine (real's mod_0488): the session runs under a detached bg-pty-host
