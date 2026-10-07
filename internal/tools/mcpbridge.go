@@ -61,6 +61,22 @@ type MCPToolEntry struct {
 	InputSchema json.RawMessage
 }
 
+// mcpPrompts maps the slash-command name (mcp__server__prompt) to a fetch
+// closure — real surfaces MCP prompts as slash commands.
+var mcpPrompts = map[string]func(ctx context.Context, args map[string]string) (string, error){}
+
+// RegisterMCPPrompt makes an MCP prompt invocable as /mcp__server__name;
+// fetch runs prompts/get and returns the flattened message text.
+func RegisterMCPPrompt(server, prompt string, fetch func(ctx context.Context, args map[string]string) (string, error)) {
+	mcpPrompts["mcp__"+server+"__"+prompt] = fetch
+}
+
+// ResolveMCPPrompt returns the fetch closure for a /mcp__ prompt command.
+func ResolveMCPPrompt(cmd string) (func(context.Context, map[string]string) (string, error), bool) {
+	f, ok := mcpPrompts[cmd]
+	return f, ok
+}
+
 // SyncMCPTools registers any tool in the list that isn't registered
 // yet — called after a tools/list_changed notification refreshes the
 // client's tool list (real reloads the surface in place).

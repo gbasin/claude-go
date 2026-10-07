@@ -4,6 +4,7 @@ import (
 	"claude-go/internal/config"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -421,6 +422,9 @@ func execAskUser(c *Context, raw json.RawMessage) Result {
 			}
 			got, err := c.AskStructuredMulti(qs)
 			if err != nil {
+				if errors.Is(err, ErrChatAboutThis) {
+					return Result{Content: chatFeedback(&in, answers), IsError: true}
+				}
 				return Result{Content: "The user did not answer the questions."}
 			}
 			for i, q := range in.Questions {
@@ -445,6 +449,9 @@ func execAskUser(c *Context, raw json.RawMessage) Result {
 				}
 				sel, err := c.AskStructured(q.Header, auqDisplay(q), opts, q.MultiSelect)
 				if err != nil {
+					if errors.Is(err, ErrChatAboutThis) {
+						return Result{Content: chatFeedback(&in, answers), IsError: true}
+					}
 					// dismissed with no answers → real "did not answer" outcome
 					return Result{Content: "The user did not answer the questions."}
 				}
@@ -571,4 +578,35 @@ func execSendFeedback(c *Context, raw json.RawMessage) Result {
 	b, _ := json.MarshalIndent(in, "", "  ")
 	os.WriteFile(p, b, 0o600)
 	return Result{Content: "Feedback recorded locally"}
+}
+
+// ErrChatAboutThis signals the "Chat about this" choice — real resolves
+// the tool call as a deny carrying clarify-feedback, not an answer.
+var ErrChatAboutThis = errors.New("chat_about_this")
+
+// chatFeedback builds real's deny-feedback text for "Chat about this":
+// the question list + each answer state (mod_1512.js).
+func chatFeedback(in *auqIn, answers map[string]any) string {
+	var b strings.Builder
+	b.WriteString("The user wants to clarify these questions.\n")
+	b.WriteString("    This means they may have additional information, context or questions for you.\n")
+	b.WriteString("    Take their response into account and then reformulate the questions if appropriate.\n")
+	b.WriteString("    Start by asking them what they would like to clarify.\n\n")
+	b.WriteString("    Questions asked:\n")
+	for _, q := range in.Questions {
+		fmt.Fprintf(&b, "- \"%s\"\n", q.Question)
+		if a, ok := answers[q.Question]; ok && a != nil {
+			switch v := a.(type) {
+			case string:
+				fmt.Fprintf(&b, "  Answer: %s\n", v)
+			case []string:
+				fmt.Fprintf(&b, "  Answer: %s\n", strings.Join(v, ", "))
+			default:
+				b.WriteString("  (No answer provided)\n")
+			}
+		} else {
+			b.WriteString("  (No answer provided)\n")
+		}
+	}
+	return b.String()
 }

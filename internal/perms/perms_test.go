@@ -113,3 +113,80 @@ func writePlanAutoOff(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "settings.json"),
 		[]byte(`{"useAutoModeDuringPlan":false}`), 0o644)
 }
+
+// Real's rule semantics (mod_0056.js parsePermissionRule).
+func TestRuleCorners(t *testing.T) {
+	r := &Rules{Allow: []string{
+		"Bash()",              // exact-empty — matches NOTHING
+		"Bash(git push *)",    // trailing " *" — also matches bare `git push`
+		"Bash(git * --force)", // interior wildcard
+		"Bash(ls:*)",          // prefix rule
+		"mcp__github",         // bare server — all its tools
+		"mcp__sentry(list)",   // narrowed to one tool
+		"WebFetch(domain:example.com)",
+		"Edit(src/**)", // matches src itself + descendants
+	}}
+	chk := func(tool, spec string) Decision { return Check(ModeDefault, r, tool, mkInput(tool, spec), "/repo") }
+
+	if chk("Bash", "rm -rf /") != Deny && chk("Bash", "rm -rf /") != Ask {
+		// not denied/asked — allowed by some rule? shouldn't be
+	}
+	// Bash() must NOT allow anything
+	if chk("Bash", "anything") == Allow {
+		t.Error("Bash() must match nothing")
+	}
+	if chk("Bash", "git push") != Allow {
+		t.Error("git push should match 'git push *'")
+	}
+	if chk("Bash", "git push origin main") != Allow {
+		t.Error("git push origin main should match")
+	}
+	if chk("Bash", "git pushx") == Allow {
+		t.Error("'git push *' must not match pushx")
+	}
+	if chk("Bash", "git rebase --force") != Allow {
+		t.Error("interior * should match 'git rebase --force'")
+	}
+	if chk("Bash", "ls") != Allow || chk("Bash", "ls -la") != Allow {
+		t.Error("ls:* should match ls and ls -la")
+	}
+	if chk("mcp__github__get_issue", "{}") != Allow {
+		t.Error("bare mcp__github should allow all github tools")
+	}
+	if chk("mcp__sentry__list", "{}") != Allow {
+		t.Error("mcp__sentry(list) should allow the list tool")
+	}
+	if chk("mcp__sentry__other", "{}") == Allow {
+		t.Error("mcp__sentry(list) must not allow other sentry tools")
+	}
+	if chk("WebFetch", "https://example.com/x") != Allow {
+		t.Error("WebFetch(domain:) should match the host")
+	}
+	// allow rules are permissive — a non-matching allow doesn't deny;
+	// the domain rule still gates when present in deny
+	rd := &Rules{Deny: []string{"WebFetch(domain:evil.com)"}}
+	if Check(ModeDefault, rd, "WebFetch", j(`{"url":"https://evil.com/x"}`), "/repo") != Deny {
+		t.Error("deny WebFetch(domain:evil.com) should deny")
+	}
+	if Check(ModeDefault, rd, "WebFetch", j(`{"url":"https://good.com/"}`), "/repo") == Deny {
+		t.Error("deny domain rule must not match other hosts")
+	}
+	if chk("WebFetch", "https://sub.example.com") != Allow {
+		t.Error("domain rule should match subdomains")
+	}
+	if chk("Edit", "/repo/src") != Allow {
+		t.Error("src/** should match src itself")
+	}
+	if chk("Edit", "/repo/src/a/b/c.go") != Allow {
+		t.Error("src/** should match deep descendants")
+	}
+}
+
+func mkInput(tool, spec string) json.RawMessage {
+	switch tool {
+	case "WebFetch":
+		return j(`{"url":"` + spec + `"}`)
+	default:
+		return j(`{"command":"` + spec + `","file_path":"` + spec + `"}`)
+	}
+}

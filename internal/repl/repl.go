@@ -373,7 +373,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			continue
 		}
 		if strings.HasPrefix(line, "/") {
-			if expanded := expandCustomSlash(line); expanded != "" {
+			if expanded := expandCustomSlash(l, line); expanded != "" {
 				line = expanded
 			} else {
 				if handleSlashLocal(l, line, ed, ks) {
@@ -458,9 +458,6 @@ func RunWithStore(l *agent.Loop, store Store) {
 							continue // modal dialog owns the key
 						}
 						if (k.b == 0x1b || k.b == 3) && k.seq == "" {
-							if os.Getenv("CG_DBGKEY") != "" {
-								fmt.Fprintf(os.Stderr, "[dbgkey cancel b=%x seq=%q]", k.b, k.seq)
-							}
 							cancel()
 							// popQueuedIntoDraft: unfinished queued text returns to the editor
 							if len(queueBuf) > 0 {
@@ -468,6 +465,21 @@ func RunWithStore(l *agent.Loop, store Store) {
 							}
 						} else {
 							act := ed.busyAction(k)
+							// global keys fire mid-turn (real's meta+o
+							// works while a turn runs — the sibling's
+							// teardown-eats-chord bug came from dropping
+							// these into the text queue)
+							switch act {
+							case "chat:fastMode":
+								ed.toggleFastMode()
+								continue
+							case "chat:thinkingToggle":
+								ed.toggleThinking()
+								continue
+							case "chat:killAgents":
+								ed.killAgents() // mid-turn task kill (real allows it)
+								continue
+							}
 							if k.b == '\r' || k.b == '\n' || act == "chat:sendNow" {
 								if len(queueBuf) > 0 {
 									if act == "chat:sendNow" {
@@ -484,7 +496,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 									// at the hardware cursor but leaves
 									// compStreamCol stale, so the next stream
 									// write repositions and overwrites it
-									streamPrint("  " + dim + "➤ queued" + reset)
+									streamPrint("  " + dim + "❯ " + trunc(string(queueBufLast(queued)), 90) + reset)
 								}
 							} else if k.r != 0 {
 								queueBuf = append(queueBuf, k.r)
@@ -552,9 +564,12 @@ func RunWithStore(l *agent.Loop, store Store) {
 					if !ok {
 						goto drained
 					}
-					if k.b != 0x1b && k.b != 3 {
+					isBareEsc := k.b == 0x1b && k.seq == ""
+					isCtrlC := k.b == 3
+					if !isBareEsc && !isCtrlC {
 						// replay channel — re-pushing to ks.ch reorders
-						// behind keys still buffered
+						// behind keys still buffered. Arrow keys carry
+						// b==0x1b + a seq — they're NOT stale interrupts.
 						select {
 						case ks.replay <- k:
 						default:
@@ -600,8 +615,11 @@ func RunWithStore(l *agent.Loop, store Store) {
 				if n := runningAgents(l); n > 0 {
 					tail = fmt.Sprintf(" · %d shell still running", n)
 				}
-				dprintf("%s✻ %s for %s · done %s%s%s\n\n", dim, pastTense(v),
-					fmtDur(time.Since(start)), clockNow(), tail, reset)
+				// showTurnDuration (default on) gates the footer line
+				if config.UserSetting("showTurnDuration") != false {
+					dprintf("%s✻ %s for %s · done %s%s%s\n\n", dim, pastTense(v),
+						fmtDur(time.Since(start)), clockNow(), tail, reset)
+				}
 			}
 		}
 		for {
@@ -647,7 +665,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 				runBang(l, line[1:])
 				goto nextQueued
 			case strings.HasPrefix(line, "/"):
-				if expanded := expandCustomSlash(line); expanded != "" {
+				if expanded := expandCustomSlash(l, line); expanded != "" {
 					line = expanded
 				} else {
 					if handleSlashLocal(l, line, ed, ks) {
@@ -1607,7 +1625,7 @@ func statusLineCmdReal(l *agent.Loop) string {
 }
 
 // expandCustomSlash resolves /name args to a prompt if it's a custom command.
-func expandCustomSlash(line string) string {
+func expandCustomSlash(l *agent.Loop, line string) string {
 	fields := strings.Fields(line)
 	name := strings.TrimPrefix(fields[0], "/")
 	c, ok := customCommands[name]
@@ -1620,6 +1638,11 @@ func expandCustomSlash(line string) string {
 		return expandMCPPrompt(c, arg)
 	}
 	dprintf("  %s/%s%s\n", dim, name, reset)
+	// real fires UserPromptExpansion when a custom command expands
+	hooks.Run(l.Hooks, hooks.UserPromptExpansion, map[string]any{
+		"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+		"command_name": name, "hook_event_name": "UserPromptExpansion",
+	}, l.ToolCtx.CWD)
 	return expandCustomCommand(c, arg)
 }
 
@@ -2204,6 +2227,11 @@ func (p *promptUI) askStructuredMulti(ks *keySource, qs []tools.AskQuestion) (ma
 				draw()
 				continue
 			}
+			if sel == len(q.Options)+1 {
+				// Chat about this → deny + clarify feedback (real's path)
+				fmt.Print("\r\n")
+				return nil, tools.ErrChatAboutThis
+			}
 			if q.MultiSelect {
 				// enter = confirm current toggles for this question
 				var sel2 []string
@@ -2240,3 +2268,10 @@ func readUserSettingStr(key string) string {
 // userSetting reads a key from ~/.claude/settings.json via config's cache —
 // real reads it once at startup too (restart to pick up edits).
 func userSetting(key string) any { return config.UserSetting(key) }
+
+func queueBufLast(q []string) string {
+	if len(q) == 0 {
+		return ""
+	}
+	return q[len(q)-1]
+}

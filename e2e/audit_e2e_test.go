@@ -704,3 +704,150 @@ func TestDebugToolCall(t *testing.T) {
 	p.waitFor("dbg-marker", 15*time.Second)
 	p.exit()
 }
+
+// TestClearSessionHookSequence: /clear fires SessionEnd(reason=clear)
+// then SessionStart(source=clear) — the real end/start pair.
+func TestClearSessionHookSequence(t *testing.T) {
+	s := newSession(t)
+	dump := filepath.Join(s.cwd, "clear-hooks.jsonl")
+	s.writeFile(".claude/settings.json",
+		`{"hooks":{`+
+			`"SessionEnd":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}],`+
+			`"SessionStart":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}]`+
+			`}}`)
+	p := startREPL(t, s)
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t, "/clear\r", "❯ /clear", 8)
+	p.waitFor("context cleared", 15*time.Second)
+	p.exit()
+
+	b, _ := os.ReadFile(dump)
+	out := string(b)
+	if !strings.Contains(out, `"reason":"clear"`) {
+		t.Fatalf("no SessionEnd(reason=clear):\n%s", out)
+	}
+	if !strings.Contains(out, `"source":"clear"`) {
+		t.Fatalf("no SessionStart(source=clear):\n%s", out)
+	}
+}
+
+// TestPermissionRequestAutoAllow: a PermissionRequest hook emitting
+// permissionDecision=allow skips the dialog — the tool runs without a
+// prompt, and the "1. Yes" dialog never appears.
+func TestPermissionRequestAutoAllow(t *testing.T) {
+	s := newSession(t)
+	s.writeSettings(`{"hooks":{"PermissionRequest":[{"matcher":"Bash","hooks":[` +
+		`{"type":"command","command":` +
+		`"echo '{\"hookSpecificOutput\":{\"permissionDecision\":\"allow\"}}'"}]}]}}`)
+	p := startREPL(t, s) // default mode — Bash would normally prompt
+	out := filepath.Join(s.cwd, "auto-allowed.txt")
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"echo AUTO-ALLOWED > `+out+`"}`+"\r",
+		"❯ tool:Bash", 8)
+	p.waitFor("Tool results received", 30*time.Second)
+	p.exit()
+	// `> file` writes aren't on the read-only auto-allow list — reaching
+	// the result without a dialog means the hook allowed it
+	if !fileExists(out) {
+		t.Fatal("auto-allow hook ran but Bash didn't execute")
+	}
+}
+
+// TestPermissionRequestDeny: a deny decision refuses the tool without a
+// dialog — the model sees the deny.
+func TestPermissionRequestDeny(t *testing.T) {
+	s := newSession(t)
+	target := filepath.Join(s.cwd, "denied.txt")
+	s.writeSettings(`{"hooks":{"PermissionRequest":[{"matcher":"Write","hooks":[` +
+		`{"type":"command","command":` +
+		`"touch /tmp/zz-permhook.ran && echo '{\"hookSpecificOutput\":{\"permissionDecision\":\"deny\",` +
+		`\"permissionDecisionReason\":\"hook says no\"}}'"}]}]}}`)
+	p := startREPL(t, s) // default mode — the deny answers the prompt
+	p.sendUntilEchoed(t,
+		`tool:Write {"file_path":"`+target+`","content":"x"}`+"\r",
+		"❯ tool:Write", 8)
+	p.waitFor("Tool results received", 30*time.Second)
+	p.exit()
+	if fileExists(target) {
+		t.Fatalf("denied Write still ran (hookFired=%v)", fileExists(target+".hookran"))
+	}
+}
+
+// TestHookMatrixRound2: the remaining wired hook events —
+// PermissionDenied (dialog deny), DirectoryAdded (/add-dir),
+// UserPromptExpansion (custom command), SubagentStart (Task spawn),
+// Pre/PostModelSwitch (fast-mode toggle).
+func TestHookMatrixRound2(t *testing.T) {
+	s := newSession(t)
+	dump := filepath.Join(s.cwd, "matrix2.jsonl")
+	s.writeFile(".claude/settings.json",
+		`{"hooks":{`+
+			`"PermissionDenied":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}],`+
+			`"DirectoryAdded":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}],`+
+			`"UserPromptExpansion":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}],`+
+			`"SubagentStart":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}],`+
+			`"PreModelSwitch":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}],`+
+			`"PostModelSwitch":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}]`+
+			`}}`)
+	s.writeFile(".claude/commands/probe.md", "probe-body")
+	p := startREPL(t, s)
+
+	// UserPromptExpansion — custom command
+	p.sendUntilEchoed(t, "/probe\r", "❯ /probe", 8)
+	p.waitFor("Mock response", 30*time.Second)
+
+	// DirectoryAdded
+	p.sendUntilEchoed(t, "/add-dir /tmp\r", "❯ /add-dir", 8)
+	p.waitFor("added /tmp", 15*time.Second)
+
+	// PermissionDenied — Write prompts in default mode; deny with 3
+	p.sendUntilEchoed(t,
+		`tool:Write {"file_path":"`+filepath.Join(s.cwd, "x.txt")+`","content":"x"}`+"\r",
+		"❯ tool:Write", 8)
+	p.waitFor("1. Yes", 30*time.Second)
+	p.send("3\r")
+	p.waitFor("Tool results received", 30*time.Second)
+	p.waitFor("· done", 30*time.Second)
+
+	// Pre/PostModelSwitch — meta+o toggles fast mode (silent in UI; the
+	// hooks are the observable signal). Sent twice — a chord that lands
+	// during turn teardown is eaten by the busy loop.
+	p.send("\x1bo")
+	time.Sleep(800 * time.Millisecond)
+	p.send("\x1bo")
+	time.Sleep(800 * time.Millisecond)
+
+	// SubagentStart — Agent tool spawns a subagent
+	p.sendUntilEchoed(t,
+		`calls:[{"name":"ToolSearch","input":{"query":"select:Agent"}},`+
+			`{"name":"Agent","input":{"description":"d","prompt":"run","subagent_type":"general-purpose"}}]`+"\r",
+		`❯ calls:[{"name":"ToolSearch"`, 8)
+	p.waitFor("· done", 30*time.Second)
+	p.exit()
+
+	b, _ := os.ReadFile(dump)
+	out := string(b)
+	seen := map[string]bool{}
+	for _, ev := range []string{
+		`"hook_event_name":"UserPromptExpansion"`,
+		`"hook_event_name":"DirectoryAdded"`,
+		`"hook_event_name":"PermissionDenied"`,
+		`"hook_event_name":"PreModelSwitch"`,
+		`"hook_event_name":"PostModelSwitch"`,
+		`"hook_event_name":"SubagentStart"`,
+	} {
+		seen[ev] = strings.Contains(out, ev)
+	}
+	t.Logf("seen: %v", seen)
+	for _, ev := range []string{
+		`"hook_event_name":"UserPromptExpansion"`,
+		`"hook_event_name":"DirectoryAdded"`,
+		`"hook_event_name":"PermissionDenied"`,
+		`"hook_event_name":"PreModelSwitch"`,
+		`"hook_event_name":"PostModelSwitch"`,
+	} {
+		if !strings.Contains(out, ev) {
+			t.Fatalf("missing %s in hook dump:\n%s", ev, out)
+		}
+	}
+}
