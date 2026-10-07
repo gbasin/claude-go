@@ -69,24 +69,28 @@ type Loop struct {
 	Transcript            string // path to JSONL transcript (for compact notes)
 	Hooks                 hooks.Config
 	inCompact             bool
-	AllowedTools          []string // nil = all
-	Goal                  string   // /goal stop-condition
-	Bare                  bool     // --bare: skip auto-discovery
-	FallbackModel         string   // --fallback-model retry chain
-	ThinkingMode          string   // --thinking enabled|disabled
-	ThinkingDisplay       string   // --thinking-display updates|omitted
-	ThinkingBudget        int      // --max-thinking-tokens
-	SessionStartSource    string   // startup|resume|clear|compact|fork
-	SessionEndReason      string   // clear|logout|prompt_input_exit|other
-	SessionEndFired       bool     // SessionEnd hook already ran — main skips its duplicate fire
-	FastMode              bool     // fast mode: output_config.speed="fast"
-	AutoCompactWindow     string   // settings autoCompactWindow ("auto"|"500k"|N)
-	AdvisorModel          string   // settings advisorModel — the /advisor pick
-	CorrelationID         string   // --correlation-id → output_config.correlation_id
-	MemoryPaused          bool     // /pause-memory: skip MEMORY.md injection
-	AlwaysThinking        bool     // settings alwaysThinkingEnabled
-	pendingTrigger        string   // last compact trigger for the boundary record
-	compactSummaryPending bool     // next user log is the compact continuation
+	AllowedTools          []string         // nil = all
+	Goal                  string           // /goal stop-condition
+	Bare                  bool             // --bare: skip auto-discovery
+	FallbackModel         string           // --fallback-model retry chain
+	ThinkingMode          string           // --thinking enabled|disabled
+	ThinkingDisplay       string           // --thinking-display updates|omitted
+	ThinkingBudget        int              // --max-thinking-tokens
+	SessionStartSource    string           // startup|resume|clear|compact|fork
+	SessionEndReason      string           // clear|logout|prompt_input_exit|other
+	SessionEndFired       bool             // SessionEnd hook already ran — main skips its duplicate fire
+	FastMode              bool             // fast mode: output_config.speed="fast"
+	ParentSessionID       string           // --parent-session-id lineage marker
+	SysPromptSnapshot     string           // --system-prompt-snapshot digest/label
+	TeammateCtx           *TeammateContext // --agent-id/-name/--team-name triad
+	ProactivityOff        bool             // --proactivity off (gates proactive nudges)
+	AutoCompactWindow     string           // settings autoCompactWindow ("auto"|"500k"|N)
+	AdvisorModel          string           // settings advisorModel — the /advisor pick
+	CorrelationID         string           // --correlation-id → output_config.correlation_id
+	MemoryPaused          bool             // /pause-memory: skip MEMORY.md injection
+	AlwaysThinking        bool             // settings alwaysThinkingEnabled
+	pendingTrigger        string           // last compact trigger for the boundary record
+	compactSummaryPending bool             // next user log is the compact continuation
 	compactKept           int
 	turnCount             int
 	toolCallsTotal        int
@@ -154,7 +158,7 @@ func isXHighModel(m string) bool {
 
 func (l *Loop) buildRequest() *api.Request {
 	if l.tokensLeft == 0 {
-		l.tokensLeft = 15000000
+		l.tokensLeft = tokenBudgetStart()
 	}
 	effort := l.Effort
 	if effort == "" {
@@ -420,7 +424,7 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 		}
 		l.started = true
 		if l.tokensLeft == 0 {
-			l.tokensLeft = 15000000
+			l.tokensLeft = tokenBudgetStart()
 		}
 		deferred := l.ToolCtx.DeferredNames()
 		sort.Strings(deferred)
@@ -1347,4 +1351,27 @@ func (l *Loop) subPromptID() string {
 		return l.subPID
 	}
 	return l.Client.PromptID()
+}
+
+// TeammateContext is the --agent-id/--agent-name/--team-name spawn
+// context — real sets it via setDynamicTeamContext.
+type TeammateContext struct {
+	AgentID, AgentName, TeamName, Color string
+}
+
+// tokenBudgetStart is the <total_tokens> countdown start — real's
+// totalTokensReminderBudget setting / CLAUDE_CODE_TOTAL_TOKENS_REMINDER
+// env / --task-budget (mod_0056.js).
+func tokenBudgetStart() int64 {
+	for _, raw := range []string{
+		os.Getenv("CLAUDE_GO_TASK_BUDGET"),
+		os.Getenv("CLAUDE_CODE_TOTAL_TOKENS_REMINDER"),
+	} {
+		if raw != "" {
+			if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n > 0 {
+				return n
+			}
+		}
+	}
+	return 15000000
 }
