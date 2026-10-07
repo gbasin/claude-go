@@ -23,68 +23,68 @@ import (
 
 // editor is a modal (vim-capable) multiline line editor fed by keySource.
 type editor struct {
-	history        []string
-	hIdx           int
-	buf            []rune
-	pos            int
-	stashed        [][]rune // ctrl+s draft stash
-	busyChord      []string
-	busyChordAt    time.Time
-	prompt         string
-	saved          []rune
-	vim            bool
-	mode           string            // "insert" | "normal"
-	pastes         map[string]string // placeholder -> pasted content
-	pasteN         int
-	lastCtrlC      time.Time
-	lastEsc        int64
-	completer      func(prefix string) []string // slash command completion
-	acOpen         bool                         // autocomplete menu visible
-	acDesc         func(name string) string     // per-item description
-	acItems        []string                     // filtered matches
-	acSel          int                          // selected index
-	leftArm        bool                         // ← pressed once on empty input
-	acAt           string                       // @-mention token being completed
-	cycleMode      func()                       // shift+tab -> permission mode cycle
-	keys           *keySource
-	pendingX       bool
-	chordAt        time.Time
-	actions        map[byte]func(*editor) *readResult
-	histSearch     bool
-	searchBuf      []rune
-	onToggleExpand func()
-	onToggleTodos  func()
-	onKillAgents   func()
-	onFastMode     func()
-	insertRemaps   []string // vimInsertModeRemaps: 2-char sequences -> <Esc>
-	lastIns        rune
-	vimOp          rune
-	vimFind        rune
-	vimPendingG    rune
-	vimCount       int
-	vimCountRaw    int
-	vimVisual      int
-	vimReplace     bool
-	lastFindCh     rune
-	lastFindDir    rune
-	lastDel        string
-	lastChange     rune
-	undoStack      [][]rune
-	undoPos        []int
-	kb             map[string]string // canonical chord -> action (keybindings.go)
-	kbPrefix       map[string]bool   // canonical chord prefixes awaiting more keys
-	kbUnbound      map[string]bool   // chords explicitly unbound via keybindings.json
-	pendingChord   []string          // matched chord-prefix strokes
-	imgDir         string            // scratchpad dir for pasted images
-	imgN           int               // pasted-image counter
-	zoneEdit       bool              // input box lives in the compositor live zone
-	boxAll         []string          // last-rendered full box (for the scrollback echo)
-	voice          *voiceUI          // voice session glue (internal/voice)
-	voiceBase      string            // api.BaseURL for the voice_stream ws
-	voiceCreds     *auth.Credentials // OAuth creds for Bearer auth
-	voiceCWD       string            // cwd for settings + keyterms
-	deferredKeys   []key             // bound commands pressed mid-turn — replay at idle
-	footer         string            // status row rendered under the box
+	history         []string
+	hIdx            int
+	buf             []rune
+	pos             int
+	stashed         [][]rune // ctrl+s draft stash
+	busyChord       []string
+	busyChordAt     time.Time
+	prompt          string
+	saved           []rune
+	vim             bool
+	mode            string            // "insert" | "normal"
+	pastes          map[string]string // placeholder -> pasted content
+	pasteN          int
+	lastCtrlC       time.Time
+	lastEsc         int64
+	completer       func(prefix string) []string // slash command completion
+	acOpen          bool                         // autocomplete menu visible
+	acDesc          func(name string) string     // per-item description
+	acItems         []string                     // filtered matches
+	acSel           int                          // selected index
+	leftArm         bool                         // ← pressed once on empty input
+	acAt            string                       // @-mention token being completed
+	cycleMode       func()                       // shift+tab -> permission mode cycle
+	keys            *keySource
+	pendingX        bool
+	chordAt         time.Time
+	actions         map[byte]func(*editor) *readResult
+	histSearch      bool
+	searchBuf       []rune
+	onToggleExpand  func()
+	onToggleTodos   func()
+	onKillAgents    func()
+	onFastMode      func()
+	insertRemaps    []string // vimInsertModeRemaps: 2-char sequences -> <Esc>
+	lastIns         rune
+	vimOp           rune
+	vimFind         rune
+	vimPendingG     rune
+	vimCount        int
+	vimCountRaw     int
+	vimVisual       int
+	vimReplace      bool
+	lastFindCh      rune
+	lastFindDir     rune
+	lastDel         string
+	lastChange      rune
+	undoStack       [][]rune
+	undoPos         []int
+	kb              map[string]string // canonical chord -> action (keybindings.go)
+	kbPrefix        map[string]bool   // canonical chord prefixes awaiting more keys
+	kbUnbound       map[string]bool   // chords explicitly unbound via keybindings.json
+	pendingChord    []string          // matched chord-prefix strokes
+	imgDir          string            // scratchpad dir for pasted images
+	imgN            int               // pasted-image counter
+	zoneEdit        bool              // input box lives in the compositor live zone
+	boxAll          []string          // last-rendered full box (for the scrollback echo)
+	voice           *voiceUI          // voice session glue (internal/voice)
+	voiceBase       string            // api.BaseURL for the voice_stream ws
+	voiceCreds      *auth.Credentials // OAuth creds for Bearer auth
+	voiceCWD        string            // cwd for settings + keyterms
+	deferredActions []string          // resolved actions pressed mid-turn — dispatch at idle
+	footer          string            // status row rendered under the box
 }
 
 func newEditor() *editor {
@@ -306,12 +306,14 @@ type readResult struct {
 
 // readLine consumes keys until submit. Vim-normal mode supported.
 func (e *editor) readLine(ks *keySource) readResult {
-	if len(e.deferredKeys) > 0 {
-		// a bound command pressed while the turn ran — replay now
-		k := e.deferredKeys[0]
-		e.deferredKeys = e.deferredKeys[1:]
-		if r := e.insertKey(k); r != nil {
-			return *r
+	if len(e.deferredActions) > 0 {
+		// a bound command resolved while the turn ran — dispatch it now
+		act := e.deferredActions[0]
+		e.deferredActions = e.deferredActions[1:]
+		if fn := kbActions[act]; fn != nil {
+			if r := fn(e); r != nil {
+				return *r
+			}
 		}
 	}
 	if e.zoneEdit = compInputActive(); e.zoneEdit {
