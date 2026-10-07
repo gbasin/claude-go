@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -54,6 +55,7 @@ type Permissions struct {
 // its deny/ask rules can't be overridden by user or project settings, and
 // its defaultMode wins. Track it separately.
 func Load(cwd string) *Settings {
+	cwd = ProjectConfigRoot(cwd)
 	merged := &Settings{}
 	managed := &Settings{}
 	if b, err := os.ReadFile(managedSettingsPath()); err == nil {
@@ -408,3 +410,20 @@ func SettingSourceOK(cwd, path string) bool {
 }
 
 // LoadPermissions merges permissions across enabled settings layers.
+
+// projectConfigRoot overrides where project .claude/ resolves —
+// --project-config-root (real: "the named --project-config-root when a
+// host set one"). Empty = the session cwd.
+var projectConfigRoot atomic.Value // string
+
+func SetProjectConfigRoot(p string) { projectConfigRoot.Store(p) }
+
+// ProjectConfigRoot resolves the config root for a cwd.
+func ProjectConfigRoot(cwd string) string {
+	if v := projectConfigRoot.Load(); v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			return s
+		}
+	}
+	return cwd
+}

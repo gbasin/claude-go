@@ -453,6 +453,12 @@ func main() {
 		return
 	}
 
+	// --attach-serve <session-id>: run this process as the session's
+	// attach-serving worker (real's spawn entrypoint)
+	if sid := os.Getenv("CLAUDE_GO_ATTACH_SERVE"); sid != "" {
+		os.Exit(bg.RunHost(bg.HostOpts{SessionID: sid, CWD: cwd}))
+	}
+
 	agentCleanup := installCLIAgents(o.agentsJSON, cwd)
 	if o.agentsJSON != "" {
 		os.Setenv("CLAUDE_GO_AGENTS_JSON", o.agentsJSON)
@@ -512,6 +518,32 @@ func main() {
 	}
 	var promptAtt string
 	loop := agent.NewLoop(client, cwd)
+	// --agent-id/--agent-name/--team-name must all be present or none
+	// (real errors otherwise — mod_0659.js)
+	aid, aname, tname := os.Getenv("CLAUDE_GO_AGENT_ID"), os.Getenv("CLAUDE_GO_AGENT_NAME"), os.Getenv("CLAUDE_GO_TEAM_NAME")
+	if (aid != "") != (aname != "") || (aname != "") != (tname != "") {
+		fmt.Fprintln(os.Stderr, "Error: --agent-id, --agent-name, and --team-name must all be provided together")
+		os.Exit(1)
+	}
+	if aid != "" {
+		loop.TeammateCtx = &agent.TeammateContext{
+			AgentID: aid, AgentName: aname, TeamName: tname,
+			Color: os.Getenv("CLAUDE_GO_AGENT_COLOR"),
+		}
+	}
+	// --parent-session-id marks spawn lineage on the init record
+	loop.ParentSessionID = os.Getenv("CLAUDE_GO_PARENT_SESSION_ID")
+	// --system-prompt-snapshot records the sys-prompt digest in meta
+	loop.SysPromptSnapshot = os.Getenv("CLAUDE_GO_SYSTEM_PROMPT_SNAPSHOT")
+	// --proactivity gates proactive suggestions (real: proactivityLevel)
+	if v := os.Getenv("CLAUDE_GO_PROACTIVITY"); v != "" && v != "auto" {
+		loop.ProactivityOff = v == "off" || v == "0"
+	}
+	// --project-config-root overrides where .claude/ resolves for this session
+	if r := os.Getenv("CLAUDE_GO_PROJECT_CONFIG_ROOT"); r != "" {
+		config.SetProjectConfigRoot(r)
+	}
+
 	// --prefill / --prefill-b64: assistant continuation appended after the
 	// first user message (real's prefill / continuation)
 	if pf := os.Getenv("CLAUDE_GO_PREFILL"); pf != "" {
@@ -764,7 +796,8 @@ func main() {
 		defer st2.Close()
 		loop.Transcript = st2.Path
 		if resumeID == "" || o.forkSess {
-			st2.LogInit(loop.Model) // system/init — fresh sessions only; a
+			st2.LogInitMeta(loop.Model, loop.ParentSessionID,
+				os.Getenv("CLAUDE_GO_AGENT_TYPE"), loop.SysPromptSnapshot) // system/init
 			// resumed transcript already carries its own init record
 		}
 		tools.OnSnapshot = func(path, backup string, ver int) {

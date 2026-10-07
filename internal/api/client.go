@@ -226,6 +226,11 @@ func (c *Client) headers(req *http.Request) {
 	h.Set("anthropic-dangerous-direct-browser-access", "true")
 	h.Set("anthropic-version", "2023-06-01")
 	h.Set("x-app", "cli")
+	// --agent-type marks spawned-agent sessions on the wire
+	// (mod_0132.js: x-claude-code-agent-type)
+	if at := os.Getenv("CLAUDE_GO_AGENT_TYPE"); at != "" {
+		h.Set("x-claude-code-agent-type", at)
+	}
 	// provider auth: bedrock → SigV4 (in the caller — needs the body);
 	// vertex → ADC bearer; foundry → api-key or Entra token
 	switch c.Provider {
