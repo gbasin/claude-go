@@ -760,7 +760,6 @@ func TestTokenRefreshRace(t *testing.T) {
 	r := s.runEx(t, []string{
 		"CLAUDE_GO_CREDS_FILE=" + credsFile,
 		"CLAUDE_GO_TOKEN_URL=" + tokenSrv.URL,
-		"CG_DBG401=1",
 		"CLAUDE_GO_RAW_HTTP=0",
 	}, 30*time.Second, "--sdk-url", apiSrv.URL, "-p", "hi",
 		"--output-format", "stream-json")
@@ -872,7 +871,6 @@ func Test401RefreshRetry(t *testing.T) {
 	r := s.runEx(t, []string{
 		"CLAUDE_GO_CREDS_FILE=" + credsFile,
 		"CLAUDE_GO_TOKEN_URL=" + tokenSrv.URL,
-		"CG_DBG401=1",
 		"ANTHROPIC_BASE_URL=" + apiSrv.URL,
 	}, 60*time.Second, "-p", "hi")
 	s.mustOK(t, r)
