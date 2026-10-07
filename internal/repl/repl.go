@@ -101,6 +101,22 @@ func RunWithStore(l *agent.Loop, store Store) {
 	}
 	ks, err := startKeys()
 	if err == nil {
+		// MCP elicitation: a server asks the user mid-flow — real shows a
+		// form; we prompt inline + fire Elicitation/ElicitationResult
+		tools.SetElicitHandler(func(req *tools.ElicitRequest) tools.ElicitAnswer {
+			return elicitDialog(l, ks, req)
+		})
+		// TeammateIdle: a registered agent went idle/completed
+		tools.OnAgentIdle = func(a *tools.AgentRecord) {
+			hooks.Run(l.Hooks, hooks.TeammateIdle, map[string]any{
+				"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+				"hook_event_name": "TeammateIdle", "permission_mode": l.PermMode,
+				"transcript_path": l.Transcript,
+				"teammate_name":   a.Name, "teammate_id": a.AgentID,
+			}, l.ToolCtx.CWD)
+		}
+	}
+	if err == nil {
 		ed.keys = ks
 		ed.registerDefaultActions()
 		ed.actions[2] = func(e *editor) *readResult { // ctrl+shift+b (app:toggleBrief)
@@ -2286,4 +2302,74 @@ func queueBufLast(q []string) string {
 		return ""
 	}
 	return q[len(q)-1]
+}
+
+// elicitDialog renders the elicitation/create prompt: server name +
+// message + accept/decline (real's form renders schema fields; we take
+// a single text answer when fields exist).
+func elicitDialog(l *agent.Loop, ks *keySource, req *tools.ElicitRequest) tools.ElicitAnswer {
+	hooks.Run(l.Hooks, hooks.Elicitation, map[string]any{
+		"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+		"hook_event_name": "Elicitation", "permission_mode": l.PermMode,
+		"transcript_path": l.Transcript, "mcp_server_name": req.Server,
+	}, l.ToolCtx.CWD)
+	compInline("\r\n" + "\x1b[38;5;246m" + "┌ MCP " + req.Server + " is asking:\x1b[39m\r\n")
+	compInline("  " + req.Message + "\r\n")
+	// requestedSchema fields → prompt for each string property
+	var schema struct {
+		Properties map[string]struct {
+			Type string `json:"type"`
+			Desc string `json:"description"`
+		} `json:"properties"`
+		Required []string `json:"required"`
+	}
+	_ = json.Unmarshal(req.Schema, &schema)
+	content := map[string]any{}
+	action := "decline"
+	if len(schema.Properties) == 0 {
+		compInline("  " + "\x1b[38;5;246m" + "y to accept, n to decline\x1b[39m\r\n")
+		k := <-ks.ch
+		if k.r == 'y' || k.r == 'Y' || k.b == '\r' {
+			action = "accept"
+		}
+	} else {
+		for name, prop := range schema.Properties {
+			if prop.Desc != "" {
+				compInline(fmt.Sprintf("  %s%s%s: ", dim, prop.Desc, reset))
+			} else {
+				compInline(fmt.Sprintf("  %s%s%s: ", dim, name, reset))
+			}
+			var line strings.Builder
+			for {
+				k := <-ks.ch
+				if k.b == '\r' || k.b == '\n' {
+					break
+				}
+				if k.b == 0x1b || k.b == 3 {
+					line.Reset()
+					break
+				}
+				if k.b == 0x7f && line.Len() > 0 {
+					s := []rune(line.String())
+					line.Reset()
+					line.WriteString(string(s[:len(s)-1]))
+					continue
+				}
+				if k.r != 0 {
+					line.WriteRune(k.r)
+				}
+			}
+			if s := strings.TrimSpace(line.String()); s != "" {
+				content[name] = s
+			}
+		}
+		action = "accept"
+	}
+	hooks.Run(l.Hooks, hooks.ElicitationResult, map[string]any{
+		"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+		"hook_event_name": "ElicitationResult", "permission_mode": l.PermMode,
+		"transcript_path": l.Transcript, "mcp_server_name": req.Server,
+		"action": action,
+	}, l.ToolCtx.CWD)
+	return tools.ElicitAnswer{Action: action, Content: content}
 }
