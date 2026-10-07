@@ -209,3 +209,63 @@ func TestBackgroundSlashDetach(t *testing.T) {
 	// clean up the worker so it doesn't outlive the test session
 	s.runStdin(t, "/exit\r", "attach", short)
 }
+
+// TestResumeLiveBgRefused: real refuses to resume a session that's live
+// in a bg worker — "Can't open — this session is running in another
+// terminal". --fork-session bypasses; direct -r exits nonzero.
+func TestResumeLiveBgRefused(t *testing.T) {
+	s := newSession(t)
+	sid := newUUID()
+
+	r := s.run(t, "--mock", "--bg", "-p", "ping", "--session-id", sid)
+	s.mustOK(t, r)
+	short := sid[:8]
+	deadline := time.Now().Add(15 * time.Second)
+	for !strings.Contains(s.run(t, "agents").stdout, short) {
+		if time.Now().After(deadline) {
+			jd := filepath.Join(s.home, ".claude", "bg", "jobs")
+			ents, _ := os.ReadDir(jd)
+			var names []string
+			for _, e := range ents {
+				names = append(names, e.Name())
+			}
+			xnote, _ := os.ReadFile(filepath.Join(jd, "last-exit.log"))
+			t.Fatalf("worker never registered (jobdirs=%v agents=%q exitnote=%s)",
+				names, s.run(t, "agents").stdout, xnote)
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	// direct -r on the live session → refused
+	r = s.run(t, "--mock", "-r", sid, "-p", "clobber")
+	if r.code == 0 {
+		t.Fatalf("resume of a live bg session should refuse: %s", r.stdout)
+	}
+	contains(t, r.stderr, "running in another terminal", "refusal text")
+
+	// also refuses by short id prefix (registry lookup)
+	r = s.run(t, "--mock", "-r", short, "-p", "clobber")
+	if r.code == 0 || !strings.Contains(r.stderr, "running in another terminal") {
+		jobDir := filepath.Join(s.home, ".claude", "bg", "jobs")
+		ents, _ := os.ReadDir(jobDir)
+		var names []string
+		for _, e := range ents {
+			names = append(names, e.Name())
+		}
+		xnote, _ := os.ReadFile(filepath.Join(jobDir, "last-exit.log"))
+		t.Fatalf("prefix resume of a live bg session should refuse (code=%d stderr=%q stdout=%q jobdirs=%v agents=%q\nexitnote=%s)",
+			r.code, r.stderr, r.stdout, names, s.run(t, "agents").stdout, xnote)
+	}
+
+	// --fork-session is the sanctioned bypass — forks the transcript
+	r = s.run(t, "--mock", "-r", sid, "--fork-session", "-p", "branch off")
+	s.mustOK(t, r)
+
+	// cleanup
+	s.runStdin(t, "/exit\r", "attach", sid)
+	poll(t, 10*time.Second, "worker exit", func() bool {
+		out := s.run(t, "agents").stdout
+		i := strings.Index(out, "background sessions:")
+		return i < 0 || strings.Contains(out[i:], "none")
+	})
+}
