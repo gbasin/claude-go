@@ -205,6 +205,10 @@ type Client struct {
 	// Roots, if set, answers roots/list server requests with the session's
 	// workspace roots (project dir + add-dirs).
 	Roots func() []map[string]string
+	// OnElicit, if set, answers elicitation/create server requests. Returns
+	// the action ("accept"|"decline"|"cancel") and the form content. Nil →
+	// auto-decline (non-interactive sessions can't render forms).
+	OnElicit func(params map[string]any) (string, map[string]any)
 
 	tr      transport
 	cmd     *exec.Cmd // stdio only
@@ -430,7 +434,7 @@ func (c *Client) handleNotification(method string, params json.RawMessage) {
 
 // handleServerRequest answers server->client JSON-RPC requests. Only ping
 // is understood; everything else gets -32601 (method not found).
-func (c *Client) handleServerRequest(id json.RawMessage, method string, _ json.RawMessage) {
+func (c *Client) handleServerRequest(id json.RawMessage, method string, raw json.RawMessage) {
 	var resp map[string]any
 	if method == "logging/setLevel" {
 		resp = map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "result": map[string]any{}}
@@ -441,6 +445,22 @@ func (c *Client) handleServerRequest(id json.RawMessage, method string, _ json.R
 		}
 		resp = map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id),
 			"result": map[string]any{"roots": roots}}
+	} else if method == "elicitation/create" {
+		var params map[string]any
+		json.Unmarshal(raw, &params)
+		action, content := "decline", map[string]any(nil)
+		if c.OnElicit != nil {
+			action, content = c.OnElicit(params)
+			if action == "" {
+				action = "decline"
+			}
+		}
+		res := map[string]any{"action": action}
+		if content != nil {
+			res["content"] = content
+		}
+		resp = map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id),
+			"result": res}
 	} else if method == "ping" {
 		resp = map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "result": map[string]any{}}
 	} else {
