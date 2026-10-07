@@ -185,6 +185,9 @@ func RunWithStore(l *agent.Loop, store Store) {
 	var printedDot bool
 	var thinkingSeen bool
 	md := newMDRenderer()
+	if mw, _ := userSetting("maxProseWidth").(float64); mw > 0 {
+		md.proseW = int(mw) // real's prose cap (default: terminal width)
+	}
 	md.out = &turnWriter{}
 
 	l.ToolCtx.Permission = func(name string, input json.RawMessage, summary string) bool {
@@ -1954,6 +1957,7 @@ var currentStore Store
 var logResync atomic.Int32
 
 func init() { logResync.Store(-1) }
+
 var sessionOnlyModel bool // /model "s" key — applies the pick without persisting
 
 // showAgentsPane is real's ←← agents overlay — lists background tasks

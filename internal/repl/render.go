@@ -21,6 +21,8 @@ type mdRenderer struct {
 	table      []string // buffered |...| lines pending box render
 	pending    strings.Builder
 	out        stringWriter // emit sink — compInline-aware under the zone
+	proseW     int          // maxProseWidth setting — lazy word-wrap in prose
+	lineCells  int          // visible cells on the current line (for proseW)
 }
 
 func newMDRenderer() *mdRenderer {
@@ -160,6 +162,7 @@ func (r *mdRenderer) flush(eof bool) {
 		if c == '\n' {
 			r.out.WriteString(reset + "\n")
 			r.lineStart = true
+			r.lineCells = 0
 			r.inlineCode, r.bold, r.italic = false, false, false
 			i++
 			continue
@@ -301,7 +304,18 @@ func (r *mdRenderer) flush(eof bool) {
 			i++
 			continue
 		}
+		if r.proseW > 0 && c == ' ' && r.lineCells >= r.proseW {
+			// lazy wrap: replace the space with a newline (prose only)
+			r.out.WriteString(reset + "\n")
+			r.lineStart = true
+			r.lineCells = 0
+			i++
+			continue
+		}
 		r.out.WriteString(string(c))
+		if c >= 0x20 {
+			r.lineCells++
+		}
 		i++
 	}
 	r.pending.Reset()

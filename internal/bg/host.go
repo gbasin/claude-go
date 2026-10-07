@@ -9,8 +9,8 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -154,7 +154,7 @@ func RunHost(o HostOpts) int {
 	var (
 		mu      sync.Mutex
 		clients = map[*attacher]bool{}
-		tail    []byte // rolling pty-output tail replayed to new attachers
+		tail    []byte     // rolling pty-output tail replayed to new attachers
 		ptyMu   sync.Mutex // serializes attach-input writes to the pty
 	)
 
@@ -313,21 +313,12 @@ func serveAttach(conn net.Conn, master *os.File, job *Job,
 
 	a := &attacher{conn: conn, out: make(chan []byte, 64), done: make(chan struct{})}
 	go a.pump()
+	// opReady + snapshot must leave BEFORE the attacher joins clients —
+	// a concurrent broadcast queued between registration and opReady
+	// makes the client see opData first ("unexpected handshake op 3").
 	mu.Lock()
-	clients[a] = true
-	job.Attached++
-	_ = job.Write() // daemon reads attached state for skew respawn
 	snap := append([]byte(nil), (*tail)...)
 	mu.Unlock()
-	defer func() {
-		mu.Lock()
-		delete(clients, a)
-		job.Attached--
-		_ = job.Write()
-		mu.Unlock()
-		close(a.out)
-	}()
-
 	a.send(opReady, mustJSON(map[string]any{
 		"session": job.SessionID, "cols": hello.Cols, "rows": hello.Rows}))
 	if len(snap) > 0 {
@@ -340,6 +331,19 @@ func serveAttach(conn net.Conn, master *os.File, job *Job,
 			return // client already not reading — let the disconnect path reap
 		}
 	}
+	mu.Lock()
+	clients[a] = true
+	job.Attached++
+	_ = job.Write() // daemon reads attached state for skew respawn
+	mu.Unlock()
+	defer func() {
+		mu.Lock()
+		delete(clients, a)
+		job.Attached--
+		_ = job.Write()
+		mu.Unlock()
+		close(a.out)
+	}()
 
 	for {
 		op, payload, err := readFrame(conn)

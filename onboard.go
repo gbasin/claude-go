@@ -5,6 +5,7 @@ package main
 
 import (
 	"claude-go/internal/config"
+	"claude-go/internal/hooks"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -32,6 +33,15 @@ func maybeOnboard(interactive bool) {
 	}
 	m["hasCompletedOnboarding"] = true
 	writeClaudeJSON(p, m)
+	// Setup hooks fire once on first run (real: trigger=startup; and
+	// trigger=maintenance after updates — we don't ship an updater)
+	if cwd, err := os.Getwd(); err == nil {
+		hooks.Run(hooks.Load(cwd), hooks.Setup, map[string]any{
+			"cwd":             cwd,
+			"hook_event_name": "Setup",
+			"trigger":         "startup",
+		}, cwd)
+	}
 }
 
 // onboardThemePicker renders real's first-run theme selector:
