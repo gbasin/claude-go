@@ -433,7 +433,12 @@ func RunWithStore(l *agent.Loop, store Store) {
 							}
 						} else {
 							act := ed.busyAction(k)
-							if k.b == '\r' || k.b == '\n' || act == "chat:sendNow" {
+							if act != "" && act != "chat:sendNow" {
+								// a bound command (meta+o etc.) pressed mid-turn —
+								// replay it at idle rather than eating it or
+								// queueing the letter as text
+								ed.deferredKeys = append(ed.deferredKeys, k)
+							} else if k.b == '\r' || k.b == '\n' || act == "chat:sendNow" {
 								if len(queueBuf) > 0 {
 									if act == "chat:sendNow" {
 										// sendNow jumps ahead of queued messages

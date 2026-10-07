@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -559,4 +560,23 @@ func TestMCPToolError(t *testing.T) {
 	p.sendUntilEchoed(t, line+"\r", `❯ calls:[{"name":"ToolSearch"`, 8)
 	p.waitFor("MCP-FAIL-E2E", 30*time.Second)
 	p.exit()
+}
+
+// TestSettingSourcesSkipsMCP: --setting-sources user skips project-scope
+// .mcp.json — the server never connects.
+func TestSettingSourcesSkipsMCP(t *testing.T) {
+	srv := newSSEMCPServer(t)
+	s := newSession(t)
+	s.writeSettings(`{"enableAllProjectMcpServers":true}`)
+	s.writeFile(".mcp.json", fmt.Sprintf(
+		`{"mcpServers":{"ssetest":{"type":"sse","url":%q}}}`, srv.srv.URL+"/sse"))
+
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions",
+		"--setting-sources", "user")
+	p.sendUntil("/mcp\r", "none configured", 20)
+	p.exit()
+
+	if slices.Contains(srv.sawMethods(), "initialize") {
+		t.Fatal("MCP server connected despite --setting-sources user")
+	}
 }
