@@ -54,7 +54,14 @@ func (j *Job) Write() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(j.dir(), "job.json"), b, 0o600) // holds the attach token
+	// tmp+rename: Beat() rewrites this file every 5s — a plain WriteFile
+	// truncates in place and a concurrent Lookup reads torn JSON (the
+	// resume-live guard missed the job mid-beat under load)
+	tmp := filepath.Join(j.dir(), ".job.json.tmp")
+	if err := os.WriteFile(tmp, b, 0o600); err != nil { // holds the attach token
+		return err
+	}
+	return os.Rename(tmp, filepath.Join(j.dir(), "job.json"))
 }
 
 // Beat refreshes the heartbeat timestamp in place.
