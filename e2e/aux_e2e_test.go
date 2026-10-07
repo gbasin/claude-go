@@ -1145,3 +1145,65 @@ func TestVerboseDebug(t *testing.T) {
 		t.Fatalf("--verbose printed no request debug:\n%s", truncStr(r.stderr, 600))
 	}
 }
+
+// TestAppendSubagentSystemPrompt: --append-subagent-system-prompt lands
+// in the subagent's wire system prompt.
+func TestAppendSubagentSystemPrompt(t *testing.T) {
+	s := newSession(t)
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 60*time.Second,
+		"--mock", "--permission-mode", "bypassPermissions", "-p",
+		`calls:[{"name":"ToolSearch","input":{"query":"select:Agent"}},`+
+			`{"name":"Agent","input":{"description":"d","prompt":"run","subagent_type":"general-purpose","run_in_background":false}}]`,
+		"--append-subagent-system-prompt", "SUB-SYS-MARKER-e2e")
+	s.mustOK(t, r)
+
+	found := false
+	ents, _ := os.ReadDir(rec)
+	for _, e := range ents {
+		if b, err := os.ReadFile(filepath.Join(rec, e.Name())); err == nil {
+			if bytes.Contains(b, []byte("SUB-SYS-MARKER-e2e")) {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("--append-subagent-system-prompt never reached the wire")
+	}
+}
+
+// TestPlanModeInstructions: --plan-mode-instructions lands in the env
+// composite when plan mode is active.
+func TestPlanModeInstructions(t *testing.T) {
+	s := newSession(t)
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 30*time.Second,
+		"--mock", "-p", "hi", "--plan-mode-required",
+		"--plan-mode-instructions", "PLAN-INSTR-e2e")
+	s.mustOK(t, r)
+	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
+	if !bytes.Contains(b, []byte("PLAN-INSTR-e2e")) ||
+		!bytes.Contains(b, []byte("Plan mode is active")) {
+		t.Fatalf("plan-mode instructions missing from wire:\n%s",
+			truncStr(string(b), 600))
+	}
+}
+
+// TestManagedSettingsFlag: --managed-settings <path> makes the file the
+// managed layer — a managed deny applies even in bypass mode.
+func TestManagedSettingsFlag(t *testing.T) {
+	s := newSession(t)
+	managed := filepath.Join(s.home, "managed.json")
+	os.WriteFile(managed, []byte(`{"permissions":{"deny":["Bash(rm *)"]}}`), 0o644)
+	// managed deny overrides even bypass mode
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions",
+		"--managed-settings", managed)
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"rm -rf /tmp/zz-managed-rm"}`+"\r",
+		"❯ tool:Bash", 8)
+	out := p.waitFor("Tool results received", 30*time.Second)
+	p.exit()
+	if strings.Contains(out, "1. Yes") {
+		t.Fatal("managed deny path opened a dialog")
+	}
+}
