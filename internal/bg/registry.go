@@ -26,6 +26,9 @@ type Job struct {
 	Name      string    `json:"name,omitempty"`   // optional session name
 	Prompt    string    `json:"prompt,omitempty"` // first prompt (agents listing)
 	Auth      string    `json:"auth,omitempty"`   // CLAUDE_BG_PTY_AUTH — attach handshake token
+	Version   string    `json:"version,omitempty"`    // cli build that spawned the worker
+	Attached  int       `json:"attached,omitempty"`   // live attach clients — real won't respawn
+	Activity  time.Time `json:"activityAt,omitempty"` // last pty output — idle-stale guard
 }
 
 const heartbeatStale = 15 * time.Second // real heartbeat is 5s; triple it

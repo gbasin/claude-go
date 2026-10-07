@@ -269,3 +269,82 @@ func TestResumeLiveBgRefused(t *testing.T) {
 		return i < 0 || strings.Contains(out[i:], "none")
 	})
 }
+
+// TestDaemonRespawnsVersionStale: the daemon recycles workers built on
+// an older CLI once they sit idle — real's respawnIfIdleStale (upgrade
+// sweep). Attached or busy workers are left alone.
+func TestDaemonRespawnsVersionStale(t *testing.T) {
+	s := newSession(t)
+	sid := newUUID()
+	// worker stamped with an old version — simulates a session started
+	// before a CLI upgrade
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK=1", "CLAUDE_GO_BG_NODAEMON=1",
+		"CLAUDE_BG_CLI_VERSION=0.0.0-old"}, 30*time.Second,
+		"--bg", "-p", "ping", "--session-id", sid)
+	s.mustOK(t, r)
+	short := sid[:8]
+	poll(t, 10*time.Second, "worker in agents", func() bool {
+		return strings.Contains(s.run(t, "agents").stdout, short)
+	})
+	jobFile := filepath.Join(s.home, ".claude", "bg", "jobs", short, "job.json")
+	var j0 struct{ PID int }
+	b, _ := os.ReadFile(jobFile)
+	_ = json.Unmarshal(b, &j0)
+	if j0.PID == 0 {
+		t.Fatal("job record unreadable")
+	}
+
+	dbg := filepath.Join(s.home, "daemon.log")
+	dcmd := exec.Command(binPath, "daemon", "run")
+	dcmd.Dir = s.cwd
+	dcmd.Env = append(append([]string{}, s.env...), "CLAUDE_GO_MOCK=1",
+		"CLAUDE_GO_BG_SWEEP_MS=150", "CLAUDE_GO_BG_SKEW_IDLE_MS=200",
+		"CLAUDE_GO_BG_DEBUG="+dbg)
+	if err := dcmd.Start(); err != nil {
+		t.Fatalf("daemon run: %v", err)
+	}
+	t.Cleanup(func() { dcmd.Process.Kill() })
+	defer s.run(t, "daemon", "stop")
+
+	// daemon terms + respawns the stale worker — same session, new pid
+	fail := func() {
+		dl, _ := os.ReadFile(dbg)
+		var dump []string
+		jd := filepath.Join(s.home, ".claude", "bg", "jobs")
+		filepath.Walk(jd, func(p string, i os.FileInfo, e error) error {
+			if i != nil && !i.IsDir() {
+				b, _ := os.ReadFile(p)
+				dump = append(dump, p[len(jd):]+": "+string(b[:min(300, len(b))]))
+			}
+			return nil
+		})
+		t.Fatalf("worker not respawned\ndaemon.log:\n%s\njobfiles:\n%s", dl, strings.Join(dump, "\n"))
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	var okSkew bool
+	for !okSkew && time.Now().Before(deadline) {
+		b, err := os.ReadFile(jobFile)
+		if err != nil {
+			continue
+		}
+		var j struct {
+			PID     int    `json:"pid"`
+			Version string `json:"version"`
+		}
+		if json.Unmarshal(b, &j) != nil {
+			continue
+		}
+		okSkew = j.PID != 0 && j.PID != j0.PID && j.Version != "0.0.0-old"
+		if !okSkew {
+			time.Sleep(150 * time.Millisecond)
+		}
+	}
+	if !okSkew {
+		fail()
+	}
+	s.runStdin(t, "/exit\r", "attach", sid)
+	poll(t, 10*time.Second, "worker exit", func() bool {
+		out := s.run(t, "agents").stdout
+		return !strings.Contains(out, short)
+	})
+}
