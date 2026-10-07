@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"path/filepath"
 	"time"
 )
@@ -69,6 +70,12 @@ func RunDaemon(version string, sweep time.Duration) int {
 	if sweep <= 0 {
 		sweep = defaultSweep
 	}
+	// worker must sit idle this long before a version-skew respawn —
+	// real's "busy" guard against recycling a session mid-turn
+	skewIdle := 60 * time.Second
+	if ms, err := strconv.Atoi(os.Getenv("CLAUDE_GO_BG_SKEW_IDLE_MS")); err == nil {
+		skewIdle = time.Duration(ms) * time.Millisecond
+	}
 	const idleShutdown = 60 * time.Second
 	st := daemonState{PID: os.Getpid(), StartedAt: time.Now(), Version: version}
 	writeDaemon(st)
@@ -83,6 +90,15 @@ func RunDaemon(version string, sweep time.Duration) int {
 		jobs := allJobs()
 		for _, j := range jobs {
 			if pidAlive(j.PID) {
+				// version-skew: a worker on an older build gets recycled
+				// once idle — real's respawnIfIdleStale (attached or busy
+				// sessions are left alone, as are settled/exited ones)
+				if j.Version != "" && version != "" && j.Version != version &&
+					j.Attached == 0 && time.Since(j.Activity) > skewIdle {
+					dbgf("daemon: respawning version-stale %s (%s→%s)", j.Short, j.Version, version)
+					signalHost(j.PID)
+					termed[j.SessionID] = time.Now()
+				}
 				if time.Since(j.Heartbeat) >= heartbeatStale {
 					if _, ok := termed[j.SessionID]; !ok {
 						signalHost(j.PID) // wedged worker — TERM once
