@@ -95,7 +95,8 @@ Flags:
                                 discarded tail belongs to that turn (refused otherwise)
   --fork-session                fork when resuming
   --no-session-persistence      don't write a transcript
-  --rewind-files <mode>         (accepted)
+  --rewind-files <uuid>         with -r: restore tracked files to the
+                                state at that user message, then exit
   -w, --worktree [name]         create .claude/worktrees/<name> and cd into it
   --project <dir>               run in a different project directory
   --from-pr <ref>               (accepted)
@@ -400,6 +401,33 @@ func main() {
 	if o.dropsTurn != "" && o.resumeAt == "" {
 		fmt.Fprintln(os.Stderr, "Error: --resume-drops-turn requires --resume-session-at")
 		os.Exit(1)
+	}
+	if o.rewindFiles != "" && resumeID == "" {
+		fmt.Fprintln(os.Stderr, "Error: --rewind-files requires --resume")
+		os.Exit(1)
+	}
+	if o.rewindFiles != "" && strings.Join(o.prompt, " ") != "" {
+		fmt.Fprintln(os.Stderr, "Error: --rewind-files is a standalone operation and cannot be used with a prompt")
+		os.Exit(1)
+	}
+	tools.Checkpoints.Init(sessionID) // file-history backups cover tool
+	// writes in both print and interactive modes (real snapshots every
+	// Write); was interactive-only — -p writes left no rewind trail
+
+	if o.rewindFiles != "" {
+		// standalone: restore tracked files to the state at that user
+		// message, then exit — real never enters the session
+		restored, removed, err := session.RewindFiles(cwd, resumeID, o.rewindFiles)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Files rewound to state at message %s (%d restored", o.rewindFiles, restored)
+		if removed > 0 {
+			fmt.Printf(", %d removed", removed)
+		}
+		fmt.Println(")")
+		return
 	}
 
 	agentCleanup := installCLIAgents(o.agentsJSON, cwd)
@@ -852,7 +880,6 @@ func main() {
 	}
 	tools.Interactive = true
 	// entrypoint already set to cli before the aux goroutines (above)
-	tools.Checkpoints.Init(sessionID)
 	if !repl.TrustGate(cwd) {
 		fmt.Println("not trusted — exiting")
 		return
