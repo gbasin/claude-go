@@ -1021,3 +1021,17 @@ func TestSettingSources(t *testing.T) {
 		t.Fatal("project settings ignored under --setting-sources project")
 	}
 }
+
+// TestWorkloadTag: --workload lands as cc_workload in the attribution
+// header on the wire.
+func TestWorkloadTag(t *testing.T) {
+	s := newSession(t)
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 30*time.Second,
+		"--mock", "-p", "hi", "--workload", "e2e-work")
+	s.mustOK(t, r)
+	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
+	if !bytes.Contains(b, []byte("cc_workload=e2e-work")) {
+		t.Fatalf("--workload tag missing from wire:\n%s", truncStr(string(b), 600))
+	}
+}
