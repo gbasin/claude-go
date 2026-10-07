@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"runtime"
 	"time"
 )
@@ -74,11 +75,32 @@ func Load(cwd string) *Settings {
 			merged.Permissions = &Permissions{DefaultMode: managed.Permissions.DefaultMode}
 		}
 	}
-	for _, p := range []string{
-		filepath.Join(ClaudeDir(), "settings.json"),
-		filepath.Join(cwd, ".claude", "settings.json"),
-		filepath.Join(cwd, ".claude", "settings.local.json"),
-	} {
+	// --setting-sources user,project,local picks which tiers load —
+	// managed/policy settings still apply (real can't opt out of those)
+	tierOK := func(tier string) bool {
+		s := os.Getenv("CLAUDE_GO_SETTING_SOURCES")
+		if s == "" {
+			return true
+		}
+		for _, want := range strings.Split(s, ",") {
+			if strings.EqualFold(strings.TrimSpace(want), tier) {
+				return true
+			}
+		}
+		return false
+	}
+	tiers := []struct {
+		name, path string
+	}{
+		{"user", filepath.Join(ClaudeDir(), "settings.json")},
+		{"project", filepath.Join(cwd, ".claude", "settings.json")},
+		{"local", filepath.Join(cwd, ".claude", "settings.local.json")},
+	}
+	for _, tier := range tiers {
+		if !tierOK(tier.name) {
+			continue
+		}
+		p := tier.path
 		var s Settings
 		if b, err := os.ReadFile(p); err == nil {
 			if json.Unmarshal(b, &s) == nil {
