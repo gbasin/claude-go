@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"unicode/utf8"
 
 	"golang.org/x/term"
@@ -382,8 +381,12 @@ func compResize() {
 
 // compWatchResize relays SIGWINCH to compResize until compClose closes done.
 func compWatchResize(done chan struct{}) {
+	if sigResize == 0 {
+		<-done // windows: no resize signals — just park until close
+		return
+	}
 	ch := make(chan os.Signal, 4)
-	signal.Notify(ch, syscall.SIGWINCH)
+	signal.Notify(ch, sigResize)
 	defer signal.Stop(ch)
 	for {
 		select {
