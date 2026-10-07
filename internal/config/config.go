@@ -188,6 +188,9 @@ func OrganizationUUID() string {
 
 // managedSettingsPath: enterprise-managed settings (CC reads these too).
 func managedSettingsPath() string {
+	if p := os.Getenv("CLAUDE_GO_MANAGED_SETTINGS"); p != "" {
+		return p // --managed-settings
+	}
 	if runtime.GOOS == "darwin" {
 		return "/Library/Application Support/ClaudeCode/managed-settings.json"
 	}

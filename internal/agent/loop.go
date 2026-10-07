@@ -1299,11 +1299,17 @@ func (l *Loop) subagentSystemBlocks(msgs []api.Message) []api.SystemBlock {
 		"x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s; cch=%s; cc_is_subagent=true; cc_prompt_id=%s;",
 		version(), ccVersionSuffix(bill.FirstPrompt), l.Entrypoint,
 		cchHash(bill.ReqSeed), bill.PromptID)
-	return []api.SystemBlock{
+	out := []api.SystemBlock{
 		{Type: "text", Text: billing},
 		{Type: "text", Text: `You are a Claude agent, built on Anthropic's Claude Agent SDK.`, CacheControl: &api.CacheControl{Type: "ephemeral"}},
 		{Type: "text", Text: l.AppendSysP, CacheControl: &api.CacheControl{Type: "ephemeral"}},
 	}
+	// --append-subagent-system-prompt rides as a trailing block
+	for _, s := range l.ExtraSystem {
+		out = append(out, api.SystemBlock{Type: "text", Text: s,
+			CacheControl: &api.CacheControl{Type: "ephemeral"}})
+	}
+	return out
 }
 
 // subPromptID: subagent requests carry their own prompt-id (captured —

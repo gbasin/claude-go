@@ -284,6 +284,10 @@ func precomputeCompactionEnabled(cwd string) bool {
 // ShouldAutoCompact: window minus max-output reserve (20000) minus buffers
 // (8000+4000), matching real autoCompactWindow intent.
 func (l *Loop) ShouldAutoCompact(u api.Usage) bool {
+	// --autocompact off disables auto-compaction entirely
+	if os.Getenv("CLAUDE_GO_AUTOCOMPACT") == "off" {
+		return false
+	}
 	if os.Getenv("DISABLE_COMPACT") != "" {
 		return false
 	}
