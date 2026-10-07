@@ -690,7 +690,7 @@ func RegisterSession(sessionID, cwd, name string) error {
 		SessionID: sessionID, CWD: cwd, Name: name,
 		PID: os.Getpid(), TS: time.Now(),
 		Kind:                kind,
-		Entrypoint:          os.Getenv("CLAUDE_CODE_ENTRYPOINT"),
+		Entrypoint:          sessionEntrypoint(),
 		StartedAt:           now,
 		UpdatedAt:           now,
 		Version:             "2.1.292",
@@ -1635,14 +1635,17 @@ func peerTokenClass(tok string) string {
 	return ""
 }
 
-// peerKeyName is real's V(): "<pid>.<sha256(canonical sock path)>.key" —
-// the hash pins the key to the socket it vouches for.
+// peerKeyName is real's V(): "<pid>.<sha256(sock path)>.key" —
+// the hash pins the key to the socket it vouches for. Real hashes the
+// RAW path string (verified live: its key for /tmp/cc-socks/P.sock
+// hashes that literal path, not the /private/tmp EvalSymlinks form) —
+// canonicalizing made our published key invisible to real's
+// reply-target lookup, which is why `from` was dropped on delivery.
 func peerKeyName(pid int, sock string) string {
-	canon, err := filepath.EvalSymlinks(sock)
-	if err != nil || canon == "" {
-		canon, _ = filepath.Abs(sock)
+	if !filepath.IsAbs(sock) {
+		sock, _ = filepath.Abs(sock)
 	}
-	sum := sha256.Sum256([]byte(canon))
+	sum := sha256.Sum256([]byte(sock))
 	return fmt.Sprintf("%d.%x.key", pid, sum)
 }
 
@@ -3039,7 +3042,8 @@ func peerTokenForSock(sockPath string, pidHint int) string {
 	if sockPath == "" {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(canonSock(sockPath)))
+	// real's key-name hash is over the RAW socket path — see peerKeyName
+	sum := sha256.Sum256([]byte(sockPath))
 	suffix := fmt.Sprintf(".%x.key", sum)
 	ents, err := os.ReadDir(registryPath())
 	if err != nil {
@@ -3175,8 +3179,13 @@ func procStartTokenOf(pid int) string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "ps", "-o", "lstart=", "-p",
-		fmt.Sprint(pid)).Output()
+	cmd := exec.CommandContext(ctx, "ps", "-o", "lstart=", "-p",
+		fmt.Sprint(pid))
+	// real runs ps with LC_ALL=C TZ=UTC — the token is UTC-formatted.
+	// Without this the record fails real's pid-reuse vet and peers
+	// can't send to us (procStart mismatch → torn record)
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "TZ=UTC")
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
@@ -3187,4 +3196,14 @@ func procStartTokenOf(pid int) string {
 func ActiveSocketPath() string {
 	s, _ := activeSock.Load().(string)
 	return s
+}
+
+// sessionEntrypoint: real writes "cli" into its session record when
+// CLAUDE_CODE_ENTRYPOINT is unset — omitempty dropped it, which may
+// mark the record as torn for peers that expect it.
+func sessionEntrypoint() string {
+	if v := os.Getenv("CLAUDE_CODE_ENTRYPOINT"); v != "" {
+		return v
+	}
+	return "cli"
 }
