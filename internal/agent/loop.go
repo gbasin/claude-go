@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"claude-go/internal/api"
+	"claude-go/internal/config"
 	"claude-go/internal/hooks"
 	"claude-go/internal/tools"
 )
@@ -94,6 +95,7 @@ type Loop struct {
 	firstPrompt           string
 	sessionStarted        time.Time
 	envSent               bool   // env composite has been on the wire once
+	instrHookFired        bool   // InstructionsLoaded hooks fired once
 	tokensLeft            int64  // <total_tokens> budget (starts 15000000)
 	SessionHookCtx        string // SessionStart hook context — wires as sys msg    // tail messages retained by the last compaction
 	announcedDeferred     string // last announced deferred-tool name set (sorted join)
@@ -346,6 +348,7 @@ func (l *Loop) MarkEnvSent() { l.envSent = true; l.started = true }
 func (l *Loop) ResetForNewSession() {
 	l.envSent = false
 	l.started = false
+	l.instrHookFired = false
 	l.envIdx = 0
 	l.ambientPending = false
 	l.turnCount = 0
@@ -366,6 +369,22 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 	}
 	var msg api.Message
 	if !l.started {
+		// InstructionsLoaded fires once per CLAUDE.md actually read into
+		// the first-turn preamble (real's memory-load hook event)
+		if !l.instrHookFired {
+			l.instrHookFired = true
+			for _, p := range claudeMDPaths(l.CWD) {
+				if fi, err := os.Stat(p); err == nil && fi.Size() > 0 {
+					mt := "project"
+					if strings.HasPrefix(p, config.ClaudeDir()) {
+						mt = "user"
+					}
+					l.runHook(hooks.InstructionsLoaded, map[string]any{
+						"file_path": p, "memory_type": mt, "load_reason": "session_start",
+					})
+				}
+			}
+		}
 		msg = FirstUserMessage(prompt, l.CWD, l.User.Email, l.MemoryPaused)
 		if l.handbackTail {
 			var blks []api.ContentBlock
