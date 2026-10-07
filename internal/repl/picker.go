@@ -192,7 +192,7 @@ func pickSession(cwd string, ks *keySource, selfID string) string {
 				meta += "  " + dim + tailRunes(session.SlugPath(in.Slug), 30) + reset
 			}
 			if short, ok := running[in.ID]; ok {
-				line += fmt.Sprintf("  %sbg:%s%s", yellow, short, reset)
+				meta += fmt.Sprintf("  %sbg:%s%s", yellow, short, reset)
 			}
 			if i == sel {
 				emit(fmt.Sprintf(" %s❯%s %s", cyan, "\x1b[39m", title))
