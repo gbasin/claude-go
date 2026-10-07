@@ -770,3 +770,15 @@ func TestAdvisorFlag(t *testing.T) {
 	r := s.run(t, "--mock", "--advisor", "haiku", "-p", "ok")
 	s.mustOK(t, r)
 }
+
+// TestPrefillFlag: --prefill <text> seeds the interactive input buffer
+// without submitting — real's deep-link launch path.
+func TestPrefillFlag(t *testing.T) {
+	s := newSession(t)
+	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK=1"}, "--mock", "--prefill", "draft seed text")
+	defer p.exit()
+	p.waitFor("draft seed text", 10*time.Second)
+	// not submitted — no turn runs until Enter
+	p.send("\r")
+	p.waitFor("Mock response to: draft seed text", 30*time.Second)
+}

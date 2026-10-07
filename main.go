@@ -131,7 +131,7 @@ Flags:
   --advisor <model>             server-side advisor model (alias or full ID)
   --proactivity <level>         (accepted)
   --prompt-suggestions [mode]   (accepted)
-  --prefill <text>              (accepted)
+  --prefill <text>              seed the input buffer without submitting
   --prefill-b64 <b64>           (accepted)
   --teammate-mode <mode>        (accepted)
   --messaging-socket-path <p>   (accepted)
