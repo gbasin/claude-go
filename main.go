@@ -392,6 +392,18 @@ func main() {
 		if !o.forkSess && resumeID != "" {
 			sessionID = resumeID
 		}
+		// real: "Can't open — this session is running in another terminal"
+		// — a live bg worker owns the transcript; a second writer would
+		// interleave records. --fork-session is the sanctioned bypass, and
+		// a bg host's inner session resumes its own transcript (daemon
+		// respawns mark the job live before the child starts).
+		if resumeID != "" && !o.forkSess && os.Getenv("CLAUDE_CODE_SESSION_KIND") != "bg" {
+			if j, _ := bg.Lookup(resumeID); j != nil && j.Alive() {
+				fmt.Fprintf(os.Stderr,
+					"Can't open — this session is running in another terminal (claude attach %s)\n", j.Short)
+				os.Exit(1)
+			}
+		}
 	}
 	// real's flag wiring: these only make sense attached to a resume
 	if o.resumeAt != "" && resumeID == "" {
