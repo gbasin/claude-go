@@ -58,6 +58,7 @@ type editor struct {
 	onFastMode      func()
 	insertRemaps    []string // vimInsertModeRemaps: 2-char sequences -> <Esc>
 	lastIns         rune
+	insGroup        bool // mid insert-group — push undo once per burst
 	vimOp           rune
 	vimFind         rune
 	vimPendingG     rune
@@ -380,6 +381,11 @@ func (e *editor) readLine(ks *keySource) readResult {
 
 func (e *editor) insertKey(k key) *readResult {
 	c := k.b
+	wasInsert := e.insGroup
+	e.insGroup = false // any non-insert key closes the previous group
+	if os.Getenv("CG_DBGKEY") != "" {
+		fmt.Fprintf(os.Stderr, "[dbgkey b=%d seq=%q] ", c, k.seq)
+	}
 	if k.mod&modCtrl != 0 && k.r >= 'a' && k.r <= 'z' {
 		c = byte(k.r) - 'a' + 1 // CSI-u ctrl+letter -> control byte
 	}
@@ -571,8 +577,16 @@ func (e *editor) insertKey(k key) *readResult {
 			}
 		}
 		e.lastIns = k.r
+		if !wasInsert {
+			e.pushUndo()
+		}
+		e.insGroup = true
 		e.insert(k.r)
 	case c >= 32 && c < 127 && k.mod&^modShift == 0:
+		if !wasInsert {
+			e.pushUndo()
+		}
+		e.insGroup = true
 		e.insert(rune(c))
 	}
 	return nil
