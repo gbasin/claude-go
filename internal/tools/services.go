@@ -707,6 +707,9 @@ func RegisterSession(sessionID, cwd, name string) error {
 		Tmux:                tmuxLabel(),
 		MessagingSocketPath: socketPath(), // peers can push instantly
 	}
+	// stash for the outbound <cross-session-message> envelope — real
+	// renders sender attribution + reply addressing from these attrs
+	selfPeerInfo.Store(struct{ Name, SessionID string }{Name: name, SessionID: sessionID})
 	b, err := json.MarshalIndent(e, "", "  ")
 	if err != nil {
 		return err
@@ -2219,6 +2222,55 @@ const (
 	peerDedupCap    = 1024
 )
 
+// selfPeerInfo carries this session's registered identity for the
+// outbound <cross-session-message> envelope — real renders the sender
+// from `from-name` (and replies to `from`), which live in the message
+// content wrapper, not the frame's `from` field.
+var selfPeerInfo atomic.Value // struct{Name, SessionID string}
+
+// wrapPeerOutbound builds real's cross-session envelope:
+//   <cross-session-message from="uds:..." from-session="<uuid>"
+//     hop-chain="<64-hex>" from-name="<name>" from-mode="prompting">
+//     body </cross-session-message>
+// Live-verified: without it real renders the body but drops all sender
+// attribution, so the receiving session can't reply to the sender.
+func wrapPeerOutbound(body string) string {
+	// real's CWe(): break any tag-shape in the body that would re-parse
+	esc := strings.NewReplacer(
+		"</cross-session-message", "<\\/cross-session-message",
+		"<cross-session-message", "<\\cross-session-message",
+	).Replace(body)
+	var attrs []string
+	if from := udsAddr(socketPath()); from != "" {
+		attrs = append(attrs, fmt.Sprintf(`from=%q`, from))
+	}
+	if self, ok := selfPeerInfo.Load().(struct{ Name, SessionID string }); ok {
+		if isUUID(self.SessionID) {
+			attrs = append(attrs, fmt.Sprintf(`from-session=%q`, self.SessionID))
+		}
+		sum := sha256.Sum256([]byte(self.SessionID))
+		// real's hop entries are 24-hex (12 bytes) — observed live:
+		// `hop-chain="fd5a71268e410e98c7d2fdb5"`
+		attrs = append(attrs, fmt.Sprintf(`hop-chain=%q`, hex.EncodeToString(sum[:12])))
+		name := strings.Map(func(r rune) rune {
+			if strings.ContainsRune(`"<>`+"\n\r", r) {
+				return -1
+			}
+			return r
+		}, self.Name)
+		if name != "" {
+			attrs = append(attrs, fmt.Sprintf(`from-name=%q`, name))
+		}
+	}
+	mode := "prompting"
+	if currentPermMode() == "bypassPermissions" {
+		mode = "bypass"
+	}
+	attrs = append(attrs, fmt.Sprintf(`from-mode=%q`, mode))
+	return fmt.Sprintf("<cross-session-message %s> %s </cross-session-message>",
+		strings.Join(attrs, " "), esc)
+}
+
 var peerSeenIDs = struct {
 	mu sync.Mutex
 	m  map[string]time.Time
@@ -2988,6 +3040,9 @@ func socketDeliver(e sessionEntry, m mailMsg) (bool, string) {
 	if m.Summary != "" {
 		content = m.Summary + ": " + m.Message
 	}
+	// real's hUt(): the envelope lives in message.content — sender
+	// attribution + reply addressing ride inside, not in frame fields
+	content = wrapPeerOutbound(content)
 	msgID := newUUID()
 	frame := peerFrame{
 		Type: "user", MsgV: 1, MsgID: msgID,
