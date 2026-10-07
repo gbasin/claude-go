@@ -4,6 +4,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -511,6 +512,17 @@ func main() {
 	}
 	var promptAtt string
 	loop := agent.NewLoop(client, cwd)
+	// --prefill / --prefill-b64: assistant continuation appended after the
+	// first user message (real's prefill / continuation)
+	if pf := os.Getenv("CLAUDE_GO_PREFILL"); pf != "" {
+		loop.Prefill = pf
+	} else if pb := os.Getenv("CLAUDE_GO_PREFILL_B64"); pb != "" {
+		if dec, err := base64.StdEncoding.DecodeString(pb); err == nil {
+			loop.Prefill = string(dec)
+		}
+	}
+	// --json-schema → output_config.format on the wire
+	loop.OutputSchema = o.jsonSchema
 	if !o.mockMode {
 	}
 	loop.Entrypoint = "sdk-cli"
@@ -845,7 +857,11 @@ func main() {
 	}
 
 	if o.debug || o.verbose {
-		os.Setenv("CLAUDE_GO_DEBUG", "1")
+		// -d/--verbose enables all debug channels at once (per-channel
+		// CLAUDE_GO_DEBUG_{KB,HTTP,REQ} still work individually)
+		for _, ch := range []string{"", "_KB", "_HTTP", "_REQ"} {
+			os.Setenv("CLAUDE_GO_DEBUG"+ch, "1")
+		}
 	}
 	if o.debugFile != "" {
 		if f, err := os.OpenFile(o.debugFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {

@@ -196,6 +196,10 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		}
 	case "init":
 		dprintln("  analyzing codebase → CLAUDE.md …")
+		hooks.Run(l.Hooks, hooks.Setup, map[string]any{
+			"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+			"trigger": "init", "hook_event_name": "Setup",
+		}, l.ToolCtx.CWD)
 		body := bundledInit
 		if foreignAgentConfigExists() {
 			body = strings.Replace(body, "\n- Do not make up information",

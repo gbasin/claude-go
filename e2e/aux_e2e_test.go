@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -882,5 +883,327 @@ func Test401RefreshRetry(t *testing.T) {
 	}
 	if secondAuth != "Bearer fresh-token-2" {
 		t.Fatalf("retry didn't carry new token: %q", secondAuth)
+	}
+}
+
+// TestPrefillWire: --prefill/--prefill-b64 append an assistant
+// continuation block after the first user message (real's prefill).
+func TestPrefillWire(t *testing.T) {
+	s := newSession(t)
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 30*time.Second,
+		"--mock", "-p", "hi", "--prefill", "PREFILLED-TXT")
+	s.mustOK(t, r)
+
+	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
+	if !bytes.Contains(b, []byte(`"assistant"`)) || !bytes.Contains(b, []byte("PREFILLED-TXT")) {
+		t.Fatalf("prefill missing from wire:\n%s", truncStr(string(b), 800))
+	}
+
+	// base64 form decodes to the same block
+	rec2 := t.TempDir() + "/reqs2"
+	r = s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec2}, 30*time.Second,
+		"--mock", "-p", "hi", "--prefill-b64", "UFJFRklMTEVELUI2NA==")
+	s.mustOK(t, r)
+	b, _ = os.ReadFile(filepath.Join(rec2, "001.json"))
+	if !bytes.Contains(b, []byte("PREFILLED-B64")) {
+		t.Fatalf("prefill-b64 missing from wire:\n%s", truncStr(string(b), 800))
+	}
+}
+
+// TestBetasHeader: --betas merges into the anthropic-beta request header.
+func TestBetasHeader(t *testing.T) {
+	var betaHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/messages") {
+			betaHeader = r.Header.Get("anthropic-beta")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"fable\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n")
+		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n")
+		fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n")
+		fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer srv.Close()
+
+	s := newSession(t)
+	r := s.runEx(t, []string{
+		"ANTHROPIC_BASE_URL=" + srv.URL,
+		"CLAUDE_GO_TOKEN=test-token",
+	}, 30*time.Second, "-p", "hi", "--betas", "e2e-beta-flag-1,e2e-beta-flag-2")
+	s.mustOK(t, r)
+	if !strings.Contains(betaHeader, "e2e-beta-flag-1") ||
+		!strings.Contains(betaHeader, "e2e-beta-flag-2") {
+		t.Fatalf("anthropic-beta header missing flags: %q", betaHeader)
+	}
+}
+
+// TestMaxThinkingTokens: --max-thinking-tokens sets thinking.budget_tokens
+// on the wire; MAX_THINKING_TOKENS env caps it downward.
+func TestMaxThinkingTokens(t *testing.T) {
+	s := newSession(t)
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 30*time.Second,
+		"--mock", "-p", "hi", "--thinking", "medium", "--max-thinking-tokens", "12345")
+	s.mustOK(t, r)
+	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
+	if !bytes.Contains(b, []byte(`"budget_tokens":12345`)) {
+		t.Fatalf("--max-thinking-tokens missing from wire:\n%s", truncStr(string(b), 500))
+	}
+
+	// env cap wins over the flag when smaller
+	rec2 := t.TempDir() + "/reqs2"
+	r = s.runEx(t, []string{
+		"CLAUDE_GO_MOCK_RECORD=" + rec2, "MAX_THINKING_TOKENS=500",
+	}, 30*time.Second, "--mock", "-p", "hi", "--thinking", "medium",
+		"--max-thinking-tokens", "12345")
+	s.mustOK(t, r)
+	b, _ = os.ReadFile(filepath.Join(rec2, "001.json"))
+	if !bytes.Contains(b, []byte(`"budget_tokens":500`)) {
+		t.Fatalf("MAX_THINKING_TOKENS cap missing:\n%s", truncStr(string(b), 500))
+	}
+}
+
+// TestBareMode: --bare suppresses auto-discovery — no CLAUDE.md, no hooks,
+// no custom commands.
+func TestBareMode(t *testing.T) {
+	s := newSession(t)
+	s.writeFile("CLAUDE.md", "# BARE-SHOULD-NOT-LOAD\n")
+	s.writeFile(".claude/commands/probe.md", "probe-body")
+	hookFired := filepath.Join(s.cwd, "bare-hook.ran")
+	s.writeFile(".claude/settings.json",
+		`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"touch `+hookFired+`"}]}]}}`)
+
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 30*time.Second,
+		"--mock", "-p", "hi", "--bare")
+	s.mustOK(t, r)
+
+	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
+	if bytes.Contains(b, []byte("BARE-SHOULD-NOT-LOAD")) {
+		t.Fatal("--bare still loaded CLAUDE.md")
+	}
+	if fileExists(hookFired) {
+		t.Fatal("--bare still ran hooks")
+	}
+	// sanity: without --bare the same session loads both
+	rec2 := t.TempDir() + "/reqs2"
+	r = s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec2}, 30*time.Second,
+		"--mock", "-p", "hi")
+	s.mustOK(t, r)
+	b, _ = os.ReadFile(filepath.Join(rec2, "001.json"))
+	if !bytes.Contains(b, []byte("BARE-SHOULD-NOT-LOAD")) {
+		t.Fatal("CLAUDE.md missing without --bare")
+	}
+}
+
+// TestSettingSources: --setting-sources user,local ignores the project
+// layer — tasks.enabled in .claude/settings.json doesn't gate on.
+func TestSettingSources(t *testing.T) {
+	s := newSession(t)
+	s.writeSettings(`{"tasks":{"enabled":true}}`)
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 30*time.Second,
+		"--mock", "-p", "hi", "--setting-sources", "user")
+	s.mustOK(t, r)
+	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
+	if bytes.Contains(b, []byte("TaskCreate")) {
+		t.Fatal("project-layer tasks.enabled leaked through --setting-sources user")
+	}
+
+	// and the project layer alone loads the gate
+	rec2 := t.TempDir() + "/reqs2"
+	r = s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec2}, 30*time.Second,
+		"--mock", "-p", "hi", "--setting-sources", "project")
+	s.mustOK(t, r)
+	b, _ = os.ReadFile(filepath.Join(rec2, "001.json"))
+	if !bytes.Contains(b, []byte("TaskCreate")) {
+		t.Fatal("project settings ignored under --setting-sources project")
+	}
+}
+
+// TestWorkloadTag: --workload lands as cc_workload in the attribution
+// header on the wire.
+func TestWorkloadTag(t *testing.T) {
+	s := newSession(t)
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 30*time.Second,
+		"--mock", "-p", "hi", "--workload", "e2e-work")
+	s.mustOK(t, r)
+	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
+	if !bytes.Contains(b, []byte("cc_workload=e2e-work")) {
+		t.Fatalf("--workload tag missing from wire:\n%s", truncStr(string(b), 600))
+	}
+}
+
+// TestFallbackModel: --fallback-model walks the chain on retryable
+// errors — first model gets 529, fallback serves the response.
+func TestFallbackModel(t *testing.T) {
+	var sawModels []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/v1/messages") {
+			json.NewEncoder(w).Encode(map[string]any{})
+			return
+		}
+		var body struct {
+			Model string `json:"model"`
+		}
+		b, _ := io.ReadAll(r.Body)
+		json.Unmarshal(b, &body)
+		sawModels = append(sawModels, body.Model)
+		// only the main lane's model gets the 529 — aux probes (haiku)
+		// must serve normally or they'd eat the retry
+		if body.Model == "claude-fable-5-1" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(529)
+			fmt.Fprint(w, `{"type":"error","error":{"type":"overloaded_error","message":"busy"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"fb\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n")
+		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"FALLBACK-OK\"}}\n\n")
+		fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n")
+		fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer srv.Close()
+
+	s := newSession(t)
+	r := s.runEx(t, []string{
+		"ANTHROPIC_BASE_URL=" + srv.URL,
+		"CLAUDE_GO_TOKEN=test-token",
+	}, 30*time.Second, "-p", "hi", "--fallback-model", "claude-e2e-fallback")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "FALLBACK-OK") {
+		t.Fatalf("fallback response missing: %s", truncStr(r.stdout, 600))
+	}
+	if !slices.Contains(sawModels, "claude-e2e-fallback") {
+		t.Fatalf("fallback chain not walked: %v", sawModels)
+	}
+}
+
+// TestJSONSchemaWire: --json-schema lands as output_config.format on the
+// wire (real's structured output), not just client-side wrapping.
+func TestJSONSchemaWire(t *testing.T) {
+	s := newSession(t)
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 30*time.Second,
+		"--mock", "-p", "hi", "--json-schema",
+		`{"type":"object","properties":{"answer":{"type":"string"}}}`)
+	s.mustOK(t, r)
+	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
+	if !bytes.Contains(b, []byte(`"json_schema"`)) ||
+		!bytes.Contains(b, []byte(`"answer"`)) {
+		t.Fatalf("--json-schema missing from output_config:\n%s",
+			truncStr(string(b), 800))
+	}
+}
+
+// TestAppendSystemPromptWire + TestInitOnly: cheap flag-wire checks.
+func TestAppendSystemPromptWire(t *testing.T) {
+	s := newSession(t)
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 30*time.Second,
+		"--mock", "-p", "hi", "--append-system-prompt", "EXTRA-SYS-MARKER")
+	s.mustOK(t, r)
+	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
+	if !bytes.Contains(b, []byte("EXTRA-SYS-MARKER")) {
+		t.Fatal("--append-system-prompt missing from wire")
+	}
+}
+
+func TestInitOnly(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "--init-only")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout+r.stderr, "initialized") {
+		t.Fatalf("--init-only didn't print init status: %s", r.stdout)
+	}
+}
+
+// TestVerboseDebug: -d/--verbose enables debug channels — request debug
+// lines appear on stderr for real HTTP requests.
+func TestVerboseDebug(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"fable\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n")
+		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n")
+		fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n")
+		fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer srv.Close()
+
+	s := newSession(t)
+	r := s.runEx(t, []string{
+		"ANTHROPIC_BASE_URL=" + srv.URL, "CLAUDE_GO_TOKEN=test-token",
+	}, 30*time.Second, "-p", "hi", "--verbose")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stderr, "POST /v1/messages") &&
+		!strings.Contains(r.stderr, "v1/messages") {
+		t.Fatalf("--verbose printed no request debug:\n%s", truncStr(r.stderr, 600))
+	}
+}
+
+// TestAppendSubagentSystemPrompt: --append-subagent-system-prompt lands
+// in the subagent's wire system prompt.
+func TestAppendSubagentSystemPrompt(t *testing.T) {
+	s := newSession(t)
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 60*time.Second,
+		"--mock", "--permission-mode", "bypassPermissions", "-p",
+		`calls:[{"name":"ToolSearch","input":{"query":"select:Agent"}},`+
+			`{"name":"Agent","input":{"description":"d","prompt":"run","subagent_type":"general-purpose","run_in_background":false}}]`,
+		"--append-subagent-system-prompt", "SUB-SYS-MARKER-e2e")
+	s.mustOK(t, r)
+
+	found := false
+	ents, _ := os.ReadDir(rec)
+	for _, e := range ents {
+		if b, err := os.ReadFile(filepath.Join(rec, e.Name())); err == nil {
+			if bytes.Contains(b, []byte("SUB-SYS-MARKER-e2e")) {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("--append-subagent-system-prompt never reached the wire")
+	}
+}
+
+// TestPlanModeInstructions: --plan-mode-instructions lands in the env
+// composite when plan mode is active.
+func TestPlanModeInstructions(t *testing.T) {
+	s := newSession(t)
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 30*time.Second,
+		"--mock", "-p", "hi", "--plan-mode-required",
+		"--plan-mode-instructions", "PLAN-INSTR-e2e")
+	s.mustOK(t, r)
+	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
+	if !bytes.Contains(b, []byte("PLAN-INSTR-e2e")) ||
+		!bytes.Contains(b, []byte("Plan mode is active")) {
+		t.Fatalf("plan-mode instructions missing from wire:\n%s",
+			truncStr(string(b), 600))
+	}
+}
+
+// TestManagedSettingsFlag: --managed-settings <path> makes the file the
+// managed layer — a managed deny applies even in bypass mode.
+func TestManagedSettingsFlag(t *testing.T) {
+	s := newSession(t)
+	managed := filepath.Join(s.home, "managed.json")
+	os.WriteFile(managed, []byte(`{"permissions":{"deny":["Bash(rm *)"]}}`), 0o644)
+	// managed deny overrides even bypass mode
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions",
+		"--managed-settings", managed)
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"rm -rf /tmp/zz-managed-rm"}`+"\r",
+		"❯ tool:Bash", 8)
+	out := p.waitFor("Tool results received", 30*time.Second)
+	p.exit()
+	if strings.Contains(out, "1. Yes") {
+		t.Fatal("managed deny path opened a dialog")
 	}
 }
