@@ -372,7 +372,7 @@ func stubBinDir() string {
 			"open", "xdg-open", "open2",
 			"osascript", "notify-send",
 			"pbcopy", "pbpaste", "pngpaste",
-			"security",
+			"security", "tmux",
 		} {
 			os.WriteFile(filepath.Join(d, name),
 				[]byte("#!/bin/sh\nexit 0\n"), 0o755)

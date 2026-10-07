@@ -111,9 +111,6 @@ func (rawHTTP11RoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 		// keep-alive pool — the server closes its side after the body.
 		rc.closed = true
 	}
-	if os.Getenv("CLAUDE_GO_DEBUG_HTTP") != "" {
-		fmt.Fprintf(os.Stderr, "[debug] %s %s -> %d\n", req.Method, req.URL.String(), resp.StatusCode)
-	}
 	// return conn to pool when the body is fully consumed or closed;
 	// a cancelled request ctx must also kill the conn or Read blocks
 	// forever (esc-interrupt during a long stream relies on this)

@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1033,5 +1034,114 @@ func TestWorkloadTag(t *testing.T) {
 	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
 	if !bytes.Contains(b, []byte("cc_workload=e2e-work")) {
 		t.Fatalf("--workload tag missing from wire:\n%s", truncStr(string(b), 600))
+	}
+}
+
+// TestFallbackModel: --fallback-model walks the chain on retryable
+// errors — first model gets 529, fallback serves the response.
+func TestFallbackModel(t *testing.T) {
+	var sawModels []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/v1/messages") {
+			json.NewEncoder(w).Encode(map[string]any{})
+			return
+		}
+		var body struct {
+			Model string `json:"model"`
+		}
+		b, _ := io.ReadAll(r.Body)
+		json.Unmarshal(b, &body)
+		sawModels = append(sawModels, body.Model)
+		// only the main lane's model gets the 529 — aux probes (haiku)
+		// must serve normally or they'd eat the retry
+		if body.Model == "claude-fable-5-1" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(529)
+			fmt.Fprint(w, `{"type":"error","error":{"type":"overloaded_error","message":"busy"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"fb\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n")
+		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"FALLBACK-OK\"}}\n\n")
+		fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n")
+		fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer srv.Close()
+
+	s := newSession(t)
+	r := s.runEx(t, []string{
+		"ANTHROPIC_BASE_URL=" + srv.URL,
+		"CLAUDE_GO_TOKEN=test-token",
+	}, 30*time.Second, "-p", "hi", "--fallback-model", "claude-e2e-fallback")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "FALLBACK-OK") {
+		t.Fatalf("fallback response missing: %s", truncStr(r.stdout, 600))
+	}
+	if !slices.Contains(sawModels, "claude-e2e-fallback") {
+		t.Fatalf("fallback chain not walked: %v", sawModels)
+	}
+}
+
+// TestJSONSchemaWire: --json-schema lands as output_config.format on the
+// wire (real's structured output), not just client-side wrapping.
+func TestJSONSchemaWire(t *testing.T) {
+	s := newSession(t)
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 30*time.Second,
+		"--mock", "-p", "hi", "--json-schema",
+		`{"type":"object","properties":{"answer":{"type":"string"}}}`)
+	s.mustOK(t, r)
+	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
+	if !bytes.Contains(b, []byte(`"json_schema"`)) ||
+		!bytes.Contains(b, []byte(`"answer"`)) {
+		t.Fatalf("--json-schema missing from output_config:\n%s",
+			truncStr(string(b), 800))
+	}
+}
+
+// TestAppendSystemPromptWire + TestInitOnly: cheap flag-wire checks.
+func TestAppendSystemPromptWire(t *testing.T) {
+	s := newSession(t)
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 30*time.Second,
+		"--mock", "-p", "hi", "--append-system-prompt", "EXTRA-SYS-MARKER")
+	s.mustOK(t, r)
+	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
+	if !bytes.Contains(b, []byte("EXTRA-SYS-MARKER")) {
+		t.Fatal("--append-system-prompt missing from wire")
+	}
+}
+
+func TestInitOnly(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "--init-only")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout+r.stderr, "initialized") {
+		t.Fatalf("--init-only didn't print init status: %s", r.stdout)
+	}
+}
+
+// TestVerboseDebug: -d/--verbose enables debug channels — request debug
+// lines appear on stderr for real HTTP requests.
+func TestVerboseDebug(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"fable\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n")
+		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n")
+		fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n")
+		fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer srv.Close()
+
+	s := newSession(t)
+	r := s.runEx(t, []string{
+		"ANTHROPIC_BASE_URL=" + srv.URL, "CLAUDE_GO_TOKEN=test-token",
+	}, 30*time.Second, "-p", "hi", "--verbose")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stderr, "POST /v1/messages") &&
+		!strings.Contains(r.stderr, "v1/messages") {
+		t.Fatalf("--verbose printed no request debug:\n%s", truncStr(r.stderr, 600))
 	}
 }
