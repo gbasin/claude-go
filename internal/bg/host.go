@@ -1,6 +1,7 @@
 package bg
 
 import (
+	"claude-go/internal/api"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -89,6 +90,8 @@ func RunHost(o HostOpts) int {
 		Name:      o.Name,
 		Prompt:    o.Prompt,
 		Auth:      os.Getenv("CLAUDE_BG_PTY_AUTH"), // attach handshake token
+		Version:   cliVersion(),
+		Activity:  time.Now(),
 	}
 	if err := os.MkdirAll(job.dir(), 0o755); err != nil {
 		return fatalHost("job dir", err)
@@ -194,6 +197,7 @@ func RunHost(o HostOpts) int {
 				if dbgLog != nil {
 					dbgLog.Write(buf[:n])
 				}
+				job.Activity = time.Now() // real's lastInputAt — version-skew respawn skips busy workers
 				broadcast(buf[:n])
 			}
 			if err != nil {
@@ -219,9 +223,14 @@ func RunHost(o HostOpts) int {
 	}()
 	sigc := make(chan os.Signal, 2)
 	signal.Notify(sigc, syscall.SIGTERM, syscall.SIGINT)
+	signalled := false
 	go func() {
 		select {
 		case <-sigc:
+			// signal death keeps the job dir — the daemon may respawn
+			// the session; only a clean child exit or `claude stop` is
+			// a real "session over"
+			signalled = true
 			killChildPgrp(cmd.Process.Pid, syscall.SIGTERM)
 			<-done
 		case <-done:
@@ -266,7 +275,9 @@ func RunHost(o HostOpts) int {
 	}
 	_ = os.WriteFile(filepath.Join(jobsRoot(), "last-exit.log"),
 		[]byte(fmt.Sprintf("%s %s exited: child=%v\n%s", time.Now().Format(time.RFC3339), job.SessionID, waitErr, outTail)), 0o644)
-	job.Remove()
+	if !signalled {
+		job.Remove()
+	}
 	return 0
 }
 
@@ -304,11 +315,15 @@ func serveAttach(conn net.Conn, master *os.File, job *Job,
 	go a.pump()
 	mu.Lock()
 	clients[a] = true
+	job.Attached++
+	_ = job.Write() // daemon reads attached state for skew respawn
 	snap := append([]byte(nil), (*tail)...)
 	mu.Unlock()
 	defer func() {
 		mu.Lock()
 		delete(clients, a)
+		job.Attached--
+		_ = job.Write()
 		mu.Unlock()
 		close(a.out)
 	}()
@@ -375,4 +390,14 @@ func dbgf(format string, args ...any) {
 	if dbgLog != nil {
 		fmt.Fprintf(dbgLog, "bg-host[%d] "+format+"\n", append([]any{os.Getpid()}, args...)...)
 	}
+}
+
+// cliVersion is the binary version stamped into job.json — a worker
+// carries the version of the CLI that spawned it (env override simulates
+// an older-binary worker for tests).
+func cliVersion() string {
+	if v := os.Getenv("CLAUDE_BG_CLI_VERSION"); v != "" {
+		return v
+	}
+	return api.Version
 }
