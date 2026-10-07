@@ -261,8 +261,16 @@ func TestResumeLiveBgRefused(t *testing.T) {
 	r = s.run(t, "--mock", "-r", sid, "--fork-session", "-p", "branch off")
 	s.mustOK(t, r)
 
-	// cleanup
-	s.runStdin(t, "/exit\r", "attach", sid)
+	// cleanup — keep poking /exit; a host that's slow to bring its
+	// socket up fails the attach fast so we can retry
+	for i := 0; i < 5; i++ {
+		s.runStdin(t, "/exit\r", "attach", sid)
+		out := s.run(t, "agents").stdout
+		if !strings.Contains(out, short) {
+			break
+		}
+		time.Sleep(400 * time.Millisecond)
+	}
 	poll(t, 30*time.Second, "worker exit", func() bool {
 		out := s.run(t, "agents").stdout
 		i := strings.Index(out, "background sessions:")
@@ -342,7 +350,17 @@ func TestDaemonRespawnsVersionStale(t *testing.T) {
 	if !okSkew {
 		fail()
 	}
-	s.runStdin(t, "/exit\r", "attach", sid)
+	// keep poking /exit — the respawned host's rendezvous socket may not
+	// be up yet when we first attach (a dead socket fails fast)
+	for i := 0; i < 5; i++ {
+		r := s.runStdin(t, "/exit\r", "attach", sid)
+		out := s.run(t, "agents").stdout
+		if !strings.Contains(out, short) {
+			break
+		}
+		_ = r
+		time.Sleep(400 * time.Millisecond)
+	}
 	poll(t, 30*time.Second, "worker exit", func() bool {
 		out := s.run(t, "agents").stdout
 		return !strings.Contains(out, short)

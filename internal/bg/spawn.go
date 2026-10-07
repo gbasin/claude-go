@@ -12,6 +12,7 @@ import (
 // session keeps running headless) and --bg (fresh session id, optional
 // first prompt).
 type SpawnOpts struct {
+	Auth string // optional: pre-minted attach token (daemon respawn)
 	SessionID  string
 	CWD        string
 	ResumeFrom string
@@ -41,10 +42,18 @@ func Spawn(o SpawnOpts) (*exec.Cmd, error) {
 	cmd.Env = os.Environ()
 	cmd.SysProcAttr = detachAttr()
 	// per-worker attach auth — real's CLAUDE_BG_PTY_AUTH: without it any
-	// local process that finds the rendezvous socket could drive the pty
-	var tok [16]byte
-	if _, err := rand.Read(tok[:]); err == nil {
-		cmd.Env = append(cmd.Env, "CLAUDE_BG_PTY_AUTH="+hex.EncodeToString(tok[:]))
+	// local process that finds the rendezvous socket could drive the pty.
+	// A daemon respawn may pass the token it stamped in job.json — reuse
+	// it so attach never sees a token/pid mismatch window.
+	tok := o.Auth
+	if tok == "" {
+		var b [16]byte
+		if _, err := rand.Read(b[:]); err == nil {
+			tok = hex.EncodeToString(b[:])
+		}
+	}
+	if tok != "" {
+		cmd.Env = append(cmd.Env, "CLAUDE_BG_PTY_AUTH="+tok)
 	}
 	cmd.Stdin = nil
 	devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
