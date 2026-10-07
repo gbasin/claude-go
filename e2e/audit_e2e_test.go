@@ -915,3 +915,30 @@ func TestHookFileChanged(t *testing.T) {
 		t.Fatalf("FileChanged missing file_path %q:\n%s", target, b)
 	}
 }
+
+// TestDeferredKeyMidTurn: a bound command pressed mid-turn replays at
+// idle — meta+o toggles fast mode even while a tool is running.
+func TestDeferredKeyMidTurn(t *testing.T) {
+	s := newSession(t)
+	dump := filepath.Join(s.cwd, "deferred.jsonl")
+	s.writeFile(".claude/settings.json",
+		`{"hooks":{"PostModelSwitch":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}]}}`)
+	marker := filepath.Join(s.cwd, "slow.marker")
+	s.writeFile(".claude/settings.json",
+		`{"hooks":{`+
+			`"PostToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"touch `+marker+` && sleep 2"}]}],`+
+			`"PostModelSwitch":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}]`+
+			`}}`)
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"echo hi"}`+"\r", "❯ tool:Bash", 8)
+	p.waitFor("running PostToolUse hook", 20*time.Second)
+	p.send("\x1bo") // meta+o mid-turn — should replay when the turn ends
+	p.waitFor("· done", 30*time.Second)
+	p.exit()
+
+	b, _ := os.ReadFile(dump)
+	if !strings.Contains(string(b), `"hook_event_name":"PostModelSwitch"`) {
+		t.Fatalf("meta+o mid-turn never replayed:\n%s", b)
+	}
+}

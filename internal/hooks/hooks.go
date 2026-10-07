@@ -99,12 +99,18 @@ type Config map[string][]Matcher
 
 // Load reads hooks from user + project settings files.
 func Load(cwd string) Config {
+	if os.Getenv("CLAUDE_CODE_SIMPLE") != "" {
+		return Config{} // --bare: no hooks
+	}
 	out := Config{}
 	for _, p := range []string{
 		filepath.Join(config.ClaudeDir(), "settings.json"),
 		filepath.Join(cwd, ".claude", "settings.json"),
 		filepath.Join(cwd, ".claude", "settings.local.json"),
 	} {
+		if !config.SettingSourceOK(cwd, p) {
+			continue
+		}
 		b, err := os.ReadFile(p)
 		if err != nil {
 			continue

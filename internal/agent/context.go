@@ -286,6 +286,9 @@ func memoryIndex(cwd string) string {
 }
 
 func claudeMDPaths(cwd string) []string {
+	if os.Getenv("CLAUDE_CODE_SIMPLE") != "" {
+		return nil // --bare: no auto-discovery, no CLAUDE.md
+	}
 	paths := []string{filepath.Join(config.ClaudeDir(), "CLAUDE.md")}
 	// walk cwd up to root collecting CLAUDE.md (project files prepend later)
 	var chain []string

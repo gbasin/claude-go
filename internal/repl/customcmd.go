@@ -32,6 +32,9 @@ var hiddenCommands map[string]customCmd
 // loadCustomCommands scans user + project + plugin command dirs.
 func loadCustomCommands(cwd string) {
 	customCommands = map[string]customCmd{}
+	if os.Getenv("CLAUDE_CODE_SIMPLE") != "" {
+		return // --bare: no command auto-discovery
+	}
 	hiddenCommands = map[string]customCmd{}
 	var dirs []string
 	for _, d := range []string{

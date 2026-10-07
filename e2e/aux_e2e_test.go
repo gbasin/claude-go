@@ -963,3 +963,61 @@ func TestMaxThinkingTokens(t *testing.T) {
 		t.Fatalf("MAX_THINKING_TOKENS cap missing:\n%s", truncStr(string(b), 500))
 	}
 }
+
+// TestBareMode: --bare suppresses auto-discovery — no CLAUDE.md, no hooks,
+// no custom commands.
+func TestBareMode(t *testing.T) {
+	s := newSession(t)
+	s.writeFile("CLAUDE.md", "# BARE-SHOULD-NOT-LOAD\n")
+	s.writeFile(".claude/commands/probe.md", "probe-body")
+	hookFired := filepath.Join(s.cwd, "bare-hook.ran")
+	s.writeFile(".claude/settings.json",
+		`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"touch `+hookFired+`"}]}]}}`)
+
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 30*time.Second,
+		"--mock", "-p", "hi", "--bare")
+	s.mustOK(t, r)
+
+	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
+	if bytes.Contains(b, []byte("BARE-SHOULD-NOT-LOAD")) {
+		t.Fatal("--bare still loaded CLAUDE.md")
+	}
+	if fileExists(hookFired) {
+		t.Fatal("--bare still ran hooks")
+	}
+	// sanity: without --bare the same session loads both
+	rec2 := t.TempDir() + "/reqs2"
+	r = s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec2}, 30*time.Second,
+		"--mock", "-p", "hi")
+	s.mustOK(t, r)
+	b, _ = os.ReadFile(filepath.Join(rec2, "001.json"))
+	if !bytes.Contains(b, []byte("BARE-SHOULD-NOT-LOAD")) {
+		t.Fatal("CLAUDE.md missing without --bare")
+	}
+}
+
+// TestSettingSources: --setting-sources user,local ignores the project
+// layer — tasks.enabled in .claude/settings.json doesn't gate on.
+func TestSettingSources(t *testing.T) {
+	s := newSession(t)
+	s.writeSettings(`{"tasks":{"enabled":true}}`)
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 30*time.Second,
+		"--mock", "-p", "hi", "--setting-sources", "user")
+	s.mustOK(t, r)
+	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
+	if bytes.Contains(b, []byte("TaskCreate")) {
+		t.Fatal("project-layer tasks.enabled leaked through --setting-sources user")
+	}
+
+	// and the project layer alone loads the gate
+	rec2 := t.TempDir() + "/reqs2"
+	r = s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec2}, 30*time.Second,
+		"--mock", "-p", "hi", "--setting-sources", "project")
+	s.mustOK(t, r)
+	b, _ = os.ReadFile(filepath.Join(rec2, "001.json"))
+	if !bytes.Contains(b, []byte("TaskCreate")) {
+		t.Fatal("project settings ignored under --setting-sources project")
+	}
+}

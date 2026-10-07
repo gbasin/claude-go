@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -79,6 +80,9 @@ func Load(cwd string) *Settings {
 		filepath.Join(cwd, ".claude", "settings.json"),
 		filepath.Join(cwd, ".claude", "settings.local.json"),
 	} {
+		if !SettingSourceOK(cwd, p) {
+			continue
+		}
 		var s Settings
 		if b, err := os.ReadFile(p); err == nil {
 			if json.Unmarshal(b, &s) == nil {
@@ -372,3 +376,32 @@ func GBFeature(name string) any {
 	}
 	return cur[name]
 }
+
+// SettingSourceOK reports whether a settings file's layer is enabled by
+// --setting-sources (CLAUDE_GO_SETTING_SOURCES, comma list of
+// user/project/local/managed). Unset = all layers load.
+func SettingSourceOK(cwd, path string) bool {
+	raw := os.Getenv("CLAUDE_GO_SETTING_SOURCES")
+	if raw == "" {
+		return true
+	}
+	layer := "project"
+	switch path {
+	case filepath.Join(ClaudeDir(), "settings.json"):
+		layer = "user"
+	case filepath.Join(cwd, ".claude", "settings.local.json"):
+		layer = "local"
+	case filepath.Join(cwd, ".claude", "settings.json"):
+		layer = "project"
+	default:
+		layer = "managed"
+	}
+	for _, s := range strings.Split(raw, ",") {
+		if strings.TrimSpace(s) == layer {
+			return true
+		}
+	}
+	return false
+}
+
+// LoadPermissions merges permissions across enabled settings layers.

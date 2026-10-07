@@ -363,6 +363,9 @@ func settingBool(cwd, key string) bool {
 		filepath.Join(cwd, ".claude", "settings.json"),
 		filepath.Join(config.ClaudeDir(), "settings.json"),
 	} {
+		if !config.SettingSourceOK(cwd, p) {
+			continue
+		}
 		b, err := os.ReadFile(p)
 		if err != nil {
 			continue
@@ -392,6 +395,9 @@ func settingStr(cwd, key string) string {
 		filepath.Join(cwd, ".claude", "settings.json"),
 		filepath.Join(config.ClaudeDir(), "settings.json"),
 	} {
+		if !config.SettingSourceOK(cwd, p) {
+			continue
+		}
 		b, err := os.ReadFile(p)
 		if err != nil {
 			continue
