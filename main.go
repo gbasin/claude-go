@@ -10,11 +10,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -811,9 +811,10 @@ func main() {
 				return client.SafetyEvalStage2(ctx, billing, sessCtx, md, tr)
 			}
 		}
+		loop.MaxBudgetUSD = o.maxBudget
 		code := runPrint(loop, strings.Join(o.prompt, " ")+promptAtt, o.outFormat, st2, o.jsonSchema)
 		if o.maxBudget > 0 {
-			fmt.Fprintf(os.Stderr, "note: --max-budget-usd %.2f (per-request cost tracking not yet enforced)\n", o.maxBudget)
+			fmt.Fprintf(os.Stderr, "note: --max-budget-usd %.2f enforced at turn end\n", o.maxBudget)
 		}
 		agentCleanup() // os.Exit skips the deferred call above
 		// drain aux traffic briefly — real flushes its telemetry tail
