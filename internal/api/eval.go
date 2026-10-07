@@ -127,6 +127,11 @@ func (c *Client) EvalCheck(ctx context.Context, ua string) (map[string]any, erro
 // NOT honor ANTHROPIC_BASE_URL (verified: eval kept hitting prod while
 // messages were redirected, and headers stayed production-shaped).
 func (c *Client) evalBase() string {
+	// honor the same base-URL override as the messages path so tests and
+	// proxies never touch the real API (eval is aux telemetry anyway)
+	if b := c.BaseURL; b != "" {
+		return b
+	}
 	return "https://api.anthropic.com"
 }
 

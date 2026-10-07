@@ -97,6 +97,7 @@ type Loop struct {
 	envSent               bool   // env composite has been on the wire once
 	instrHookFired        bool   // InstructionsLoaded hooks fired once
 	Prefill               string // --prefill: assistant continuation text appended after the first user message
+	OutputSchema          string // --json-schema: structured-output schema JSON
 	tokensLeft            int64  // <total_tokens> budget (starts 15000000)
 	SessionHookCtx        string // SessionStart hook context — wires as sys msg    // tail messages retained by the last compaction
 	announcedDeferred     string // last announced deferred-tool name set (sorted join)
@@ -170,6 +171,19 @@ func (l *Loop) buildRequest() *api.Request {
 			oc["speed"] = "fast"
 		}
 		ocRaw, _ = json.Marshal(oc)
+	}
+	if l.OutputSchema != "" {
+		// --json-schema: structured-output format rides output_config.format
+		var sch any
+		if json.Unmarshal([]byte(l.OutputSchema), &sch) == nil {
+			var oc map[string]any
+			json.Unmarshal(ocRaw, &oc)
+			if oc == nil {
+				oc = map[string]any{}
+			}
+			oc["format"] = map[string]any{"type": "json_schema", "schema": sch}
+			ocRaw, _ = json.Marshal(oc)
+		}
 	}
 	l.syncDeferredPool()
 	msgs := l.withEphemeralBreakpoint(l.wireMessages())

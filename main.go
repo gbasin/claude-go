@@ -389,6 +389,8 @@ func main() {
 			loop.Prefill = string(dec)
 		}
 	}
+	// --json-schema → output_config.format on the wire
+	loop.OutputSchema = o.jsonSchema
 	if !o.mockMode {
 	}
 	loop.Entrypoint = "sdk-cli"
@@ -709,7 +711,11 @@ func main() {
 	}
 
 	if o.debug || o.verbose {
-		os.Setenv("CLAUDE_GO_DEBUG", "1")
+		// -d/--verbose enables all debug channels at once (per-channel
+		// CLAUDE_GO_DEBUG_{KB,HTTP,REQ} still work individually)
+		for _, ch := range []string{"", "_KB", "_HTTP", "_REQ"} {
+			os.Setenv("CLAUDE_GO_DEBUG"+ch, "1")
+		}
 	}
 	if o.debugFile != "" {
 		if f, err := os.OpenFile(o.debugFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
