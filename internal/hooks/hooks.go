@@ -146,19 +146,14 @@ func pluginHooks() []struct {
 		root string
 		cfg  Config
 	}
-	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "plugins", "installed_plugins.json"))
-	if err != nil {
-		return out
-	}
+	b, _ := os.ReadFile(filepath.Join(config.ClaudeDir(), "plugins", "installed_plugins.json"))
 	var wrap struct {
 		Plugins map[string][]struct {
 			InstallPath string `json:"installPath"`
 			Enabled     *bool  `json:"enabled"`
 		} `json:"plugins"`
 	}
-	if json.Unmarshal(b, &wrap) != nil {
-		return out
-	}
+	json.Unmarshal(b, &wrap)
 	for _, vers := range wrap.Plugins {
 		for _, v := range vers {
 			if v.Enabled != nil && !*v.Enabled {
@@ -189,6 +184,36 @@ func pluginHooks() []struct {
 				cfg  Config
 			}{v.InstallPath, top.Hooks})
 		}
+	}
+	// --plugin-dir: load a dev plugin directory directly (hooks/hooks.json)
+	// without requiring installed_plugins.json registration
+	for _, dir := range strings.Fields(os.Getenv("CLAUDE_GO_PLUGIN_DIR")) {
+		if dir == "" {
+			continue
+		}
+		hb, err := os.ReadFile(filepath.Join(dir, "hooks", "hooks.json"))
+		if err != nil {
+			continue
+		}
+		var top struct {
+			Hooks Config `json:"hooks"`
+		}
+		if json.Unmarshal(hb, &top) != nil {
+			continue
+		}
+		for ev, ms := range top.Hooks {
+			for mi := range ms {
+				for hi := range ms[mi].Hooks {
+					ms[mi].Hooks[hi].Command = strings.ReplaceAll(
+						ms[mi].Hooks[hi].Command, "${CLAUDE_PLUGIN_ROOT}", dir)
+				}
+			}
+			top.Hooks[ev] = ms
+		}
+		out = append(out, struct {
+			root string
+			cfg  Config
+		}{dir, top.Hooks})
 	}
 	return out
 }

@@ -226,6 +226,9 @@ func (c *Client) headers(req *http.Request) {
 	h.Set("anthropic-dangerous-direct-browser-access", "true")
 	h.Set("anthropic-version", "2023-06-01")
 	h.Set("x-app", "cli")
+	if cid := os.Getenv("CLAUDE_GO_CORRELATION_ID"); cid != "" {
+		h.Set("x-correlation-id", cid) // --correlation-id
+	}
 	// provider auth: bedrock → SigV4 (in the caller — needs the body);
 	// vertex → ADC bearer; foundry → api-key or Entra token
 	switch c.Provider {
