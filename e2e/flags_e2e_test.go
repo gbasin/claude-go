@@ -740,3 +740,33 @@ func TestFlagFromPR(t *testing.T) {
 		t.Fatalf("--from-pr resume should answer: %s", truncStr(r.stdout, 800))
 	}
 }
+
+// TestAutocompactFlag: --autocompact <auto|tokens> is real's window
+// override — validates the range, sets autoCompactWindow for the session.
+func TestAutocompactFlag(t *testing.T) {
+	s := newSession(t)
+
+	// invalid: out of range → real's argParser refusal
+	r := s.run(t, "--mock", "--autocompact", "50k", "-p", "x")
+	if r.code == 0 || !strings.Contains(r.stderr, "between 100k and 1M") {
+		t.Fatalf("50k should refuse (code=%d stderr=%q)", r.code, r.stderr)
+	}
+	r = s.run(t, "--mock", "--autocompact", "banana", "-p", "x")
+	if r.code == 0 || !strings.Contains(r.stderr, "between 100k and 1M") {
+		t.Fatalf("garbage value should refuse (code=%d)", r.code)
+	}
+
+	// valid forms run
+	for _, v := range []string{"auto", "100k", "500k", "200000", "1M"} {
+		r = s.run(t, "--mock", "--autocompact", v, "-p", "ok")
+		s.mustOK(t, r)
+	}
+}
+
+// TestAdvisorFlag: --advisor <model> overrides the advisor model for the
+// session — accepted like real (alias or full ID).
+func TestAdvisorFlag(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "--advisor", "haiku", "-p", "ok")
+	s.mustOK(t, r)
+}

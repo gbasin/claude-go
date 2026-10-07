@@ -63,6 +63,8 @@ type cliOpts struct {
 	resumeAt     string
 	dropsTurn    string
 	rewindFiles  string
+	autoCompact  string
+	advisor      string
 	worktreeSet  bool
 	worktreeName string
 	tmux         string // "" | "auto" | "classic"
@@ -154,6 +156,8 @@ func parseCLI(args []string) *cliOpts {
 		"--resume-session-at":  func(v string) { o.resumeAt = v },
 		"--resume-drops-turn":  func(v string) { o.dropsTurn = v },
 		"--rewind-files":       func(v string) { o.rewindFiles = v },
+		"--autocompact":        func(v string) { o.autoCompact = v },
+		"--advisor":            func(v string) { o.advisor = v },
 		"--workload":           func(v string) { o.workload = v; os.Setenv("CLAUDE_GO_WORKLOAD", v) },
 		"--session-id":         func(v string) { o.sessID = v },
 		"--settings":           func(v string) { o.settingsF = v },
@@ -170,11 +174,10 @@ func parseCLI(args []string) *cliOpts {
 		"--inherit-permission-mode", "--proactivity",
 		"--system-prompt-snapshot", "--append-subagent-system-prompt",
 		"--append-subagent-system-prompt-file", "--plan-mode-instructions",
-		"--permission-prompt-tool", "--permission-prompts", "--advisor",
+		"--permission-prompt-tool", "--permission-prompts",
 		"--channels", "--dangerously-load-development-channels",
 		"--plugin-dir", "--plugin-dir-no-mcp", "--plugin-url",
 		"--remote-control-session-name-prefix",
-		"--autocompact",
 		"--task-budget", "--teammate-mode", "--messaging-socket-path",
 		"--environment", "--pool", "--ref", "--on-branch",
 		"--correlation-id", "--forward-home-settings", "--project-config-root",
