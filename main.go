@@ -4,6 +4,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -379,6 +380,15 @@ func main() {
 	}
 	var promptAtt string
 	loop := agent.NewLoop(client, cwd)
+	// --prefill / --prefill-b64: assistant continuation appended after the
+	// first user message (real's prefill / continuation)
+	if pf := os.Getenv("CLAUDE_GO_PREFILL"); pf != "" {
+		loop.Prefill = pf
+	} else if pb := os.Getenv("CLAUDE_GO_PREFILL_B64"); pb != "" {
+		if dec, err := base64.StdEncoding.DecodeString(pb); err == nil {
+			loop.Prefill = string(dec)
+		}
+	}
 	if !o.mockMode {
 	}
 	loop.Entrypoint = "sdk-cli"

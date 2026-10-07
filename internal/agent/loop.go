@@ -96,6 +96,7 @@ type Loop struct {
 	sessionStarted        time.Time
 	envSent               bool   // env composite has been on the wire once
 	instrHookFired        bool   // InstructionsLoaded hooks fired once
+	Prefill               string // --prefill: assistant continuation text appended after the first user message
 	tokensLeft            int64  // <total_tokens> budget (starts 15000000)
 	SessionHookCtx        string // SessionStart hook context — wires as sys msg    // tail messages retained by the last compaction
 	announcedDeferred     string // last announced deferred-tool name set (sorted join)
@@ -420,6 +421,10 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 		}
 		l.Messages = append(l.Messages, msg, envBlocks)
 		l.envIdx = len(l.Messages) - 1
+		if l.Prefill != "" {
+			l.Messages = append(l.Messages, api.BlocksMessage("assistant",
+				[]api.ContentBlock{{Type: "text", Text: l.Prefill}}))
+		}
 	} else {
 		// real sends subsequent user prompts as bare-string content
 		// (captured); only the first message carries context blocks
