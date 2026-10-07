@@ -772,3 +772,82 @@ func TestPermissionRequestDeny(t *testing.T) {
 		t.Fatalf("denied Write still ran (hookFired=%v)", fileExists(target+".hookran"))
 	}
 }
+
+// TestHookMatrixRound2: the remaining wired hook events —
+// PermissionDenied (dialog deny), DirectoryAdded (/add-dir),
+// UserPromptExpansion (custom command), SubagentStart (Task spawn),
+// Pre/PostModelSwitch (fast-mode toggle).
+func TestHookMatrixRound2(t *testing.T) {
+	s := newSession(t)
+	dump := filepath.Join(s.cwd, "matrix2.jsonl")
+	s.writeFile(".claude/settings.json",
+		`{"hooks":{`+
+			`"PermissionDenied":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}],`+
+			`"DirectoryAdded":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}],`+
+			`"UserPromptExpansion":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}],`+
+			`"SubagentStart":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}],`+
+			`"PreModelSwitch":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}],`+
+			`"PostModelSwitch":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}]`+
+			`}}`)
+	s.writeFile(".claude/commands/probe.md", "probe-body")
+	p := startREPL(t, s)
+
+	// UserPromptExpansion — custom command
+	p.sendUntilEchoed(t, "/probe\r", "❯ /probe", 8)
+	p.waitFor("Mock response", 30*time.Second)
+
+	// DirectoryAdded
+	p.sendUntilEchoed(t, "/add-dir /tmp\r", "❯ /add-dir", 8)
+	p.waitFor("added /tmp", 15*time.Second)
+
+	// PermissionDenied — Write prompts in default mode; deny with 3
+	p.sendUntilEchoed(t,
+		`tool:Write {"file_path":"`+filepath.Join(s.cwd, "x.txt")+`","content":"x"}`+"\r",
+		"❯ tool:Write", 8)
+	p.waitFor("1. Yes", 30*time.Second)
+	p.send("3\r")
+	p.waitFor("Tool results received", 30*time.Second)
+	p.waitFor("· done", 30*time.Second)
+
+	// Pre/PostModelSwitch — meta+o toggles fast mode (silent in UI; the
+	// hooks are the observable signal). Sent twice — a chord that lands
+	// during turn teardown is eaten by the busy loop.
+	p.send("\x1bo")
+	time.Sleep(800 * time.Millisecond)
+	p.send("\x1bo")
+	time.Sleep(800 * time.Millisecond)
+
+	// SubagentStart — Agent tool spawns a subagent
+	p.sendUntilEchoed(t,
+		`calls:[{"name":"ToolSearch","input":{"query":"select:Agent"}},`+
+			`{"name":"Agent","input":{"description":"d","prompt":"run","subagent_type":"general-purpose"}}]`+"\r",
+		`❯ calls:[{"name":"ToolSearch"`, 8)
+	p.waitFor("· done", 30*time.Second)
+	p.exit()
+
+	b, _ := os.ReadFile(dump)
+	out := string(b)
+	seen := map[string]bool{}
+	for _, ev := range []string{
+		`"hook_event_name":"UserPromptExpansion"`,
+		`"hook_event_name":"DirectoryAdded"`,
+		`"hook_event_name":"PermissionDenied"`,
+		`"hook_event_name":"PreModelSwitch"`,
+		`"hook_event_name":"PostModelSwitch"`,
+		`"hook_event_name":"SubagentStart"`,
+	} {
+		seen[ev] = strings.Contains(out, ev)
+	}
+	t.Logf("seen: %v", seen)
+	for _, ev := range []string{
+		`"hook_event_name":"UserPromptExpansion"`,
+		`"hook_event_name":"DirectoryAdded"`,
+		`"hook_event_name":"PermissionDenied"`,
+		`"hook_event_name":"PreModelSwitch"`,
+		`"hook_event_name":"PostModelSwitch"`,
+	} {
+		if !strings.Contains(out, ev) {
+			t.Fatalf("missing %s in hook dump:\n%s", ev, out)
+		}
+	}
+}

@@ -95,6 +95,11 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			break
 		}
 		l.AddDirs = append(l.AddDirs, p)
+		hooks.Run(l.Hooks, hooks.DirectoryAdded, map[string]any{
+			"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+			"directory": p, "source": "user_command",
+			"hook_event_name": "DirectoryAdded",
+		}, l.ToolCtx.CWD)
 		dprintln("  added", p)
 	case "memory":
 		memoryCmd(l, arg)
