@@ -782,3 +782,29 @@ func TestPrefillFlag(t *testing.T) {
 	p.send("\r")
 	p.waitFor("Mock response to: draft seed text", 30*time.Second)
 }
+
+func TestPlanModeInstructions(t *testing.T) {
+	s := newSession(t)
+	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK=1"},
+		"--mock", "--plan-mode-instructions", "WORKFLOW: sketch first, verify twice")
+	defer p.exit()
+	p.waitFor("❯", 10*time.Second)
+	// the mock parses tool: calls out of the prompt itself
+	p.send("tool:EnterPlanMode {}\r")
+	p.waitFor("Do you want to proceed?", 30*time.Second)
+	p.send("\r") // approve (highlighted "Yes")
+	out := p.waitFor("Do you want to proceed?|Entered plan mode|plan mode", 30*time.Second)
+	if !strings.Contains(out, "plan mode") {
+		t.Fatalf("no plan-mode result in output: %s", p.clean())
+	}
+	p.send("/exit\r")
+	p.waitExit(10 * time.Second)
+	paths := s.transcriptPaths(t)
+	if len(paths) == 0 {
+		t.Fatal("no transcript")
+	}
+	blob, _ := os.ReadFile(paths[0])
+	if !strings.Contains(string(blob), "WORKFLOW: sketch first, verify twice") {
+		t.Fatalf("plan-mode instructions missing from transcript: %s", paths[0])
+	}
+}

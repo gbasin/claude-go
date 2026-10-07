@@ -65,6 +65,7 @@ type cliOpts struct {
 	rewindFiles  string
 	autoCompact  string
 	advisor      string
+	planModeInstr string
 	worktreeSet  bool
 	worktreeName string
 	tmux         string // "" | "auto" | "classic"
@@ -158,6 +159,10 @@ func parseCLI(args []string) *cliOpts {
 		"--rewind-files":       func(v string) { o.rewindFiles = v },
 		"--autocompact":        func(v string) { o.autoCompact = v },
 		"--advisor":            func(v string) { o.advisor = v },
+		"--plan-mode-instructions": func(v string) {
+			o.planModeInstr = v
+			os.Setenv("CLAUDE_GO_PLAN_MODE_INSTRUCTIONS", v) // tool Context propagation
+		},
 		"--workload":           func(v string) { o.workload = v; os.Setenv("CLAUDE_GO_WORKLOAD", v) },
 		"--session-id":         func(v string) { o.sessID = v },
 		"--settings":           func(v string) { o.settingsF = v },
@@ -173,7 +178,7 @@ func parseCLI(args []string) *cliOpts {
 		"--parent-session-id", "--agent-type", "--routine",
 		"--inherit-permission-mode", "--proactivity",
 		"--system-prompt-snapshot", "--append-subagent-system-prompt",
-		"--append-subagent-system-prompt-file", "--plan-mode-instructions",
+		"--append-subagent-system-prompt-file",
 		"--permission-prompt-tool", "--permission-prompts",
 		"--channels", "--dangerously-load-development-channels",
 		"--plugin-dir", "--plugin-dir-no-mcp", "--plugin-url",
