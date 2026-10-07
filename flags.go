@@ -58,33 +58,33 @@ type cliOpts struct {
 	jsonSchema   string
 	agentName    string
 	// new surface
-	effort       string
-	sessionName  string
-	resumeAt     string
-	dropsTurn    string
-	rewindFiles  string
-	autoCompact  string
+	effort        string
+	sessionName   string
+	resumeAt      string
+	dropsTurn     string
+	rewindFiles   string
+	autoCompact   string
 	correlationID string
-	advisor      string
+	advisor       string
 	planModeInstr string
-	worktreeSet  bool
-	worktreeName string
-	tmux         string // "" | "auto" | "classic"
-	projectDir   string
-	sdkURL       string
-	betas        string
-	initOnly     bool
-	bgMode       bool
-	noPersist    bool
-	partialMsgs  bool
-	replayUser   bool
-	hookEvents   bool
-	execPrompt   string
-	teleport     bool
-	teleportArg  string
-	stubs        []string // feature flags accepted but not wired
-	fromPR       string   // --from-pr <ref> — session linked to a PR
-	fromPRFlag   bool     // --from-pr passed at all (bare → picker)
+	worktreeSet   bool
+	worktreeName  string
+	tmux          string // "" | "auto" | "classic"
+	projectDir    string
+	sdkURL        string
+	betas         string
+	initOnly      bool
+	bgMode        bool
+	noPersist     bool
+	partialMsgs   bool
+	replayUser    bool
+	hookEvents    bool
+	execPrompt    string
+	teleport      bool
+	teleportArg   string
+	stubs         []string // feature flags accepted but not wired
+	fromPR        string   // --from-pr <ref> — session linked to a PR
+	fromPRFlag    bool     // --from-pr passed at all (bare → picker)
 }
 
 // stubEnv records a parse-only flag as an env var so the value is at least
@@ -159,7 +159,7 @@ func parseCLI(args []string) *cliOpts {
 		"--resume-drops-turn":  func(v string) { o.dropsTurn = v },
 		"--rewind-files":       func(v string) { o.rewindFiles = v },
 		"--autocompact":        func(v string) { o.autoCompact = v },
-		"--correlation-id":      func(v string) { o.correlationID = v },
+		"--correlation-id":     func(v string) { o.correlationID = v },
 		"--advisor":            func(v string) { o.advisor = v },
 		"--append-subagent-system-prompt": func(v string) {
 			os.Setenv("CLAUDE_GO_APPEND_SUBAGENT_SYS", v) // agent.effectiveSystemPrompt
@@ -176,11 +176,11 @@ func parseCLI(args []string) *cliOpts {
 			o.planModeInstr = v
 			os.Setenv("CLAUDE_GO_PLAN_MODE_INSTRUCTIONS", v) // tool Context propagation
 		},
-		"--workload":           func(v string) { o.workload = v; os.Setenv("CLAUDE_GO_WORKLOAD", v) },
-		"--session-id":         func(v string) { o.sessID = v },
-		"--settings":           func(v string) { o.settingsF = v },
-		"--debug-file":         func(v string) { o.debugFile = v },
-		"--mock-port":          func(v string) { fmt.Sscanf(v, "%d", &o.mockPort) },
+		"--workload":   func(v string) { o.workload = v; os.Setenv("CLAUDE_GO_WORKLOAD", v) },
+		"--session-id": func(v string) { o.sessID = v },
+		"--settings":   func(v string) { o.settingsF = v },
+		"--debug-file": func(v string) { o.debugFile = v },
+		"--mock-port":  func(v string) { fmt.Sscanf(v, "%d", &o.mockPort) },
 	}
 	// parse-only value flags -> env vars
 	for _, f := range []string{
@@ -207,14 +207,24 @@ func parseCLI(args []string) *cliOpts {
 	valueFlags["--prefill"] = func(v string) { os.Setenv("CLAUDE_GO_PREFILL", v) }
 	valueFlags["--prefill-b64"] = func(v string) { os.Setenv("CLAUDE_GO_PREFILL_B64", v) }
 	// attach-serve and feature flags the user will notice missing
-	for _, f := range []string{"--attach-serve", "--teammate-mode", "--messaging-socket-path"} {
+	for _, f := range []string{"--attach-serve", "--messaging-socket-path"} {
 		flag := f
 		valueFlags[flag] = func(v string) { o.stubEnv(flag, stubName(flag), v, true) }
 	}
+	// --teammate-mode: real validates choices auto|tmux|iterm2|in-process
+	valueFlags["--teammate-mode"] = func(v string) {
+		switch v {
+		case "auto", "tmux", "iterm2", "in-process":
+			os.Setenv("CLAUDE_GO_TEAMMATE_MODE", v)
+		default:
+			fmt.Fprintf(os.Stderr, "error: --teammate-mode must be one of auto, tmux, iterm2, in-process\n")
+			os.Exit(1)
+		}
+	}
 
 	boolFlags := map[string]func(){
-		"-p":                                   func() { o.printMode = true },
-		"--print":                              func() { o.printMode = true },
+		"-p":      func() { o.printMode = true },
+		"--print": func() { o.printMode = true },
 		"--mock": func() {
 			o.mockMode = true
 			// env is the propagation contract for spawned children (bg
@@ -236,8 +246,8 @@ func parseCLI(args []string) *cliOpts {
 		"--dangerously-skip-permissions":       func() { o.permMode = "bypassPermissions" },
 		"--allow-dangerously-skip-permissions": func() { o.permMode = "bypassPermissions" },
 		"-c":                                   func() { o.cont = true },
-		"--bg":                                  func() { o.bgMode = true },
-		"--background":                          func() { o.bgMode = true },
+		"--bg":                                 func() { o.bgMode = true },
+		"--background":                         func() { o.bgMode = true },
 		"--continue":                           func() { o.cont = true },
 		"--fork-session":                       func() { o.forkSess = true },
 		"--strict-mcp-config":                  func() { o.strictMCP = true },
@@ -543,13 +553,13 @@ func setupWorktree(cwd, name, sessionID string) string {
 // resumeAtRec is the record view --resume-session-at loads (shared by the
 // loader and the drops-turn guard).
 type resumeAtRec struct {
-	Type            string `json:"type"`
-	UUID            string `json:"uuid"`
-	ParentUUID      string `json:"parentUuid"`
-	IsSidechain     bool   `json:"isSidechain"`
-	IsMeta          bool   `json:"isMeta"`
-	IsCompactSummary bool  `json:"isCompactSummary"`
-	Message         struct {
+	Type             string `json:"type"`
+	UUID             string `json:"uuid"`
+	ParentUUID       string `json:"parentUuid"`
+	IsSidechain      bool   `json:"isSidechain"`
+	IsMeta           bool   `json:"isMeta"`
+	IsCompactSummary bool   `json:"isCompactSummary"`
+	Message          struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
 	} `json:"message"`

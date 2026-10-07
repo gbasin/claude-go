@@ -1,6 +1,7 @@
 package repl
 
 import (
+	"os"
 	"fmt"
 	"strings"
 	"sync"
@@ -287,6 +288,10 @@ var promptSuggestions = []string{
 }
 
 func promptSuggestionsEnabled() bool {
+	// --proactivity off also gates the ghosts (proactivityLevel === 0)
+	if v := os.Getenv("CLAUDE_GO_PROACTIVITY"); v == "off" || v == "0" {
+		return false
+	}
 	if v, ok := config.UserSetting("promptSuggestionEnabled").(bool); ok {
 		return v
 	}

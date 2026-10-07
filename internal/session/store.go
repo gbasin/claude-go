@@ -218,12 +218,28 @@ func (s *Store) LogCompactBoundaryTrig(preTokens, kept int, trigger string) erro
 // LogInit writes the {type:"system",subtype:"init"} record CC emits at
 // session start.
 func (s *Store) LogInit(model string) error {
-	return s.LogRecord(map[string]any{
+	return s.LogInitMeta(model, "", "", "")
+}
+
+// LogInitMeta is LogInit carrying spawn lineage (--parent-session-id,
+// agent type, sys-prompt snapshot) when set.
+func (s *Store) LogInitMeta(model, parentSessionID, agentType, sysSnap string) error {
+	rec := map[string]any{
 		"type": "system", "subtype": "init",
 		"model": model, "cwd": s.CWD,
 		"version": "2.1.292", "userType": "external",
 		"gitBranch": currentGitBranch(s.CWD), "entrypoint": "cli",
-	})
+	}
+	if parentSessionID != "" {
+		rec["parentSessionId"] = parentSessionID
+	}
+	if agentType != "" {
+		rec["agentType"] = agentType
+	}
+	if sysSnap != "" {
+		rec["systemPromptSnapshot"] = sysSnap
+	}
+	return s.LogRecord(rec)
 }
 
 // LogAttachment appends an attachment record

@@ -57,6 +57,24 @@ func marketplacesFile() string { return filepath.Join(pluginsDir(), "known_marke
 // Load also tolerates the earlier flat array.
 func loadInstalled() []InstalledPlugin {
 	var out []InstalledPlugin
+	// --plugin-dir adds scan roots: each immediate subdir is a plugin
+	for _, root := range filepath.SplitList(os.Getenv("CLAUDE_GO_PLUGIN_DIR")) {
+		ents, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, e := range ents {
+			if !e.IsDir() {
+				continue
+			}
+			pd := filepath.Join(root, e.Name())
+			if _, err := os.Stat(filepath.Join(pd, ".claude-plugin", "plugin.json")); err == nil {
+				out = append(out, InstalledPlugin{
+					Name: e.Name(), Marketplace: "local-dir",
+					Path: pd, Enabled: true})
+			}
+		}
+	}
 	b, err := os.ReadFile(installedFile())
 	if err != nil {
 		return out
