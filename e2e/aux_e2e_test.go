@@ -884,3 +884,82 @@ func Test401RefreshRetry(t *testing.T) {
 		t.Fatalf("retry didn't carry new token: %q", secondAuth)
 	}
 }
+
+// TestPrefillWire: --prefill/--prefill-b64 append an assistant
+// continuation block after the first user message (real's prefill).
+func TestPrefillWire(t *testing.T) {
+	s := newSession(t)
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 30*time.Second,
+		"--mock", "-p", "hi", "--prefill", "PREFILLED-TXT")
+	s.mustOK(t, r)
+
+	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
+	if !bytes.Contains(b, []byte(`"assistant"`)) || !bytes.Contains(b, []byte("PREFILLED-TXT")) {
+		t.Fatalf("prefill missing from wire:\n%s", truncStr(string(b), 800))
+	}
+
+	// base64 form decodes to the same block
+	rec2 := t.TempDir() + "/reqs2"
+	r = s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec2}, 30*time.Second,
+		"--mock", "-p", "hi", "--prefill-b64", "UFJFRklMTEVELUI2NA==")
+	s.mustOK(t, r)
+	b, _ = os.ReadFile(filepath.Join(rec2, "001.json"))
+	if !bytes.Contains(b, []byte("PREFILLED-B64")) {
+		t.Fatalf("prefill-b64 missing from wire:\n%s", truncStr(string(b), 800))
+	}
+}
+
+// TestBetasHeader: --betas merges into the anthropic-beta request header.
+func TestBetasHeader(t *testing.T) {
+	var betaHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/messages") {
+			betaHeader = r.Header.Get("anthropic-beta")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"fable\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n")
+		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n")
+		fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n")
+		fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer srv.Close()
+
+	s := newSession(t)
+	r := s.runEx(t, []string{
+		"ANTHROPIC_BASE_URL=" + srv.URL,
+		"CLAUDE_GO_TOKEN=test-token",
+	}, 30*time.Second, "-p", "hi", "--betas", "e2e-beta-flag-1,e2e-beta-flag-2")
+	s.mustOK(t, r)
+	if !strings.Contains(betaHeader, "e2e-beta-flag-1") ||
+		!strings.Contains(betaHeader, "e2e-beta-flag-2") {
+		t.Fatalf("anthropic-beta header missing flags: %q", betaHeader)
+	}
+}
+
+// TestMaxThinkingTokens: --max-thinking-tokens sets thinking.budget_tokens
+// on the wire; MAX_THINKING_TOKENS env caps it downward.
+func TestMaxThinkingTokens(t *testing.T) {
+	s := newSession(t)
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 30*time.Second,
+		"--mock", "-p", "hi", "--thinking", "medium", "--max-thinking-tokens", "12345")
+	s.mustOK(t, r)
+	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
+	if !bytes.Contains(b, []byte(`"budget_tokens":12345`)) {
+		t.Fatalf("--max-thinking-tokens missing from wire:\n%s", truncStr(string(b), 500))
+	}
+
+	// env cap wins over the flag when smaller
+	rec2 := t.TempDir() + "/reqs2"
+	r = s.runEx(t, []string{
+		"CLAUDE_GO_MOCK_RECORD=" + rec2, "MAX_THINKING_TOKENS=500",
+	}, 30*time.Second, "--mock", "-p", "hi", "--thinking", "medium",
+		"--max-thinking-tokens", "12345")
+	s.mustOK(t, r)
+	b, _ = os.ReadFile(filepath.Join(rec2, "001.json"))
+	if !bytes.Contains(b, []byte(`"budget_tokens":500`)) {
+		t.Fatalf("MAX_THINKING_TOKENS cap missing:\n%s", truncStr(string(b), 500))
+	}
+}
