@@ -130,10 +130,16 @@ func (d AgentDef) isFork() bool { return strings.EqualFold(d.Name, "fork") }
 // statusline-setup builtin (real text lives in the repl package's extracted
 // prompts file).
 func (d AgentDef) effectiveSystemPrompt() string {
+	p := d.SystemPrompt
 	if d.Name == "statusline-setup" && StatuslineSetupPrompt != "" {
-		return StatuslineSetupPrompt
+		p = StatuslineSetupPrompt
 	}
-	return d.SystemPrompt
+	// --append-subagent-system-prompt[-file]: real appends the text to
+	// every subagent's system prompt
+	if extra := os.Getenv("CLAUDE_GO_APPEND_SUBAGENT_SYS"); extra != "" {
+		p += "\n\n" + extra
+	}
+	return p
 }
 
 func strIn(list []string, s string) bool {

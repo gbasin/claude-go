@@ -63,6 +63,9 @@ type cliOpts struct {
 	resumeAt     string
 	dropsTurn    string
 	rewindFiles  string
+	autoCompact  string
+	advisor      string
+	planModeInstr string
 	worktreeSet  bool
 	worktreeName string
 	tmux         string // "" | "auto" | "classic"
@@ -154,6 +157,23 @@ func parseCLI(args []string) *cliOpts {
 		"--resume-session-at":  func(v string) { o.resumeAt = v },
 		"--resume-drops-turn":  func(v string) { o.dropsTurn = v },
 		"--rewind-files":       func(v string) { o.rewindFiles = v },
+		"--autocompact":        func(v string) { o.autoCompact = v },
+		"--advisor":            func(v string) { o.advisor = v },
+		"--append-subagent-system-prompt": func(v string) {
+			os.Setenv("CLAUDE_GO_APPEND_SUBAGENT_SYS", v) // agent.effectiveSystemPrompt
+		},
+		"--append-subagent-system-prompt-file": func(v string) {
+			b, err := os.ReadFile(v)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: --append-subagent-system-prompt-file: %v\n", err)
+				os.Exit(1)
+			}
+			os.Setenv("CLAUDE_GO_APPEND_SUBAGENT_SYS", string(b))
+		},
+		"--plan-mode-instructions": func(v string) {
+			o.planModeInstr = v
+			os.Setenv("CLAUDE_GO_PLAN_MODE_INSTRUCTIONS", v) // tool Context propagation
+		},
 		"--workload":           func(v string) { o.workload = v; os.Setenv("CLAUDE_GO_WORKLOAD", v) },
 		"--session-id":         func(v string) { o.sessID = v },
 		"--settings":           func(v string) { o.settingsF = v },
@@ -168,13 +188,11 @@ func parseCLI(args []string) *cliOpts {
 		"--team-name", "--agent-id", "--agent-name", "--agent-color",
 		"--parent-session-id", "--agent-type", "--routine",
 		"--inherit-permission-mode", "--proactivity",
-		"--system-prompt-snapshot", "--append-subagent-system-prompt",
-		"--append-subagent-system-prompt-file", "--plan-mode-instructions",
-		"--permission-prompt-tool", "--permission-prompts", "--advisor",
+		"--system-prompt-snapshot",
+		"--permission-prompt-tool", "--permission-prompts",
 		"--channels", "--dangerously-load-development-channels",
 		"--plugin-dir", "--plugin-dir-no-mcp", "--plugin-url",
 		"--remote-control-session-name-prefix",
-		"--autocompact",
 		"--task-budget", "--teammate-mode", "--messaging-socket-path",
 		"--environment", "--pool", "--ref", "--on-branch",
 		"--correlation-id", "--forward-home-settings", "--project-config-root",
