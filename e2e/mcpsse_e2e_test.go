@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -613,5 +614,65 @@ func TestPermPromptTool(t *testing.T) {
 	// perm_gate returns {"behavior":"deny"} — no dialog, no file
 	if fileExists(filepath.Join(s.cwd, "ppt.txt")) {
 		t.Fatal("perm-prompt-tool deny path still wrote the file")
+	}
+}
+
+// TestMCPElicitation: the server pushes elicitation/create — the client
+// answers with the CLAUDE_GO_ELICIT_ANSWER seam's decision.
+func TestMCPElicitation(t *testing.T) {
+	srv := newSSEMCPServer(t)
+	s := newSession(t)
+	dump := filepath.Join(s.cwd, "elicit.jsonl")
+	s.writeSettings(`{"enableAllProjectMcpServers":true,"hooks":{`+
+		`"Elicitation":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}],`+
+		`"ElicitationResult":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}]}}`)
+	s.writeFile(".mcp.json", fmt.Sprintf(
+		`{"mcpServers":{"ssetest":{"type":"sse","url":%q}}}`, srv.srv.URL+"/sse"))
+
+	p := s.runPTY(t, []string{
+		"CLAUDE_GO_ELICIT_ANSWER={\"action\":\"accept\",\"content\":{\"name\":\"gary\"}}",
+	}, "--mock", "--permission-mode", "bypassPermissions")
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntil("/mcp\r", "● ", 20)
+	p.send("\x1b")
+	time.Sleep(300 * time.Millisecond)
+
+	srv.pushRequest(88, "elicitation/create", map[string]any{
+		"message": "what's your name",
+		"requestedSchema": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name": map[string]any{"type": "string"}},
+		},
+	})
+	// the client answers via POST — wait for it
+	for i := 0; i < 40; i++ {
+		for _, res := range srv.sawResults() {
+			if strings.Contains(res, `"88"`) || strings.Contains(res, `"id":88`) {
+				if !strings.Contains(res, `"accept"`) {
+					t.Fatalf("elicitation answer not accept: %s", res)
+				}
+				if !strings.Contains(res, `"gary"`) {
+					t.Fatalf("elicitation content missing: %s", res)
+				}
+				p.exit()
+				elicitHooks(dump, t)
+				return
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	p.exit()
+	t.Fatal("elicitation/create never answered")
+}
+
+// assert Elicitation + ElicitationResult hooks fired once the answer lands
+func elicitHooks(dump string, t *testing.T) {
+	t.Helper()
+	b, _ := os.ReadFile(dump)
+	for _, ev := range []string{`"hook_event_name":"Elicitation"`, `"hook_event_name":"ElicitationResult"`} {
+		if !strings.Contains(string(b), ev) {
+			t.Fatalf("missing %s in elicit hook dump:\n%s", ev, b)
+		}
 	}
 }
