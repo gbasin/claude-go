@@ -1,4 +1,4 @@
-//go:build e2e
+//go:build e2e && !windows
 
 // suspend_e2e_test.go — ctrl+z job-control suspend (real CC v1.0.44+):
 //   - the raw 0x1a byte suspends the process (state T); SIGCONT resumes it
