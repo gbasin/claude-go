@@ -6,6 +6,7 @@ package mcp
 import (
 	"bufio"
 	"claude-go/internal/config"
+	"claude-go/internal/plugins"
 	"context"
 	"encoding/json"
 	"errors"
@@ -112,6 +113,56 @@ func LoadConfigs(cwd string) map[string]ServerConfig {
 			}
 			out[n] = c
 		}
+	}
+	// plugin .mcp.json: each enabled plugin dir may declare servers;
+	// --plugin-dir-no-mcp entries skip this entirely (real parity)
+	var pluginServers []string
+	for _, p := range plugins.EnabledPluginEntries() {
+		if p.NoMCP {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(p.Path, ".mcp.json"))
+		if err != nil {
+			continue
+		}
+		var top struct {
+			Servers map[string]ServerConfig `json:"mcpServers"`
+		}
+		if json.Unmarshal(b, &top) != nil {
+			continue
+		}
+		for n, sc := range top.Servers {
+			if _, dup := out[n]; !dup {
+				out[n] = sc
+			}
+		}
+		pluginServers = append(pluginServers, keysOf(top.Servers)...)
+	}
+	// --channels <csv>: selects which plugin-provided servers run
+	// (real's channel allowlist — mod_0056.js). Doesn't gate .mcp.json.
+	// --dangerously-load-development-channels exempts dev_* servers.
+	if sel := os.Getenv("CLAUDE_GO_CHANNELS"); sel != "" {
+		want := map[string]bool{}
+		for _, s := range strings.Split(sel, ",") {
+			want[strings.TrimSpace(s)] = true
+		}
+		devOK := os.Getenv("CLAUDE_GO_DANGEROUSLY_LOAD_DEVELOPMENT_CHANNELS") != ""
+		for _, n := range pluginServers {
+			if devOK && strings.HasPrefix(n, "dev_") {
+				continue
+			}
+			if !want[n] {
+				delete(out, n)
+			}
+		}
+	}
+	return out
+}
+
+func keysOf(m map[string]ServerConfig) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
 	}
 	return out
 }

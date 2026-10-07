@@ -245,6 +245,18 @@ var subagentTools = []string{
 }
 
 func RequestDefs(c *Context) []api.Tool {
+	out := requestDefs(c)
+	// --advisor <model>: real's server-side advisor tool rides at the
+	// tail of tools[] ({type:"advisor_20260301"} — mod_0386.js Mvt)
+	if m := os.Getenv("CLAUDE_GO_ADVISOR"); m != "" {
+		raw, _ := json.Marshal(map[string]any{
+			"type": "advisor_20260301", "name": "advisor", "model": m})
+		out = append(out, api.Tool{Raw: raw})
+	}
+	return out
+}
+
+func requestDefs(c *Context) []api.Tool {
 	if !toolSearchEnabled() {
 		return Defs()
 	}
