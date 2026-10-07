@@ -2551,10 +2551,10 @@ func configCmd(l *agent.Loop, arg string) {
 	var parsed any
 	if json.Unmarshal([]byte(v), &parsed) == nil {
 		config.WriteUserSetting(k, parsed)
-		fireConfigChange(l, k)
 	} else {
 		config.WriteUserSetting(k, v)
 	}
+	fireConfigChange(l, k)
 	dprintf("  set %s = %s\n", k, v)
 }
 
@@ -4708,6 +4708,7 @@ func fireConfigChange(l *agent.Loop, key string) {
 	if l == nil || l.Hooks == nil {
 		return
 	}
+
 	hooks.Run(l.Hooks, hooks.ConfigChange, map[string]any{
 		"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
 		"hook_event_name": "ConfigChange", "permission_mode": l.PermMode,
