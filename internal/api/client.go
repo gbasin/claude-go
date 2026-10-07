@@ -607,8 +607,18 @@ type routingTransport struct {
 }
 
 func (r routingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var resp *http.Response
+	var err error
 	if req.URL.Scheme == "https" {
-		return r.raw.RoundTrip(req)
+		resp, err = r.raw.RoundTrip(req)
+	} else {
+		resp, err = r.std.RoundTrip(req)
 	}
-	return r.std.RoundTrip(req)
+	// the per-request debug line lives here so --verbose covers std
+	// (non-https) requests too, not just the raw transport lane
+	if err == nil && os.Getenv("CLAUDE_GO_DEBUG_HTTP") != "" {
+		fmt.Fprintf(os.Stderr, "[debug] %s %s -> %d\n",
+			req.Method, req.URL.String(), resp.StatusCode)
+	}
+	return resp, err
 }
