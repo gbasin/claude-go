@@ -44,7 +44,7 @@ func TestSlashTable(t *testing.T) {
 		{"/vim", "moved to /config", ""},
 		{"/keybindings", "keybindings.json", ""},
 		{"/ide", "no IDE detected", "IDE connected"},
-		{"/terminal-setup", "unsupported terminal", ""}, // TERM_PROGRAM unset in sandbox
+		{"/terminal-setup", "unsupported terminal", "macOS terminals only"}, // darwin: TERM_PROGRAM unset; linux: not a macOS terminal
 		{"/privacy-settings", "telemetry", ""},
 		{"/release-notes", "claude-go", ""},
 		{"/plugin", "plugins:", ""},

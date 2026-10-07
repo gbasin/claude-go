@@ -1,3 +1,5 @@
+//go:build e2e
+
 // Perf regression guards — the replica's whole point is lighter/faster.
 // Generous thresholds (loaded-machine safe); failures mean real
 // regressions, not jitter.
