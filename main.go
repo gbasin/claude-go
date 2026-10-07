@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"os/exec"
 	"os/user"
 	"path/filepath"
@@ -391,6 +392,31 @@ func main() {
 	}
 	// --json-schema → output_config.format on the wire
 	loop.OutputSchema = o.jsonSchema
+	// elicitation/create: hook wiring needs the loop's hook config — wrap
+	// whatever main's default OnElicit resolved (decline/answer-seam)
+	for _, c := range mcpClients {
+		base := c.OnElicit
+		serverName := c.Name
+		c.OnElicit = func(params map[string]any) (string, map[string]any) {
+			msg, _ := params["message"].(string)
+			hooks.Run(loop.Hooks, hooks.Elicitation, map[string]any{
+				"session_id": sessionID, "cwd": cwd,
+				"hook_event_name": "Elicitation",
+				"mcp_server_name": serverName, "message": msg,
+			}, cwd)
+			action, content := "decline", map[string]any(nil)
+			if base != nil {
+				action, content = base(params)
+			}
+			hooks.Run(loop.Hooks, hooks.ElicitationResult, map[string]any{
+				"session_id": sessionID, "cwd": cwd,
+				"hook_event_name": "ElicitationResult",
+				"mcp_server_name": serverName, "action": action,
+				"content": content,
+			}, cwd)
+			return action, content
+		}
+	}
 	if !o.mockMode {
 	}
 	loop.Entrypoint = "sdk-cli"
@@ -690,6 +716,26 @@ func main() {
 			default:
 				msgs, err = session.Load(cwd, id)
 			}
+			// --resume-drops-turn: drop the last N turns from the tail
+			if raw := os.Getenv("CLAUDE_GO_RESUME_DROPS_TURN"); raw != "" {
+				if n, nerr := strconv.Atoi(raw); nerr == nil && n > 0 && len(msgs) > 0 {
+					// a "turn" = user message + following assistant/tool blocks —
+					// walk back n user-boundaries
+					dropFrom := len(msgs)
+					for i := len(msgs) - 1; i >= 0 && n > 0; i-- {
+						if msgs[i].Role == "user" {
+							var blks []api.ContentBlock
+							isTool := json.Unmarshal(msgs[i].Content, &blks) == nil &&
+								len(blks) > 0 && blks[0].Type == "tool_result"
+							if !isTool {
+								dropFrom = i
+								n--
+							}
+						}
+					}
+					msgs = msgs[:dropFrom]
+				}
+			}
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "resume %s: %v\n", id, err)
 			} else if len(msgs) > 0 {
@@ -971,6 +1017,23 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 					}
 				}
 			})
+			c.OnElicit = func(params map[string]any) (string, map[string]any) {
+				// elicitation/create: surface the server's question; the full
+				// form modal isn't implemented — non-interactive answer seam
+				// CLAUDE_GO_ELICIT_ANSWER {action, content} for tests/SDK use.
+				msg, _ := params["message"].(string)
+				fmt.Fprintf(os.Stderr, "  %s asks: %s\n", name, msg)
+				if raw := os.Getenv("CLAUDE_GO_ELICIT_ANSWER"); raw != "" {
+					var a struct {
+						Action  string         `json:"action"`
+						Content map[string]any `json:"content"`
+					}
+					if json.Unmarshal([]byte(raw), &a) == nil && a.Action != "" {
+						return a.Action, a.Content
+					}
+				}
+				return "decline", nil
+			}
 			roots := append([]string{cwd}, addDirs...)
 			c.Roots = func() []map[string]string {
 				out := make([]map[string]string, 0, len(roots))
