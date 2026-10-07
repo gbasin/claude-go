@@ -4,7 +4,6 @@ import (
 	"claude-go/internal/config"
 	"context"
 	_ "embed"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -261,20 +260,12 @@ func (l *Loop) precomputeOn() bool {
 // settings.json files; absent means enabled.
 func precomputeCompactionEnabled(cwd string) bool {
 	enabled := true
-	for _, p := range []string{
-		filepath.Join(config.ClaudeDir(), "settings.json"),
-		filepath.Join(cwd, ".claude", "settings.json"),
-		filepath.Join(cwd, ".claude", "settings.local.json"),
+	for _, m := range []map[string]any{
+		config.UserSettings(),
+		config.ReadJSONMap(filepath.Join(cwd, ".claude", "settings.json")),
+		config.ReadJSONMap(filepath.Join(cwd, ".claude", "settings.local.json")),
 	} {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		var s map[string]any
-		if json.Unmarshal(b, &s) != nil {
-			continue
-		}
-		if v, ok := s["precomputeCompactionEnabled"].(bool); ok {
+		if v, ok := m["precomputeCompactionEnabled"].(bool); ok {
 			enabled = v // later sources win, project over user
 		}
 	}

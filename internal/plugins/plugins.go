@@ -327,27 +327,21 @@ func EnabledPluginDirs() []string {
 
 func settingsPluginGates() (map[string]bool, map[string]bool) {
 	en, dis := map[string]bool{}, map[string]bool{}
-	for _, p := range []string{
-		filepath.Join(config.ClaudeDir(), "settings.json"),
-	} {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		var s struct {
-			EnabledPlugins  map[string]bool `json:"enabledPlugins"`
-			EnabledPlugins2 map[string]any  `json:"-"`
-			DisabledPlugins map[string]bool `json:"disabledPlugins"`
-		}
+	var s struct {
+		EnabledPlugins  map[string]bool `json:"enabledPlugins"`
+		DisabledPlugins map[string]bool `json:"disabledPlugins"`
+	}
+	if b, err := json.Marshal(config.UserSettings()); err == nil {
+		// a malformed value fails the whole file, like the old direct read
 		if json.Unmarshal(b, &s) != nil {
-			continue
+			return en, dis
 		}
-		for k, v := range s.EnabledPlugins {
-			en[k] = v
-		}
-		for k, v := range s.DisabledPlugins {
-			dis[k] = v
-		}
+	}
+	for k, v := range s.EnabledPlugins {
+		en[k] = v
+	}
+	for k, v := range s.DisabledPlugins {
+		dis[k] = v
 	}
 	return en, dis
 }

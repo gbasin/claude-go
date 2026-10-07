@@ -4,7 +4,6 @@ package perms
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -366,15 +365,7 @@ func fileInsideWorkspace(input json.RawMessage, cwd string) bool {
 // autoModeDuringPlan honors settings.useAutoModeDuringPlan (real default
 // true — plan mode uses auto semantics when auto mode is available).
 func autoModeDuringPlan() bool {
-	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
-	if err != nil {
-		return true
-	}
-	var m map[string]any
-	if json.Unmarshal(b, &m) != nil {
-		return true
-	}
-	if v, ok := m["useAutoModeDuringPlan"].(bool); ok {
+	if v, ok := config.UserSetting("useAutoModeDuringPlan").(bool); ok {
 		return v
 	}
 	return true

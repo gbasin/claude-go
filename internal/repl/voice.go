@@ -1,10 +1,7 @@
 package repl
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -290,15 +287,7 @@ var promptSuggestions = []string{
 }
 
 func promptSuggestionsEnabled() bool {
-	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
-	if err != nil {
-		return true
-	}
-	var m map[string]any
-	if json.Unmarshal(b, &m) != nil {
-		return true
-	}
-	if v, ok := m["promptSuggestionEnabled"].(bool); ok {
+	if v, ok := config.UserSetting("promptSuggestionEnabled").(bool); ok {
 		return v
 	}
 	return true

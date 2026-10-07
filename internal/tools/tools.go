@@ -341,15 +341,7 @@ func workflowEnabled() bool {
 
 // boolSetting reads a boolean key from ~/.claude/settings.json.
 func boolSetting(key string) bool {
-	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json"))
-	if err != nil {
-		return false
-	}
-	var m map[string]any
-	if json.Unmarshal(b, &m) != nil {
-		return false
-	}
-	v, _ := m[key].(bool)
+	v, _ := config.UserSetting(key).(bool)
 	return v
 }
 

@@ -356,31 +356,27 @@ func execEnterWorktree(c *Context, raw json.RawMessage) Result {
 	return Result{Content: fmt.Sprintf("Entered worktree at %s (branch %s)", wtPath, branch)}
 }
 
+// dottedSetting walks a dotted key ("tasks.enabled") in a settings map.
+func dottedSetting(m map[string]any, key string) any {
+	v := any(m)
+	for _, k := range strings.Split(key, ".") {
+		mm, ok := v.(map[string]any)
+		if !ok {
+			return nil
+		}
+		v = mm[k]
+	}
+	return v
+}
+
 // settingBool resolves a dotted settings key as a bool (real's
-// tasks.enabled et al are booleans, not strings).
+// tasks.enabled et al are booleans, not strings). Project tier wins.
 func settingBool(cwd, key string) bool {
-	for _, p := range []string{
-		filepath.Join(cwd, ".claude", "settings.json"),
-		filepath.Join(config.ClaudeDir(), "settings.json"),
+	for _, m := range []map[string]any{
+		config.ReadJSONMap(filepath.Join(cwd, ".claude", "settings.json")),
+		config.UserSettings(),
 	} {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		var m map[string]any
-		if json.Unmarshal(b, &m) != nil {
-			continue
-		}
-		v := any(m)
-		for _, k := range strings.Split(key, ".") {
-			mm, ok := v.(map[string]any)
-			if !ok {
-				v = nil
-				break
-			}
-			v = mm[k]
-		}
-		if bv, ok := v.(bool); ok {
+		if bv, ok := dottedSetting(m, key).(bool); ok {
 			return bv
 		}
 	}
@@ -388,29 +384,11 @@ func settingBool(cwd, key string) bool {
 }
 
 func settingStr(cwd, key string) string {
-	for _, p := range []string{
-		filepath.Join(cwd, ".claude", "settings.json"),
-		filepath.Join(config.ClaudeDir(), "settings.json"),
+	for _, m := range []map[string]any{
+		config.ReadJSONMap(filepath.Join(cwd, ".claude", "settings.json")),
+		config.UserSettings(),
 	} {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		var m map[string]any
-		if json.Unmarshal(b, &m) != nil {
-			continue
-		}
-		parts := strings.Split(key, ".")
-		v := any(m)
-		for _, k := range parts {
-			if mm, ok := v.(map[string]any); ok {
-				v = mm[k]
-			} else {
-				v = nil
-				break
-			}
-		}
-		if s, ok := v.(string); ok {
+		if s, ok := dottedSetting(m, key).(string); ok {
 			return s
 		}
 	}

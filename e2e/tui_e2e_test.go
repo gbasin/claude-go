@@ -136,8 +136,8 @@ func TestModelPickerChrome(t *testing.T) {
 	p.sendUntilEchoed(t, "/model\r", "❯ /model", 8)
 	p.waitFor("Select model", 15*time.Second)
 	screen := p.clean()
-	if !strings.Contains(screen, "Enter to confirm") ||
-		!strings.Contains(screen, "s session-only") {
+	if !strings.Contains(screen, "Enter to set as default") ||
+		!strings.Contains(screen, "s to use this session only") {
 		t.Fatalf("model picker chrome missing:\n%s", truncStr(screen, 1500))
 	}
 	p.send("\x1b") // esc — keep the default
