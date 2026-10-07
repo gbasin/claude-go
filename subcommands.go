@@ -387,8 +387,16 @@ func agentsSub(args []string) {
 		if len(what) > 60 {
 			what = what[:60] + "…"
 		}
-		fmt.Printf("  %s  %s  %s ago  %s\n", j.Short, j.CWD,
-			time.Since(j.StartedAt).Round(time.Second), what)
+		// real's fleet view marks attach state + version skew
+		marks := ""
+		if j.Attached > 0 {
+			marks += "  attached"
+		}
+		if j.Version != "" && j.Version != version {
+			marks += fmt.Sprintf("  ↑v%s→%s", j.Version, version)
+		}
+		fmt.Printf("  %s  %s  %s ago  %s%s\n", j.Short, j.CWD,
+			time.Since(j.StartedAt).Round(time.Second), what, marks)
 	}
 }
 
