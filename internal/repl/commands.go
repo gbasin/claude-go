@@ -307,9 +307,24 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			break
 		}
 		go func() {
-			sub := *l
-			sub.Messages = nil
-			sub.ToolCtx = l.ToolCtx
+			// side query: same client/config as the session, fresh history
+			// (a struct copy of l trips vet — Loop embeds atomic counters)
+			sub := &agent.Loop{
+				Client: l.Client, Model: l.Model, Wants1m: l.Wants1m,
+				MaxTokens: l.MaxTokens, Effort: l.Effort,
+				Entrypoint: l.Entrypoint, PermMode: l.PermMode, CWD: l.CWD,
+				AppendSysP: l.AppendSysP, ExtraSystem: l.ExtraSystem,
+				SessionExtras: l.SessionExtras, PermRules: l.PermRules,
+				AddDirs: l.AddDirs, User: l.User, ToolCtx: l.ToolCtx,
+				Events: l.Events, MaxTurns: l.MaxTurns,
+				Transcript: l.Transcript, Hooks: l.Hooks,
+				AllowedTools: l.AllowedTools, FallbackModel: l.FallbackModel,
+				ThinkingMode: l.ThinkingMode, ThinkingDisplay: l.ThinkingDisplay,
+				ThinkingBudget: l.ThinkingBudget, FastMode: l.FastMode,
+				AutoCompactWindow: l.AutoCompactWindow, AdvisorModel: l.AdvisorModel,
+				MemoryPaused: l.MemoryPaused, AlwaysThinking: l.AlwaysThinking,
+				Bare: l.Bare, Goal: l.Goal, SessionStartSource: l.SessionStartSource,
+			}
 			resp, err := sub.Ask(context.Background(), arg)
 			if err != nil {
 				dprintf("\n  btw failed: %s\n", err)
