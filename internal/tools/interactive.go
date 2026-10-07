@@ -506,9 +506,15 @@ func execEnterPlan(c *Context, raw json.RawMessage) Result {
 		return Result{Content: "plan mode requires an interactive session", IsError: true}
 	}
 	c.SetPermMode("plan")
-	return Result{Content: fmt.Sprintf(
+	msg := fmt.Sprintf(
 		"Entered plan mode. Explore the codebase read-only, then write your plan to %s and present it with ExitPlanMode.",
-		planPath(c))}
+		planPath(c))
+	// --plan-mode-instructions replaces the default workflow body —
+	// real wraps it with the read-only preamble + ExitPlanMode footer
+	if inst := os.Getenv("CLAUDE_GO_PLAN_MODE_INSTRUCTIONS"); inst != "" {
+		msg += "\n\n" + inst
+	}
+	return Result{Content: msg}
 }
 
 func execExitPlan(c *Context, raw json.RawMessage) Result {
