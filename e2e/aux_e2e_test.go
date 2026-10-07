@@ -1207,3 +1207,60 @@ func TestManagedSettingsFlag(t *testing.T) {
 		t.Fatal("managed deny path opened a dialog")
 	}
 }
+
+// TestFileAttach: --file <path> wraps the contents in <file path> blocks
+// on the wire.
+func TestFileAttach(t *testing.T) {
+	s := newSession(t)
+	s.writeFile("attach.txt", "ATTACHED-CONTENT-e2e\n")
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 30*time.Second,
+		"--mock", "-p", "hi", "--file", filepath.Join(s.cwd, "attach.txt"))
+	s.mustOK(t, r)
+	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
+	if !bytes.Contains(b, []byte("file path=")) ||
+		!bytes.Contains(b, []byte("ATTACHED-CONTENT-e2e")) {
+		t.Fatalf("--file attach missing from wire:\n%s", truncStr(string(b), 600))
+	}
+}
+
+// TestAgentFlag: --agent <name> puts the resolved agent's prompt into
+// the system prompt.
+func TestAgentFlag(t *testing.T) {
+	s := newSession(t)
+	s.writeFile(".claude/agents/e2e-agent.md",
+		"---\nname: e2e-agent\ndescription: test agent\n---\n\nAGENT-SYS-MARKER body\n")
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 30*time.Second,
+		"--mock", "-p", "hi", "--agent", "e2e-agent")
+	s.mustOK(t, r)
+	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
+	if !bytes.Contains(b, []byte("AGENT-SYS-MARKER")) {
+		t.Fatalf("--agent system prompt missing from wire:\n%s", truncStr(string(b), 600))
+	}
+}
+
+// TestCorrelationID: --correlation-id lands as x-correlation-id header.
+func TestCorrelationID(t *testing.T) {
+	var cid string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/messages") {
+			cid = r.Header.Get("x-correlation-id")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"fable\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n")
+		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n")
+		fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n")
+		fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer srv.Close()
+	s := newSession(t)
+	r := s.runEx(t, []string{
+		"ANTHROPIC_BASE_URL=" + srv.URL, "CLAUDE_GO_TOKEN=test-token",
+	}, 30*time.Second, "-p", "hi", "--correlation-id", "corr-e2e-42")
+	s.mustOK(t, r)
+	if cid != "corr-e2e-42" {
+		t.Fatalf("x-correlation-id = %q", cid)
+	}
+}

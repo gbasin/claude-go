@@ -623,9 +623,9 @@ func TestMCPElicitation(t *testing.T) {
 	srv := newSSEMCPServer(t)
 	s := newSession(t)
 	dump := filepath.Join(s.cwd, "elicit.jsonl")
-	s.writeSettings(`{"enableAllProjectMcpServers":true,"hooks":{`+
-		`"Elicitation":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}],`+
-		`"ElicitationResult":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}]}}`)
+	s.writeSettings(`{"enableAllProjectMcpServers":true,"hooks":{` +
+		`"Elicitation":[{"hooks":[{"type":"command","command":"cat >> ` + dump + `"}]}],` +
+		`"ElicitationResult":[{"hooks":[{"type":"command","command":"cat >> ` + dump + `"}]}]}}`)
 	s.writeFile(".mcp.json", fmt.Sprintf(
 		`{"mcpServers":{"ssetest":{"type":"sse","url":%q}}}`, srv.srv.URL+"/sse"))
 
@@ -674,5 +674,27 @@ func elicitHooks(dump string, t *testing.T) {
 		if !strings.Contains(string(b), ev) {
 			t.Fatalf("missing %s in elicit hook dump:\n%s", ev, b)
 		}
+	}
+}
+
+// TestPluginDirHooks: --plugin-dir loads hooks/hooks.json directly —
+// ${CLAUDE_PLUGIN_ROOT} expands to the dir.
+func TestPluginDirHooks(t *testing.T) {
+	s := newSession(t)
+	plugDir := filepath.Join(s.home, "dev-plugin")
+	os.MkdirAll(filepath.Join(plugDir, "hooks"), 0o755)
+	os.WriteFile(filepath.Join(plugDir, "hooks", "hooks.json"),
+		[]byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"cat >> `+
+			s.cwd+`/plug-hook.jsonl`+`"}]}]}}`), 0o644)
+	p := s.runPTY(t, []string{
+		"CLAUDE_GO_PLUGIN_DIR=" + plugDir,
+	}, "--mock")
+	p.sendUntilEchoed(t, "hello\r", "❯ hello", 8)
+	p.waitFor("· done", 30*time.Second)
+	p.exit()
+
+	b, _ := os.ReadFile(filepath.Join(s.cwd, "plug-hook.jsonl"))
+	if !strings.Contains(string(b), `"hook_event_name":"UserPromptSubmit"`) {
+		t.Fatalf("plugin-dir hook never fired:\n%s", b)
 	}
 }
