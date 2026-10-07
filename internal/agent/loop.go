@@ -81,6 +81,7 @@ type Loop struct {
 	FastMode              bool     // fast mode: output_config.speed="fast"
 	AutoCompactWindow     string   // settings autoCompactWindow ("auto"|"500k"|N)
 	AdvisorModel          string   // settings advisorModel — the /advisor pick
+	CorrelationID         string   // --correlation-id → output_config.correlation_id
 	MemoryPaused          bool     // /pause-memory: skip MEMORY.md injection
 	AlwaysThinking        bool     // settings alwaysThinkingEnabled
 	pendingTrigger        string   // last compact trigger for the boundary record
@@ -171,6 +172,9 @@ func (l *Loop) buildRequest() *api.Request {
 		oc := map[string]string{"effort": effort}
 		if l.FastMode {
 			oc["speed"] = "fast"
+		}
+		if l.CorrelationID != "" {
+			oc["correlation_id"] = l.CorrelationID // real sends it inside output_config
 		}
 		ocRaw, _ = json.Marshal(oc)
 	}
