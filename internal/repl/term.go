@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"encoding/base64"
 	"encoding/json"
 
 	"claude-go/internal/voice"
@@ -91,6 +92,22 @@ func newEditor() *editor {
 	e := &editor{prompt: " ❯\u00a0", hIdx: -1, mode: "insert", pastes: map[string]string{}}
 	e.history = loadHistoryFile()
 	e.loadKeybindings()
+	// --prefill <text> / --prefill-b64: real seeds the input buffer
+	// without submitting (deep-link launch paths)
+	if pf := func() string {
+		if p := os.Getenv("CLAUDE_GO_PREFILL"); p != "" {
+			return p
+		}
+		if b64 := os.Getenv("CLAUDE_GO_PREFILL_B64"); b64 != "" {
+			if dec, err := base64.RawURLEncoding.DecodeString(b64); err == nil {
+				return string(dec)
+			}
+		}
+		return ""
+	}(); pf != "" {
+		e.buf = []rune(pf)
+		e.pos = len(e.buf)
+	}
 	return e
 }
 
