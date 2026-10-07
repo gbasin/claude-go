@@ -127,11 +127,11 @@ Flags:
                                 (claude attach <id> rejoins, claude agents lists)
   --attach-serve <target>       (accepted)
   --init-only                   run onboarding/migrations then exit
-  --autocompact <mode>          (accepted)
-  --advisor <mode>              (accepted)
+  --autocompact <auto|tokens>   auto-compact window (auto, or 100k-1M)
+  --advisor <model>             server-side advisor model (alias or full ID)
   --proactivity <level>         (accepted)
   --prompt-suggestions [mode]   (accepted)
-  --prefill <text>              (accepted)
+  --prefill <text>              seed the input buffer without submitting
   --prefill-b64 <b64>           (accepted)
   --teammate-mode <mode>        (accepted)
   --messaging-socket-path <p>   (accepted)
@@ -267,6 +267,15 @@ func main() {
 	}
 
 	o := parseCLI(args)
+
+	// --autocompact <auto|tokens>: real's argParser — 'auto' or 100k–1M
+	if o.autoCompact != "" && o.autoCompact != "auto" {
+		if n := agent.ParseWindow(o.autoCompact); n < 100_000 || n > 1_000_000 {
+			fmt.Fprintf(os.Stderr,
+				"Error: --autocompact must be 'auto', or between 100k and 1M (e.g. 500k, 200000)\n")
+			os.Exit(1)
+		}
+	}
 
 	// env wiring that must precede client construction
 	if o.sdkURL != "" {
@@ -559,7 +568,13 @@ func main() {
 		loop.Effort = st.EffortLevel
 	}
 	loop.AutoCompactWindow = st.AutoCompactWindow
+	if o.autoCompact != "" {
+		loop.AutoCompactWindow = o.autoCompact // --autocompact <auto|tokens>
+	}
 	loop.AdvisorModel = st.AdvisorModel
+	if o.advisor != "" {
+		loop.AdvisorModel = o.advisor // --advisor <model> (alias or full ID)
+	}
 	loop.AlwaysThinking = st.AlwaysThinkingEnabled
 	if st.FastMode == "on" || st.FastMode == "true" {
 		loop.FastMode = true
