@@ -392,6 +392,9 @@ func main() {
 	}
 	// --json-schema → output_config.format on the wire
 	loop.OutputSchema = o.jsonSchema
+	if m := os.Getenv("CLAUDE_GO_ADVISOR"); m != "" {
+		loop.AdvisorModel = m // --advisor <model>
+	}
 	// elicitation/create: hook wiring needs the loop's hook config — wrap
 	// whatever main's default OnElicit resolved (decline/answer-seam)
 	for _, c := range mcpClients {
@@ -475,7 +478,9 @@ func main() {
 		loop.Effort = st.EffortLevel
 	}
 	loop.AutoCompactWindow = st.AutoCompactWindow
-	loop.AdvisorModel = st.AdvisorModel
+	if st.AdvisorModel != "" || loop.AdvisorModel == "" {
+		loop.AdvisorModel = st.AdvisorModel
+	}
 	loop.AlwaysThinking = st.AlwaysThinkingEnabled
 	if st.FastMode == "on" || st.FastMode == "true" {
 		loop.FastMode = true

@@ -643,4 +643,3 @@ func TestBangInterpolation(t *testing.T) {
 	}
 	t.Fatal("!`echo` output never reached the wire")
 }
-

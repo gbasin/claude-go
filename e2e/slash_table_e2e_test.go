@@ -134,3 +134,13 @@ func TestCopyCmd(t *testing.T) {
 	p.waitFor("copied", 15*time.Second)
 	p.exit()
 }
+
+// TestAdvisorFlag: --advisor <model> pre-seeds the advisor model.
+func TestAdvisorFlag(t *testing.T) {
+	s := newSession(t)
+	p := s.runPTY(t, nil, "--mock", "--advisor", "claude-e2e-advisor-model")
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t, "/advisor\r", "❯ /advisor", 8)
+	p.waitFor("claude-e2e-advisor-model", 15*time.Second)
+	p.exit()
+}
