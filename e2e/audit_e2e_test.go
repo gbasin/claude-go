@@ -851,3 +851,67 @@ func TestHookMatrixRound2(t *testing.T) {
 		}
 	}
 }
+
+// TestHookMatrixRound3: Setup (/init), ConfigChange (/config set),
+// InstructionsLoaded (CLAUDE.md at first turn).
+func TestHookMatrixRound3(t *testing.T) {
+	s := newSession(t)
+	dump := filepath.Join(s.cwd, "matrix3.jsonl")
+	s.writeFile(".claude/settings.json",
+		`{"hooks":{`+
+			`"Setup":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}],`+
+			`"ConfigChange":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}],`+
+			`"InstructionsLoaded":[{"hooks":[{"type":"command","command":"cat >> `+dump+`"}]}]`+
+			`}}`)
+	s.writeFile("CLAUDE.md", "# test instructions\n")
+	p := startREPL(t, s)
+
+	// InstructionsLoaded — first turn loads CLAUDE.md
+	p.sendUntilEchoed(t, "hello\r", "❯ hello", 8)
+	p.waitFor("· done", 30*time.Second)
+
+	// Setup — /init spawns the init turn (the Setup hook fires up front)
+	p.sendUntilEchoed(t, "/init\r", "❯ /init", 8)
+	p.waitFor("analyzing codebase", 15*time.Second)
+	p.waitFor("· done", 30*time.Second)
+
+	// ConfigChange — /config set writes settings
+	p.sendUntilEchoed(t, "/config theme dark\r", "❯ /config theme dark", 8)
+	p.waitFor("set theme = ", 15*time.Second)
+	p.exit()
+
+	b, _ := os.ReadFile(dump)
+	out := string(b)
+	for _, ev := range []string{
+		`"hook_event_name":"InstructionsLoaded"`,
+		`"hook_event_name":"Setup"`,
+		`"hook_event_name":"ConfigChange"`,
+	} {
+		if !strings.Contains(out, ev) {
+			t.Fatalf("missing %s in hook dump:\n%s", ev, out)
+		}
+	}
+}
+
+// TestHookFileChanged: Write/Edit fire FileChanged(file_path, kind).
+func TestHookFileChanged(t *testing.T) {
+	s := newSession(t)
+	dump := filepath.Join(s.cwd, "fc.jsonl")
+	target := filepath.Join(s.cwd, "fc-target.txt")
+	s.writeSettings(`{"hooks":{"FileChanged":[{"hooks":[` +
+		`{"type":"command","command":"cat >> ` + dump + `"}]}]}}`)
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p.sendUntilEchoed(t,
+		`tool:Write {"file_path":"`+target+`","content":"x"}`+"\r",
+		"❯ tool:Write", 8)
+	p.waitFor("Tool results received", 30*time.Second)
+	p.exit()
+
+	b, _ := os.ReadFile(dump)
+	if !strings.Contains(string(b), `"hook_event_name":"FileChanged"`) {
+		t.Fatalf("FileChanged never fired:\n%s", b)
+	}
+	if !strings.Contains(string(b), target) {
+		t.Fatalf("FileChanged missing file_path %q:\n%s", target, b)
+	}
+}

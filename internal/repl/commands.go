@@ -135,6 +135,10 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		exportCmd(l, arg)
 	case "init":
 		dprintln("  analyzing codebase → CLAUDE.md …")
+		hooks.Run(l.Hooks, hooks.Setup, map[string]any{
+			"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+			"trigger": "init", "hook_event_name": "Setup",
+		}, l.ToolCtx.CWD)
 		body := bundledInit
 		if foreignAgentConfigExists() {
 			body = strings.Replace(body, "\n- Do not make up information",
@@ -2462,6 +2466,10 @@ func configCmd(l *agent.Loop, arg string) {
 	}
 	out, _ := json.MarshalIndent(m, "", "  ")
 	os.WriteFile(p, out, 0o644)
+	hooks.Run(l.Hooks, hooks.ConfigChange, map[string]any{
+		"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+		"source": "user_settings", "file_path": p, "hook_event_name": "ConfigChange",
+	}, l.ToolCtx.CWD)
 	dprintf("  set %s = %s\n", k, v)
 }
 
