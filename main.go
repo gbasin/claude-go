@@ -644,6 +644,9 @@ func main() {
 	loop.PermRules = rules
 	stampProjectState(cwd, sessionID, loop.Model, false)
 	loop.Hooks = hooks.Load(cwd)
+	// InstructionsLoaded fires once per loaded memory/CLAUDE.md file at
+	// startup (real: load_reason + file_path per source)
+	fireInstructionsLoaded(loop, cwd)
 	// --settings JSON also carries hooks (real applies the whole file)
 	if o.settingsF != "" && len(sb2) > 0 {
 		var top struct {
@@ -1299,9 +1302,27 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 	l.Events.OnToolUse = func(name string, input json.RawMessage) {
 		if sj {
 			ev, _ := json.Marshal(map[string]any{
-				"type": "assistant",
+				"type": "assistant", "uuid": session.NewID(),
+				"parent_tool_use_id": nil,
 				"message": map[string]any{"role": "assistant", "content": []map[string]any{{
-					"type": "tool_use", "name": name, "input": json.RawMessage(input)}}},
+					"type": "tool_use", "name": name, "id": "toolu_" + session.NewID()[:12],
+					"input": json.RawMessage(input)}}},
+				"session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
+	}
+	var lastToolUseID string
+	l.Events.OnToolUse = func(name string, input json.RawMessage) {
+		if sj {
+			id := "toolu_" + session.NewID()[:12]
+			lastToolUseID = id
+			ev, _ := json.Marshal(map[string]any{
+				"type": "assistant", "uuid": session.NewID(),
+				"parent_tool_use_id": nil,
+				"message": map[string]any{"role": "assistant", "content": []map[string]any{{
+					"type": "tool_use", "name": name, "id": id,
+					"input": json.RawMessage(input)}}},
 				"session_id": l.Client.SessionID,
 			})
 			fmt.Println(string(ev))
@@ -1310,9 +1331,11 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 	l.Events.OnToolResult = func(name string, tr tools.Result) {
 		if sj {
 			ev, _ := json.Marshal(map[string]any{
-				"type": "user",
+				"type": "user", "uuid": session.NewID(),
+				"parent_tool_use_id": nil,
 				"message": map[string]any{"role": "user", "content": []map[string]any{{
-					"type": "tool_result", "content": tr.Content, "is_error": tr.IsError}}},
+					"type": "tool_result", "tool_use_id": lastToolUseID,
+					"content": tr.Content, "is_error": tr.IsError}}},
 				"session_id": l.Client.SessionID,
 			})
 			fmt.Println(string(ev))
@@ -2088,5 +2111,38 @@ func fullUsage(u api.Usage) map[string]any {
 		"cache_creation": map[string]any{
 			"ephemeral_1h_input_tokens": 0, "ephemeral_5m_input_tokens": u.CacheCreationInputTokens,
 		},
+	}
+}
+
+// fireInstructionsLoaded emits InstructionsLoaded for each CLAUDE.md /
+// memory file that actually feeds the session (real fires per file with
+// load_reason=session_start).
+func fireInstructionsLoaded(l *agent.Loop, cwd string) {
+	if len(l.Hooks["InstructionsLoaded"]) == 0 {
+		return
+	}
+	home, _ := os.UserHomeDir()
+	var files []string
+	for _, p := range []string{
+		filepath.Join(config.ClaudeDir(), "CLAUDE.md"),
+		filepath.Join(cwd, "CLAUDE.md"),
+		filepath.Join(cwd, "CLAUDE.local.md"),
+		filepath.Join(cwd, ".claude", "CLAUDE.md"),
+		filepath.Join(config.ClaudeDir(), "projects",
+			strings.ReplaceAll(filepath.Clean(cwd), "/", "-"), "memory", "MEMORY.md"),
+	} {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			files = append(files, p)
+		}
+	}
+	_ = home
+	for _, f := range files {
+		hooks.Run(l.Hooks, hooks.InstructionsLoaded, map[string]any{
+			"session_id": l.Client.SessionID, "cwd": cwd,
+			"hook_event_name": "InstructionsLoaded", "permission_mode": l.PermMode,
+			"transcript_path": l.Transcript,
+			"load_reason":     "session_start",
+			"file_path":       f,
+		}, cwd)
 	}
 }
