@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"claude-go/internal/bg"
 	"claude-go/internal/session"
 	"golang.org/x/term"
 )
@@ -19,17 +20,26 @@ import (
 // Keys: ↑/↓/j/k navigate · enter resume · / or ctrl-f search · ctrl-r rename
 // · space preview pane · ctrl-b all projects · esc/ctrl-c cancel.
 func PickSession(cwd string) string {
-	return pickSession(cwd, nil)
+	return pickSession(cwd, nil, "")
 }
 
 // pickSession runs the picker against an existing keySource when the
 // caller is the REPL — a second stdin reader would race the REPL's and
 // starve the picker of arrows/enter (live-verified on m5p). nil starts
 // a standalone reader for the non-REPL -r path.
-func pickSession(cwd string, ks *keySource) string {
+func pickSession(cwd string, ks *keySource, selfID string) string {
 	infos, err := session.List(cwd)
 	if err != nil {
 		infos = nil
+	}
+	if selfID != "" {
+		kept := infos[:0]
+		for _, in := range infos {
+			if in.ID != selfID { // you can't resume the session you're in
+				kept = append(kept, in)
+			}
+		}
+		infos = kept
 	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		session.Print(cwd)
@@ -58,7 +68,15 @@ func pickSession(cwd string, ks *keySource) string {
 		view       []session.Info
 		pcache     = map[string][]string{}
 		lastLines  int
+		notice     string // transient hint under the list
 	)
+
+	// bg sessions run under a bg-host — real marks them `bg` in the list and
+	// refuses a live-resume ("attach to it from claude agents or stop it")
+	running := map[string]string{}
+	for _, j := range bg.List() {
+		running[j.SessionID] = j.Short
+	}
 
 	refilter := func() {
 		view = view[:0]
@@ -102,6 +120,17 @@ func pickSession(cwd string, ks *keySource) string {
 			return in.ID
 		}
 		return in.Path
+	}
+	// tryPick blocks resuming a still-running bg session — real refuses
+	// ("attach to it from claude agents or stop it first"). The caller's
+	// draw() renders the notice.
+	tryPick := func() (string, bool) {
+		in := view[sel]
+		if short, ok := running[in.ID]; ok {
+			notice = fmt.Sprintf("%s is still running — `claude attach %s` to join it", short, short)
+			return "", false
+		}
+		return pick(in), true
 	}
 
 	width, height, _ := term.GetSize(int(os.Stdout.Fd()))
@@ -162,6 +191,9 @@ func pickSession(cwd string, ks *keySource) string {
 			if allProj {
 				meta += "  " + dim + tailRunes(session.SlugPath(in.Slug), 30) + reset
 			}
+			if short, ok := running[in.ID]; ok {
+				meta += fmt.Sprintf("  %sbg:%s%s", yellow, short, reset)
+			}
 			if i == sel {
 				emit(fmt.Sprintf(" %s❯%s %s", cyan, "\x1b[39m", title))
 				emit("    " + dim + meta + reset)
@@ -187,10 +219,14 @@ func pickSession(cwd string, ks *keySource) string {
 				}
 			}
 		}
+		if notice != "" {
+			emit(fmt.Sprintf("  %s%s%s", yellow, notice, reset))
+		}
 	}
 	draw()
 
 	for k := range ks.ch {
+		notice = ""
 		// navigation works in every mode
 		nav := func() bool {
 			switch {
@@ -251,7 +287,9 @@ func pickSession(cwd string, ks *keySource) string {
 				refilter()
 			case k.b == '\r' || k.b == '\n':
 				if len(view) > 0 {
-					return pick(view[sel])
+					if id, ok := tryPick(); ok {
+						return id
+					}
 				}
 				searchMode = false
 			case k.b == 0x7f || k.b == 8:
@@ -277,7 +315,9 @@ func pickSession(cwd string, ks *keySource) string {
 		switch {
 		case k.b == '\r' || k.b == '\n':
 			if len(view) > 0 {
-				return pick(view[sel])
+				if id, ok := tryPick(); ok {
+					return id
+				}
 			}
 		case (k.b == 0x1b && k.seq == "") || k.b == 3:
 			fmt.Print("\r\n")

@@ -61,6 +61,8 @@ type cliOpts struct {
 	effort       string
 	sessionName  string
 	resumeAt     string
+	dropsTurn    string
+	rewindFiles  string
 	worktreeSet  bool
 	worktreeName string
 	tmux         string // "" | "auto" | "classic"
@@ -68,6 +70,7 @@ type cliOpts struct {
 	sdkURL       string
 	betas        string
 	initOnly     bool
+	bgMode       bool
 	noPersist    bool
 	partialMsgs  bool
 	replayUser   bool
@@ -149,6 +152,8 @@ func parseCLI(args []string) *cliOpts {
 		"--thinking":           func(v string) { o.thinkingMode = v },
 		"--thinking-display":   func(v string) { o.thinkingDisp = v },
 		"--resume-session-at":  func(v string) { o.resumeAt = v },
+		"--resume-drops-turn":  func(v string) { o.dropsTurn = v },
+		"--rewind-files":       func(v string) { o.rewindFiles = v },
 		"--workload":           func(v string) { o.workload = v; os.Setenv("CLAUDE_GO_WORKLOAD", v) },
 		"--session-id":         func(v string) { o.sessID = v },
 		"--settings":           func(v string) { o.settingsF = v },
@@ -169,7 +174,7 @@ func parseCLI(args []string) *cliOpts {
 		"--channels", "--dangerously-load-development-channels",
 		"--plugin-dir", "--plugin-dir-no-mcp", "--plugin-url",
 		"--remote-control-session-name-prefix",
-		"--autocompact", "--rewind-files", "--resume-drops-turn",
+		"--autocompact",
 		"--task-budget", "--teammate-mode", "--messaging-socket-path",
 		"--environment", "--pool", "--ref", "--on-branch",
 		"--correlation-id", "--forward-home-settings", "--project-config-root",
@@ -190,7 +195,14 @@ func parseCLI(args []string) *cliOpts {
 	boolFlags := map[string]func(){
 		"-p":                                   func() { o.printMode = true },
 		"--print":                              func() { o.printMode = true },
-		"--mock":                               func() { o.mockMode = true },
+		"--mock": func() {
+			o.mockMode = true
+			// env is the propagation contract for spawned children (bg
+			// workers, daemon respawns read CLAUDE_GO_MOCK to add --mock);
+			// a flag-only --mock silently spawned an unmocked worker that
+			// died on credentials
+			os.Setenv("CLAUDE_GO_MOCK", "1")
+		},
 		"-d":                                   func() { o.debug = true },
 		"--debug":                              func() { o.debug = true },
 		"-d2e":                                 func() { o.debug = true },
@@ -204,6 +216,8 @@ func parseCLI(args []string) *cliOpts {
 		"--dangerously-skip-permissions":       func() { o.permMode = "bypassPermissions" },
 		"--allow-dangerously-skip-permissions": func() { o.permMode = "bypassPermissions" },
 		"-c":                                   func() { o.cont = true },
+		"--bg":                                  func() { o.bgMode = true },
+		"--background":                          func() { o.bgMode = true },
 		"--continue":                           func() { o.cont = true },
 		"--fork-session":                       func() { o.forkSess = true },
 		"--strict-mcp-config":                  func() { o.strictMCP = true },
@@ -224,7 +238,7 @@ func parseCLI(args []string) *cliOpts {
 		"--enable-auth-status", "--restricted",
 		"--exclude-dynamic-system-prompt-sections", "--deep-link-origin",
 		"--reply-on-resume", "--disable-slash-commands",
-		"--bg", "--background", "--brief", "--ax-screen-reader", "--hard-fail",
+		"--brief", "--ax-screen-reader", "--hard-fail",
 	} {
 		flag := f
 		boolFlags[flag] = func() { os.Setenv(stubName(flag), "1") }
@@ -506,37 +520,47 @@ func setupWorktree(cwd, name, sessionID string) string {
 
 // --- --resume-session-at ---------------------------------------------------
 
+// resumeAtRec is the record view --resume-session-at loads (shared by the
+// loader and the drops-turn guard).
+type resumeAtRec struct {
+	Type            string `json:"type"`
+	UUID            string `json:"uuid"`
+	ParentUUID      string `json:"parentUuid"`
+	IsSidechain     bool   `json:"isSidechain"`
+	IsMeta          bool   `json:"isMeta"`
+	IsCompactSummary bool  `json:"isCompactSummary"`
+	Message         struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	} `json:"message"`
+}
+
 // loadSessionAt rebuilds the message chain ending at a specific message
 // uuid — session.Load always starts from the leaf; --resume-session-at
 // resumes mid-chain.
-func loadSessionAt(cwd, sessionID, atUUID string) ([]api.Message, error) {
+func loadSessionAt(cwd, sessionID, atUUID, dropsTurn string) ([]api.Message, string, error) {
 	return loadSessionAtPath(filepath.Join(config.ClaudeDir(), "projects",
-		strings.ReplaceAll(filepath.Clean(cwd), "/", "-"), sessionID+".jsonl"), atUUID)
+		strings.ReplaceAll(filepath.Clean(cwd), "/", "-"), sessionID+".jsonl"), atUUID, dropsTurn)
 }
 
 // loadSessionAtPath is loadSessionAt on an arbitrary transcript file —
 // needed when -r takes a path and --resume-session-at targets a uuid
-// inside it.
-func loadSessionAtPath(p, atUUID string) ([]api.Message, error) {
+// inside it. Also returns the leaf uuid — the parentUuid anchor a
+// same-transcript resume continues from. dropsTurn is real's
+// --resume-drops-turn <turn-uuid>: a safety declaration that every record
+// discarded by resuming at atUUID belongs to that turn — refused when the
+// tail contains anything else.
+func loadSessionAtPath(p, atUUID, dropsTurn string) ([]api.Message, string, error) {
 	f, err := os.Open(p)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer f.Close()
-	type rec struct {
-		Type        string `json:"type"`
-		UUID        string `json:"uuid"`
-		ParentUUID  string `json:"parentUuid"`
-		IsSidechain bool   `json:"isSidechain"`
-		IsMeta      bool   `json:"isMeta"`
-		Message     struct {
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
-		} `json:"message"`
-	}
+	type rec = resumeAtRec
 	var records []rec
 	byUUID := map[string]*rec{}
 	var target *rec
+	targetIdx := -1
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 1<<20), 8<<20)
 	for sc.Scan() {
@@ -550,11 +574,18 @@ func loadSessionAtPath(p, atUUID string) ([]api.Message, error) {
 			byUUID[r.UUID] = &cp
 			if r.UUID == atUUID || strings.HasPrefix(r.UUID, atUUID) {
 				target = byUUID[r.UUID]
+				targetIdx = len(records) - 1
 			}
 		}
 	}
 	if target == nil {
-		return nil, fmt.Errorf("message %s not found in %s", atUUID, p)
+		return nil, "", fmt.Errorf("message %s not found in %s", atUUID, p)
+	}
+	if dropsTurn != "" {
+		if err := dropGuard(records[targetIdx+1:], dropsTurn); err != nil {
+			return nil, "", fmt.Errorf("resuming at %s would discard entries not attributable to turn %s: %s",
+				atUUID, dropsTurn, err)
+		}
 	}
 	var chain []rec
 	seen := map[string]bool{}
@@ -576,5 +607,66 @@ func loadSessionAtPath(p, atUUID string) ([]api.Message, error) {
 		}
 		msgs = append(msgs, api.Message{Role: r.Message.Role, Content: r.Message.Content})
 	}
-	return msgs, nil
+	return msgs, target.UUID, nil
+}
+
+// dropGuard is real's --resume-drops-turn check (vg in the decompile):
+// the caller declares that everything discarded by the resume-at — the
+// transcript tail after the anchor — belongs to one turn, turnID. The
+// first discarded entry must BE that turn's prompt; anything else
+// (another user prompt, a compaction summary, externally-sourced input)
+// refuses. Meta records, sidechains, tool results, and furniture pass.
+func dropGuard(tail []resumeAtRec, turnID string) error {
+	if !uuidShape(turnID) {
+		return fmt.Errorf("declared turn id is not a UUID: %s", turnID)
+	}
+	i := 0
+	for i < len(tail) && tail[i].Type != "user" {
+		i++ // skip leading non-user furniture (system/progress/attachment)
+	}
+	if i == len(tail) {
+		return nil
+	}
+	first := tail[i]
+	if first.UUID != turnID {
+		return fmt.Errorf("range does not start with the declared turn prompt")
+	}
+	if first.IsMeta || promptless(first.Message.Content) {
+		return fmt.Errorf("declared turn id names a non-prompt user entry")
+	}
+	for _, r := range tail[i+1:] {
+		if r.Type != "user" {
+			continue // assistant/progress/system/attachment all pass
+		}
+		if r.IsMeta || r.IsSidechain || promptless(r.Message.Content) {
+			continue // tool results, meta entries, sidechain chatter
+		}
+		if r.IsCompactSummary {
+			return fmt.Errorf("range contains a compaction summary")
+		}
+		return fmt.Errorf("range contains a user turn not attributable to the declared turn")
+	}
+	return nil
+}
+
+// promptless reports whether a user-message content carries no real text
+// prompt — tool_result payloads ride the user role but aren't a turn start.
+func promptless(content json.RawMessage) bool {
+	return !strings.Contains(string(content), `"type":"text"`)
+}
+
+func uuidShape(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, c := range s {
+		want := i == 8 || i == 13 || i == 18 || i == 23
+		if (c == '-') != want {
+			return false
+		}
+		if c != '-' && !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
 }

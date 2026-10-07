@@ -9,11 +9,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
 	"claude-go/internal/api"
 	"claude-go/internal/auth"
+	"claude-go/internal/bg"
 	"claude-go/internal/bridge"
 	"claude-go/internal/mcp"
 	"claude-go/internal/netproxy"
@@ -366,6 +368,165 @@ func agentsSub(args []string) {
 	}
 	fmt.Println("\nbackground tasks: none (tasks live inside a running session)")
 	fmt.Println("local bus agents: none (no messaging socket)")
+	jobs := bg.List()
+	fmt.Println("\nbackground sessions:")
+	if pid := bg.DaemonPID(); pid != 0 {
+		fmt.Printf("  (daemon running, pid %d)\n", pid)
+	}
+	if len(jobs) == 0 {
+		fmt.Println("  none")
+	}
+	for _, j := range jobs {
+		what := j.Prompt
+		if what == "" {
+			what = j.Name
+		}
+		if what == "" {
+			what = "(idle)"
+		}
+		if len(what) > 60 {
+			what = what[:60] + "…"
+		}
+		// real's fleet view marks attach state + version skew
+		marks := ""
+		if j.Attached > 0 {
+			marks += "  attached"
+		}
+		if j.Version != "" && j.Version != version {
+			marks += fmt.Sprintf("  ↑v%s→%s", j.Version, version)
+		}
+		fmt.Printf("  %s  %s  %s ago  %s%s\n", j.Short, j.CWD,
+			time.Since(j.StartedAt).Round(time.Second), what, marks)
+	}
+}
+
+// bgHostSub is the hidden bg-pty-host worker — detached by Spawn,
+// never invoked by hand. Owns the session's pty + rendezvous socket.
+func bgHostSub(args []string) {
+	var o bg.HostOpts
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--session":
+			i++
+			o.SessionID = args[i]
+		case "--cwd":
+			i++
+			o.CWD = args[i]
+		case "--resume-from":
+			i++
+			o.ResumeFrom = args[i]
+		case "--prompt":
+			i++
+			o.Prompt = args[i]
+		case "--name":
+			i++
+			o.Name = args[i]
+		}
+	}
+	if o.SessionID == "" {
+		fmt.Fprintln(os.Stderr, "bg-host: --session required")
+		os.Exit(2)
+	}
+	if o.CWD == "" {
+		o.CWD = mustGetwd()
+	}
+	os.Exit(bg.RunHost(o))
+}
+
+// attachSub: claude attach <id> — live-attach this terminal to a running
+// background session (real's attach; Ctrl+Z inside detaches).
+func attachSub(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: claude attach <session-id|prefix|name>")
+		os.Exit(2)
+	}
+	if err := bg.Attach(args[0], os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+// stopSub is `claude stop <id>` — ends a running background session. The
+// transcript stays on disk (real's stop keeps transcript + worktree).
+func stopSub(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: claude stop <session-id|prefix|name>")
+		os.Exit(2)
+	}
+	j, err := bg.Lookup(args[0])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	short := args[0]
+	if j != nil {
+		short = j.Short
+	}
+	if err := bg.Stop(args[0]); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Printf("session %s stopped\n", short)
+}
+
+// daemonSub is `claude daemon` — the background-session supervisor:
+// `run` foreground-sweeps respawning dead workers; `start` detaches one;
+// `status`/`stop` manage it. Real's daemon is the service arm of the bg
+// architecture — ours is a single-process supervisor.
+func daemonSub(args []string) {
+	sub := "status"
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch sub {
+	case "run":
+		sweep := 0
+		if v := os.Getenv("CLAUDE_GO_BG_SWEEP_MS"); v != "" {
+			sweep, _ = strconv.Atoi(v)
+		}
+		os.Exit(bg.RunDaemon(version, time.Duration(sweep)*time.Millisecond))
+	case "start":
+		if bg.DaemonAlive() {
+			fmt.Println("daemon already running")
+			return
+		}
+		if _, err := bg.StartDaemon(); err != nil {
+			fmt.Fprintln(os.Stderr, "daemon start:", err)
+			os.Exit(1)
+		}
+		fmt.Println("daemon started")
+	case "stop":
+		if err := bg.StopDaemon(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println("daemon stopped")
+	case "install":
+		// real's daemon is an installable service — ours registers a
+		// LaunchAgent (macOS) or user systemd unit (linux)
+		if p, err := bg.InstallDaemon(); err != nil {
+			fmt.Fprintln(os.Stderr, "daemon install:", err)
+			os.Exit(1)
+		} else {
+			fmt.Printf("daemon service installed: %s\n", p)
+		}
+	case "uninstall":
+		if err := bg.UninstallDaemon(); err != nil {
+			fmt.Fprintln(os.Stderr, "daemon uninstall:", err)
+			os.Exit(1)
+		}
+		fmt.Println("daemon service removed")
+	case "status":
+		if pid := bg.DaemonPID(); pid != 0 {
+			jobs := bg.List()
+			fmt.Printf("daemon running (pid %d) — %d background session(s)\n", pid, len(jobs))
+		} else {
+			fmt.Println("daemon not running — `claude daemon start`")
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "usage: claude daemon [run|start|status|stop|install|uninstall]\n")
+		os.Exit(2)
+	}
 }
 
 func quickFrontmatter(s string) map[string]string {

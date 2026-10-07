@@ -21,6 +21,7 @@ import (
 	"claude-go/internal/agent"
 	"claude-go/internal/api"
 	"claude-go/internal/auth"
+	"claude-go/internal/bg"
 	"claude-go/internal/bridge"
 	"claude-go/internal/browsermcp"
 	"claude-go/internal/config"
@@ -90,10 +91,12 @@ Flags:
   -c, --continue                continue most recent session
   -r, --resume [id]             resume a session (picker if no id)
   --resume-session-at <uuid>    resume from a specific message
-  --resume-drops-turn <n>       (accepted)
+  --resume-drops-turn <uuid>    with --resume-session-at: declare the
+                                discarded tail belongs to that turn (refused otherwise)
   --fork-session                fork when resuming
   --no-session-persistence      don't write a transcript
-  --rewind-files <mode>         (accepted)
+  --rewind-files <uuid>         with -r: restore tracked files to the
+                                state at that user message, then exit
   -w, --worktree [name]         create .claude/worktrees/<name> and cd into it
   --project <dir>               run in a different project directory
   --from-pr <ref>               (accepted)
@@ -120,6 +123,8 @@ Flags:
   --forward-home-settings <v>   (accepted)
   --project-config-root <dir>   (accepted)
   --sdk-url <url>               API base URL (sets ANTHROPIC_BASE_URL)
+  --bg, --background            run this session as a background agent
+                                (claude attach <id> rejoins, claude agents lists)
   --attach-serve <target>       (accepted)
   --init-only                   run onboarding/migrations then exit
   --autocompact <mode>          (accepted)
@@ -151,7 +156,11 @@ Flags:
   -h, --help                    this help
 
 Subcommands:
-  agents                        list agent types + background tasks
+  agents                        list agent types + background sessions
+  attach <id>                   attach to a running background session (^Z detaches)
+  daemon run|start|status|stop  background-session supervisor (respawns dead workers)
+                                install|uninstall register as a service (launchd/systemd)
+  stop <id>                     stop a running background session
   auth login|status|logout      credential management
   config get|set|list           settings.json
   doctor                        diagnostics
@@ -221,6 +230,18 @@ func main() {
 		case "agents":
 			agentsSub(args[1:])
 			return
+		case "attach":
+			attachSub(args[1:])
+			return
+		case "stop":
+			stopSub(args[1:])
+			return
+		case "daemon":
+			daemonSub(args[1:])
+			return
+		case "bg-host":
+			bgHostSub(args[1:])
+			return
 		case "import":
 			importSub(args[1:])
 			return
@@ -280,6 +301,26 @@ func main() {
 	if o.sessID != "" {
 		sessionID = o.sessID
 	}
+	if o.bgMode {
+		// real's --bg (v2.1.198+): start the session as a background agent
+		// and return — prints the id + management commands
+		opts := bg.SpawnOpts{
+			SessionID: sessionID,
+			CWD:       cwd,
+			Prompt:    strings.Join(o.prompt, " "),
+		}
+		if o.resume != "" && o.resume != "-" {
+			opts.ResumeFrom = o.resume // --bg -r <id> backgrounds an existing session
+		}
+		if _, err := bg.Spawn(opts); err != nil {
+			fmt.Fprintln(os.Stderr, "--bg:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("background session %s started\n", sessionID)
+		fmt.Printf("  attach:   claude attach %s\n", sessionID[:8])
+		fmt.Println("  monitor:  claude agents")
+		os.Exit(0)
+	}
 	if o.tmux != "" {
 		// real's --tmux requires --worktree and a tmux/iTerm2 backend
 		// (classic = traditional tmux session for the worktree)
@@ -323,6 +364,84 @@ func main() {
 			o.resume = id
 		}
 	}
+
+	// Resolve the resume target BEFORE sessionID-dependent wiring (client,
+	// store, checkpoints). Real continues the SAME transcript on -c/-r —
+	// new turns append to the resumed session's file, parentUuid-chained
+	// to the loaded leaf. Only --fork-session keeps the fresh id.
+	resumeID := ""
+	resumePath := "" // -r <file>.jsonl keeps the path for loading
+	if o.cont || o.resume != "" {
+		resumeID = o.resume
+		if o.cont {
+			if l2, err := session.Latest(cwd); err == nil {
+				resumeID = l2
+			}
+		}
+		if resumeID == "-" {
+			if id2 := repl.PickSession(cwd); id2 != "" {
+				resumeID = id2
+			} else {
+				return
+			}
+		}
+		if strings.HasSuffix(resumeID, ".jsonl") {
+			resumePath = resumeID
+			resumeID = strings.TrimSuffix(filepath.Base(resumeID), ".jsonl")
+		}
+		if !o.forkSess && resumeID != "" {
+			sessionID = resumeID
+		}
+		// real: "Can't open — this session is running in another terminal"
+		// — a live bg worker owns the transcript; a second writer would
+		// interleave records. --fork-session is the sanctioned bypass, and
+		// a bg host's inner session resumes its own transcript (daemon
+		// respawns mark the job live before the child starts).
+		if resumeID != "" && !o.forkSess && os.Getenv("CLAUDE_CODE_SESSION_KIND") != "bg" {
+			if j, _ := bg.Lookup(resumeID); j != nil && j.Alive() {
+				fmt.Fprintf(os.Stderr,
+					"Can't open — this session is running in another terminal (claude attach %s)\n", j.Short)
+				os.Exit(1)
+			}
+		}
+	}
+	// real's flag wiring: these only make sense attached to a resume
+	if o.resumeAt != "" && resumeID == "" {
+		fmt.Fprintln(os.Stderr, "Error: --resume-session-at requires --resume")
+		os.Exit(1)
+	}
+	if o.dropsTurn != "" && o.resumeAt == "" {
+		fmt.Fprintln(os.Stderr, "Error: --resume-drops-turn requires --resume-session-at")
+		os.Exit(1)
+	}
+	if o.rewindFiles != "" && resumeID == "" {
+		fmt.Fprintln(os.Stderr, "Error: --rewind-files requires --resume")
+		os.Exit(1)
+	}
+	if o.rewindFiles != "" && strings.Join(o.prompt, " ") != "" {
+		fmt.Fprintln(os.Stderr, "Error: --rewind-files is a standalone operation and cannot be used with a prompt")
+		os.Exit(1)
+	}
+	tools.Checkpoints.Init(sessionID) // file-history backups cover tool
+	// writes in both print and interactive modes (real snapshots every
+	// Write); was interactive-only — -p writes left no rewind trail
+
+	if o.rewindFiles != "" {
+		// standalone: restore tracked files to the state at that user
+		// message, then exit — real never enters the session
+		restored, removed, err := session.RewindFiles(cwd, resumeID, o.rewindFiles)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Files rewound to state at message %s (%d restored", o.rewindFiles, restored)
+		if removed > 0 {
+			fmt.Printf(", %d removed", removed)
+		}
+		fmt.Println(")")
+		return
+	}
+
 	agentCleanup := installCLIAgents(o.agentsJSON, cwd)
 	if o.agentsJSON != "" {
 		os.Setenv("CLAUDE_GO_AGENTS_JSON", o.agentsJSON)
@@ -612,7 +731,10 @@ func main() {
 	if st2 != nil {
 		defer st2.Close()
 		loop.Transcript = st2.Path
-		st2.LogInit(loop.Model) // system/init record at session start (real)
+		if resumeID == "" || o.forkSess {
+			st2.LogInit(loop.Model) // system/init — fresh sessions only; a
+			// resumed transcript already carries its own init record
+		}
 		tools.OnSnapshot = func(path, backup string, ver int) {
 			st2.LogRecord(map[string]any{
 				"type": "file-history-snapshot", "isSnapshotUpdate": true,
@@ -648,38 +770,23 @@ func main() {
 
 	if o.cont || o.resume != "" {
 		loop.SessionStartSource = "resume"
-		id := o.resume
-		if o.cont {
-			if l2, err := session.Latest(cwd); err == nil {
-				id = l2
-			}
-		}
-		if id == "-" {
-			if id2 := repl.PickSession(cwd); id2 != "" {
-				id = id2
-			} else {
-				return
-			}
-		}
+		id := resumeID
+		loadPath := resumePath
 		if id != "" {
 			var msgs []api.Message
+			var leaf string
 			var err error
-			// normalize: -r accepts a transcript path, not just an id —
-			// resolve it to (id, loadPath) before branching on resumeAt
-			loadPath := ""
-			if strings.HasSuffix(id, ".jsonl") {
-				loadPath = id
-				id = strings.TrimSuffix(filepath.Base(id), ".jsonl")
-			}
 			switch {
 			case o.resumeAt != "" && loadPath != "":
-				msgs, err = loadSessionAtPath(loadPath, o.resumeAt)
+				msgs, leaf, err = loadSessionAtPath(loadPath, o.resumeAt, o.dropsTurn)
 			case o.resumeAt != "":
-				msgs, err = loadSessionAt(cwd, id, o.resumeAt)
+				msgs, leaf, err = loadSessionAt(cwd, id, o.resumeAt, o.dropsTurn)
 			case loadPath != "":
 				msgs, err = session.LoadPath(loadPath)
+				leaf = session.LeafUUID(loadPath)
 			default:
 				msgs, err = session.Load(cwd, id)
+				leaf = session.LeafUUID(filepath.Join(session.ProjectsDir(cwd), id+".jsonl"))
 			}
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "resume %s: %v\n", id, err)
@@ -695,6 +802,10 @@ func main() {
 					})
 					fmt.Fprintf(os.Stderr, "forked session %s → %s (%d messages)\n", id[:8], sessionID[:8], len(msgs))
 				} else {
+					if st2 != nil && leaf != "" {
+						st2.SeedParent(leaf) // continue the branch —
+						// the next record's parentUuid is the loaded leaf
+					}
 					fmt.Fprintf(os.Stderr, "resumed session %s (%d messages)\n", id, len(msgs))
 					// awaySummaryEnabled (default on): recap when the last
 					// message is 5+ minutes old — last assistant text
@@ -781,7 +892,6 @@ func main() {
 	}
 	tools.Interactive = true
 	// entrypoint already set to cli before the aux goroutines (above)
-	tools.Checkpoints.Init(sessionID)
 	if !repl.TrustGate(cwd) {
 		fmt.Println("not trusted — exiting")
 		return
