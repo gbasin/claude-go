@@ -81,6 +81,7 @@ type cliOpts struct {
 	hookEvents    bool
 	execPrompt    string
 	teleport      bool
+	cloud         bool
 	teleportArg   string
 	stubs         []string // feature flags accepted but not wired
 	fromPR        string   // --from-pr <ref> — session linked to a PR
@@ -197,7 +198,7 @@ func parseCLI(args []string) *cliOpts {
 		"--remote-control-session-name-prefix",
 		"--task-budget", "--teammate-mode",
 		"--environment", "--pool", "--ref", "--on-branch",
-		"--forward-home-settings", "--project-config-root",
+		"--project-config-root",
 		"--attach-serve",
 	} {
 		flag := f
@@ -210,6 +211,15 @@ func parseCLI(args []string) *cliOpts {
 	for _, f := range []string{"--attach-serve", "--messaging-socket-path"} {
 		flag := f
 		valueFlags[flag] = func(v string) { o.stubEnv(flag, stubName(flag), v, true) }
+	}
+	// --forward-home-settings true|false — real requires a cloud/env
+	// target; standalone it errors (mod_0659.js)
+	valueFlags["--forward-home-settings"] = func(v string) {
+		if v != "true" && v != "false" {
+			fmt.Fprintf(os.Stderr, "Error: --forward-home-settings takes true or false, not %s.\n", v)
+			os.Exit(2)
+		}
+		os.Setenv("CLAUDE_GO_FORWARD_HOME_SETTINGS", v)
 	}
 	// --teammate-mode: real validates choices auto|tmux|iterm2|in-process
 	valueFlags["--teammate-mode"] = func(v string) {
@@ -293,7 +303,7 @@ func parseCLI(args []string) *cliOpts {
 		"--worktree":       func(v string) { o.worktreeSet = true; o.worktreeName = v },
 		"--project":        func(v string) { o.projectDir = v },
 		"--teleport":       func(v string) { o.teleport = true; o.teleportArg = v },
-		"--cloud":          func(v string) { o.stubs = append(o.stubs, "--cloud") },
+		"--cloud":          func(v string) { o.cloud = true; o.stubs = append(o.stubs, "--cloud") },
 		"--remote":         func(v string) { o.stubs = append(o.stubs, "--remote") },
 		"--remote-control": func(v string) { o.stubs = append(o.stubs, "--remote-control") },
 		"--rc":             func(v string) { o.stubs = append(o.stubs, "--remote-control") },

@@ -491,10 +491,11 @@ func RunWithStore(l *agent.Loop, store Store) {
 						} else {
 							act := ed.busyAction(k)
 							if act != "" && act != "chat:sendNow" {
-								// a bound command (meta+o etc.) pressed mid-turn —
-								// replay it at idle rather than eating it or
-								// queueing the letter as text
-								ed.deferredKeys = append(ed.deferredKeys, k)
+								// a bound command (meta+o, ctrl+x ctrl+k) pressed
+								// mid-turn — defer the ACTION (key replay would
+								// lose chord context: the ctrl+x prefix is gone
+								// by the time ctrl+k resolves)
+								ed.deferredActions = append(ed.deferredActions, act)
 							} else if k.b == '\r' || k.b == '\n' || act == "chat:sendNow" {
 								if len(queueBuf) > 0 {
 									if act == "chat:sendNow" {

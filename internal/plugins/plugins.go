@@ -39,6 +39,7 @@ type InstalledPlugin struct {
 	Path        string `json:"path"`
 	Enabled     bool   `json:"enabled"`
 	InstalledAt string `json:"installed_at"`
+	NoMCP       bool   `json:"noMCP,omitempty"` // --plugin-dir-no-mcp: skip MCP registration
 }
 
 func home() string {
@@ -57,21 +58,30 @@ func marketplacesFile() string { return filepath.Join(pluginsDir(), "known_marke
 // Load also tolerates the earlier flat array.
 func loadInstalled() []InstalledPlugin {
 	var out []InstalledPlugin
-	// --plugin-dir adds scan roots: each immediate subdir is a plugin
-	for _, root := range filepath.SplitList(os.Getenv("CLAUDE_GO_PLUGIN_DIR")) {
-		ents, err := os.ReadDir(root)
-		if err != nil {
-			continue
-		}
-		for _, e := range ents {
-			if !e.IsDir() {
+	// --plugin-dir adds scan roots: each immediate subdir is a plugin;
+	// --plugin-dir-no-mcp registers the same dirs minus their MCP servers
+	for _, spec := range []struct {
+		env   string
+		noMCP bool
+	}{{"CLAUDE_GO_PLUGIN_DIR", false}, {"CLAUDE_GO_PLUGIN_DIR_NO_MCP", true}} {
+		root0 := spec.env
+		_ = root0
+		roots := filepath.SplitList(os.Getenv(spec.env))
+		for _, root := range roots {
+			ents, err := os.ReadDir(root)
+			if err != nil {
 				continue
 			}
-			pd := filepath.Join(root, e.Name())
-			if _, err := os.Stat(filepath.Join(pd, ".claude-plugin", "plugin.json")); err == nil {
-				out = append(out, InstalledPlugin{
-					Name: e.Name(), Marketplace: "local-dir",
-					Path: pd, Enabled: true})
+			for _, e := range ents {
+				if !e.IsDir() {
+					continue
+				}
+				pd := filepath.Join(root, e.Name())
+				if _, err := os.Stat(filepath.Join(pd, ".claude-plugin", "plugin.json")); err == nil {
+					out = append(out, InstalledPlugin{
+						Name: e.Name(), Marketplace: "local-dir",
+						Path: pd, Enabled: true, NoMCP: spec.noMCP})
+				}
 			}
 		}
 	}
@@ -126,7 +136,8 @@ func saveInstalled(p []InstalledPlugin) {
 // known_marketplaces.json: {name: {source: {...}, autoUpdate: bool}}.
 // Reads both real objects and our older {name: path} flat map.
 type marketplaceSource struct {
-	Source string `json:"source"` // github|git|url|directory|file|pluginDirectory
+	Source string `json:"source"`          // github|git|url|directory|file|pluginDirectory
+	NoMCP  bool   `json:"noMCP,omitempty"` // --plugin-dir-no-mcp: skip MCP registration
 	Repo   string `json:"repo,omitempty"`
 	URL    string `json:"url,omitempty"`
 	Path   string `json:"path,omitempty"`
@@ -324,9 +335,11 @@ func List() []InstalledPlugin { return loadInstalled() }
 // EnabledPluginDirs returns paths of enabled plugins (for skill/command/agents
 // loading). The settings enabledPlugins/disabledPlugins maps override the
 // installed-file flag like real CC (keyed "name@marketplace").
-func EnabledPluginDirs() []string {
+// EnabledPluginEntries is EnabledPluginDirs with the full records —
+// callers that need NoMCP/marketplace metadata use this.
+func EnabledPluginEntries() []InstalledPlugin {
 	enabled, disabled := settingsPluginGates()
-	var out []string
+	var out []InstalledPlugin
 	for _, p := range loadInstalled() {
 		key := p.Name + "@" + p.Marketplace
 		on := p.Enabled
@@ -337,8 +350,16 @@ func EnabledPluginDirs() []string {
 			on = false
 		}
 		if on {
-			out = append(out, p.Path)
+			out = append(out, p)
 		}
+	}
+	return out
+}
+
+func EnabledPluginDirs() []string {
+	var out []string
+	for _, p := range EnabledPluginEntries() {
+		out = append(out, p.Path)
 	}
 	return out
 }
