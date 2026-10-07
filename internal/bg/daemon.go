@@ -1,6 +1,8 @@
 package bg
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -115,9 +117,15 @@ func RunDaemon(version string, sweep time.Duration) int {
 			// new pid into the record immediately — the next sweep must not
 			// see the dead pid and respawn a second worker. The fresh host
 			// rewrites job.json with its own heartbeat once it's up.
+			var tok [16]byte
+			newAuth := ""
+			if _, err := rand.Read(tok[:]); err == nil {
+				newAuth = hex.EncodeToString(tok[:])
+			}
 			if cmd, err := Spawn(SpawnOpts{
 				SessionID:  j.SessionID,
 				ResumeFrom: j.SessionID,
+				Auth:       newAuth,
 				CWD:        j.CWD,
 				Name:       j.Name,
 			}); err == nil {

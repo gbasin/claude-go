@@ -697,7 +697,7 @@ func RegisterSession(sessionID, cwd, name string) error {
 		SessionID: sessionID, CWD: cwd, Name: name,
 		PID: os.Getpid(), TS: time.Now(),
 		Kind:                kind,
-		Entrypoint:          os.Getenv("CLAUDE_CODE_ENTRYPOINT"),
+		Entrypoint:          sessionEntrypoint(),
 		StartedAt:           now,
 		UpdatedAt:           now,
 		Version:             "2.1.292",
@@ -714,6 +714,9 @@ func RegisterSession(sessionID, cwd, name string) error {
 		Tmux:                tmuxLabel(),
 		MessagingSocketPath: socketPath(), // peers can push instantly
 	}
+	// stash for the outbound <cross-session-message> envelope — real
+	// renders sender attribution + reply addressing from these attrs
+	selfPeerInfo.Store(struct{ Name, SessionID string }{Name: name, SessionID: sessionID})
 	b, err := json.MarshalIndent(e, "", "  ")
 	if err != nil {
 		return err
@@ -1642,14 +1645,17 @@ func peerTokenClass(tok string) string {
 	return ""
 }
 
-// peerKeyName is real's V(): "<pid>.<sha256(canonical sock path)>.key" —
-// the hash pins the key to the socket it vouches for.
+// peerKeyName is real's V(): "<pid>.<sha256(sock path)>.key" —
+// the hash pins the key to the socket it vouches for. Real hashes the
+// RAW path string (verified live: its key for /tmp/cc-socks/P.sock
+// hashes that literal path, not the /private/tmp EvalSymlinks form) —
+// canonicalizing made our published key invisible to real's
+// reply-target lookup, which is why `from` was dropped on delivery.
 func peerKeyName(pid int, sock string) string {
-	canon, err := filepath.EvalSymlinks(sock)
-	if err != nil || canon == "" {
-		canon, _ = filepath.Abs(sock)
+	if !filepath.IsAbs(sock) {
+		sock, _ = filepath.Abs(sock)
 	}
-	sum := sha256.Sum256([]byte(canon))
+	sum := sha256.Sum256([]byte(sock))
 	return fmt.Sprintf("%d.%x.key", pid, sum)
 }
 
@@ -2222,6 +2228,55 @@ const (
 	peerDedupWindow = 5 * time.Minute
 	peerDedupCap    = 1024
 )
+
+// selfPeerInfo carries this session's registered identity for the
+// outbound <cross-session-message> envelope — real renders the sender
+// from `from-name` (and replies to `from`), which live in the message
+// content wrapper, not the frame's `from` field.
+var selfPeerInfo atomic.Value // struct{Name, SessionID string}
+
+// wrapPeerOutbound builds real's cross-session envelope:
+//   <cross-session-message from="uds:..." from-session="<uuid>"
+//     hop-chain="<64-hex>" from-name="<name>" from-mode="prompting">
+//     body </cross-session-message>
+// Live-verified: without it real renders the body but drops all sender
+// attribution, so the receiving session can't reply to the sender.
+func wrapPeerOutbound(body string) string {
+	// real's CWe(): break any tag-shape in the body that would re-parse
+	esc := strings.NewReplacer(
+		"</cross-session-message", "<\\/cross-session-message",
+		"<cross-session-message", "<\\cross-session-message",
+	).Replace(body)
+	var attrs []string
+	if from := udsAddr(socketPath()); from != "" {
+		attrs = append(attrs, fmt.Sprintf(`from=%q`, from))
+	}
+	if self, ok := selfPeerInfo.Load().(struct{ Name, SessionID string }); ok {
+		if isUUID(self.SessionID) {
+			attrs = append(attrs, fmt.Sprintf(`from-session=%q`, self.SessionID))
+		}
+		sum := sha256.Sum256([]byte(self.SessionID))
+		// real's hop entries are 24-hex (12 bytes) — observed live:
+		// `hop-chain="fd5a71268e410e98c7d2fdb5"`
+		attrs = append(attrs, fmt.Sprintf(`hop-chain=%q`, hex.EncodeToString(sum[:12])))
+		name := strings.Map(func(r rune) rune {
+			if strings.ContainsRune(`"<>`+"\n\r", r) {
+				return -1
+			}
+			return r
+		}, self.Name)
+		if name != "" {
+			attrs = append(attrs, fmt.Sprintf(`from-name=%q`, name))
+		}
+	}
+	mode := "prompting"
+	if currentPermMode() == "bypassPermissions" {
+		mode = "bypass"
+	}
+	attrs = append(attrs, fmt.Sprintf(`from-mode=%q`, mode))
+	return fmt.Sprintf("<cross-session-message %s> %s </cross-session-message>",
+		strings.Join(attrs, " "), esc)
+}
 
 var peerSeenIDs = struct {
 	mu sync.Mutex
@@ -2992,6 +3047,9 @@ func socketDeliver(e sessionEntry, m mailMsg) (bool, string) {
 	if m.Summary != "" {
 		content = m.Summary + ": " + m.Message
 	}
+	// real's hUt(): the envelope lives in message.content — sender
+	// attribution + reply addressing ride inside, not in frame fields
+	content = wrapPeerOutbound(content)
 	msgID := newUUID()
 	frame := peerFrame{
 		Type: "user", MsgV: 1, MsgID: msgID,
@@ -3046,7 +3104,8 @@ func peerTokenForSock(sockPath string, pidHint int) string {
 	if sockPath == "" {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(canonSock(sockPath)))
+	// real's key-name hash is over the RAW socket path — see peerKeyName
+	sum := sha256.Sum256([]byte(sockPath))
 	suffix := fmt.Sprintf(".%x.key", sum)
 	ents, err := os.ReadDir(registryPath())
 	if err != nil {
@@ -3182,8 +3241,13 @@ func procStartTokenOf(pid int) string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "ps", "-o", "lstart=", "-p",
-		fmt.Sprint(pid)).Output()
+	cmd := exec.CommandContext(ctx, "ps", "-o", "lstart=", "-p",
+		fmt.Sprint(pid))
+	// real runs ps with LC_ALL=C TZ=UTC — the token is UTC-formatted.
+	// Without this the record fails real's pid-reuse vet and peers
+	// can't send to us (procStart mismatch → torn record)
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "TZ=UTC")
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
@@ -3194,4 +3258,14 @@ func procStartTokenOf(pid int) string {
 func ActiveSocketPath() string {
 	s, _ := activeSock.Load().(string)
 	return s
+}
+
+// sessionEntrypoint: real writes "cli" into its session record when
+// CLAUDE_CODE_ENTRYPOINT is unset — omitempty dropped it, which may
+// mark the record as torn for peers that expect it.
+func sessionEntrypoint() string {
+	if v := os.Getenv("CLAUDE_CODE_ENTRYPOINT"); v != "" {
+		return v
+	}
+	return "cli"
 }

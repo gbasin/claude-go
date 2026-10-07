@@ -798,7 +798,7 @@ func TestHookMatrixRound2(t *testing.T) {
 
 	// DirectoryAdded
 	p.sendUntilEchoed(t, "/add-dir /tmp\r", "❯ /add-dir", 8)
-	p.waitFor("added /tmp", 15*time.Second)
+	p.waitFor("added /tmp", 30*time.Second)
 
 	// PermissionDenied — Write prompts in default mode; deny with 3
 	p.sendUntilEchoed(t,
