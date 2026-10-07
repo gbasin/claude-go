@@ -18,7 +18,6 @@ import (
 	"encoding/json"
 
 	"claude-go/internal/voice"
-	"golang.org/x/term"
 )
 
 // editor is a modal (vim-capable) multiline line editor fed by keySource.
@@ -356,6 +355,12 @@ func (e *editor) readLine(ks *keySource) readResult {
 			if r := e.voiceApply(*ev); r != nil {
 				return *r
 			}
+			continue
+		}
+		if suspendSupported && isSuspendKey(k) {
+			// ctrl+z — global like real: suspends from insert, vim, and
+			// search modes alike
+			suspendToShell(ks, e.redraw)
 			continue
 		}
 		if e.vim && e.mode == "normal" {
@@ -1461,7 +1466,7 @@ func (e *editor) externalEditor() *readResult {
 	defer compResume()
 	os.Stdout.WriteString("\r\x1b[2K  ($EDITOR: " + ed + ")\r\n")
 	if e.keys != nil {
-		term.Restore(int(os.Stdin.Fd()), e.keys.old)
+		e.keys.release() // cooked mode + kitty flags off for the editor
 	}
 	cmd := exec.Command("sh", "-c", ed+" "+path)
 	cmd.Stdin = os.Stdin
@@ -1469,9 +1474,7 @@ func (e *editor) externalEditor() *readResult {
 	cmd.Stderr = os.Stderr
 	cmd.Run()
 	if e.keys != nil {
-		if st, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
-			e.keys.old = st
-		}
+		e.keys.grab()
 	}
 	if b, err := os.ReadFile(path); err == nil {
 		e.buf = []rune(strings.TrimRight(string(b), "\n"))

@@ -13,15 +13,12 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
-	"unsafe"
 
-	"golang.org/x/sys/unix"
 )
 
 // openPTY allocates a master/slave pair (120x40).
@@ -32,45 +29,25 @@ func openPTY(t *testing.T) (master, slave *os.File) {
 // openPTYSize allocates a master/slave pair at the given size — narrow
 // widths exercise the compositor's wrap/scroll-region paths.
 func openPTYSize(t *testing.T, cols, rows int) (master, slave *os.File) {
-	t.Helper()
-	if runtime.GOOS != "darwin" {
-		t.Skipf("pty harness implemented for darwin only (got %s)", runtime.GOOS)
-	}
-	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
+	master, slave, err := ptyAlloc(cols, rows)
 	if err != nil {
-		t.Skipf("open /dev/ptmx: %v", err)
-	}
-	var buf [128]byte
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, master.Fd(),
-		uintptr(unix.TIOCPTYGNAME), uintptr(unsafe.Pointer(&buf[0])))
-	if errno != 0 {
-		master.Close()
-		t.Skipf("ioctl TIOCPTYGNAME: %v", errno)
-	}
-	// grantpt: macOS creates the slave root-owned until the master grants
-	// access — without this the slave open fails EPERM
-	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, master.Fd(),
-		uintptr(unix.TIOCPTYGRANT), 0); errno != 0 {
-		master.Close()
-		t.Skipf("ioctl TIOCPTYGRANT: %v", errno)
-	}
-	// unlockpt: slave opens EAGAIN until unlocked
-	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, master.Fd(),
-		uintptr(unix.TIOCPTYUNLK), 0); errno != 0 {
-		master.Close()
-		t.Skipf("ioctl TIOCPTYUNLK: %v", errno)
-	}
-	name := string(buf[:bytes.IndexByte(buf[:], 0)])
-	slave, err = os.OpenFile(name, os.O_RDWR, 0)
-	if err != nil {
-		master.Close()
-		t.Skipf("open pty slave %s: %v", name, err)
-	}
-	if err := unix.IoctlSetWinsize(int(slave.Fd()), unix.TIOCSWINSZ,
-		&unix.Winsize{Row: uint16(rows), Col: uint16(cols)}); err != nil {
-		t.Logf("set winsize: %v (continuing)", err)
+		t.Skipf("pty alloc: %v", err)
 	}
 	return master, slave
+}
+
+
+// poll re-runs cond until it holds or the deadline passes.
+func poll(t *testing.T, d time.Duration, what string, cond func() bool) {
+	t.Helper()
+	end := time.Now().Add(d)
+	for time.Now().Before(end) {
+		if cond() {
+			return
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
 }
 
 // ptyProc is a claude-go process running with stdin/stdout/stderr on a pty.
@@ -99,6 +76,10 @@ func (s *sess) runPTYSize(t *testing.T, extraEnv []string, cols, rows int, args 
 	cmd.Stdin = slave
 	cmd.Stdout = slave
 	cmd.Stderr = slave
+	// own process group — what a job-control shell gives each launch. The
+	// suspend path signals the group (real's kill(0,SIGTSTP)); without this
+	// a ^Z inside a test would stop the whole go-test process tree.
+	cmd.SysProcAttr = ptyProcAttr()
 	if err := cmd.Start(); err != nil {
 		master.Close()
 		slave.Close()

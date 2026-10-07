@@ -405,7 +405,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 					return // whole span already logged
 				}
 				for _, m := range span[loggedTo:] {
-					store.Log(m)
+					currentStore.Log(m)
 				}
 			}
 		}
@@ -456,6 +456,12 @@ func RunWithStore(l *agent.Loop, store Store) {
 						sawInput.Store(true)
 						if ks.forward(k) {
 							continue // modal dialog owns the key
+						}
+						if suspendSupported && isSuspendKey(k) {
+							// ctrl+z mid-turn: stop the process; compResume
+							// repaints spinner/draft on fg
+							suspendToShell(ks, nil)
+							continue
 						}
 						if (k.b == 0x1b || k.b == 3) && k.seq == "" {
 							if os.Getenv("CG_DBGKEY") != "" {
@@ -519,18 +525,23 @@ func RunWithStore(l *agent.Loop, store Store) {
 			fireStopHook(l)
 			if store != nil {
 				// log only NEW messages per turn (was O(n²) re-log + a git
-				// fork per record)
+				// fork per record). currentStore, not the param — /resume
+				// and /fork swap it mid-session.
 				if kept := l.TakeCompactPending(); kept >= 0 && len(l.Messages) > 0 {
 					// compaction rewrote history: Messages[0] is the new
 					// isCompactSummary record, indices 1..kept are the
 					// retained tail already in the transcript
-					store.Log(l.Messages[0])
+					currentStore.Log(l.Messages[0])
 					loggedTo = 1 + kept
 				} else if loggedTo > len(l.Messages) {
 					loggedTo = 0 // /clear wiped history
 				}
+				if v := logResync.Load(); v >= 0 {
+					loggedTo = int(v) // /resume|/fork swapped store+messages
+					logResync.Store(-1)
+				}
 				for _, m := range l.Messages[loggedTo:] {
-					store.Log(m)
+					currentStore.Log(m)
 				}
 				loggedTo = len(l.Messages)
 			}
@@ -1913,6 +1924,13 @@ func builtinSlashCommands() []string {
 
 // currentStore is set by RunWithStore so slash commands can write records.
 var currentStore Store
+
+// logResync carries a new logging start index across a mid-session store
+// swap (/resume, /fork): the loaded history is already in the target file —
+// re-logging it would duplicate the chain. -1 = keep counting.
+var logResync atomic.Int32
+
+func init() { logResync.Store(-1) }
 var sessionOnlyModel bool // /model "s" key — applies the pick without persisting
 
 // showAgentsPane is real's ←← agents overlay — lists background tasks
