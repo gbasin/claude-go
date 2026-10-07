@@ -145,6 +145,14 @@ func EnvMessage(cwd, model string, addDirs []string, permMode string, sessionID 
 		b.WriteString("\n")
 	}
 
+	if permMode == "plan" {
+		b.WriteString("\nPlan mode is active. You can read files, search, and ask questions — " +
+			"do not make edits, run mutating commands, or otherwise modify state. " +
+			"Explore, then present the plan with ExitPlanMode.\n")
+		if pi := os.Getenv("CLAUDE_GO_PLAN_MODE_INSTRUCTIONS"); pi != "" {
+			b.WriteString("\n" + pi + "\n") // --plan-mode-instructions
+		}
+	}
 	if permMode == "auto" {
 		b.WriteString("\nWhile auto mode is active:\n\n" +
 			"Do your work through the Bash tool wherever it can accomplish the job: read files with cat, head, or sed -n, " +
