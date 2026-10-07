@@ -434,13 +434,8 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			dprintln("  " + tools.SandboxAllowHost(host))
 			break
 		}
-		if os.Getenv("CLAUDE_GO_SANDBOX") == "1" {
-			os.Unsetenv("CLAUDE_GO_SANDBOX")
-			dprintln("  sandbox off")
-		} else {
-			os.Setenv("CLAUDE_GO_SANDBOX", "1")
-			dprintln("  sandbox on (bash commands run under sandbox-exec)")
-		}
+		// real: sandbox-mode picker — auto-allow / regular perms / off
+		sandboxPicker(l, ks)
 	case "skills":
 		skills := agent.SkillNames(l.ToolCtx.CWD)
 		if len(skills) == 0 {
@@ -4523,3 +4518,85 @@ func effortSlider(l *agent.Loop, ks *keySource) {
 
 // menuCyan is the 153-cyan real uses for ❯ cursors and gauges.
 const menuCyan = "\x1b[38;5;153m"
+
+// sandboxPicker renders real's /sandbox mode chooser (captured 2.1.292):
+// three rows, ✔ current, auto-allow explainer, ←/→ + ↑/↓ + Enter/Esc.
+func sandboxPicker(l *agent.Loop, ks *keySource) {
+	type opt struct{ label, hint string }
+	opts := []opt{
+		{"Sandbox Bash Tool, with auto-allow", ""},
+		{"Sandbox Bash Tool, with regular permissions", ""},
+		{"No Sandbox", ""},
+	}
+	cur := 2 // No Sandbox default (CLAUDE_GO_SANDBOX unset)
+	if os.Getenv("CLAUDE_GO_SANDBOX") == "1" {
+		cur = 0
+	}
+	compSuspend()
+	defer compResume()
+	dch := make(chan key, 16)
+	ks.dialog.Store(&dch)
+	defer ks.dialog.Store(nil)
+	rows := 0
+	draw := func() {
+		var sb strings.Builder
+		if rows > 0 {
+			sb.WriteString(fmt.Sprintf("\x1b[%dA\r", rows))
+		}
+		rows = 0
+		emit := func(s string) { sb.WriteString("\x1b[K" + s + "\r\n"); rows++ }
+		emit("  " + bold + "Sandbox Mode Overrides Config" + reset)
+		emit("")
+		emit("  " + dim + "Configure mode" + reset)
+		for i, o := range opts {
+			c := "   "
+			if i == cur {
+				c = menuCyan + "❯" + reset + " "
+			}
+			mark := ""
+			if (i == 2 && os.Getenv("CLAUDE_GO_SANDBOX") == "") ||
+				(i == 0 && os.Getenv("CLAUDE_GO_SANDBOX") == "1") {
+				mark = " " + menuCyan + "✔" + reset
+			}
+			emit(fmt.Sprintf(" %s%d. %s%s", c, i+1, o.label, mark))
+		}
+		emit("  " + dim + "Auto-allow mode: Commands will try to run in the sandbox automatically," + reset)
+		emit("  " + dim + "and attempts to run outside of the sandbox fallback to regular" + reset)
+		emit("  " + dim + "permissions. Explicit ask/deny rules are always respected." + reset)
+		emit("")
+		emit("  " + dim + "Learn more: https://code.claude.com/docs/en/sandboxing" + reset)
+		emit("")
+		emit("  " + dim + " ←/→ to switch · ↑/↓ to navigate · Enter to select · Esc to close" + reset)
+		fmt.Print(sb.String())
+	}
+	draw()
+	for k := range dch {
+		switch {
+		case k.seq == "[A" || k.seq == "[D":
+			if cur > 0 {
+				cur--
+				draw()
+			}
+		case k.seq == "[B" || k.seq == "[C":
+			if cur < len(opts)-1 {
+				cur++
+				draw()
+			}
+		case k.b == 0x1b || k.b == 3:
+			dprintln()
+			return
+		case k.b == '\r':
+			switch cur {
+			case 0, 1: // both sandbox-on variants — auto-allow vs regular
+				os.Setenv("CLAUDE_GO_SANDBOX", "1")
+				dprintln()
+				dprintln("  sandbox →", opts[cur].label)
+			case 2:
+				os.Unsetenv("CLAUDE_GO_SANDBOX")
+				dprintln()
+				dprintln("  sandbox → No Sandbox")
+			}
+			return
+		}
+	}
+}
