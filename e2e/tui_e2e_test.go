@@ -808,3 +808,16 @@ func TestNewlineKey(t *testing.T) {
 	}
 	p.exit()
 }
+
+// TestImagePasteNoImage: ctrl+v with an empty clipboard falls back to
+// text paste (stubbed pbpaste/osascript return nothing — no hang).
+func TestImagePasteNoImage(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.waitFor("❯", 30*time.Second)
+	p.send("\x16") // ctrl+v — imagePaste
+	time.Sleep(1 * time.Second)
+	p.send("still-alive\r")
+	p.waitFor("Mock response to: still-alive", 30*time.Second)
+	p.exit()
+}
