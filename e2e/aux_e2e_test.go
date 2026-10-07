@@ -1277,3 +1277,17 @@ func TestMaxBudget(t *testing.T) {
 		t.Fatalf("budget error missing: %s", r.stderr)
 	}
 }
+
+// TestThinkingDisplay: --thinking-display hidden → thinking.display=
+// "omitted" on the wire (real's adaptive-mode display field).
+func TestThinkingDisplay(t *testing.T) {
+	s := newSession(t)
+	rec := t.TempDir() + "/reqs"
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 30*time.Second,
+		"--mock", "-p", "hi", "--thinking", "medium", "--thinking-display", "hidden")
+	s.mustOK(t, r)
+	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
+	if !bytes.Contains(b, []byte(`"display":"omitted"`)) {
+		t.Fatalf("thinking-display not on wire:\n%s", truncStr(string(b), 500))
+	}
+}
