@@ -84,6 +84,13 @@ func (l *Loop) applySummary(text, transcriptPath string, keepLast int) {
 		cont += "\n\nIf you need specific details from before compaction (like exact code snippets, " +
 			"error messages, or content you generated), read the full transcript at: " + transcriptPath
 	}
+	// real (mod_0386.js wY): preserved tail + resume directive + head note
+	if keepLast > 0 && keepLast < len(l.Messages) {
+		cont += "\n\nRecent messages are preserved verbatim."
+	}
+	cont += "\n\nContinue the conversation from where it left off without asking the user any further questions. " +
+		"Resume directly — do not acknowledge the summary, do not recap what was happening, " +
+		`do not preface with "I'll continue" or similar. Pick up the last task as if the break never happened.`
 
 	// the span being replaced — writers that persist the transcript
 	// post-hoc (print mode, subagents) would otherwise lose it

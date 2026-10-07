@@ -1,33 +1,45 @@
 package repl
 
 import (
+	"context"
 	"fmt"
 	"testing"
+
+	"claude-go/internal/tools"
 )
 
-// MCP prompt slash commands: registration → slash expansion → prompts/get
-// text becomes the submitted user message.
-func TestMCPPromptExpansion(t *testing.T) {
+// MCP prompt slash commands: tools.RegisterMCPPrompt → ResolveMCPPrompt
+// fetch closure → prompts/get text becomes the submitted user message.
+// The e2e path is covered by TestMCPPromptSlash.
+func TestMCPPromptResolution(t *testing.T) {
 	var gotArgs map[string]string
-	RegisterMCPPrompt("srv__testprompt", "a test prompt",
-		func(args map[string]string) (string, error) {
+	tools.RegisterMCPPrompt("srv", "testprompt",
+		func(ctx context.Context, args map[string]string) (string, error) {
 			gotArgs = args
 			return "expanded prompt text", nil
 		})
-	defer delete(customCommands, "srv__testprompt")
-	got := expandCustomSlash("/srv__testprompt k=v extra words")
-	if got != "expanded prompt text" {
-		t.Fatalf("expansion: %q", got)
+	fetch, ok := tools.ResolveMCPPrompt("mcp__srv__testprompt")
+	if !ok {
+		t.Fatal("registered prompt not resolvable")
 	}
-	if gotArgs["k"] != "v" || gotArgs["arguments"] != "extra words" {
+	out, err := fetch(context.Background(), map[string]string{"input": "k=v"})
+	if err != nil || out != "expanded prompt text" {
+		t.Fatalf("fetch: %q %v", out, err)
+	}
+	if gotArgs["input"] != "k=v" {
 		t.Fatalf("args: %+v", gotArgs)
 	}
-	// failure must not submit a prompt
-	RegisterMCPPrompt("srv__bad", "x", func(map[string]string) (string, error) {
-		return "", fmt.Errorf("server gone")
-	})
-	defer delete(customCommands, "srv__bad")
-	if expandCustomSlash("/srv__bad") != "" {
-		t.Fatal("failed prompt must expand to nothing")
+	if _, ok := tools.ResolveMCPPrompt("mcp__srv__other"); ok {
+		t.Fatal("unregistered prompt must not resolve")
+	}
+	// a failed fetch surfaces an error — callers must not submit it
+	tools.RegisterMCPPrompt("srv", "bad",
+		func(context.Context, map[string]string) (string, error) {
+			return "", fmt.Errorf("server gone")
+		})
+	if bad, _ := tools.ResolveMCPPrompt("mcp__srv__bad"); bad != nil {
+		if _, err := bad(context.Background(), nil); err == nil {
+			t.Fatal("expected fetch error")
+		}
 	}
 }

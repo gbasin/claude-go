@@ -370,7 +370,7 @@ func main() {
 	// connect MCP servers in background (like CC's async init)
 	mcp.SetSessionID(sessionID)
 	chromeSysP, chromeMCP := chromeSessionSetup(o, lastCreds)
-	mcpClients := startMCP(cwd, o.mcpConfig, o.strictMCP, chromeMCP)
+	mcpClients := startMCP(cwd, o.mcpConfig, o.strictMCP, chromeMCP, o.addDirs)
 	defer func() {
 		for _, c := range mcpClients {
 			c.Close()
@@ -855,7 +855,7 @@ func fireHook(l *agent.Loop, ev hooks.Event) {
 // dynamic carries host-side additions (real's scope:"dynamic" entries —
 // gme() puts `claude-in-chrome` there), merged last so a configured server
 // of the same name wins, like real's explicit mcpConfigs beat dynamic.
-func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.ServerConfig) (clients []*mcp.Client) {
+func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.ServerConfig, addDirs []string) (clients []*mcp.Client) {
 	var cfgs map[string]mcp.ServerConfig
 	if strict {
 		// --strict-mcp-config: only the --mcp-config file's servers load
@@ -927,37 +927,64 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 			for _, t := range c.Tools {
 				tools.RegisterMCP(prefix, c, t.Name, t.Description, t.InputSchema)
 			}
-			// tools/list_changed → refresh the deferred surface (the
-			// client's internal list already updated)
-			// MCP prompts surface as /mcp__<server>__<prompt> slash
-			// commands (real's vn() prompt expansion)
-			if pr, _, perr := c.ListPrompts(context.Background(), ""); perr == nil {
-				for _, p := range pr {
-					pname := p.Name
-					repl.RegisterMCPPrompt(prefix+"__"+pname, p.Description,
-						func(args map[string]string) (string, error) {
-							res, err := c.GetPrompt(context.Background(), pname, args)
-							if err != nil {
-								return "", err
-							}
-							var sb strings.Builder
-							for _, m := range res.Messages {
-								var blocks []struct {
-									Type string `json:"type"`
-									Text string `json:"text"`
+			// tools/list_changed: the client refreshes c.Tools; re-register
+			// the new entries so they surface (real reloads in place)
+			// prompts surface as /mcp__server__name slash commands (real
+			// parity) — expand via prompts/get when invoked
+			registerPrompts := func() {
+				if ps, _, perr := c.ListPrompts(context.Background(), ""); perr == nil {
+					for _, pr := range ps {
+						pn := pr.Name
+						tools.RegisterMCPPrompt(prefix, pn,
+							func(ctx context.Context, args map[string]string) (string, error) {
+								res, err := c.GetPrompt(ctx, pn, args)
+								if err != nil {
+									return "", err
 								}
-								json.Unmarshal(m.Content, &blocks)
-								for _, b := range blocks {
-									if b.Text != "" {
-										if sb.Len() > 0 {
-											sb.WriteString("\n\n")
-										}
-										sb.WriteString(b.Text)
+								var parts []string
+								for _, m := range res.Messages {
+									var pc struct {
+										Type string `json:"type"`
+										Text string `json:"text"`
+									}
+									if json.Unmarshal(m.Content, &pc) == nil && pc.Text != "" {
+										parts = append(parts, pc.Text)
 									}
 								}
-							}
-							return sb.String(), nil
-						})
+								return strings.Join(parts, "\n\n"), nil
+							})
+					}
+				}
+			}
+			registerPrompts()
+			c.OnPromptsChanged = registerPrompts // prompts/list_changed
+			c.SetNotificationHandler(func(method string, params json.RawMessage) {
+				// notifications/message = server log lines — real shows
+				// them as dim status notes above the prompt
+				if method == "notifications/message" {
+					var p struct {
+						Level string `json:"level"`
+						Data  string `json:"data"`
+					}
+					if json.Unmarshal(params, &p) == nil && p.Data != "" {
+						fmt.Fprintf(os.Stderr, "  [mcp %s] %s: %s\n", name, p.Level, p.Data)
+					}
+				}
+			})
+			roots := append([]string{cwd}, addDirs...)
+			c.Roots = func() []map[string]string {
+				out := make([]map[string]string, 0, len(roots))
+				for _, d := range roots {
+					out = append(out, map[string]string{"uri": "file://" + d, "name": d})
+				}
+				return out
+			}
+			c.OnToolsChanged = func() {
+				var ents []tools.MCPToolEntry
+				for _, t := range c.ListTools() {
+					ents = append(ents, tools.MCPToolEntry{
+						Name: t.Name, Description: t.Description,
+						InputSchema: t.InputSchema})
 				}
 			}
 			c.OnToolsChanged = func() {
@@ -1196,9 +1223,12 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 	if err != nil {
 		if sj {
 			ev, _ := json.Marshal(map[string]any{
-				"type": "result", "subtype": "error", "is_error": true,
-				"error": err.Error(), "session_id": l.Client.SessionID,
-				"duration_ms": time.Since(start).Milliseconds(), "num_turns": turns,
+				"type": "result", "subtype": "error_during_execution",
+				"is_error": true, "errors": []string{err.Error()},
+				"session_id":      l.Client.SessionID,
+				"duration_ms":     time.Since(start).Milliseconds(),
+				"duration_api_ms": l.APIDuration().Milliseconds(),
+				"num_turns":       turns, "uuid": session.NewID(),
 			})
 			fmt.Println(string(ev))
 		} else {
@@ -1217,16 +1247,36 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 				out.Write(b2)
 			}
 		}
-		b, _ := json.MarshalIndent(map[string]any{
-			"type":        "result",
-			"subtype":     "success",
-			"is_error":    false,
-			"result":      out.String(),
-			"session_id":  l.Client.SessionID,
-			"duration_ms": time.Since(start).Milliseconds(),
-			"num_turns":   turns,
-			"usage":       resp.Usage,
-		}, "", "  ")
+		res := map[string]any{
+			"type":               "result",
+			"subtype":            "success",
+			"is_error":           false,
+			"result":             out.String(),
+			"session_id":         l.Client.SessionID,
+			"duration_ms":        time.Since(start).Milliseconds(),
+			"duration_api_ms":    l.APIDuration().Milliseconds(),
+			"num_turns":          turns,
+			"stop_reason":        resp.StopReason,
+			"total_cost_usd":     l.CostUSD(),
+			"permission_denials": []string{},
+			"fast_mode_state":    l.FastMode,
+			"uuid":               session.NewID(),
+			"usage":              fullUsage(resp.Usage),
+			"modelUsage": map[string]any{l.Model: map[string]any{
+				"inputTokens":              resp.Usage.InputTokens,
+				"outputTokens":             resp.Usage.OutputTokens,
+				"cacheReadInputTokens":     resp.Usage.CacheReadInputTokens,
+				"cacheCreationInputTokens": resp.Usage.CacheCreationInputTokens,
+				"costUSD":                  l.CostUSD(),
+			}},
+		}
+		if schema != "" {
+			var v any
+			if json.Unmarshal([]byte(out.String()), &v) == nil {
+				res["structured_output"] = v
+			}
+		}
+		b, _ := json.Marshal(res) // single line — real emits JSONL
 		fmt.Println(string(b))
 	}
 	return 0
@@ -1302,9 +1352,12 @@ func runPrintStreamJSON(l *agent.Loop) {
 		turns++
 		if _, err := l.Ask(context.Background(), text); err != nil {
 			ev, _ := json.Marshal(map[string]any{
-				"type": "result", "subtype": "error", "is_error": true,
-				"error": err.Error(), "session_id": l.Client.SessionID,
-				"duration_ms": time.Since(start).Milliseconds(), "num_turns": turns,
+				"type": "result", "subtype": "error_during_execution",
+				"is_error": true, "errors": []string{err.Error()},
+				"session_id":      l.Client.SessionID,
+				"duration_ms":     time.Since(start).Milliseconds(),
+				"duration_api_ms": l.APIDuration().Milliseconds(),
+				"num_turns":       turns, "uuid": session.NewID(),
 			})
 			fmt.Println(string(ev))
 			continue
@@ -1325,11 +1378,42 @@ func runPrintStreamJSON(l *agent.Loop) {
 // --output-format stream-json.
 func emitStreamJSONInit(l *agent.Loop) {
 	toolNames := tools.Names()
+	// mcp_servers as [{name,status}] objects (real's shape)
+	var servers []map[string]string
+	for _, t := range toolNames {
+		if strings.HasPrefix(t, "mcp__") {
+			parts := strings.SplitN(t, "__", 3)
+			if len(parts) > 1 {
+				servers = append(servers, map[string]string{
+					"name": parts[1], "status": "connected"})
+			}
+		}
+	}
+	seen := map[string]bool{}
+	var uniq []map[string]string
+	for _, s := range servers {
+		if !seen[s["name"]] {
+			seen[s["name"]] = true
+			uniq = append(uniq, s)
+		}
+	}
+	if uniq == nil {
+		uniq = []map[string]string{}
+	}
 	initFields := map[string]any{
 		"type": "system", "subtype": "init",
 		"session_id": l.Client.SessionID, "model": l.Model, "cwd": l.CWD,
-		"tools": toolNames, "mcp_servers": []string{}, "permissionMode": l.PermMode,
-		"slash_commands": repl.SlashCommandNames(), "apiKeySource": "none",
+		"tools": toolNames, "mcp_servers": uniq, "permissionMode": l.PermMode,
+		"slash_commands":      repl.SlashCommandNames(),
+		"apiKeySource":        apiKeySource(),
+		"betas":               []string{},
+		"claude_code_version": version,
+		"output_style":        "default",
+		"agents":              []string{"general-purpose", "Explore", "Plan"},
+		"skills":              repl.SlashCommandNames(),
+		"plugins":             []string{},
+		"fast_mode_state":     l.FastMode,
+		"uuid":                session.NewID(),
 	}
 	// mod_0659.js: startup payloads carry is_coordinator only when true
 	if tools.IsCoordinatorMode() {
@@ -1864,4 +1948,35 @@ func pruneOldSessions(days int) {
 		}
 		return nil
 	})
+}
+
+// apiKeySource resolves where auth came from for the init event.
+func apiKeySource() string {
+	if os.Getenv("ANTHROPIC_API_KEY") != "" {
+		return "ANTHROPIC_API_KEY"
+	}
+	if os.Getenv("CLAUDE_CODE_API_KEY") != "" {
+		return "CLAUDE_CODE_API_KEY"
+	}
+	if c, err := auth.Load(); err == nil && c != nil {
+		return "oauth"
+	}
+	return "none"
+}
+
+// fullUsage expands api.Usage to real's stream-json usage object.
+func fullUsage(u api.Usage) map[string]any {
+	return map[string]any{
+		"input_tokens":                u.InputTokens,
+		"output_tokens":               u.OutputTokens,
+		"cache_creation_input_tokens": u.CacheCreationInputTokens,
+		"cache_read_input_tokens":     u.CacheReadInputTokens,
+		"server_tool_use": map[string]any{
+			"web_search_requests": 0, "web_fetch_requests": 0,
+		},
+		"service_tier": "standard",
+		"cache_creation": map[string]any{
+			"ephemeral_1h_input_tokens": 0, "ephemeral_5m_input_tokens": u.CacheCreationInputTokens,
+		},
+	}
 }

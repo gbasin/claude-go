@@ -5,6 +5,7 @@ package perms
 import (
 	"encoding/json"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"claude-go/internal/config"
@@ -72,7 +73,7 @@ func Check(mode Mode, rules *Rules, toolName string, input json.RawMessage, cwd 
 	// order: deny > ask > allow
 	if dd := d(func(s string) Decision {
 		for _, r := range deny(rules) {
-			if matchRule(r, toolName, s) {
+			if matchRuleAt(r, toolName, s, cwd) {
 				return Deny
 			}
 		}
@@ -82,7 +83,7 @@ func Check(mode Mode, rules *Rules, toolName string, input json.RawMessage, cwd 
 	}
 	if dd := d(func(s string) Decision {
 		for _, r := range askList(rules) {
-			if matchRule(r, toolName, s) {
+			if matchRuleAt(r, toolName, s, cwd) {
 				return Ask
 			}
 		}
@@ -94,7 +95,7 @@ func Check(mode Mode, rules *Rules, toolName string, input json.RawMessage, cwd 
 		allAllowed := true
 		matched := false
 		for _, r := range allow(rules) {
-			if matchRule(r, toolName, s) {
+			if matchRuleAt(r, toolName, s, cwd) {
 				matched = true
 				break
 			}
@@ -106,7 +107,7 @@ func Check(mode Mode, rules *Rules, toolName string, input json.RawMessage, cwd 
 			continue
 		}
 	}
-	if allSpecsAllowed(rules, toolName, specs) {
+	if allSpecsAllowed(rules, toolName, specs, cwd) {
 		return Allow
 	}
 	// read-only tools never prompt in any mode (deny/ask rules already ran
@@ -140,11 +141,11 @@ func Check(mode Mode, rules *Rules, toolName string, input json.RawMessage, cwd 
 }
 
 // allSpecsAllowed: every subcommand must be covered by an allow rule.
-func allSpecsAllowed(rules *Rules, toolName string, specs []string) bool {
+func allSpecsAllowed(rules *Rules, toolName string, specs []string, cwd string) bool {
 	for _, s := range specs {
 		ok := false
 		for _, r := range allow(rules) {
-			if matchRule(r, toolName, s) {
+			if matchRuleAt(r, toolName, s, cwd) {
 				ok = true
 				break
 			}
@@ -263,69 +264,176 @@ func toolSpec(name string, input json.RawMessage, cwd string) string {
 		return p
 	case "WebFetch":
 		return s("url")
+	case "WebSearch":
+		return s("query")
 	case "Agent":
 		return s("subagent_type")
 	}
 	return ""
 }
 
-// matchRule matches "Tool" or "Tool(spec)" against the call.
-// Bash rules use "prefix:*" (or "prefix *") wildcard prefix matching;
-// file tools use glob matching on the path.
+// matchRule matches "Tool" or "Tool(spec)" against the call — real's
+// parsePermissionRule union: exact / prefix (":*") / wildcard ("*").
 func matchRule(rule, toolName, spec string) bool {
+	return matchRuleAt(rule, toolName, spec, "")
+}
+
+// matchRuleAt additionally tries the spec relativized to cwd — real
+// groups file patterns by root (the dir the rule was written in).
+func matchRuleAt(rule, toolName, spec, cwd string) bool {
 	name, arg := rule, ""
+	hasArg := false
 	if i := strings.Index(rule, "("); i >= 0 && strings.HasSuffix(rule, ")") {
 		name, arg = rule[:i], rule[i+1:len(rule)-1]
+		hasArg = true
 	}
 	if name != toolName {
-		// mcp__server rules match every tool on that server
+		// bare mcp__server matches every tool on that server; an arg
+		// narrows to the specific tool (mcp__github(get_issue))
 		if strings.HasPrefix(toolName, name+"__") {
-			return true
+			if !hasArg {
+				return true
+			}
+			return toolName == name+"__"+arg
 		}
 		return false
 	}
-	if arg == "" {
-		return true // "Bash" allows all bash
+	if !hasArg {
+		return true // bare "Bash" allows all bash
 	}
 	switch toolName {
 	case "Bash", "Monitor":
 		return matchCmdPrefix(arg, spec)
-	default:
+	case "WebFetch", "WebSearch":
+		// WebFetch(domain:x) is a host rule (real: mod_1687.js)
+		if strings.HasPrefix(arg, "domain:") {
+			host := arg[len("domain:"):]
+			u := spec
+			if i := strings.Index(u, "://"); i >= 0 {
+				u = u[i+3:]
+			}
+			if i := strings.IndexAny(u, "/?#"); i >= 0 {
+				u = u[:i]
+			}
+			return u == host || strings.HasSuffix(u, "."+host)
+		}
 		return matchGlob(arg, spec)
+	default:
+		if matchGlob(arg, spec) {
+			return true
+		}
+		if cwd != "" {
+			if rel, err := filepath.Rel(cwd, spec); err == nil && !strings.HasPrefix(rel, "..") {
+				return matchGlob(arg, rel)
+			}
+		}
+		return false
 	}
 }
 
-// matchCmdPrefix implements Bash("git status:*") prefix rules.
+// matchCmdPrefix — real's Bash rule semantics (mod_0056.js):
+//
+//	"cmd:*"    prefix rule — matches `cmd` or `cmd args` (word boundary)
+//	"cmd *"    wildcard — the trailing " *" special-case also matches bare `cmd`
+//	interior * wildcard regex (* → .*, \* escaped)
+//	"Bash()"   exact "" — matches NOTHING
 func matchCmdPrefix(pat, cmd string) bool {
 	cmd = strings.TrimSpace(cmd)
+	pat = strings.TrimRight(pat, " ")
+	if pat == "" {
+		return false // Bash() — exact-empty, matches nothing
+	}
+	// ":*" prefix — word boundary only
 	if strings.HasSuffix(pat, ":*") {
 		pref := strings.TrimSuffix(pat, ":*")
 		return cmd == pref || strings.HasPrefix(cmd, pref+" ")
 	}
-	if strings.HasSuffix(pat, " *") {
-		pref := strings.TrimSuffix(pat, " *")
-		return cmd == pref || strings.HasPrefix(cmd, pref+" ")
-	}
-	if strings.HasSuffix(pat, "*") {
-		return strings.HasPrefix(cmd, strings.TrimSuffix(pat, "*"))
-	}
-	return cmd == pat
+	// wildcard: any unescaped * → regex; trailing " *" becomes optional
+	re := wildcardRegex(pat)
+	return re.MatchString(cmd)
 }
 
-// matchGlob does filepath-style globbing, treating "**" as recursive.
+// wildcardRegex converts real's pattern syntax to an anchored regex:
+// `*` → `.*`, `**` → `.*` (same for commands), `\*` → literal *,
+// `\\` → literal backslash; a trailing " *" → "( .*)?" so
+// `Bash(git push *)` also allows bare `git push`.
+func wildcardRegex(pat string) *regexp.Regexp {
+	var b strings.Builder
+	b.WriteString("^")
+	trail := false
+	for i := 0; i < len(pat); i++ {
+		ch := pat[i]
+		if ch == '\\' && i+1 < len(pat) && (pat[i+1] == '*' || pat[i+1] == '\\') {
+			b.WriteString(regexp.QuoteMeta(string(pat[i+1])))
+			i++
+			continue
+		}
+		if ch == ' ' && i+1 < len(pat) && pat[i+1] == '*' && i+2 == len(pat) {
+			// trailing " *" → optional arg segment
+			b.WriteString("( .*)?")
+			trail = true
+			break
+		}
+		if ch == '*' {
+			b.WriteString(".*")
+			continue
+		}
+		b.WriteString(regexp.QuoteMeta(string(ch)))
+	}
+	_ = trail
+	b.WriteString("$")
+	re, err := regexp.Compile(b.String())
+	if err != nil {
+		return regexp.MustCompile("^$") // bad pattern matches nothing
+	}
+	return re
+}
+
+// matchGlob — gitignore semantics for file-path rules (real uses the
+// ignore package): `dir/**` matches dir itself + all descendants,
+// `**/*.env` matches at any depth, `*` doesn't cross /.
 func matchGlob(pat, path string) bool {
 	if pat == path {
 		return true
 	}
-	if strings.Contains(pat, "**") {
-		parts := strings.Split(pat, "**")
-		if len(parts) == 2 {
-			pref, suff := parts[0], parts[1]
-			return strings.HasPrefix(path, pref) && strings.HasSuffix(path, suff)
+	return gitignoreMatch(pat, path)
+}
+
+func gitignoreMatch(pat, path string) bool {
+	// trailing "/**" also matches the base directory itself
+	if strings.HasSuffix(pat, "/**") {
+		base := strings.TrimSuffix(pat, "/**")
+		if path == base || strings.HasPrefix(path, base+"/") {
+			return true
 		}
 	}
-	ok, err := filepath.Match(pat, path)
-	return err == nil && ok
+	// pattern → regex: **/ → (?:.*/)? , ** → .* , * → [^/]* , ? → [^/]
+	var b strings.Builder
+	b.WriteString("^")
+	for i := 0; i < len(pat); i++ {
+		if pat[i] == '*' && i+1 < len(pat) && pat[i+1] == '*' {
+			if i+2 < len(pat) && pat[i+2] == '/' {
+				b.WriteString("(?:.*/)?")
+				i += 2
+			} else {
+				b.WriteString(".*")
+				i++
+			}
+			continue
+		}
+		if pat[i] == '*' {
+			b.WriteString("[^/]*")
+			continue
+		}
+		if pat[i] == '?' {
+			b.WriteString("[^/]")
+			continue
+		}
+		b.WriteString(regexp.QuoteMeta(string(pat[i])))
+	}
+	b.WriteString("$")
+	re, err := regexp.Compile(b.String())
+	return err == nil && re.MatchString(path)
 }
 
 // AdditionalDirs is set once from settings permissions.additionalDirectories.
