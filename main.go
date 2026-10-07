@@ -652,7 +652,7 @@ func main() {
 	if st2 != nil {
 		defer st2.Close()
 		loop.Transcript = st2.Path
-		st2.LogInit(loop.Model) // system/init record at session start (real)
+		st2.LogInitMode(loop.Model, o.permMode) // init record carries the perm mode
 		tools.OnSnapshot = func(path, backup string, ver int) {
 			st2.LogRecord(map[string]any{
 				"type": "file-history-snapshot", "isSnapshotUpdate": true,
@@ -745,6 +745,11 @@ func main() {
 				fmt.Fprintf(os.Stderr, "resume %s: %v\n", id, err)
 			} else if len(msgs) > 0 {
 				loop.Messages = msgs
+				if os.Getenv("CLAUDE_GO_INHERIT_PERMISSION_MODE") != "" && !o.permModeSet {
+					if m := session.InitMode(cwd, id); m != "" {
+						loop.PermMode = m // --inherit-permission-mode
+					}
+				}
 				// resumed history already carried the env composite on
 				// the wire — real replays only the hook string
 				loop.MarkEnvSent()
@@ -1097,7 +1102,9 @@ func buildClient(mockMode bool, sessionID string) (*api.Client, func()) {
 		fatal("%v", err)
 	}
 	lastCreds = creds
-	return api.NewClient(creds, sessionID, api.EntrySDKCLI), func() {}
+	cl := api.NewClient(creds, sessionID, api.EntrySDKCLI)
+	cl.ParentSessionID = os.Getenv("CLAUDE_GO_PARENT_SESSION_ID") // --parent-session-id
+	return cl, func() {}
 }
 
 var lastCreds *auth.Credentials

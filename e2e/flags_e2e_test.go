@@ -740,3 +740,40 @@ func TestFlagFromPR(t *testing.T) {
 		t.Fatalf("--from-pr resume should answer: %s", truncStr(r.stdout, 800))
 	}
 }
+
+// TestResumeDropsTurn: --resume-drops-turn 1 drops the last turn when
+// resuming — the next request has no trace of the dropped turn.
+func TestResumeDropsTurn(t *testing.T) {
+	s := newSession(t)
+	r1 := s.run(t, "--mock", "-p", "keep-marker-one")
+	s.mustOK(t, r1)
+	r2 := s.run(t, "--mock", "-c", "-p", "drop-marker-two")
+	s.mustOK(t, r2)
+
+	rec := t.TempDir() + "/reqs"
+	r3 := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 30*time.Second,
+		"--mock", "-c", "-p", "third-turn", "--resume-drops-turn", "1")
+	s.mustOK(t, r3)
+	b, _ := os.ReadFile(filepath.Join(rec, "001.json"))
+	if bytes.Contains(b, []byte("drop-marker-two")) {
+		t.Fatal("resume-drops-turn kept the dropped turn")
+	}
+	if !bytes.Contains(b, []byte("keep-marker-one")) {
+		t.Fatal("resume-drops-turn dropped too much")
+	}
+}
+
+// TestInheritPermissionMode: --inherit-permission-mode on -c restores
+// the mode recorded in the session's init record (plan → plan).
+func TestInheritPermissionMode(t *testing.T) {
+	s := newSession(t)
+	p1 := s.runPTY(t, nil, "--mock", "--permission-mode", "plan")
+	p1.waitFor("plan mode", 20*time.Second)
+	p1.sendUntilEchoed(t, "hi\r", "❯ hi", 8)
+	p1.waitFor("· done", 30*time.Second)
+	p1.exit()
+
+	p2 := s.runPTY(t, nil, "--mock", "-c", "--inherit-permission-mode", "true")
+	p2.waitFor("plan mode", 30*time.Second)
+	p2.exit()
+}

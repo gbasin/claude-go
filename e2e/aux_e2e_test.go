@@ -1291,3 +1291,23 @@ func TestThinkingDisplay(t *testing.T) {
 		t.Fatalf("thinking-display not on wire:\n%s", truncStr(string(b), 500))
 	}
 }
+
+// TestParentSessionID: --parent-session-id lands on the init record
+// and in aux event_data.
+func TestParentSessionID(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p", "hi", "--parent-session-id", "parent-sess-42")
+	s.mustOK(t, r)
+	found := false
+	dir := filepath.Join(s.home, ".claude", "projects")
+	files, _ := filepath.Glob(filepath.Join(dir, "*", "*.jsonl"))
+	for _, f := range files {
+		b, _ := os.ReadFile(f)
+		if bytes.Contains(b, []byte("parentSessionId")) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("parentSessionId missing from init record")
+	}
+}
