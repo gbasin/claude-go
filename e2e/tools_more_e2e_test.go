@@ -755,3 +755,65 @@ func TestSandboxDenyWrite(t *testing.T) {
 		t.Fatal("sandbox blocked a write outside denyWrite")
 	}
 }
+
+// TestSandboxDenyNetwork: sandbox.network.deniedDomains:["*"] blocks
+// outbound — a curl to example.com fails inside seatbelt.
+func TestSandboxDenyNetwork(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("seatbelt profile is macOS-only")
+	}
+	s := newSession(t)
+	s.writeSettings(`{"sandbox":{"enabled":true,"network":{"deniedDomains":["*"]}}}`)
+	p := s.runPTY(t, nil, "--mock", "--permission-mode", "bypassPermissions")
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"curl -s -m 5 -o /dev/null -w \"%{http_code}\" https://example.com || echo NET-DENIED-E2E"}`+"\r",
+		"❯ tool:Bash", 8)
+	out := p.waitFor("Tool results received", 30*time.Second)
+	p.exit()
+	if !strings.Contains(out, "000") && !strings.Contains(out, "NET-DENIED") {
+		t.Fatalf("network deny not enforced:\n%s", truncStr(out, 800))
+	}
+}
+
+// TestSandboxDenyRead: filesystem.denyRead blocks reads inside the
+// sandbox even though the file exists and is world-readable.
+func TestSandboxDenyRead(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("seatbelt profile is macOS-only")
+	}
+	s := newSession(t)
+	s.writeFile("protected/secret.txt", "SECRET-CONTENTS\n")
+	s.writeSettings(`{"sandbox":{"enabled":true,"filesystem":{"denyRead":["protected/**"]}}}`)
+	p := s.runPTY(t, nil, "--mock", "--permission-mode", "bypassPermissions")
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"cat protected/secret.txt 2>&1 || echo READ-DENIED"}`+"\r",
+		"❯ tool:Bash", 8)
+	out := p.waitFor("Tool results received", 30*time.Second)
+	p.exit()
+	if strings.Contains(out, "SECRET-CONTENTS") {
+		t.Fatal("denyRead path was readable under sandbox")
+	}
+}
+
+// TestSandboxDangerouslyDisable: dangerouslyDisableSandbox:true bypasses
+// the profile — a denied-write path becomes writable.
+func TestSandboxDangerouslyDisable(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("seatbelt profile is macOS-only")
+	}
+	s := newSession(t)
+	s.writeSettings(`{"sandbox":{"enabled":true,"filesystem":{"denyWrite":["protected/**"]},"allowUnsandboxedCommands":true}}`)
+	os.MkdirAll(filepath.Join(s.cwd, "protected"), 0o755)
+	p := s.runPTY(t, nil, "--mock", "--permission-mode", "bypassPermissions")
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t,
+		`tool:Bash {"command":"touch protected/bypassed","dangerouslyDisableSandbox":true}`+"\r",
+		"❯ tool:Bash", 8)
+	p.waitFor("Tool results received", 30*time.Second)
+	p.exit()
+	if !fileExists(filepath.Join(s.cwd, "protected", "bypassed")) {
+		t.Fatal("dangerouslyDisableSandbox didn't bypass the profile")
+	}
+}
