@@ -163,8 +163,9 @@ type marketplaceSource struct {
 }
 
 type marketplaceEntry struct {
-	Source     marketplaceSource `json:"source"`
-	AutoUpdate bool              `json:"autoUpdate"`
+	Source          marketplaceSource `json:"source"`
+	AutoUpdate      bool              `json:"autoUpdate"`
+	InstallLocation string            `json:"installLocation,omitempty"`
 }
 
 func loadMarketplaces() map[string]string {
@@ -210,10 +211,24 @@ func saveMarketplaces(m map[string]string) {
 		if strings.HasPrefix(path, pluginsDir()) {
 			src = marketplaceSource{Source: "git", URL: path}
 		}
-		out[name] = marketplaceEntry{Source: src, AutoUpdate: true}
+		// real records the resolved clone dir on the entry
+		out[name] = marketplaceEntry{Source: src, AutoUpdate: true,
+			InstallLocation: path}
 	}
 	b, _ := json.MarshalIndent(out, "", "  ")
 	os.WriteFile(marketplacesFile(), b, 0o644)
+}
+
+// RemoveMarketplace unregisters a marketplace (real's
+// `plugin marketplace remove --scope <name>`) — leaves the clone dir.
+func RemoveMarketplace(name string) error {
+	mkts := loadMarketplaces()
+	if _, ok := mkts[name]; !ok {
+		return fmt.Errorf("unknown marketplace %q", name)
+	}
+	delete(mkts, name)
+	saveMarketplaces(mkts)
+	return nil
 }
 
 // AddMarketplace clones/copies a marketplace source and registers it.

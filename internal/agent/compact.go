@@ -115,7 +115,7 @@ func (l *Loop) applySummary(text, transcriptPath string, keepLast int) {
 	contMsg.IsCompactSummary = true
 	msgs := []api.Message{contMsg}
 	l.compactSummaryPending = true // transcript marks it isCompactSummary
-	l.ReleaseSysPromptSnapshot() // real: the snapshot holds until compaction
+	l.ReleaseSysPromptSnapshot()   // real: the snapshot holds until compaction
 	l.compactKept = 0
 	if keepLast > 0 && keepLast < len(l.Messages) {
 		msgs = append(msgs, l.Messages[keepLast:]...)
@@ -310,6 +310,10 @@ func (l *Loop) ShouldAutoCompact(u api.Usage) bool {
 	}
 	return total > l.contextWindow()-20000-8000-4000
 }
+
+// ContextWindowSize exposes contextWindow for the result event's
+// modelUsage.contextWindow.
+func (l *Loop) ContextWindowSize() int { return l.contextWindow() }
 
 func (l *Loop) contextWindow() int {
 	// CLAUDE_CODE_AUTO_COMPACT_WINDOW / settings autoCompactWindow override
