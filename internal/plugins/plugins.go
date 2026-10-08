@@ -232,9 +232,33 @@ func RemoveMarketplace(name string) error {
 }
 
 // AddMarketplace clones/copies a marketplace source and registers it.
-// Sources: owner/repo (github), https://… , ./local/path
 func AddMarketplace(src string) (string, error) {
+	return AddMarketplaceOpts(src, nil)
+}
+
+// AddMarketplaceOpts is AddMarketplace with real's flags:
+// --sparse <paths...> = git sparse-checkout on the clone (monorepo
+// marketplaces) — real 295 uses `clone --filter=blob:none --sparse` then
+// `sparse-checkout set`.
+func AddMarketplaceOpts(src string, sparse []string) (string, error) {
 	var name, path string
+	clone := func(url, dst string) error {
+		argv := []string{"clone", "--depth", "1"}
+		if len(sparse) > 0 {
+			argv = append(argv, "--filter=blob:none", "--sparse")
+		}
+		argv = append(argv, url, dst)
+		if out, err := exec.Command("git", argv...).CombinedOutput(); err != nil {
+			return fmt.Errorf("clone %s failed: %s", url, out)
+		}
+		if len(sparse) > 0 {
+			args := append([]string{"-C", dst, "sparse-checkout", "set"}, sparse...)
+			if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+				return fmt.Errorf("sparse-checkout failed: %s", out)
+			}
+		}
+		return nil
+	}
 	switch {
 	case strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") || strings.Contains(src, "@"):
 		name = strings.TrimSuffix(filepath.Base(src), ".git")
@@ -243,17 +267,16 @@ func AddMarketplace(src string) (string, error) {
 			path = dst // already cloned
 			break
 		}
-		if out, err := exec.Command("git", "clone", "--depth", "1", src, dst).CombinedOutput(); err != nil {
-			return "", fmt.Errorf("clone failed: %s", out)
+		if err := clone(src, dst); err != nil {
+			return "", err
 		}
 		path = dst
 	case strings.Contains(src, "/") && !strings.HasPrefix(src, ".") && strings.Count(src, "/") == 1:
 		// owner/repo → github
 		name = strings.Split(src, "/")[1]
 		dst := filepath.Join(pluginsDir(), "marketplaces", name)
-		url := "https://github.com/" + src
-		if out, err := exec.Command("git", "clone", "--depth", "1", url, dst).CombinedOutput(); err != nil {
-			return "", fmt.Errorf("clone %s failed: %s", url, out)
+		if err := clone("https://github.com/"+src, dst); err != nil {
+			return "", err
 		}
 		path = dst
 	default:
