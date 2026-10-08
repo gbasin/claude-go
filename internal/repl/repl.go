@@ -206,6 +206,20 @@ func RunWithStore(l *agent.Loop, store Store) {
 	}
 	md.out = &turnWriter{}
 
+	// MessageDisplay hook lane (real's jlo transform queue): when
+	// MessageDisplay hooks are configured, stream deltas through the
+	// batching transform — displayContent rewrites what's rendered
+	// without touching the stored message.
+	var msgDisp *msgDisplay
+	if len(l.Hooks[string(hooks.MessageDisplay)]) > 0 {
+		msgDisp = newMsgDisplay(
+			func(p map[string]any) hooks.Result {
+				return l.RunHookEvent(hooks.MessageDisplay, p)
+			},
+			func(t string) { md.Write(t) },
+		)
+	}
+
 	l.ToolCtx.Permission = func(name string, input json.RawMessage, summary string) bool {
 		if name == "Bash" && tools.SandboxAutoAllow(l.ToolCtx.CWD) {
 			return true // sandboxed bash auto-allowed per settings
@@ -237,7 +251,11 @@ func RunWithStore(l *agent.Loop, store Store) {
 			streamFresh("\r\x1b[K⏺ ")
 			printedDot = true
 		}
-		md.Write(t)
+		if msgDisp != nil {
+			msgDisp.Delta(t)
+		} else {
+			md.Write(t)
+		}
 	}
 	l.Events.OnThinking = func(t string) {
 		if thinkingHidden.Load() {
@@ -258,6 +276,9 @@ func RunWithStore(l *agent.Loop, store Store) {
 			return // focus view hides tool lines (real's viewMode:"focus")
 		}
 		// the next text block is a new message — it gets its own ⏺
+		if msgDisp != nil {
+			msgDisp.Finalize()
+		}
 		printedDot = false
 		thinkingSeen = false
 		streamPrint(fmt.Sprintf("%s⏺%s %s%s%s", green, reset, bold+name+reset, summarize(name, input), ""))
@@ -444,6 +465,10 @@ func RunWithStore(l *agent.Loop, store Store) {
 		runTurn := func(line string) {
 			tools.UserActive.Store(false)
 			defer tools.UserActive.Store(true)
+			if msgDisp != nil {
+				msgDisp.NewTurn()
+				defer msgDisp.Finalize()
+			}
 			printedDot = false
 			thinkingSeen = false
 			spin := newSpinner()
