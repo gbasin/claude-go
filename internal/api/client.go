@@ -73,6 +73,10 @@ type Client struct {
 	// whenever the request uses thinking display "updates" (cli
 	// entrypoint or --output-format stream-json), not entrypoint alone.
 	ThinkingDisplayUpdates bool
+	// ExtraBetas appends conditional betas to the anthropic-beta header —
+	// real pushes task-budgets/structured-outputs/etc onto the list when
+	// the corresponding output_config field is set.
+	ExtraBetas []string
 	RemoteEnv       bool   // eval hasRemoteEnvironment attr
 	evalFailed      bool   // eval returned empty features (fallback state)
 	RetryCount      int    // exposed for x-stainless-retry-count
@@ -195,6 +199,11 @@ func (c *Client) betaHeaderValue() string {
 		// haiku-class requests carry the threads + cache-diagnosis betas
 		// (diagnostics.previous_message_id rides cache-diagnosis)
 		betas += ",message-threads-2026-08-12,cache-diagnosis-2026-04-07"
+	}
+	for _, b := range c.ExtraBetas {
+		if !strings.Contains(betas, b) {
+			betas += "," + b
+		}
 	}
 	return betas
 }
