@@ -160,7 +160,7 @@ func parseCLI(args []string) *cliOpts {
 		"--resume-drops-turn":  func(v string) { o.dropsTurn = v },
 		"--rewind-files":       func(v string) { o.rewindFiles = v },
 		"--autocompact":        func(v string) { o.autoCompact = v },
-		"--correlation-id":     func(v string) { o.correlationID = v },
+		"--correlation-id":     func(v string) { o.correlationID = v; os.Setenv("CLAUDE_GO_CORRELATION_ID", v) },
 		"--advisor":            func(v string) { o.advisor = v },
 		"--append-subagent-system-prompt": func(v string) {
 			os.Setenv("CLAUDE_GO_APPEND_SUBAGENT_SYS", v) // agent.effectiveSystemPrompt
