@@ -250,3 +250,87 @@ func TestUnknownFlagWriteSessionID(t *testing.T) {
 	}
 	contains(t, r.stderr, "unknown flag", "flag error")
 }
+
+// TestResultEventShape: real's stream-json result event carries the full
+// enrichment set (captured 295): latency fields, terminal accounting,
+// subagent_stats snapshot, fast-mode state, usage/modelUsage details.
+func TestResultEventShape(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p", "shape check",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	_, result := parseStreamJSON(t, r.stdout)
+	if result == nil {
+		t.Fatalf("no result event:\n%s", r.stdout)
+	}
+	for _, k := range []string{
+		"time_to_request_ms", "ttft_ms", "ttft_stream_ms",
+		"first_content_frame_ms", "queued_turn_count", "result_index",
+		"safety_stops", "terminal_reason", "subagent_stats",
+		"fast_mode_state", "fast_mode_disabled_reason", "modelUsage",
+	} {
+		if _, ok := result[k]; !ok {
+			t.Fatalf("result missing %q: %v", k, result)
+		}
+	}
+	if result["terminal_reason"] != "completed" {
+		t.Fatalf("terminal_reason = %v", result["terminal_reason"])
+	}
+	if result["fast_mode_state"] != "off" {
+		t.Fatalf("fast_mode_state = %v", result["fast_mode_state"])
+	}
+	if result["fast_mode_disabled_reason"] != "sdk_opt_in_required" {
+		t.Fatalf("disabled_reason = %v", result["fast_mode_disabled_reason"])
+	}
+	ss, _ := result["subagent_stats"].(map[string]any)
+	if ss == nil {
+		t.Fatalf("subagent_stats not an object: %v", result["subagent_stats"])
+	}
+	if ss["spawned"] != 0.0 {
+		t.Fatalf("no agent call scripted — spawned should be 0: %v", ss)
+	}
+	mu, _ := result["modelUsage"].(map[string]any)
+	for k, v := range mu {
+		mm, _ := v.(map[string]any)
+		for _, f := range []string{"contextWindow", "maxOutputTokens", "canonicalModel", "provider", "costBasis"} {
+			if _, ok := mm[f]; !ok {
+				t.Fatalf("modelUsage[%s] missing %q: %v", k, f, mm)
+			}
+		}
+	}
+	u, _ := result["usage"].(map[string]any)
+	for _, f := range []string{"output_tokens_details", "inference_geo", "iterations", "speed"} {
+		if _, ok := u[f]; !ok {
+			t.Fatalf("usage missing %q: %v", f, u)
+		}
+	}
+}
+
+// TestSubagentStatsCount: an Agent tool call bumps subagent_stats on the
+// result event (real's LX(session) snapshot shape).
+func TestSubagentStatsCount(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p",
+		`tool:Agent {"description":"scout","prompt":"hi","subagent_type":"general-purpose","run_in_background":false}`,
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	_, result := parseStreamJSON(t, r.stdout)
+	ss, _ := result["subagent_stats"].(map[string]any)
+	if ss == nil {
+		t.Fatalf("no subagent_stats: %v", result)
+	}
+	if got := ss["spawned"]; got != 1.0 {
+		t.Fatalf("spawned = %v, want 1: %v", got, ss)
+	}
+	if got := ss["by_type"].(map[string]any)["general-purpose"]; got != 1.0 {
+		t.Fatalf("by_type = %v", ss)
+	}
+	req, _ := ss["requested"].(map[string]any)
+	if req["foreground"] != 1.0 {
+		t.Fatalf("explicit run_in_background:false → foreground: %v", req)
+	}
+	if ss["max_depth"] != 1.0 {
+		t.Fatalf("max_depth = %v", ss)
+	}
+}

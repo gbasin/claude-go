@@ -2359,11 +2359,18 @@ func queueBufLast(q []string) string {
 // message + accept/decline (real's form renders schema fields; we take
 // a single text answer when fields exist).
 func elicitDialog(l *agent.Loop, ks *keySource, req *tools.ElicitRequest) tools.ElicitAnswer {
-	hooks.Run(l.Hooks, hooks.Elicitation, map[string]any{
+	res := hooks.Run(l.Hooks, hooks.Elicitation, map[string]any{
 		"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
 		"hook_event_name": "Elicitation", "permission_mode": l.PermMode,
 		"transcript_path": l.Transcript, "mcp_server_name": req.Server,
 	}, l.ToolCtx.CWD)
+	// an Elicitation hook can answer outright — real's
+	// hookSpecificOutput {action,content} skips the dialog
+	if res.ElicitAction != "" {
+		var content map[string]any
+		_ = json.Unmarshal(res.ElicitContent, &content)
+		return tools.ElicitAnswer{Action: res.ElicitAction, Content: content}
+	}
 	compInline("\r\n" + "\x1b[38;5;246m" + "┌ MCP " + req.Server + " is asking:\x1b[39m\r\n")
 	compInline("  " + req.Message + "\r\n")
 	// requestedSchema fields → prompt for each string property
