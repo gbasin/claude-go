@@ -75,6 +75,8 @@ type cliOpts struct {
 	sdkURL        string
 	betas         string
 	initOnly      bool
+	initHook      string // --init/--maintenance → Setup-hook trigger
+	promptSuggestions bool // --prompt-suggestions → prompt_suggestion emission
 	bgMode        bool
 	noPersist     bool
 	partialMsgs   bool
@@ -279,10 +281,11 @@ func parseCLI(args []string) *cliOpts {
 		"--no-chrome":                          func() { os.Setenv("CLAUDE_GO_CHROME", "0") },
 		"--tmux":                               func() { o.tmux = "auto" },
 		"--tmux=classic":                       func() { o.tmux = "classic" },
-		"--init":                               func() { o.stubs = append(o.stubs, "--init") },
+		"--init":                               func() { o.initHook = "init" },
+		"--maintenance":                        func() { o.initHook = "maintenance" },
 	}
 	for _, f := range []string{
-		"--safe-mode", "--maintenance", "--forward-subagent-text",
+		"--safe-mode", "--forward-subagent-text",
 		"--session-mirror", "--await-claim", "--await-initialize",
 		"--enable-auth-status", "--restricted",
 		"--exclude-dynamic-system-prompt-sections", "--deep-link-origin",
@@ -316,8 +319,18 @@ func parseCLI(args []string) *cliOpts {
 		"--remote":         func(v string) { o.stubs = append(o.stubs, "--remote") },
 		"--remote-control": func(v string) { o.stubs = append(o.stubs, "--remote-control") },
 		"--rc":             func(v string) { o.stubs = append(o.stubs, "--remote-control") },
+		// real: --prompt-suggestions [true|false|1|0|yes|no|on|off],
+		// preset true — emits a prompt_suggestion after each turn in
+		// print/SDK mode
 		"--prompt-suggestions": func(v string) {
-			o.stubEnv("--prompt-suggestions", "CLAUDE_GO_PROMPT_SUGGESTIONS", v, false)
+			switch strings.ToLower(v) {
+			case "", "true", "1", "yes", "on":
+				o.promptSuggestions = true
+			case "false", "0", "no", "off":
+				o.promptSuggestions = false
+			default:
+				fatal("--prompt-suggestions: allowed choices are true, false, 1, 0, yes, no, on, off.")
+			}
 		},
 	}
 
