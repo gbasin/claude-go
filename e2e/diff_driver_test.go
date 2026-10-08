@@ -184,6 +184,8 @@ func execAgainstMock(t *testing.T, label, bin string, sc diffScenario, cwd, home
 			}
 			dumpGolden(t, dir, label, i, "POST /v1/messages?beta=true HTTP/1.1", hdrs, b)
 		}
+		// stdout — lets us inspect real's stream-json event shapes
+		os.WriteFile(filepath.Join(dir, label+"-stdout.txt"), []byte(r.stdout), 0o644)
 	}
 	return r
 }
@@ -268,6 +270,8 @@ func ptyAgainstMock(t *testing.T, label, bin string, sc diffScenario, cwd, home 
 			}
 			dumpGolden(t, dir, label, i, "POST /v1/messages?beta=true HTTP/1.1", hdrs, b)
 		}
+		// stdout — lets us inspect real's stream-json event shapes
+		os.WriteFile(filepath.Join(dir, label+"-stdout.txt"), []byte(r.stdout), 0o644)
 	}
 	return r
 }
