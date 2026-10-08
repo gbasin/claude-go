@@ -748,12 +748,26 @@ func pluginSub(args []string) {
 	}
 	switch args[0] {
 	case "marketplace":
-		if len(args) < 3 {
-			fatal("usage: claude plugin marketplace add <repo|url|path> | list")
+		if len(args) < 2 {
+			fatal("usage: claude plugin marketplace add <repo|url|path> [--sparse <paths...>] | list [--json] | remove <name> [--scope s] | update")
+		}
+		if args[1] == "add" && len(args) < 3 {
+			fatal("usage: claude plugin marketplace add <repo|url|path>")
 		}
 		switch args[1] {
 		case "add":
-			name, err := plugins.AddMarketplace(args[2])
+			var sparse []string
+			src := args[2]
+			// --sparse <paths...>: variadic — consumes until the next flag
+			for i := 3; i < len(args); i++ {
+				if args[i] == "--sparse" {
+					for i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+						i++
+						sparse = append(sparse, args[i])
+					}
+				}
+			}
+			name, err := plugins.AddMarketplaceOpts(src, sparse)
 			if err != nil {
 				fatal("marketplace add: %v", err)
 			}
