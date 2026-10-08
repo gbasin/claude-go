@@ -9,9 +9,9 @@ import (
 	"claude-go/internal/tools"
 )
 
-// wireMessages shape vs captured real wire: req1 keeps the env composite
-// (hook ctx merged in); req2+ replaces it with a bare-string hook record
-// and appends [total_tokens block][parallel-instruction string].
+// wireMessages shape vs captured real wire (294): req1 keeps the env
+// composite block; req2+ resends it as a bare-string system record and
+// appends [total_tokens block][parallel-instruction string].
 func TestWireMessagesShape(t *testing.T) {
 	l := &Loop{
 		Model:          "claude-fable-5-1",
@@ -39,14 +39,14 @@ func TestWireMessagesShape(t *testing.T) {
 		api.BlocksMessage("assistant", []api.ContentBlock{{Type: "tool_use", ID: "t1", Name: "Bash"}}),
 		api.BlocksMessage("user", []api.ContentBlock{{Type: "tool_result", ToolUseID: "t1"}}))
 	r2 := l.wireMessages()
-	// [user, sys-string hook, asst, user, sys total_tokens, sys parallel]
+	// [user, sys-string env, asst, user, sys total_tokens, sys parallel]
 	if len(r2) != 6 {
 		t.Fatalf("req2 len %d", len(r2))
 	}
-	// msg1: bare string form
+	// msg1: env record resent as a bare string
 	var s string
-	if err := json.Unmarshal(r2[1].Content, &s); err != nil || !strings.Contains(s, "hook-ctx") {
-		t.Fatalf("msg1 should be bare-string hook ctx: %s", r2[1].Content)
+	if err := json.Unmarshal(r2[1].Content, &s); err != nil || s != "ENV" {
+		t.Fatalf("msg1 should be the bare-string env record: %s", r2[1].Content)
 	}
 	// msg4: total_tokens block w/ cc
 	var tt []api.ContentBlock
@@ -94,8 +94,8 @@ func TestWireMessagesAmbientTail(t *testing.T) {
 	if err := json.Unmarshal(out[4].Content, &blocks); err != nil || len(blocks) == 0 {
 		t.Fatalf("ambient tail should be block form: %s", out[4].Content)
 	}
-	if blocks[0].CacheControl == nil || blocks[0].CacheControl.TTL != "1h" {
-		t.Fatal("ambient block missing 1h cache_control")
+	if blocks[0].CacheControl == nil || blocks[0].CacheControl.TTL != "" {
+		t.Fatal("ambient block missing plain ephemeral cache_control")
 	}
 	// mid-array ambient stays a bare string
 	var s string

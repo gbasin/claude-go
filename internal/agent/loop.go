@@ -104,6 +104,7 @@ type Loop struct {
 	LinesAdded            atomic.Int64 // /cost code-change tally
 	LinesRemoved          atomic.Int64
 	envSent               bool    // env composite has been on the wire once
+	envDropped            bool    // resume path: env record is not replayed
 	instrHookFired        bool    // InstructionsLoaded hooks fired once
 	Prefill               string  // --prefill: assistant continuation text appended after the first user message
 	OutputSchema          string  // --json-schema: structured-output schema JSON
@@ -143,7 +144,7 @@ func NewLoop(client *api.Client, cwd string) *Loop {
 		MaxTokens:  defaultMaxTokens,
 		Effort:     "",
 		Entrypoint: "sdk-cli",
-		PermMode:   "default",
+		PermMode:   "auto",
 		CWD:        abs,
 		ToolCtx: &tools.Context{
 			Ctx: context.Background(),
@@ -208,7 +209,10 @@ func (l *Loop) buildRequest() *api.Request {
 		}
 	}
 	l.syncDeferredPool()
-	msgs := l.withEphemeralBreakpoint(l.wireMessages())
+	// 294 puts no cache breakpoints inside messages — the only
+	// cache_control on the wire is the env record (req1) and the
+	// trailing tokens block (tool-loop reqs), both plain ephemeral
+	msgs := l.wireMessages()
 	if !l.IsSubagent {
 		// real's subagent requests carry plain ephemeral blocks, no
 		// 1h normalization or breakpoint budget (captured)
@@ -216,7 +220,7 @@ func (l *Loop) buildRequest() *api.Request {
 	}
 	msgs = sanitizeReplayed(msgs)
 	var safeguards json.RawMessage
-	if !l.dropSafeguards {
+	if !l.dropSafeguards && !tailEndsInToolResult(msgs) {
 		safeguards = Safeguards(l.PermMode, l.ToolCtx.CWD, l.PermRules)
 	}
 	var outCfg json.RawMessage
@@ -376,8 +380,8 @@ func (l *Loop) withEphemeralBreakpoint(msgs []api.Message) []api.Message {
 
 // Ask submits one user turn and runs the tool loop to completion.
 // MarkEnvSent marks the env composite as already-on-the-wire — used after
-// session resume, where real does not re-send it (hook ctx only).
-func (l *Loop) MarkEnvSent() { l.envSent = true; l.started = true }
+// session resume, where real replays only the hook string, not the record.
+func (l *Loop) MarkEnvSent() { l.envSent = true; l.envDropped = true; l.started = true }
 
 // ResetForNewSession clears turn-scoped wire state for /clear — the next
 // request is a fresh session: env composite is re-sent, ambient/hook
@@ -422,7 +426,7 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 				}
 			}
 		}
-		msg = FirstUserMessage(prompt, l.CWD, l.User.Email, l.MemoryPaused)
+		msg = FirstUserMessage(prompt, l.CWD, l.User.Email, l.Model, l.MemoryPaused)
 		if l.handbackTail {
 			var blks []api.ContentBlock
 			if json.Unmarshal(msg.Content, &blks) == nil {
@@ -440,16 +444,12 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 		// not as a user-message reminder — seed announcedDeferred so the
 		// first request's user message doesn't carry a duplicate
 		l.announcedDeferred = strings.Join(deferred, "\x00")
-		envCC := &api.CacheControl{Type: "ephemeral", TTL: "1h"}
-
-		if l.IsSubagent {
-			// subagent requests use plain ephemeral everywhere — no
-			// 1h ttls, no breakpoints (captured)
-			envCC = &api.CacheControl{Type: "ephemeral"}
-		}
+		// 294 wire: every cache_control is plain ephemeral — no ttl,
+		// no scope (captured on both req1 env record and req2 tail)
+		envCC := &api.CacheControl{Type: "ephemeral"}
 		envBlocks := api.BlocksMessage("system", []api.ContentBlock{{
 			Type:         "text",
-			Text:         EnvMessage(l.ToolCtx.CWD, l.Model, l.AddDirs, l.PermMode, l.Client.SessionID, l.SessionHookCtx, deferred, connectingServers(), l.tokensLeft),
+			Text:         EnvMessage(l.ToolCtx.CWD, l.Model, l.AddDirs, l.PermMode, l.Entrypoint, l.Client.SessionID, l.SessionHookCtx, deferred, connectingServers(), l.tokensLeft),
 			CacheControl: envCC,
 		}})
 		if isXHighModel(l.Model) {
@@ -1112,10 +1112,11 @@ func capBreakpoints(msgs []api.Message, sysReserved int) []api.Message {
 		blocks := blocksOf(m.Content)
 		dirty := false
 		for _, b := range blocks {
-			// real only ever emits 1h breakpoints in messages (captures);
-			// a stale 5m before a trailing 1h breaks ttl ordering
-			if b.CacheControl != nil && b.CacheControl.TTL != "1h" {
-				b.CacheControl.TTL = "1h"
+			// 294 emits plain ephemeral everywhere — strip any ttl/scope
+			// a replayed transcript might still carry (live-captured)
+			if b.CacheControl != nil && (b.CacheControl.TTL != "" || b.CacheControl.Scope != "") {
+				b.CacheControl.TTL = ""
+				b.CacheControl.Scope = ""
 				dirty = true
 				changed = true
 			}
@@ -1172,15 +1173,41 @@ func (l *Loop) envWireTransform() []api.Message {
 	}
 	for i, m := range l.Messages {
 		if m.Role == "system" && i == envAt && l.envSent {
-			if l.SessionHookCtx != "" {
-				msgs = append(msgs, api.StringMessage("system",
-					"SessionStart hook additional context: "+l.SessionHookCtx))
+			if l.envDropped {
+				// resume path: real replays only the SessionStart hook
+				// context, not the env record (289 resume capture)
+				if l.SessionHookCtx != "" {
+					msgs = append(msgs, api.StringMessage("system",
+						"SessionStart hook additional context: "+l.SessionHookCtx))
+				}
+				continue
 			}
+			// in-session continuation: the env record stays in the
+			// conversation as a bare-string system message (294 capture)
+			msgs = append(msgs, api.StringMessage("system", envTextOf(m)))
 			continue
 		}
 		msgs = append(msgs, m)
 	}
 	return msgs
+}
+
+// envTextOf flattens the stored env record (block or string form) back to
+// its plain text for the bare-string resend on later requests.
+func envTextOf(m api.Message) string {
+	var blocks []api.ContentBlock
+	if err := json.Unmarshal(m.Content, &blocks); err == nil {
+		var b strings.Builder
+		for _, blk := range blocks {
+			b.WriteString(blk.Text)
+		}
+		return b.String()
+	}
+	var s string
+	if err := json.Unmarshal(m.Content, &s); err == nil {
+		return s
+	}
+	return ""
 }
 
 // coalesceRoles merges consecutive same-role user/assistant records into
@@ -1227,7 +1254,7 @@ func (l *Loop) wireMessages() []api.Message {
 				api.BlocksMessage("system", []api.ContentBlock{{
 					Type:         "text",
 					Text:         fmt.Sprintf("<total_tokens>%d tokens left</total_tokens>", l.tokensLeft),
-					CacheControl: &api.CacheControl{Type: "ephemeral", TTL: "1h"},
+					CacheControl: &api.CacheControl{Type: "ephemeral"},
 				}}),
 				api.StringMessage("system", "First privately list what you need next; then request every item that doesn't depend on another's result in this one response."))
 		} else if l.ambientPending {
@@ -1239,7 +1266,7 @@ func (l *Loop) wireMessages() []api.Message {
 					msgs[n-1] = api.BlocksMessage("system", []api.ContentBlock{{
 						Type:         "text",
 						Text:         txt,
-						CacheControl: &api.CacheControl{Type: "ephemeral", TTL: "1h"},
+						CacheControl: &api.CacheControl{Type: "ephemeral"},
 					}})
 				}
 			}

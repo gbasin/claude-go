@@ -52,6 +52,11 @@ type evalRequest struct {
 // eval can't be performed (real then runs on flag defaults — the
 // "eval-failed" header set).
 func (c *Client) EvalCheck(ctx context.Context, ua string) (map[string]any, error) {
+	// real's GB client doesn't initialize at all when nonessential
+	// traffic is off (deps.isEnabled) — no /api/eval POST is made
+	if nonessentialDisabled() {
+		return nil, fmt.Errorf("eval skipped: nonessential traffic disabled")
+	}
 	if c.Creds == nil || c.Creds.IsAPIKey {
 		return nil, fmt.Errorf("eval skipped: no oauth credentials")
 	}
@@ -59,7 +64,8 @@ func (c *Client) EvalCheck(ctx context.Context, ua string) (map[string]any, erro
 	if err != nil {
 		return nil, err
 	}
-	_, acctUUID, devID := config.Account()
+	_, acctUUID, _ := config.Account()
+	devID := config.UserID()
 	oa := config.OAuthAccount()
 	attrs := EvalAttributes{
 		ID:               devID,
