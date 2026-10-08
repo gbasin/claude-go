@@ -985,6 +985,9 @@ func main() {
 	if st2 != nil {
 		defer st2.Close()
 		loop.Transcript = st2.Path
+		loop.OnSessionTitle = func(title string) {
+			_ = st2.LogTitle(title)
+		}
 		if resumeID == "" || o.forkSess {
 			st2.LogInitMeta(loop.Model, loop.ParentSessionID,
 				os.Getenv("CLAUDE_GO_AGENT_TYPE"), loop.SysPromptSnapshot,
