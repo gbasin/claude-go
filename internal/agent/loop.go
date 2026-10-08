@@ -102,6 +102,8 @@ type Loop struct {
 	firstPrompt           string
 	sessionStarted        time.Time
 	apiNanos              atomic.Int64 // sum of request round-trips
+	msgID                 string       // current streaming message id (MessageDisplay)
+	streamTextIdx         map[int]bool // content-block indices carrying text
 	LinesAdded            atomic.Int64 // /cost code-change tally
 	LinesRemoved          atomic.Int64
 	envSent               bool    // env composite has been on the wire once
@@ -575,6 +577,7 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 			l.Events.OnToolUse(b.Name, b.Input)
 		}
 		var r tools.Result
+		toolStart := time.Now()
 		if len(l.AllowedTools) > 0 && !containsStr(l.AllowedTools, b.Name) {
 			r = tools.Result{Content: fmt.Sprintf("tool %s not allowed for this agent", b.Name), IsError: true}
 			results = append(results, toolResultBlock(b.ID, r))
@@ -588,6 +591,13 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		if len(pre.UpdatedInput) > 0 {
 			b.Input = pre.UpdatedInput // hooks can rewrite tool_input
 		}
+		// autoLane: real's auto mode requires a classifier verdict for
+		// unresolvable calls — an allow from a hook does NOT short-circuit
+		// it (decisionReason must be type==="classifier"). SafetyEval is
+		// only wired in the non-interactive auto path, where Permission is
+		// a pure rules check (no prompt), so consulting it here is safe.
+		autoLane := (l.PermMode == "auto" || l.PermMode == "plan") &&
+			l.SafetyEval != nil && l.ToolCtx.Permission != nil
 		if b.Name == "advisor" {
 			// the advisor tool forwards the whole conversation to a second
 			// model call and returns its advice — real client behavior
@@ -598,7 +608,7 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 				reason = "blocked by hook"
 			}
 			r = tools.Result{Content: "Tool call blocked by hook: " + reason, IsError: true}
-		} else if pre.Permission == "allow" {
+		} else if pre.Permission == "allow" && !autoLane {
 			r = l.dispatch(b.Name, b.Input) // hook approved — skip the prompt
 		} else if l.ToolCtx.Permission != nil &&
 			!l.ToolCtx.Permission(b.Name, b.Input, toolSummary(b.Name, b.Input)) {
@@ -637,14 +647,31 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		} else {
 			r = l.dispatch(b.Name, b.Input)
 		}
+		toolDurMs := time.Since(toolStart).Milliseconds()
 		post := l.runHook(hooks.PostToolUse, map[string]any{
 			"tool_name": b.Name, "tool_input": json.RawMessage(b.Input),
-			"tool_use_id": b.ID, "tool_response": r.Content,
+			"tool_use_id": b.ID,
+			"tool_response": map[string]any{
+				"content": r.Content, "is_error": r.IsError,
+			},
+			"duration_ms": toolDurMs,
 		})
+		if len(post.UpdatedToolOutput) > 0 {
+			var s string
+			if json.Unmarshal(post.UpdatedToolOutput, &s) == nil {
+				r.Content = s
+			} else {
+				r.Content = string(post.UpdatedToolOutput)
+			}
+		}
+		if len(post.UpdatedMCPToolOutput) > 0 {
+			r.Content = string(post.UpdatedMCPToolOutput)
+		}
 		if r.IsError {
 			l.runHook(hooks.PostToolUseFailure, map[string]any{
 				"tool_name": b.Name, "tool_input": json.RawMessage(b.Input),
 				"tool_use_id": b.ID, "error": r.Content,
+				"is_interrupt": ctx.Err() != nil, "duration_ms": toolDurMs,
 			})
 		}
 		if post.AdditionalContext != "" {
@@ -660,7 +687,10 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		results = append(results, toolResultBlock(b.ID, r))
 		batchCalls = append(batchCalls, map[string]any{
 			"tool_name": b.Name, "tool_input": json.RawMessage(b.Input),
-			"tool_use_id": b.ID, "tool_response": r.Content,
+			"tool_use_id": b.ID,
+			"tool_response": map[string]any{
+				"content": r.Content, "is_error": r.IsError,
+			},
 		})
 		// SubagentHandback ends the run — its message is the agent's
 		// report to the caller; no follow-up request (real's contract).
@@ -708,8 +738,23 @@ func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
 			if ev.Type == "content_block_delta" && ev.Delta != nil {
 				switch ev.Delta.Type {
 				case "text_delta":
+					text := ev.Delta.Text
+					if l.streamTextIdx == nil {
+						l.streamTextIdx = map[int]bool{}
+					}
+					l.streamTextIdx[ev.Index] = true
+					// MessageDisplay hooks can rewrite the display stream
+					// (display-only — the stored message is untouched)
+					if len(l.Hooks[string(hooks.MessageDisplay)]) > 0 {
+						if h := l.runHook(hooks.MessageDisplay, map[string]any{
+							"turn_id": l.subPromptID(), "message_id": l.msgID,
+							"index": ev.Index, "final": false, "delta": ev.Delta.Text,
+						}); h.DisplayContent != "" {
+							text = h.DisplayContent
+						}
+					}
 					if l.Events.OnTextDelta != nil {
-						l.Events.OnTextDelta(ev.Delta.Text)
+						l.Events.OnTextDelta(text)
 					}
 				case "thinking_delta":
 					if l.Events.OnThinking != nil {
@@ -717,7 +762,16 @@ func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
 					}
 				}
 			}
+			if ev.Type == "content_block_stop" && l.streamTextIdx[ev.Index] &&
+				len(l.Hooks[string(hooks.MessageDisplay)]) > 0 {
+				l.runHook(hooks.MessageDisplay, map[string]any{
+					"turn_id": l.subPromptID(), "message_id": l.msgID,
+					"index": ev.Index, "final": true,
+				})
+			}
 			if ev.Type == "message_start" && ev.Message != nil {
+				l.msgID = ev.Message.ID
+				l.streamTextIdx = map[int]bool{}
 				l.UsageTotal.InputTokens += ev.Message.Usage.InputTokens
 				l.UsageTotal.CacheReadInputTokens += ev.Message.Usage.CacheReadInputTokens
 				l.UsageTotal.CacheCreationInputTokens += ev.Message.Usage.CacheCreationInputTokens
@@ -806,6 +860,29 @@ func (l *Loop) runHook(ev hooks.Event, extra map[string]any) hooks.Result {
 		"cwd":             l.ToolCtx.CWD,
 		"hook_event_name": string(ev),
 		"permission_mode": l.PermMode,
+		"prompt_id":       l.subPromptID(),
+	}
+	// real's xd() base context also carries effort (per-turn-effort
+	// models), the agent identity for teammate/subagent loops, and the
+	// session scratchpad dir
+	if isXHighModel(l.Model) {
+		effort := l.Effort
+		if effort == "" {
+			effort = os.Getenv("CLAUDE_CODE_EFFORT_LEVEL")
+		}
+		if effort == "" {
+			effort = "medium"
+		}
+		payload["effort"] = map[string]string{"level": effort}
+	}
+	if l.TeammateCtx != nil {
+		payload["agent_id"] = l.TeammateCtx.AgentID
+		if l.TeammateCtx.AgentName != "" {
+			payload["agent_type"] = l.TeammateCtx.AgentName
+		}
+	}
+	if d := scratchDir(l.ToolCtx.CWD, l.Client.SessionID); d != "" {
+		payload["scratchpad_dir"] = d
 	}
 	for k, v := range extra {
 		payload[k] = v
@@ -822,12 +899,34 @@ func (l *Loop) runHook(ev hooks.Event, extra map[string]any) hooks.Result {
 	}
 	res := hooks.Run(l.Hooks, ev, payload, l.ToolCtx.CWD)
 	if l.OnHookEvent != nil {
-		l.OnHookEvent(map[string]any{
-			"type": "system", "subtype": "hook_response",
-			"hook_event": string(ev), "hook_name": string(ev), "hook_id": hookID,
-			"uuid": api.NewUUID(), "session_id": l.Client.SessionID,
-			"blocked": res.Block, "reason": res.Reason,
-		})
+		if len(res.Records) == 0 {
+			l.OnHookEvent(map[string]any{
+				"type": "system", "subtype": "hook_response",
+				"hook_event": string(ev), "hook_name": string(ev), "hook_id": hookID,
+				"uuid": api.NewUUID(), "session_id": l.Client.SessionID,
+				"blocked": res.Block, "reason": res.Reason,
+			})
+		}
+		// real emits one hook_response per executed hook with
+		// stdout/stderr/exit_code/outcome (ji())
+		for _, rec := range res.Records {
+			m := map[string]any{
+				"type": "system", "subtype": "hook_response",
+				"hook_event": rec.Event, "hook_name": rec.Command, "hook_id": rec.HookID,
+				"uuid": api.NewUUID(), "session_id": l.Client.SessionID,
+				"outcome": rec.Outcome, "blocked": res.Block, "reason": res.Reason,
+			}
+			if rec.Stdout != "" {
+				m["stdout"] = rec.Stdout
+			}
+			if rec.Stderr != "" {
+				m["stderr"] = rec.Stderr
+			}
+			if rec.ExitCode >= 0 {
+				m["exit_code"] = rec.ExitCode
+			}
+			l.OnHookEvent(m)
+		}
 	}
 	if res.NonBlockErr != "" {
 		fmt.Fprintf(os.Stderr, "  hook error (%s): %s\n", ev, strings.TrimSpace(res.NonBlockErr))
