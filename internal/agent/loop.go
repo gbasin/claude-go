@@ -103,15 +103,17 @@ type Loop struct {
 	apiNanos              atomic.Int64 // sum of request round-trips
 	LinesAdded            atomic.Int64 // /cost code-change tally
 	LinesRemoved          atomic.Int64
-	envSent               bool   // env composite has been on the wire once
-	instrHookFired        bool   // InstructionsLoaded hooks fired once
-	Prefill               string // --prefill: assistant continuation text appended after the first user message
-	OutputSchema          string // --json-schema: structured-output schema JSON
-	tokensLeft            int64  // <total_tokens> budget (starts 15000000)
-	SessionHookCtx        string // SessionStart hook context — wires as sys msg    // tail messages retained by the last compaction
-	announcedDeferred     string // last announced deferred-tool name set (sorted join)
-	Precompute            bool   // precomputeCompactionEnabled gate
-	RateLimitNote         string // set once a slow-lane rate-limit note was shown
+	envSent               bool    // env composite has been on the wire once
+	instrHookFired        bool    // InstructionsLoaded hooks fired once
+	Prefill               string  // --prefill: assistant continuation text appended after the first user message
+	OutputSchema          string  // --json-schema: structured-output schema JSON
+	MaxBudgetUSD          float64 // --max-budget-usd: stop when cumulative cost exceeds
+	costUSD               float64 // cumulative request cost this session
+	tokensLeft            int64   // <total_tokens> budget (starts 15000000)
+	SessionHookCtx        string  // SessionStart hook context — wires as sys msg    // tail messages retained by the last compaction
+	announcedDeferred     string  // last announced deferred-tool name set (sorted join)
+	Precompute            bool    // precomputeCompactionEnabled gate
+	RateLimitNote         string  // set once a slow-lane rate-limit note was shown
 	// SafetyEval runs real's auto-mode security-monitor call on
 	// unresolvable tool calls — <50 allows, >=50 or an eval error blocks.
 	SafetyEval func(ctx context.Context, name string, input json.RawMessage) (int, string, error)
@@ -548,6 +550,12 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		resp.Usage.CacheCreationInputTokens
 	l.tokensLeft -= int64(resp.Usage.InputTokens + resp.Usage.OutputTokens +
 		resp.Usage.CacheReadInputTokens + resp.Usage.CacheCreationInputTokens)
+	l.costUSD += modelCostUSD(l.Model, resp.Usage)
+	if l.MaxBudgetUSD > 0 && l.costUSD > l.MaxBudgetUSD {
+		l.Messages = append(l.Messages, assistantMessage(resp))
+		return nil, fmt.Errorf("budget exceeded: $%.4f spent > $%.4f --max-budget-usd",
+			l.costUSD, l.MaxBudgetUSD)
+	}
 	l.Messages = append(l.Messages, assistantMessage(resp))
 
 	var results []api.ContentBlock
@@ -1403,6 +1411,23 @@ func tokenBudgetStart() int64 {
 		}
 	}
 	return 15000000
+}
+
+// modelCostUSD approximates the request cost — real's per-token price
+// table; the replica keeps rough per-1M rates per model family.
+func modelCostUSD(model string, u api.Usage) float64 {
+	var in, out float64 // per 1M tokens
+	switch {
+	case strings.Contains(model, "opus"):
+		in, out = 15, 75
+	case strings.Contains(model, "haiku"):
+		in, out = 0.8, 4
+	default: // fable/sonnet class
+		in, out = 3, 15
+	}
+	return (float64(u.InputTokens)*in + float64(u.OutputTokens)*out +
+		float64(u.CacheReadInputTokens)*in*0.1 +
+		float64(u.CacheCreationInputTokens)*in*1.25) / 1e6
 }
 
 // stopFailureClass maps an API error to real's StopFailure matcher
