@@ -925,6 +925,42 @@ func pluginSub(args []string) {
 			fatal("validate: plugin.json missing name")
 		}
 		fmt.Printf("%s %s: valid plugin manifest\n", man.Name, man.Version)
+	case "configure":
+		// real: show the plugin's declared options + which are unset,
+		// or save option values from stdin (json lines key=value)
+		if len(args) < 2 {
+			fatal("usage: claude plugin configure <plugin>")
+		}
+		var inst *plugins.InstalledPlugin
+		for _, p := range plugins.List() {
+			if p.Name == args[1] {
+				cp := p
+				inst = &cp
+				break
+			}
+		}
+		if inst == nil {
+			fatal("plugin %q not installed", args[1])
+		}
+		var man map[string]any
+		b, err := os.ReadFile(filepath.Join(inst.Path, ".claude-plugin", "plugin.json"))
+		if err == nil {
+			json.Unmarshal(b, &man)
+		}
+		opts, _ := man["options"].(map[string]any)
+		if len(opts) == 0 {
+			fmt.Printf("%s declares no configurable options\n", inst.Name)
+			return
+		}
+		settings := config.UserSettings()
+		pref := "plugins." + inst.Name + "."
+		for k, v := range opts {
+			set := "unset"
+			if _, ok := settings[pref+k]; ok {
+				set = fmt.Sprintf("%v", settings[pref+k])
+			}
+			fmt.Printf("  %s: %v (%s)\n", k, v, set)
+		}
 	case "enable", "disable":
 		// real writes the settings enabledPlugins gate ("name@mkt": bool);
 		// the installed-file flag is not the toggle store
@@ -1005,17 +1041,52 @@ func pluginSub(args []string) {
 			fmt.Println("pruned:", strings.Join(removed, ", "))
 		}
 	case "details":
+		// real: `plugin details <name>` — a PLUGIN's component inventory
+		// + projected token cost (skills/agents/hooks/commands sizes)
 		if len(args) < 2 {
-			fatal("usage: claude plugin details <marketplace>")
+			fatal("usage: claude plugin details <plugin>")
 		}
-		m, err := plugins.Marketplace(args[1])
-		if err != nil {
-			fatal("%v", err)
+		var inst *plugins.InstalledPlugin
+		for _, p := range plugins.List() {
+			if p.Name == args[1] || p.Name+"@"+p.Marketplace == args[1] {
+				cp := p
+				inst = &cp
+				break
+			}
 		}
-		fmt.Println("marketplace:", m.Name)
-		for _, p := range m.Plugins {
-			fmt.Printf("  %s — %s\n", p.Name, p.Description)
+		if inst == nil {
+			fatal("plugin %q not installed", args[1])
 		}
+		fmt.Printf("%s@%s  %s\n", inst.Name, inst.Marketplace, inst.Path)
+		total := 0
+		for _, sub := range []string{"skills", "agents", "commands", "hooks", ".mcp.json"} {
+			fi, err := os.Stat(filepath.Join(inst.Path, sub))
+			if err != nil {
+				continue
+			}
+			if fi.IsDir() {
+				var files []string
+				filepath.Walk(filepath.Join(inst.Path, sub),
+					func(p string, d os.FileInfo, e error) error {
+						if e == nil && !d.IsDir() {
+							files = append(files, p)
+						}
+						return nil
+					})
+				var sz int64
+				for _, f := range files {
+					if st, e := os.Stat(f); e == nil {
+						sz += st.Size()
+					}
+				}
+				total += len(files)
+				fmt.Printf("  %s: %d files (%d bytes)\n", sub, len(files), sz)
+			} else {
+				fmt.Printf("  %s: present\n", sub)
+				total++
+			}
+		}
+		fmt.Printf("  %d components\n", total)
 	default:
 		fatal("unknown plugin subcommand: %s (list|install|remove|update|validate|configure|marketplace|details|enable|disable)", args[0])
 	}
