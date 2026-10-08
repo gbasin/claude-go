@@ -650,9 +650,12 @@ func main() {
 	loop.User = agent.UserConfig{Email: email, AccountUUID: acct, DeviceID: dev}
 	loop.AddDirs = o.addDirs
 	if o.sysPromptF != "" {
-		if b, err := os.ReadFile(o.sysPromptF); err == nil {
-			o.sysPrompt = string(b)
+		// real fatales on a missing --system-prompt-file (mod_0706)
+		b, err := os.ReadFile(o.sysPromptF)
+		if err != nil {
+			fatal("Error: System prompt file not found: %s", o.sysPromptF)
 		}
+		o.sysPrompt = string(b)
 	}
 	if o.sysPrompt != "" {
 		loop.AppendSysP = o.sysPrompt
@@ -1780,7 +1783,7 @@ func resolveModel(m string) string {
 		if v := os.Getenv("ANTHROPIC_SMALL_FAST_MODEL"); v != "" {
 			return v
 		}
-		return "claude-haiku-4-5"
+		return "claude-haiku-5-5"
 	case "fable":
 		if v := os.Getenv("ANTHROPIC_DEFAULT_FABLE_MODEL"); v != "" {
 			return v
