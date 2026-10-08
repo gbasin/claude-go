@@ -470,7 +470,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			dprintln("  (sub-agents unavailable)")
 			return false // handled (return true exits the REPL)
 		}
-		res := l.ToolCtx.Agent.RunAgent(l.ToolCtx, "subtask", arg, "general-purpose", "", false)
+		res := l.ToolCtx.Agent.RunAgent(l.ToolCtx, "subtask", arg, "general-purpose", "", "", false)
 		dprintln(" ", res.Content)
 	case "branch":
 		// fork conversation onto a new session branch

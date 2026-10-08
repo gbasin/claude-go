@@ -19,19 +19,31 @@ type modelInfo struct {
 	Name   string
 	APIID  string
 	Cutoff string
+	MaxOut int // catalog max_output_tokens.default
 }
 
 var modelTable = map[string]modelInfo{
-	"claude-fable-5-1":          {"Fable 5.1", "claude-fable-5-1", "June 2026"},
-	"claude-opus-5-5":           {"Opus 5.5", "claude-opus-5-5", "March 2026"},
-	"claude-sonnet-5-5":         {"Sonnet 5.5", "claude-sonnet-5-5", "March 2026"},
-	"claude-haiku-4-5-20251001": {"Haiku 4.5", "claude-haiku-4-5-20251001", "February 2026"},
-	"claude-sonnet-4-5":         {"Sonnet 4.5", "claude-sonnet-4-5", "January 2025"},
-	"claude-opus-4-5":           {"Opus 4.5", "claude-opus-4-5", "January 2025"},
+	"claude-fable-5-1":          {"Fable 5.1", "claude-fable-5-1", "June 2026", 64000},
+	"claude-opus-5-5":           {"Opus 5.5", "claude-opus-5-5", "June 2026", 128000},
+	"claude-sonnet-5-5":         {"Sonnet 5.5", "claude-sonnet-5-5", "June 2026", 128000},
+	"claude-haiku-5-5":          {"Haiku 5.5", "claude-haiku-5-5", "June 2026", 128000},
+	"claude-haiku-4-5-20251001": {"Haiku 4.5", "claude-haiku-4-5-20251001", "February 2025", 32000},
+	"claude-sonnet-4-5":         {"Sonnet 4.5", "claude-sonnet-4-5", "January 2025", 64000},
+	"claude-opus-4-5":           {"Opus 4.5", "claude-opus-4-5", "January 2025", 64000},
 }
 
 // ModelDisplay returns real's friendly name ("Fable 5.1") for a model id.
 func ModelDisplay(model string) string { return infoFor(model).Name }
+
+// MaxOutputFor returns the catalog max_output_tokens.default for a model
+// id — the value real puts in max_tokens absent a clamp (mod_0046.js).
+// Unknown ids fall back to the default model's value.
+func MaxOutputFor(model string) int {
+	if v := infoFor(model).MaxOut; v > 0 {
+		return v
+	}
+	return 128000
+}
 
 func infoFor(model string) modelInfo {
 	if mi, ok := modelTable[model]; ok {
@@ -42,7 +54,7 @@ func infoFor(model string) modelInfo {
 			return mi
 		}
 	}
-	return modelInfo{model, model, ""}
+	return modelInfo{model, model, "", 0}
 }
 
 // toolSpecString renders the "(Tools: …)" column in the agent-type listing.
@@ -163,26 +175,26 @@ func EnvMessage(cwd, model string, addDirs []string, permMode string, sessionID 
 		fmt.Fprintf(&b, "\n<total_tokens>%d tokens left</total_tokens>\n", tokensLeft)
 	}
 	fmt.Fprintf(&b, "\nToday's date is %s.\n", time.Now().Format("2006-01-02"))
-	if ar := attributionReminder(cwd); ar != "" {
-		b.WriteString("\n" + ar + "\n")
-	}
 	return b.String()
 }
 
 // attributionReminder mirrors real CC's commit/PR attribution reminder:
 // "End git commit messages with: <trailer>" or the do-not-attribute form
 // when includeCoAuthoredBy is false.
-func attributionReminder(cwd string) string {
+func attributionReminder(cwd, model string) string {
 	st := config.Load(cwd)
 	replaces := "this replaces Claude Code's own earlier attribution guidance, such as a previous copy of this reminder"
 	if !st.CoAuthoredBy() {
 		return "From here on, do not add attribution lines to git commit messages or pull request descriptions (" +
 			replaces + ", and applies even if a CLAUDE.md or memory rule asks for attribution lines)."
 	}
-	trailer := "Co-Authored-By: Claude <noreply@anthropic.com>"
+	// real 294 names the model in the trailer ("Claude Opus 5.5") and adds
+	// the PR line — captured in the first user message's content[0].
+	trailer := "Co-Authored-By: Claude " + ModelDisplay(model) + " <noreply@anthropic.com>"
 	note := "the user's own instructions about these lines, such as a CLAUDE.md or memory rule, take precedence over this reminder, but do not add attribution lines this reminder leaves out"
 	return "Attribution for git commits and pull requests you create from here on (" + replaces + "; " + note + "):\n" +
-		"- End git commit messages with:\n" + trailer
+		"- End git commit messages with:\n" + trailer +
+		"\n- End pull request descriptions with:\n🤖 Generated with [Claude Code](https://claude.com/claude-code)"
 }
 
 func osVersion() string {

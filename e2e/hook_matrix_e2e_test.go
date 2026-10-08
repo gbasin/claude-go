@@ -79,6 +79,7 @@ func TestSetupHook(t *testing.T) {
 // blocks creation (real semantics).
 func TestTaskCreatedHook(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	s.writeFile(".claude/settings.json", `{"tasks":{"enabled":true},"permissions":{"allow":["TaskCreate"]},"hooks":{"TaskCreated":[{"hooks":[{"type":"command","command":"cat >> .hooklog"}]}]}}`)
 	p := startREPL(t, s)
 	p.waitFor("❯", 15*time.Second)

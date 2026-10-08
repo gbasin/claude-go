@@ -45,7 +45,7 @@ type ContentBlock struct {
 	// (ToolSearch results — mod_0386.js mapToolResultToToolResultBlockParam).
 	ToolName  string          `json:"tool_name,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"` // tool_result content
-	IsError   bool            `json:"is_error,omitempty"`
+	IsError   bool            `json:"-"` // emitted only on tool_result blocks (see MarshalJSON)
 	Thinking  string          `json:"thinking,omitempty"`
 	Signature string          `json:"signature,omitempty"`
 	Source    *ImageSource    `json:"source,omitempty"`
@@ -59,6 +59,29 @@ type ContentBlock struct {
 	Display          string          `json:"display,omitempty"`
 	// cache_control on system/tool blocks
 	CacheControl *CacheControl `json:"cache_control,omitempty"`
+}
+
+// MarshalJSON emits is_error only on tool_result blocks — real includes
+// the field even when false (294 wire), and never on other block types.
+func (b ContentBlock) MarshalJSON() ([]byte, error) {
+	type alias ContentBlock
+	raw, err := json.Marshal(alias(b))
+	if err != nil || b.Type != "tool_result" {
+		return raw, err
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return raw, nil
+	}
+	ie, _ := json.Marshal(b.IsError)
+	m["is_error"] = ie
+	// is_error position follows content on real's wire — Go's map
+	// marshal sorts keys, but the API doesn't care about order.
+	out, err := json.Marshal(m)
+	if err != nil {
+		return raw, nil
+	}
+	return out, nil
 }
 
 type CacheControl struct {

@@ -52,10 +52,10 @@ func TestStartupChrome(t *testing.T) {
 	p := startREPL(t, s)
 	screen := p.clean()
 	for _, want := range []string{
-		"◐ medium",        // effort pill above the top rule
-		"? for shortcuts", // footer hint
-		"─",               // composer rule
-		"❯",               // prompt glyph
+		"◐ medium",       // effort pill above the top rule
+		"auto mode on",   // footer pill — real 294 defaults to auto mode
+		"─",              // composer rule
+		"❯",              // prompt glyph
 	} {
 		if !strings.Contains(screen, want) {
 			t.Fatalf("startup chrome missing %q\n%s", want, truncStr(screen, 1500))
@@ -336,6 +336,7 @@ func TestKillAgents(t *testing.T) {
 // TestToggleTodos: ctrl+t shows the todo list above the prompt.
 func TestToggleTodos(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	p := s.runPTY(t, []string{"CLAUDE_CODE_TASK_TOOLS=1"},
 		"--mock", "--permission-mode", "bypassPermissions")
 	p.waitFor("❯", 30*time.Second)
@@ -584,7 +585,7 @@ func TestHookStatusInSpinner(t *testing.T) {
 // in the status line.
 func TestAgentsCountInStatus(t *testing.T) {
 	s := newSession(t)
-	p := startREPL(t, s) // manual mode — approve the bg call
+	p := startREPL(t, s, "--permission-mode", "default") // manual — approve the bg call
 	p.sendUntilEchoed(t,
 		`tool:Bash {"command":"sleep 20","run_in_background":true}`+"\r",
 		"❯ tool:Bash", 8)

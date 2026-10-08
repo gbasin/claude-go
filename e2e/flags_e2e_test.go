@@ -516,7 +516,7 @@ func TestFlagFallbackModel(t *testing.T) {
 	var sawMain, sawFallback bool
 	for _, e := range ents {
 		b, _ := os.ReadFile(filepath.Join(rec, e.Name()))
-		if bytes.Contains(b, []byte(`"model":"claude-fable-5-1"`)) {
+		if bytes.Contains(b, []byte(`"model":"claude-opus-5-5"`)) {
 			sawMain = true
 		}
 		if bytes.Contains(b, []byte(`"model":"claude-haiku-4-5-20251001"`)) {

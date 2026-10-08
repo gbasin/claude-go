@@ -35,7 +35,7 @@ type wireCapture struct {
 }
 
 func TestGoldenRequestParity(t *testing.T) {
-	gb, err := os.ReadFile("testdata/realwire_print_fable.json")
+	gb, err := os.ReadFile("testdata/realwire_print_294.json")
 	if err != nil {
 		t.Skip("no golden capture")
 	}
@@ -152,7 +152,7 @@ func TestGoldenRequestParity(t *testing.T) {
 // [user, sys-string hook ctx, asst tool_use+cc, user tool_result,
 // sys total_tokens+cc, sys-string parallel instruction].
 func TestGoldenToolLoopParity(t *testing.T) {
-	gb, err := os.ReadFile("testdata/realwire_toolloop_fable.json")
+	gb, err := os.ReadFile("testdata/realwire_toolloop_294.json")
 	if err != nil {
 		t.Skip("no golden capture")
 	}

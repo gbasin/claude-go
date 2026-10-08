@@ -1613,7 +1613,7 @@ func statusLineCmdReal(l *agent.Loop) string {
 		"session_id":      l.Client.SessionID,
 		"transcript_path": l.Transcript,
 		"cwd":             l.ToolCtx.CWD,
-		"version":         "2.1.292",
+		"version":         "2.1.294",
 		"model":           map[string]string{"id": l.Model, "display_name": l.Model},
 		"workspace":       map[string]any{"current_dir": l.ToolCtx.CWD, "project_dir": l.ToolCtx.CWD},
 		"output_style":    map[string]string{"name": outputStyle(l)},
