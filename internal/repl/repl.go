@@ -221,7 +221,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 		default:
 			reason, cfg := askReason(l, name, input)
 			ok, feedback := pr.askEx(l, ks, name, summary, reason, cfg, input)
-			if !ok && feedback != "" {
+			if feedback != "" {
 				queuePermFeedback(feedback)
 			}
 			return ok
@@ -244,10 +244,12 @@ func RunWithStore(l *agent.Loop, store Store) {
 			return // meta+t collapsed (real hides thinking by default display)
 		}
 		if !thinkingSeen {
-			streamPrint(dim + "✻ Thinking…" + reset)
+			// real renders "✻ Thinking…" dim + italic and the summary
+			// body in dim italic (mod_1551 dimColor+italic)
+			streamPrint(dim + "\x1b[3m✻ Thinking…" + reset)
 			thinkingSeen = true
 		}
-		streamWrite(dim + t + reset)
+		streamWrite(dim + "\x1b[3m" + t + reset)
 	}
 	l.Events.OnToolUse = func(name string, input json.RawMessage) {
 		// real's spinner keeps animating through tool execution — the
@@ -267,16 +269,37 @@ func RunWithStore(l *agent.Loop, store Store) {
 			return
 		}
 		lines := strings.Split(strings.TrimRight(r.Content, "\n"), "\n")
-		max := 5
 		if briefMode.Load() {
-			max = 1 // brief mode: tool previews collapse to one line
+			// brief mode: tool previews collapse to one line
+			streamPrint(fmt.Sprintf("  %s⎿%s  %s", dim, reset, trunc(lines[0], 113)))
+			return
 		}
-		for i, ln := range lines {
-			if i >= max {
-				streamPrint(fmt.Sprintf("  %s⎿%s  … +%d lines (ctrl+o to expand)", dim, reset, len(lines)-max))
-				break
+		// real's fold (mod_0397): wrap each result line at cols-10, show
+		// the first 3 WRAPPED rows (all 4 in the grace case), then
+		// "… +N lines (<key> to expand)" with the resolved transcript key
+		w := compW
+		if w <= 0 {
+			w = 80
+		}
+		ew := max(w-10, 10)
+		var rows []string
+		for _, ln := range lines {
+			for _, seg := range softWrap(ln, ew) {
+				rows = append(rows, strings.TrimRight(seg, " \t"))
 			}
-			streamPrint(fmt.Sprintf("  %s⎿%s  %s", dim, reset, trunc(ln, 113)))
+		}
+		const fold = 3
+		above, rem := rows, 0
+		if len(rows) > fold+1 {
+			above, rem = rows[:fold], len(rows)-fold
+		}
+		for _, ln := range above {
+			streamPrint(fmt.Sprintf("  %s⎿%s  %s", dim, reset, compClamp(ln, w)))
+		}
+		if rem > 0 {
+			key := ed.resolvedChord("Global", "app:toggleTranscript", "ctrl+o")
+			streamPrint(fmt.Sprintf("  %s⎿%s  … +%d %s (%s to expand)",
+				dim, reset, rem, pluralize(rem, "line", "lines"), key))
 		}
 	}
 	historySessionID = l.Client.SessionID
