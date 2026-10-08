@@ -607,8 +607,15 @@ func main() {
 	}
 	// --parent-session-id marks spawn lineage on the init record
 	loop.ParentSessionID = os.Getenv("CLAUDE_GO_PARENT_SESSION_ID")
-	// --system-prompt-snapshot records the sys-prompt digest in meta
-	loop.SysPromptSnapshot = os.Getenv("CLAUDE_GO_SYSTEM_PROMPT_SNAPSHOT")
+	// --system-prompt-snapshot on|off — on (default): the rendered sys
+	// prompt is recorded on the first request and reused verbatim on every
+	// request + resume, until compaction
+	loop.SysPromptSnapshotOff = o.sysPromptSnapshotOff
+	if resumeID != "" && !o.sysPromptSnapshotOff {
+		if snap := session.InitSysPromptSnapshot(cwd, resumeID); snap != "" {
+			loop.RestoreSysPromptSnapshot(snap)
+		}
+	}
 	// --proactivity gates proactive suggestions (real: proactivityLevel)
 	if v := os.Getenv("CLAUDE_GO_PROACTIVITY"); v != "" && v != "auto" {
 		loop.ProactivityOff = v == "off" || v == "0"

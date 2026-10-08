@@ -76,7 +76,8 @@ type cliOpts struct {
 	betas         string
 	initOnly      bool
 	initHook      string // --init/--maintenance → Setup-hook trigger
-	promptSuggestions bool // --prompt-suggestions → prompt_suggestion emission
+	promptSuggestions   bool // --prompt-suggestions → prompt_suggestion emission
+	sysPromptSnapshotOff bool // --system-prompt-snapshot off
 	bgMode        bool
 	noPersist     bool
 	partialMsgs   bool
@@ -120,6 +121,14 @@ func parseCLI(args []string) *cliOpts {
 		"--permission-mode": func(v string) { o.permMode = v; o.permModeSet = true },
 		"--output-format":   func(v string) { o.outFormat = v },
 		// real: positive int → output_config.task_budget {type:"tokens"}
+		// real: record the rendered sys prompt once; reuse verbatim on every
+		// request + resume until compaction. off = render fresh each request.
+		"--system-prompt-snapshot": func(v string) {
+			if v != "on" && v != "off" {
+				fatal("--system-prompt-snapshot: allowed choices are on, off.")
+			}
+			o.sysPromptSnapshotOff = v == "off"
+		},
 		"--task-budget": func(v string) {
 			n, err := strconv.Atoi(v)
 			if err != nil || n <= 0 {
@@ -202,7 +211,6 @@ func parseCLI(args []string) *cliOpts {
 		"--team-name", "--agent-id", "--agent-name", "--agent-color",
 		"--parent-session-id", "--agent-type", "--routine",
 		"--inherit-permission-mode", "--proactivity",
-		"--system-prompt-snapshot",
 		"--permission-prompt-tool", "--permission-prompts",
 		"--channels", "--dangerously-load-development-channels",
 		"--plugin-dir", "--plugin-dir-no-mcp", "--plugin-url",

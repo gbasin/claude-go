@@ -115,6 +115,7 @@ func (l *Loop) applySummary(text, transcriptPath string, keepLast int) {
 	contMsg.IsCompactSummary = true
 	msgs := []api.Message{contMsg}
 	l.compactSummaryPending = true // transcript marks it isCompactSummary
+	l.ReleaseSysPromptSnapshot() // real: the snapshot holds until compaction
 	l.compactKept = 0
 	if keepLast > 0 && keepLast < len(l.Messages) {
 		msgs = append(msgs, l.Messages[keepLast:]...)
