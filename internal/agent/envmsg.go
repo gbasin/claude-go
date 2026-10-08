@@ -385,6 +385,7 @@ func parseFrontmatter(s string) map[string]string {
 	}
 	return out
 }
+
 var scratchOnce = map[string]string{}
 
 // scratchDir provisions ~/.tmp scratchpad space for this session — real

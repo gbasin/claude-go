@@ -94,7 +94,7 @@ type Loop struct {
 	compactSummaryPending bool             // next user log is the compact continuation
 	compactKept           int
 	turnCount             int
-	turnOpening           bool // fresh user prompt pending its first request
+	turnOpening           bool   // fresh user prompt pending its first request
 	EvalWait              func() // awaits the GB flag eval (bounded) before request 1
 	toolCallsTotal        int
 	envIdx                int
@@ -125,15 +125,18 @@ type Loop struct {
 	// IsSubagent marks this loop as an Agent-spawned child — real's wire
 	// uses class subagent, the Agent-SDK identity line, cc_is_subagent
 	// in the billing header, and its own prompt-id.
-	IsSubagent       bool
-	subPID           string
-	handbackTail     bool // append the SubagentHandback reminder to msg[0]
-	noThinking       bool // thinking config dropped after a thinking 400
-	dropSafeguards   bool
-	dropOutputConfig bool
-	dropBetas        bool
-	maxTokensClamp   bool
-	lastTotal        int // last request's total input tokens (incl. cache)
+	IsSubagent bool
+	// LoopAgentID/ParentAgentID ride the x-claude-code-agent-id /
+	// -parent-agent-id headers on this loop's requests
+	LoopAgentID, ParentAgentID string
+	subPID                     string
+	handbackTail               bool // append the SubagentHandback reminder to msg[0]
+	noThinking                 bool // thinking config dropped after a thinking 400
+	dropSafeguards             bool
+	dropOutputConfig           bool
+	dropBetas                  bool
+	maxTokensClamp             bool
+	lastTotal                  int // last request's total input tokens (incl. cache)
 }
 
 func NewLoop(client *api.Client, cwd string) *Loop {
@@ -143,8 +146,8 @@ func NewLoop(client *api.Client, cwd string) *Loop {
 	}
 	tools.SetProjectDir(abs)
 	l := &Loop{
-		Client:     client,
-		Model:      defaultModel,
+		Client: client,
+		Model:  defaultModel,
 		// resolved per-model in buildRequest (MaxOutputFor) — the
 		// catalog default varies across models
 		MaxTokens:  0,
@@ -205,13 +208,6 @@ func (l *Loop) buildRequest() *api.Request {
 	var ocRaw json.RawMessage
 	if effortCapable {
 		oc := map[string]string{"effort": effort}
-		// Fast mode is firstParty-only and killed by
-		// CLAUDE_CODE_DISABLE_FAST_MODE (real jo(), mod_0137.js).
-		if l.FastMode && (l.Client == nil || l.Client.Provider == "" ||
-			l.Client.Provider == api.ProviderFirstParty) &&
-			!envOn("CLAUDE_CODE_DISABLE_FAST_MODE") {
-			oc["speed"] = "fast"
-		}
 		if l.CorrelationID != "" {
 			oc["correlation_id"] = l.CorrelationID // real sends it inside output_config
 		}
@@ -281,7 +277,16 @@ func (l *Loop) buildRequest() *api.Request {
 		sys = l.subagentSystemBlocks(msgs)
 	}
 	l.ToolCtx.AdvisorModel = l.AdvisorModel // advisor wire block follows the configured model
-	l.ToolCtx.Entrypoint = l.Entrypoint // cli gets the interactive schema variants
+	l.ToolCtx.Entrypoint = l.Entrypoint     // cli gets the interactive schema variants
+	// Fast mode is firstParty-only and killed by
+	// CLAUDE_CODE_DISABLE_FAST_MODE (real jo(), mod_0137.js); the flag rides
+	// the request ROOT in 294, not output_config
+	speed := ""
+	if l.FastMode && (l.Client == nil || l.Client.Provider == "" ||
+		l.Client.Provider == api.ProviderFirstParty) &&
+		!envOn("CLAUDE_CODE_DISABLE_FAST_MODE") {
+		speed = "fast"
+	}
 	return &api.Request{
 		Model:             model,
 		MaxTokens:         mt,
@@ -289,6 +294,9 @@ func (l *Loop) buildRequest() *api.Request {
 		System:            sys,
 		Class:             class_,
 		PromptID:          l.subPromptID(),
+		Speed:             speed,
+		AgentID:           l.LoopAgentID,
+		ParentAgentID:     l.ParentAgentID,
 		Tools:             tools.RequestDefs(l.ToolCtx),
 		Metadata:          Metadata(l.Client.SessionID, l.User),
 		Thinking:          l.thinkingConfig(mt),
@@ -317,12 +325,19 @@ func (l *Loop) threadField() json.RawMessage {
 func (l *Loop) billingMeta(msgs []api.Message) BillingMeta {
 	// captured: first turn emits cc_prompt_index=0, cc_turn_index=1
 	b, _ := json.Marshal(msgs)
+	origin := "sdk"
+	if l.Entrypoint == "cli" {
+		origin = "cli"
+	}
 	return BillingMeta{
 		PromptID:    l.subPromptID(),
 		PromptIndex: l.turnCount - 1,
 		TurnIndex:   l.turnCount,
 		FirstPrompt: l.firstPrompt,
 		ReqSeed:     string(b),
+		Workload:    os.Getenv("CLAUDE_GO_WORKLOAD"),
+		IsSubagent:  l.IsSubagent,
+		TurnOrigin:  origin,
 	}
 }
 
@@ -342,7 +357,9 @@ func connectingServers() []string {
 // thread-enabled models (the same gate as threadField — haiku class);
 // other models omit the field entirely (verified on the 294 wire).
 func (l *Loop) diagnosticsField() json.RawMessage {
-	if !strings.Contains(l.Model, "haiku") {
+	// cache-diagnosis surface is main-lane only (real !Ly) — subagent and
+	// aux requests omit the field entirely
+	if l.IsSubagent || !strings.Contains(l.Model, "haiku") {
 		return nil
 	}
 	var lastID string

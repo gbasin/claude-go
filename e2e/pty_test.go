@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
-
 )
 
 // openPTY allocates a master/slave pair (120x40).
@@ -35,7 +34,6 @@ func openPTYSize(t *testing.T, cols, rows int) (master, slave *os.File) {
 	}
 	return master, slave
 }
-
 
 // poll re-runs cond until it holds or the deadline passes.
 func poll(t *testing.T, d time.Duration, what string, cond func() bool) {

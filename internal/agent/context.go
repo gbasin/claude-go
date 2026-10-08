@@ -64,12 +64,14 @@ func AuxBillingLine(entrypoint, firstUserText, reqSeed string) string {
 }
 
 func SystemBlocks(entrypoint string, cwd, model, appendPrompt string, extra, sessionExtras []string, bill BillingMeta, tokensLeft int64) []api.SystemBlock {
-	// real 294 billing (captured): version+hash suffix + entrypoint ONLY —
-	// the cch/prompt-id/turn fields from 289 are gone
+	// real 294 billing (mod_0194.js wio): base version+entrypoint, then a
+	// chain of provider/flag-gated fields — cch=00000 and the prompt/turn
+	// counters ride only on the official endpoint (pi()); cc_workload
+	// rides the flag wherever it was given; cc_is_subagent marks non-main
+	// sessions. The mock-env capture shows just the base because the
+	// base-URL override puts it off pi().
 	out := []api.SystemBlock{
-		{Type: "text", Text: fmt.Sprintf(
-			"x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s;",
-			version(), ccVersionSuffix(bill.FirstPrompt), entrypoint)},
+		{Type: "text", Text: billingLine(entrypoint, bill)},
 	}
 	ident := identityCLI
 	if entrypoint != "cli" {
@@ -421,6 +423,10 @@ func version() string { return "2.1.294" }
 
 // BillingMeta carries the per-turn values the billing sys[0] needs.
 type BillingMeta struct {
+	Workload    string // --workload tag → cc_workload
+	IsSubagent  bool   // non-main session → cc_is_subagent=true
+	PrevReqID   string // req_* id → cc_prev_req (firstParty only)
+	TurnOrigin  string // sdk|cli → cc_turn_origin (firstParty only)
 	PromptID    string
 	PromptIndex int
 	TurnIndex   int
@@ -585,4 +591,40 @@ func safeguardRules(rules map[string][]string, mk func([]string, string) []any) 
 		srDropped = dropped
 	}
 	return map[string]any{"allow": allow, "deny": deny, "ask": ask}
+}
+
+// billingLine mirrors real's wio: base + conditional suffixes.
+func billingLine(entrypoint string, bill BillingMeta) string {
+	fp := os.Getenv("ANTHROPIC_BASE_URL") == "" &&
+		os.Getenv("CLAUDE_CODE_API_BASE_URL") == "" &&
+		os.Getenv("CLAUDE_CODE_USE_BEDROCK") == "" &&
+		os.Getenv("CLAUDE_CODE_USE_VERTEX") == "" // firstParty && official endpoint
+	vertex := os.Getenv("CLAUDE_CODE_USE_VERTEX") != ""
+	var b strings.Builder
+	fmt.Fprintf(&b, "x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s;",
+		version(), ccVersionSuffix(bill.FirstPrompt), entrypoint)
+	if (fp && os.Getenv("CLAUDE_GO_MOCK") == "") || vertex {
+		b.WriteString(" cch=00000;")
+	}
+	if bill.Workload != "" {
+		fmt.Fprintf(&b, " cc_workload=%s;", bill.Workload)
+	}
+	if bill.IsSubagent {
+		b.WriteString(" cc_is_subagent=true;")
+	}
+	if fp {
+		if bill.PrevReqID != "" {
+			fmt.Fprintf(&b, " cc_prev_req=%s;", bill.PrevReqID)
+		}
+		if bill.PromptID != "" {
+			fmt.Fprintf(&b, " cc_prompt_id=%s;", bill.PromptID)
+		}
+		if bill.TurnOrigin != "" {
+			fmt.Fprintf(&b, " cc_turn_origin=%s;", bill.TurnOrigin)
+		}
+		if bill.PromptIndex > 0 || bill.TurnIndex > 0 {
+			fmt.Fprintf(&b, " cc_prompt_index=%d; cc_turn_index=%d;", bill.PromptIndex, bill.TurnIndex)
+		}
+	}
+	return b.String()
 }
