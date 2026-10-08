@@ -65,6 +65,14 @@ type Client struct {
 	Model           string // drives model-conditional betas (1m family)
 	Wants1m         bool   // [1m] suffix on configured model → context-1m beta
 	AdvisorModel    string // configured advisor → advisor-tool beta
+	// EvalFailed marks the GB eval unreachable — real drops the
+	// flag-gated betas (dangerous-tool-use, afk-mode) and the
+	// safeguards classifier block.
+	EvalFailedFlag bool
+	// ThinkingDisplayUpdates — the thinking-display-updates beta rides
+	// whenever the request uses thinking display "updates" (cli
+	// entrypoint or --output-format stream-json), not entrypoint alone.
+	ThinkingDisplayUpdates bool
 	RemoteEnv       bool   // eval hasRemoteEnvironment attr
 	evalFailed      bool   // eval returned empty features (fallback state)
 	RetryCount      int    // exposed for x-stainless-retry-count
@@ -139,10 +147,20 @@ func (c *Client) betaHeaderValue() string {
 	evalFailed := c.evalFailed
 	c.mu.Unlock()
 	if evalFailed {
-		// eval-unreachable fallback: the default-on betas appear,
-		// context-1m is absent (needs a positive flag) — same slim list,
-		// no oauth (real 294 dropped it on the main lane)
-		return betaFlags
+		// eval-unreachable fallback: the GB-gated betas drop out
+		// (dangerous-tool-use, afk-mode — captured absent when eval
+		// failed) and context-1m is absent (needs a positive flag)
+		b := betaFlags
+		for _, drop := range []string{"dangerous-tool-use-2026-09-03", "afk-mode-2026-01-31"} {
+			b = strings.Replace(b, ","+drop, "", 1)
+			b = strings.Replace(b, drop+",", "", 1)
+		}
+		if c.Entrypoint == EntryCLI {
+			b = strings.Replace(b,
+				"effort-2025-11-24",
+				"effort-2025-11-24,thinking-display-updates-2026-08-18", 1)
+		}
+		return b
 	}
 	// context-1m needs a positive server flag — the captured wire shows it
 	// absent even with a [1m]-configured model and eval unreachable.
@@ -151,9 +169,9 @@ func (c *Client) betaHeaderValue() string {
 		parts = append(parts[:2], append([]string{"context-1m-2025-08-07"}, parts[2:]...)...)
 		betas = strings.Join(parts, ",")
 	}
-	if c.Entrypoint == EntryCLI {
-		// real's cli entrypoint inserts thinking-display-updates before
-		// afk-mode (294 interactive capture)
+	if c.Entrypoint == EntryCLI || c.ThinkingDisplayUpdates {
+		// thinking-display-updates rides the display mode — cli
+		// entrypoint AND stream-json output (294 captures)
 		betas = strings.Replace(betas,
 			"afk-mode-2026-01-31",
 			"thinking-display-updates-2026-08-18,afk-mode-2026-01-31", 1)

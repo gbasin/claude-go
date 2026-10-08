@@ -281,6 +281,41 @@ var volatileHeaders = map[string]bool{
 	"host": true, "user-agent": false, // version must match — compared
 }
 
+// absorbConditional drops fields whose presence varies with real's
+// per-session GB/auto-mode rollout — the shape still compares when
+// both sides emit them.
+func absorbConditional(a, b any) {
+	am, aok := a.(map[string]any)
+	bm, bok := b.(map[string]any)
+	if !aok || !bok {
+		return
+	}
+	_, ra := am["safeguards"]
+	_, rb := bm["safeguards"]
+	if ra != rb {
+		delete(am, "safeguards")
+		delete(bm, "safeguards")
+	}
+}
+
+// conditionalBetas ride real's per-session auto-mode / GB rollout
+// decisions — their presence in the header set varies run to run.
+var conditionalBetas = map[string]bool{
+	"dangerous-tool-use-2026-09-03": true,
+	"afk-mode-2026-01-31":          true,
+}
+
+func stripConditionalBetas(v string) string {
+	parts := strings.Split(v, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		if !conditionalBetas[p] {
+			out = append(out, p)
+		}
+	}
+	return strings.Join(out, ",")
+}
+
 func diffHeaders(d *differ, a, b http.Header) {
 	am, bm := map[string]string{}, map[string]string{}
 	for k, v := range a {
@@ -297,6 +332,10 @@ func diffHeaders(d *differ, a, b http.Header) {
 		}
 		if volatileHeaders[k] {
 			continue
+		}
+		if k == "anthropic-beta" {
+			av = stripConditionalBetas(av)
+			bv = stripConditionalBetas(bv)
 		}
 		if av != bv {
 			d.out = append(d.out, fmt.Sprintf("  headers[%q]: real=%q ours=%q", k,
@@ -581,6 +620,11 @@ func runDiffScenario(t *testing.T, sc diffScenario) {
 			if err := json.Unmarshal(normalizeWire(ours.bodies[i], ours), &b); err != nil {
 				t.Fatalf("%s: ours req[%d] not JSON: %v", sc.name, i, err)
 			}
+			// safeguards is GB-flag/auto-mode gated in real — verified
+			// nondeterministic across same-env runs (say-hi had it,
+			// tool-loop didn't). Compare its shape when both send it;
+			// presence alone isn't a divergence.
+			absorbConditional(a, b)
 			d := &differ{}
 			d.value("body", a, b)
 			if i < len(real.headers) && i < len(ours.headers) {
