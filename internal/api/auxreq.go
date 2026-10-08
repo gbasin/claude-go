@@ -252,7 +252,7 @@ func (c *Client) auxGet(ctx context.Context, call auxCall, org string) ([]byte, 
 
 // QuotaProbe is real's startup haiku probe: one auxiliary-class
 // /v1/messages POST with max_tokens=1. Non-fatal, single attempt.
-func (c *Client) QuotaProbe(ctx context.Context) {
+func (c *Client) QuotaProbe(ctx context.Context, model string) {
 	// oauth-lane only until an api-key-lane capture proves otherwise —
 	// every observed probe rode oauth creds
 	if nonessentialDisabled() || !c.auxLane() || c.Creds == nil || c.Creds.IsAPIKey {
@@ -280,7 +280,9 @@ func (c *Client) QuotaProbe(ctx context.Context) {
 		Messages []probeMsg      `json:"messages"`
 		Metadata json.RawMessage `json:"metadata"`
 	}{
-		Model:    "claude-haiku-4-5-20251001",
+		// real passes the resolved session model e (gnt @65597), not a
+		// hardcoded haiku — cheap models ride through unchanged
+		Model:    model,
 		MaxToks:  1,
 		Messages: []probeMsg{{"user", "quota"}},
 		Metadata: metadata,
@@ -554,8 +556,48 @@ func (c *Client) TitleCall(ctx context.Context, billingLine, firstUserText strin
 	one := float64(1)
 	user := "<session>\n" + firstUserText + "\n</session>\n\n" +
 		"Write the title in the predominant language of the session — a stray word or code token in another language doesn't change it, and neither does the English of these instructions."
-	return c.auxMessageCall(ctx, billingLine, 32000, "disabled", &one,
-		[]string{auxIdentity, auxTitlePrompt}, user)
+	return c.auxMessageCallOC(ctx, billingLine, 32000, "disabled", &one,
+		[]string{auxIdentity, auxTitlePrompt}, user,
+		`{"type":"json_schema","schema":{"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false}}`)
+}
+
+// auxMessageCallOC is auxMessageCall plus an output_config payload — the
+// title call rides structured output (real's outputFormat json_schema).
+func (c *Client) auxMessageCallOC(ctx context.Context, billingLine string, maxTok int,
+	thinking string, temp *float64, sysText []string, userText, oc string) string {
+	if nonessentialDisabled() || !c.auxLane() || c.Creds == nil || c.Creds.IsAPIKey {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, auxReqTimeout)
+	defer cancel()
+	sys := []SystemBlock{{Type: "text", Text: billingLine}}
+	for _, t := range sysText {
+		sys = append(sys, SystemBlock{Type: "text", Text: t})
+	}
+	req := &Request{
+		Model:     "claude-haiku-4-5-20251001",
+		MaxTokens: maxTok,
+		System:    sys,
+		Messages: []Message{
+			BlocksMessage("user", []ContentBlock{{Type: "text", Text: userText}}),
+		},
+		Thinking:     json.RawMessage(`{"type":"` + thinking + `"}`),
+		Temperature:  temp,
+		OutputFormat: json.RawMessage(oc),
+		Class:        "auxiliary",
+		Stream:       true,
+	}
+	resp, err := c.StreamMessage(ctx, req, func(*StreamEvent) error { return nil })
+	if err != nil {
+		return ""
+	}
+	var text string
+	for _, b := range resp.Content {
+		if b.Type == "text" {
+			text += b.Text
+		}
+	}
+	return text
 }
 
 // WalkAwayCall asks haiku to classify the session state (working / waiting /
