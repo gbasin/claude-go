@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -136,7 +137,7 @@ func NewLoop(client *api.Client, cwd string) *Loop {
 		abs = cwd
 	}
 	tools.SetProjectDir(abs)
-	return &Loop{
+	l := &Loop{
 		Client:     client,
 		Model:      defaultModel,
 		MaxTokens:  defaultMaxTokens,
@@ -150,6 +151,11 @@ func NewLoop(client *api.Client, cwd string) *Loop {
 		},
 		PermRules: map[string][]string{},
 	}
+	// tools fire some hook events from inside their exec bodies
+	// (TaskCreated, WorktreeCreate/Remove in real) — route through
+	// the loop's runner so they get the same base payload fields
+	l.ToolCtx.FireHook = l.runHook
+	return l
 }
 
 func isXHighModel(m string) bool {
@@ -535,6 +541,9 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 	}
 	resp, err := l.streamWithSanitizeRetry(ctx)
 	if err != nil {
+		// real fires StopFailure INSTEAD of Stop when an API error ends
+		// the turn — fire-and-forget, exit codes ignored
+		l.runHook(hooks.StopFailure, map[string]any{"error": stopFailureClass(err)})
 		return nil, err
 	}
 	l.lastTotal = resp.Usage.InputTokens + resp.Usage.CacheReadInputTokens +
@@ -550,6 +559,7 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 	l.Messages = append(l.Messages, assistantMessage(resp))
 
 	var results []api.ContentBlock
+	var batchCalls []map[string]any
 	for _, b := range resp.Content {
 		if b.Type != "tool_use" {
 			continue
@@ -642,11 +652,23 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 			l.Events.OnToolResult(b.Name, r)
 		}
 		results = append(results, toolResultBlock(b.ID, r))
+		batchCalls = append(batchCalls, map[string]any{
+			"tool_name": b.Name, "tool_input": json.RawMessage(b.Input),
+			"tool_use_id": b.ID, "tool_response": r.Content,
+		})
 		// SubagentHandback ends the run — its message is the agent's
 		// report to the caller; no follow-up request (real's contract).
 		if r.Handback && l.IsSubagent {
 			l.PushUser(results)
 			return &api.Response{Content: []api.ContentBlock{{Type: "text", Text: r.Content}}}, nil
+		}
+	}
+	// real's PostToolBatch: once per batch, tool_calls array with
+	// per-call results — additionalContext injects once for the batch
+	if len(batchCalls) > 0 {
+		if h := l.runHook(hooks.PostToolBatch, map[string]any{"tool_calls": batchCalls}); h.AdditionalContext != "" {
+			// context rides as a text block beside the batch's results
+			results = append(results, api.ContentBlock{Type: "text", Text: h.AdditionalContext})
 		}
 	}
 	if len(results) == 0 {
@@ -756,6 +778,13 @@ func RunningHook() (string, time.Duration) {
 	}
 	at, _ := hooksRunningAt.Load().(time.Time)
 	return n, time.Since(at)
+}
+
+// RunHookEvent is runHook, exported for cross-package hook callbacks
+// (peer idle notices arriving on the messenger goroutine fire
+// TeammateIdle through it).
+func (l *Loop) RunHookEvent(ev hooks.Event, extra map[string]any) hooks.Result {
+	return l.runHook(ev, extra)
 }
 
 func (l *Loop) runHook(ev hooks.Event, extra map[string]any) hooks.Result {
@@ -1399,5 +1428,28 @@ func modelCostUSD(model string, u api.Usage) float64 {
 	return (float64(u.InputTokens)*in + float64(u.OutputTokens)*out +
 		float64(u.CacheReadInputTokens)*in*0.1 +
 		float64(u.CacheCreationInputTokens)*in*1.25) / 1e6
+}
 
+// stopFailureClass maps an API error to real's StopFailure matcher
+// values (mod_1402.js): rate_limit|overloaded|authentication_failed|
+// billing_error|invalid_request|model_not_found|server_error|...
+func stopFailureClass(err error) string {
+	var e *api.ErrAPI
+	if errors.As(err, &e) {
+		switch e.Type() {
+		case "rate_limit_error":
+			return "rate_limit"
+		case "overloaded_error":
+			return "overloaded"
+		case "authentication_error":
+			return "authentication_failed"
+		case "permission_error":
+			return "billing_error"
+		case "not_found_error":
+			return "model_not_found"
+		case "invalid_request_error", "request_too_large", "not_supported":
+			return "invalid_request"
+		}
+	}
+	return "server_error"
 }

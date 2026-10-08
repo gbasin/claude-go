@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"bufio"
 	"claude-go/internal/config"
 	"encoding/json"
@@ -32,54 +33,118 @@ func mcpSub(args []string) {
 	switch args[0] {
 	case "list":
 		cfgs := mcp.LoadConfigs(mustGetwd())
-		if len(cfgs) == 0 {
+		pending := pendingMcpjson(mustGetwd())
+		if len(cfgs) == 0 && len(pending) == 0 {
 			fmt.Println("no MCP servers configured")
 			return
 		}
 		for name, c := range cfgs {
-			fmt.Printf("%s: %s %v\n", name, c.Command, c.Args)
+			tgt := c.Command
+			if c.URL != "" {
+				tgt = c.URL
+			}
+			fmt.Printf("%s: %s %v (%s)\n", name, tgt, c.Args, c.Type)
+		}
+		for name := range pending {
+			fmt.Printf("%s: ⏸ Pending approval\n", name)
 		}
 	case "add":
-		// claude-go mcp add [--transport http|sse] <name> <command-or-url> [args...]
-		transport := "stdio"
+		// claude-go mcp add [--transport http|sse|stdio|ws] [--scope user|local|project]
+		//   [-e KEY=VAL]... [--header "K: V"]... <name> <command-or-url> [args...]
+		transport, scope := "stdio", "local"
+		var env, headers, pos []string
 		rest := args[1:]
-		for len(rest) > 0 && strings.HasPrefix(rest[0], "--") {
-			if rest[0] == "--transport" && len(rest) > 1 {
+		// flags may appear anywhere before `--` (commander semantics);
+		// after `--` every token is part of the command line
+		for len(rest) > 0 && rest[0] != "--" {
+			switch rest[0] {
+			case "--transport":
 				transport = rest[1]
 				rest = rest[2:]
-			} else {
+			case "--scope":
+				scope = rest[1]
+				rest = rest[2:]
+			case "-e", "--env":
+				env = append(env, rest[1])
+				rest = rest[2:]
+			case "--header":
+				headers = append(headers, rest[1])
+				rest = rest[2:]
+			default:
+				pos = append(pos, rest[0])
 				rest = rest[1:]
 			}
 		}
-		if len(rest) < 2 {
-			fatal("usage: claude-go mcp add [--transport http|sse] <name> <command|url> [args...]")
+		if len(rest) > 0 && rest[0] == "--" {
+			rest = rest[1:]
 		}
-		editClaudeJSON(func(m map[string]any) {
-			servers, _ := m["mcpServers"].(map[string]any)
-			if servers == nil {
-				servers = map[string]any{}
-			}
-			if transport == "stdio" {
-				servers[rest[0]] = map[string]any{
-					"type": "stdio", "command": rest[1], "args": rest[2:],
+		rest = append(pos, rest...)
+		if len(rest) < 2 {
+			fatal("usage: claude-go mcp add [--transport t] [--scope s] [-e K=V] [--header 'K: V'] <name> <command|url> [args...]")
+		}
+		name, tgt := rest[0], rest[1]
+		cfg := map[string]any{}
+		if transport == "stdio" {
+			cfg = map[string]any{"type": "stdio", "command": tgt, "args": rest[2:]}
+		} else {
+			cfg = map[string]any{"type": transport, "url": tgt}
+		}
+		if len(env) > 0 {
+			m := map[string]string{}
+			for _, kv := range env {
+				if i := strings.Index(kv, "="); i > 0 {
+					m[kv[:i]] = kv[i+1:]
 				}
-			} else {
-				servers[rest[0]] = map[string]any{"type": transport, "url": rest[1]}
 			}
-			m["mcpServers"] = servers
+			cfg["env"] = m
+		}
+		if len(headers) > 0 {
+			m := map[string]string{}
+			for _, kv := range headers {
+				if i := strings.Index(kv, ":"); i > 0 {
+					m[strings.TrimSpace(kv[:i])] = strings.TrimSpace(kv[i+1:])
+				}
+			}
+			cfg["headers"] = m
+		}
+		writeMCPServer(scope, name, cfg)
+		fmt.Printf("added %s (%s) [%s scope]\n", name, transport, scope)
+	case "add-json":
+		if len(args) < 3 {
+			fatal("usage: claude-go mcp add-json [--scope s] <name> <json>")
+		}
+		scope := "local"
+		rest := args[1:]
+		if rest[0] == "--scope" && len(rest) > 2 {
+			scope, rest = rest[1], rest[2:]
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal([]byte(rest[1]), &cfg); err != nil {
+			fatal("invalid server json: " + err.Error())
+		}
+		writeMCPServer(scope, rest[0], cfg)
+		fmt.Printf("added %s [%s scope]\n", rest[0], scope)
+	case "reset-project-choices":
+		editLocalSettings(func(m map[string]any) {
+			delete(m, "enabledMcpjsonServers")
+			delete(m, "disabledMcpjsonServers")
 		})
-		fmt.Printf("added %s (%s)\n", rest[0], transport)
+		fmt.Println("project .mcp.json approvals reset")
 	case "get":
 		if len(args) < 2 {
 			fatal("usage: claude-go mcp get <name>")
 		}
 		cfgs := mcp.LoadConfigs(mustGetwd())
-		c, ok := cfgs[args[1]]
-		if !ok {
-			fatal("no such server: %s", args[1])
+		if c, ok := cfgs[args[1]]; ok {
+			b, _ := json.MarshalIndent(c, "", "  ")
+			fmt.Println(string(b))
+			return
 		}
-		b, _ := json.MarshalIndent(c, "", "  ")
-		fmt.Println(string(b))
+		if _, ok := pendingMcpjson(mustGetwd())[args[1]]; ok {
+			fmt.Printf("%s: ⏸ Pending approval (project .mcp.json)\n", args[1])
+			return
+		}
+		fatal("no such server: " + args[1])
 	case "remove", "rm":
 		if len(args) < 2 {
 			fatal("usage: claude-go mcp remove <name>")
@@ -90,10 +155,107 @@ func mcpSub(args []string) {
 			}
 		})
 		fmt.Printf("removed %s\n", args[1])
+	case "logout":
+		if len(args) < 2 {
+			fatal("usage: claude-go mcp logout <name>")
+		}
+		if err := mcp.DeleteServerAuth(args[1]); err != nil {
+			fatal("logout failed: " + err.Error())
+		}
+		fmt.Printf("cleared OAuth credentials for %s\n", args[1])
+	case "login":
+		if len(args) < 2 {
+			fatal("usage: claude-go mcp login <name>")
+		}
+		cfgs := mcp.LoadConfigs(mustGetwd())
+		c, ok := cfgs[args[1]]
+		if !ok || c.URL == "" {
+			fatal("no such remote server: " + args[1])
+		}
+		if err := mcp.RunOAuthFlow(ctxb(), args[1], c.URL); err != nil {
+			fatal("login failed: " + err.Error())
+		}
+		fmt.Printf("logged in to %s\n", args[1])
 	default:
-		fatal("unknown mcp subcommand: %s (list|add|remove)", args[0])
+		fatal("unknown mcp subcommand: " + args[0] + " (list|add|add-json|get|remove|login|logout|reset-project-choices)")
 	}
 }
+
+// pendingMcpjson lists project .mcp.json servers that aren't approved —
+// real shows them "⏸ Pending approval" and skips connecting.
+func pendingMcpjson(cwd string) map[string]mcp.ServerConfig {
+	out := map[string]mcp.ServerConfig{}
+	b, err := os.ReadFile(filepath.Join(cwd, ".mcp.json"))
+	if err != nil {
+		return out
+	}
+	var top struct {
+		Servers map[string]mcp.ServerConfig `json:"mcpServers"`
+	}
+	if json.Unmarshal(b, &top) != nil {
+		return out
+	}
+	st := config.Load(cwd)
+	for n := range top.Servers {
+		if st.EnableAllProjectMcpServers {
+			continue
+		}
+		if !hasStr(st.DisabledMcpjsonServers, n) && !hasStr(st.EnabledMcpjsonServers, n) {
+			out[n] = top.Servers[n]
+		}
+	}
+	return out
+}
+
+// writeMCPServer persists a server entry at the given scope:
+// user → ~/.claude.json, local → ~/.claude.json (real's local scope),
+// project → <cwd>/.mcp.json.
+func writeMCPServer(scope, name string, cfg map[string]any) {
+	if scope == "project" {
+		p := filepath.Join(mustGetwd(), ".mcp.json")
+		m := map[string]any{}
+		if b, err := os.ReadFile(p); err == nil {
+			_ = json.Unmarshal(b, &m)
+		}
+		servers, _ := m["mcpServers"].(map[string]any)
+		if servers == nil {
+			servers = map[string]any{}
+		}
+		servers[name] = cfg
+		m["mcpServers"] = servers
+		b, _ := json.MarshalIndent(m, "", "  ")
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			fatal("write .mcp.json: " + err.Error())
+		}
+		return
+	}
+	// user + local both persist to ~/.claude.json in our model
+	editClaudeJSON(func(m map[string]any) {
+		servers, _ := m["mcpServers"].(map[string]any)
+		if servers == nil {
+			servers = map[string]any{}
+		}
+		servers[name] = cfg
+		m["mcpServers"] = servers
+	})
+}
+
+// editLocalSettings rewrites <cwd>/.claude/settings.local.json in place.
+func editLocalSettings(edit func(map[string]any)) {
+	p := filepath.Join(mustGetwd(), ".claude", "settings.local.json")
+	m := map[string]any{}
+	if b, err := os.ReadFile(p); err == nil {
+		_ = json.Unmarshal(b, &m)
+	}
+	edit(m)
+	_ = os.MkdirAll(filepath.Dir(p), 0o755)
+	b, _ := json.MarshalIndent(m, "", "  ")
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		fatal("write settings.local.json: " + err.Error())
+	}
+}
+
+func ctxb() context.Context { return context.Background() }
 
 func doctorSub() {
 	fmt.Println("claude-go", api.Version)
@@ -693,4 +855,13 @@ func sandboxSub(args []string) {
 	default:
 		fatal("unknown sandbox subcommand: %s (trust)", args[0])
 	}
+}
+
+func hasStr(ss []string, v string) bool {
+	for _, s := range ss {
+		if s == v {
+			return true
+		}
+	}
+	return false
 }
