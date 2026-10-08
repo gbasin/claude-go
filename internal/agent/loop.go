@@ -237,6 +237,7 @@ func (l *Loop) buildRequest() *api.Request {
 	}
 	l.Client.Model = l.Model // beta list is model-conditional
 	l.Client.Wants1m = l.Wants1m
+	l.Client.AdvisorModel = l.AdvisorModel
 	class_ := ""
 	if l.IsSubagent {
 		class_ = "subagent"
