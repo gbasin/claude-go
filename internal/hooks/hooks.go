@@ -234,6 +234,7 @@ type Output struct {
 		PermissionDecisionReason string          `json:"permissionDecisionReason"`
 		AdditionalContext        string          `json:"additionalContext"`
 		UpdatedInput             json.RawMessage `json:"updatedInput"`
+		DisplayContent           string          `json:"displayContent"` // MessageDisplay: replaces the rendered delta
 	} `json:"hookSpecificOutput"`
 }
 
@@ -254,6 +255,7 @@ type Result struct {
 	SystemMessage     string
 	Permission        string          // allow|deny|ask|""
 	UpdatedInput      json.RawMessage // PreToolUse can rewrite tool_input
+	DisplayContent    string          // MessageDisplay: screen-only rewrite of the delta
 	PlainText         string          // non-JSON stdout → context for some events
 	NonBlockErr       string          // hook failed non-blocking — shown to user
 }
@@ -393,6 +395,9 @@ func applyOutput(res *Result, o *Output) {
 		res.AdditionalContext += o.HookSpecificOutput.AdditionalContext
 		if len(o.HookSpecificOutput.UpdatedInput) > 0 {
 			res.UpdatedInput = o.HookSpecificOutput.UpdatedInput
+		}
+		if o.HookSpecificOutput.DisplayContent != "" {
+			res.DisplayContent = o.HookSpecificOutput.DisplayContent
 		}
 	}
 	if len(o.UpdatedInput) > 0 {
