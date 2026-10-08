@@ -986,6 +986,13 @@ func pluginSub(args []string) {
 			m["enabledPlugins"] = en
 		})
 		fmt.Printf("%s %s\n", args[0]+"d", key)
+	case "eval", "test":
+		// real gates these behind earlyAccess flags (pluginEval /
+		// hooksModules) — hidden unless the flag's on
+		if os.Getenv("CLAUDE_CODE_PLUGIN_EVAL") == "" {
+			fatal("unknown plugin subcommand: %s", args[0])
+		}
+		fatal("plugin %s: eval suites are not supported in claude-go", args[0])
 	case "init", "new":
 		if len(args) < 2 {
 			fatal("usage: claude plugin init <name>")
