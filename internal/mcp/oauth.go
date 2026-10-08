@@ -47,22 +47,44 @@ func (e *AuthError) Error() string {
 	return fmt.Sprintf("mcp %s: authorization required (401)", e.Server)
 }
 
-// serverAuth is the persisted per-server OAuth record.
+// serverAuth is the persisted per-server OAuth record — real's
+// mcpOAuth[<name>|<hash>] entry shape (camelCase, discoveryState carries
+// the resolved endpoints, stepUpScope survives a scope-elevation login).
 type serverAuth struct {
-	AccessToken  string `json:"access_token,omitempty"`
-	RefreshToken string `json:"refresh_token,omitempty"`
-	ExpiresAt    int64  `json:"expires_at,omitempty"` // unix ms
-	TokenType    string `json:"token_type,omitempty"`
+	ServerName   string `json:"serverName,omitempty"`
+	ServerURL    string `json:"serverUrl,omitempty"`
+	AccessToken  string `json:"accessToken,omitempty"`
+	RefreshToken string `json:"refreshToken,omitempty"`
+	ExpiresAt    int64  `json:"expiresAt,omitempty"` // unix ms
+	TokenType    string `json:"tokenType,omitempty"`
 	Scope        string `json:"scope,omitempty"`
 
-	// dynamic client registration results
-	ClientID     string `json:"client_id,omitempty"`
-	ClientSecret string `json:"client_secret,omitempty"`
+	// dynamic client registration results (or --client-id/--client-secret)
+	ClientID     string `json:"clientId,omitempty"`
+	ClientSecret string `json:"clientSecret,omitempty"`
+	RedirectURI  string `json:"redirectUri,omitempty"`
 
-	// discovered endpoints, cached for refresh
-	TokenEndpoint         string `json:"token_endpoint,omitempty"`
-	RegistrationEndpoint  string `json:"registration_endpoint,omitempty"`
-	AuthorizationEndpoint string `json:"authorization_endpoint,omitempty"`
+	DiscoveryState *discoveryState `json:"discoveryState,omitempty"`
+	StepUpScope    string          `json:"stepUpScope,omitempty"`
+}
+
+// discoveryState caches the resolved authorization-server metadata inside
+// the credential record — real's discoveryState field.
+type discoveryState struct {
+	AuthorizationServerURL string `json:"authorizationServerUrl,omitempty"`
+	ResourceMetadataURL    string `json:"resourceMetadataUrl,omitempty"`
+	Issuer                 string `json:"issuer,omitempty"`
+	TokenEndpoint          string `json:"tokenEndpoint,omitempty"`
+	RegistrationEndpoint   string `json:"registrationEndpoint,omitempty"`
+	AuthorizationEndpoint  string `json:"authorizationEndpoint,omitempty"`
+	RevocationEndpoint     string `json:"revocationEndpoint,omitempty"`
+}
+
+func (s *serverAuth) tokenEndpoint() string {
+	if s != nil && s.DiscoveryState != nil {
+		return s.DiscoveryState.TokenEndpoint
+	}
+	return ""
 }
 
 // accessToken returns the bearer token if present and not expired.
@@ -79,7 +101,7 @@ func (s *serverAuth) accessToken() string {
 // refresh trades the refresh token for a new access token at the stored
 // token endpoint.
 func (s *serverAuth) refresh(ctx context.Context) error {
-	if s == nil || s.RefreshToken == "" || s.TokenEndpoint == "" {
+	if s == nil || s.RefreshToken == "" || s.tokenEndpoint() == "" {
 		return fmt.Errorf("no refresh token")
 	}
 	form := url.Values{
@@ -90,7 +112,7 @@ func (s *serverAuth) refresh(ctx context.Context) error {
 	if s.ClientSecret != "" {
 		form.Set("client_secret", s.ClientSecret)
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", s.TokenEndpoint,
+	req, err := http.NewRequestWithContext(ctx, "POST", s.tokenEndpoint(),
 		strings.NewReader(form.Encode()))
 	if err != nil {
 		return err
@@ -124,42 +146,61 @@ func (s *serverAuth) refresh(ctx context.Context) error {
 }
 
 // --- credential store ---
+//
+// Real keeps MCP OAuth tokens inside the shared credential store (the
+// storageV5 blob that also holds claudeAiOauth — keychain on macOS,
+// ~/.claude/.credentials.json elsewhere), under
+// mcpOAuth["<name>|<sha256({type,url,headers})[:16]>"] (Hl() in the
+// decompile). We use the plaintext file arm of that store so real and
+// claude-go interoperate on the same layout; the legacy
+// .credentials-mcp.json is still read as a fallback so existing logins
+// keep working (and are migrated on the next save).
 
 func credentialsPath() string {
+	return filepath.Join(config.ClaudeDir(), ".credentials.json")
+}
+
+func legacyCredentialsPath() string {
 	return filepath.Join(config.ClaudeDir(), ".credentials-mcp.json")
 }
 
 var credMu sync.Mutex
 
-// LoadMCPCredentials reads ~/.claude/.credentials-mcp.json.
-func LoadMCPCredentials() map[string]*serverAuth {
-	credMu.Lock()
-	defer credMu.Unlock()
-	return loadCredFile()
+// readCredStore returns the parsed credentials file.
+func readCredStore() map[string]any {
+	m := map[string]any{}
+	if b, err := os.ReadFile(credentialsPath()); err == nil {
+		_ = json.Unmarshal(b, &m)
+	}
+	return m
 }
 
-func loadCredFile() map[string]*serverAuth {
-	out := map[string]*serverAuth{}
-	b, err := os.ReadFile(credentialsPath())
+func writeCredStore(m map[string]any) error {
+	p := credentialsPath()
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	out, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
+		return err
+	}
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
+}
+
+func credMap(m map[string]any) map[string]*serverAuth {
+	out := map[string]*serverAuth{}
+	raw, ok := m["mcpOAuth"]
+	if !ok {
 		return out
 	}
-	var top map[string]json.RawMessage
-	if json.Unmarshal(b, &top) != nil {
-		return out
-	}
-	// accept both {"mcpOAuth": {...}} and a bare {name: {...}} map
-	for _, key := range []string{"mcpOAuth"} {
-		if raw, ok := top[key]; ok {
-			var m map[string]*serverAuth
-			if json.Unmarshal(raw, &m) == nil && m != nil {
-				return m
-			}
-		}
-	}
-	var m map[string]*serverAuth
-	if json.Unmarshal(b, &m) == nil {
-		for k, v := range m {
+	b, _ := json.Marshal(raw)
+	var mm map[string]*serverAuth
+	if json.Unmarshal(b, &mm) == nil {
+		for k, v := range mm {
 			if v != nil {
 				out[k] = v
 			}
@@ -168,37 +209,204 @@ func loadCredFile() map[string]*serverAuth {
 	return out
 }
 
-func loadServerAuth(name string) *serverAuth {
-	credMu.Lock()
-	defer credMu.Unlock()
-	return loadCredFile()[name]
+// loadCredFile merges the credential store's mcpOAuth map with the legacy
+// standalone file (keyed by bare server name — a migration fallback).
+func loadCredFile() map[string]*serverAuth {
+	out := credMap(readCredStore())
+	if b, err := os.ReadFile(legacyCredentialsPath()); err == nil {
+		var top map[string]json.RawMessage
+		if json.Unmarshal(b, &top) == nil {
+			var m map[string]*serverAuth
+			if raw, ok := top["mcpOAuth"]; ok && json.Unmarshal(raw, &m) == nil {
+				for k, v := range m {
+					if v != nil {
+						out[k] = v
+					}
+				}
+			} else if json.Unmarshal(b, &m) == nil {
+				for k, v := range m {
+					if v != nil {
+						out[k] = v
+					}
+				}
+			}
+		}
+	}
+	return out
 }
 
-// SaveServerAuth upserts one server's OAuth record.
-func SaveServerAuth(name string, s *serverAuth) error {
+// LoadMCPCredentials returns every stored MCP OAuth record, keyed
+// "<name>|<hash16>" (plus any unmigrated bare-name legacy entries).
+func LoadMCPCredentials() map[string]*serverAuth {
+	credMu.Lock()
+	defer credMu.Unlock()
+	return loadCredFile()
+}
+
+func loadServerAuth(name string, cfg ServerConfig) *serverAuth {
 	credMu.Lock()
 	defer credMu.Unlock()
 	m := loadCredFile()
-	m[name] = s
-	out, err := json.MarshalIndent(map[string]any{"mcpOAuth": m}, "", "  ")
-	if err != nil {
-		return err
+	if s := m[cfg.credKey(name)]; s != nil {
+		return s
 	}
-	p := credentialsPath()
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return err
+	// bare-name fallbacks: unmigrated legacy entries, and same-name
+	// records whose config hash drifted (headers/url edited)
+	var legacy *serverAuth
+	for k, v := range m {
+		if k == name {
+			return v
+		}
+		if strings.HasPrefix(k, name+"|") {
+			legacy = v
+		}
 	}
-	return os.WriteFile(p, out, 0o600)
+	return legacy
 }
 
-// DeleteServerAuth removes one server's stored tokens.
-func DeleteServerAuth(name string) error {
+// SaveServerAuth upserts one server's OAuth record under its Hl() key.
+func SaveServerAuth(name string, cfg ServerConfig, s *serverAuth) error {
 	credMu.Lock()
 	defer credMu.Unlock()
-	m := loadCredFile()
-	delete(m, name)
-	out, _ := json.MarshalIndent(map[string]any{"mcpOAuth": m}, "", "  ")
-	return os.WriteFile(credentialsPath(), out, 0o600)
+	s.ServerName, s.ServerURL = name, cfg.URL
+	store := readCredStore()
+	om := credMap(store)
+	key := cfg.credKey(name)
+	om[key] = s
+	// drop the bare-name legacy entry once the keyed record exists
+	if _, ok := om[name]; ok && name != key {
+		delete(om, name)
+	}
+	raw, _ := json.Marshal(om)
+	var anyMap map[string]any
+	_ = json.Unmarshal(raw, &anyMap)
+	store["mcpOAuth"] = anyMap
+	return writeCredStore(store)
+}
+
+// DeleteServerAuth removes one server's stored tokens (and client
+// registration record).
+func DeleteServerAuth(name string, cfg ServerConfig) error {
+	credMu.Lock()
+	defer credMu.Unlock()
+	store := readCredStore()
+	om := credMap(store)
+	delete(om, cfg.credKey(name))
+	delete(om, name) // legacy bare-name key
+	raw, _ := json.Marshal(om)
+	var anyMap map[string]any
+	_ = json.Unmarshal(raw, &anyMap)
+	store["mcpOAuth"] = anyMap
+	return writeCredStore(store)
+}
+
+// SaveClientSecret stores a --client-secret under real's
+// mcpOAuthClientConfig[Hl(name,cfg)] entry in the credential store.
+func SaveClientSecret(name string, cfg ServerConfig, secret string) error {
+	credMu.Lock()
+	defer credMu.Unlock()
+	store := readCredStore()
+	cc, _ := store["mcpOAuthClientConfig"].(map[string]any)
+	if cc == nil {
+		cc = map[string]any{}
+	}
+	cc[cfg.credKey(name)] = map[string]any{"clientSecret": secret}
+	store["mcpOAuthClientConfig"] = cc
+	return writeCredStore(store)
+}
+
+// loadClientSecret reads mcpOAuthClientConfig[Hl] — where real puts the
+// --client-secret (never in the plaintext server config).
+func loadClientSecret(name string, cfg ServerConfig) string {
+	credMu.Lock()
+	defer credMu.Unlock()
+	cc, _ := readCredStore()["mcpOAuthClientConfig"].(map[string]any)
+	if e, ok := cc[cfg.credKey(name)].(map[string]any); ok {
+		s, _ := e["clientSecret"].(string)
+		return s
+	}
+	return ""
+}
+
+// RevokeServerAuth performs RFC 7009 revocation of the stored tokens at
+// the server's revocation_endpoint (real's mcp_oauth_revoke on logout),
+// then deletes the record. Revocation failure is reported but the local
+// record is still removed — logout means "forget it" either way.
+func RevokeServerAuth(ctx context.Context, name string, cfg ServerConfig) error {
+	s := loadServerAuth(name, cfg)
+	var revokeErr error
+	if s != nil && (s.AccessToken != "" || s.RefreshToken != "") {
+		revokeErr = revokeTokens(ctx, name, cfg, s)
+	}
+	if err := DeleteServerAuth(name, cfg); err != nil {
+		return err
+	}
+	return revokeErr
+}
+
+// revokeTokens POSTs each held token to the revocation endpoint with the
+// registered client credentials (Basic or post body per server support).
+func revokeTokens(ctx context.Context, name string, cfg ServerConfig, s *serverAuth) error {
+	ep := ""
+	if s.DiscoveryState != nil && s.DiscoveryState.RevocationEndpoint != "" {
+		ep = s.DiscoveryState.RevocationEndpoint
+	} else if md, err := DiscoverOAuthMetadata(ctx, cfg.URL); err == nil {
+		ep = md.RevocationEndpoint
+	}
+	if ep == "" {
+		return nil // server doesn't advertise revocation
+	}
+	post := func(token, hint string) error {
+		form := url.Values{"token": {token}, "token_type_hint": {hint}}
+		req, err := http.NewRequestWithContext(ctx, "POST", ep, strings.NewReader(form.Encode()))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if s.ClientID != "" && s.ClientSecret != "" {
+			req.SetBasicAuth(url.QueryEscape(s.ClientID), url.QueryEscape(s.ClientSecret))
+		} else if s.ClientID != "" {
+			form.Set("client_id", s.ClientID)
+			req, _ = http.NewRequestWithContext(ctx, "POST", ep, strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		// 401 → retry once with the access token as Bearer (real's Ie())
+		if resp.StatusCode == http.StatusUnauthorized && s.AccessToken != "" {
+			req, _ = http.NewRequestWithContext(ctx, "POST", ep,
+				strings.NewReader(url.Values{"token": {token}, "token_type_hint": {hint}}.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Authorization", "Bearer "+s.AccessToken)
+			r2, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return err
+			}
+			r2.Body.Close()
+			if r2.StatusCode >= 400 {
+				return fmt.Errorf("revoke %s: http %d", hint, r2.StatusCode)
+			}
+			return nil
+		}
+		if resp.StatusCode >= 400 {
+			return fmt.Errorf("revoke %s: http %d", hint, resp.StatusCode)
+		}
+		return nil
+	}
+	var firstErr error
+	if s.RefreshToken != "" {
+		firstErr = post(s.RefreshToken, "refresh_token")
+	}
+	if s.AccessToken != "" {
+		if err := post(s.AccessToken, "access_token"); firstErr == nil {
+			firstErr = err
+		}
+	}
+	_ = name
+	return firstErr
 }
 
 // --- discovery ---
@@ -210,6 +418,7 @@ type OAuthMetadata struct {
 	AuthorizationEndpoint string `json:"authorization_endpoint"`
 	TokenEndpoint         string `json:"token_endpoint"`
 	RegistrationEndpoint  string `json:"registration_endpoint"`
+	RevocationEndpoint    string `json:"revocation_endpoint"`
 }
 
 func getJSON(ctx context.Context, u string, out any) error {
@@ -364,37 +573,58 @@ func randState() string {
 
 // RunOAuthFlow performs the full interactive MCP OAuth flow:
 // discovery → dynamic client registration → open browser → local callback
-// → token exchange → persist to ~/.claude/.credentials-mcp.json.
+// → token exchange → persist to the credential store's mcpOAuth map.
+// cfg.OAuth supplies the real mcp-add pins: --client-id/--client-secret
+// skip dynamic registration, --callback-port fixes the loopback port.
 // It blocks until the user completes authorization or ctx is cancelled.
-func RunOAuthFlow(ctx context.Context, serverName, serverURL string) error {
+func RunOAuthFlow(ctx context.Context, serverName string, cfg ServerConfig) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	md, err := DiscoverOAuthMetadata(ctx, serverURL)
+	md, err := discoverMetadata(ctx, serverName, cfg)
 	if err != nil {
 		return fmt.Errorf("mcp %s oauth discovery: %w", serverName, err)
 	}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	listen := "127.0.0.1:0"
+	if cfg.OAuth != nil && cfg.OAuth.CallbackPort > 0 {
+		listen = fmt.Sprintf("127.0.0.1:%d", cfg.OAuth.CallbackPort)
+	}
+	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		return err
 	}
 	defer ln.Close()
 	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", ln.Addr().(*net.TCPAddr).Port)
 
-	stored := loadServerAuth(serverName)
+	stored := loadServerAuth(serverName, cfg)
 	clientID, clientSecret := "", ""
-	if stored != nil {
+	if cfg.OAuth != nil {
+		clientID = cfg.OAuth.ClientID
+		clientSecret = cfg.OAuth.ClientSecret
+	}
+	if clientSecret == "" {
+		clientSecret = os.Getenv("MCP_CLIENT_SECRET") // real's env fallback
+	}
+	if clientSecret == "" {
+		clientSecret = loadClientSecret(serverName, cfg)
+	}
+	if clientID == "" && stored != nil {
 		clientID, clientSecret = stored.ClientID, stored.ClientSecret
+		if clientSecret == "" {
+			clientSecret = loadClientSecret(serverName, cfg)
+		}
 	}
 	if clientID == "" {
 		clientID, clientSecret, err = registerClient(ctx, md, redirectURI)
 		if err != nil {
 			return fmt.Errorf("mcp %s client registration: %w", serverName, err)
 		}
-		// real persists the dynamic client under .claude.json
-		// mcpOAuthClientConfig[serverName]
+		// real persists the dynamic client under the credential store's
+		// mcpOAuthClientConfig[Hl(name,cfg)] (secret) — .claude.json keeps
+		// the non-secret registration for older flows
 		saveClientConfig(serverName, clientID, clientSecret)
+		_ = SaveClientSecret(serverName, cfg, clientSecret)
 	}
 
 	verifier, challenge := pkcePair()
@@ -475,25 +705,51 @@ func RunOAuthFlow(ctx context.Context, serverName, serverURL string) error {
 		return fmt.Errorf("mcp %s token exchange failed (status %d)", serverName, resp.StatusCode)
 	}
 	rec := &serverAuth{
-		AccessToken:           tr.AccessToken,
-		RefreshToken:          tr.RefreshToken,
-		TokenType:             tr.TokenType,
-		Scope:                 tr.Scope,
-		ClientID:              clientID,
-		ClientSecret:          clientSecret,
-		TokenEndpoint:         md.TokenEndpoint,
-		RegistrationEndpoint:  md.RegistrationEndpoint,
-		AuthorizationEndpoint: md.AuthorizationEndpoint,
+		AccessToken:  tr.AccessToken,
+		RefreshToken: tr.RefreshToken,
+		TokenType:    tr.TokenType,
+		Scope:        tr.Scope,
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		RedirectURI:  redirectURI,
+		DiscoveryState: &discoveryState{
+			AuthorizationServerURL: md.Issuer,
+			Issuer:                 md.Issuer,
+			TokenEndpoint:          md.TokenEndpoint,
+			RegistrationEndpoint:   md.RegistrationEndpoint,
+			AuthorizationEndpoint:  md.AuthorizationEndpoint,
+			RevocationEndpoint:     md.RevocationEndpoint,
+		},
 	}
 	if tr.ExpiresIn > 0 {
 		rec.ExpiresAt = time.Now().UnixMilli() + tr.ExpiresIn*1000
 	}
-	if err := SaveServerAuth(serverName, rec); err != nil {
+	if err := SaveServerAuth(serverName, cfg, rec); err != nil {
 		return err
 	}
 	recordStatus(serverName, "connected", "", "")
 	return nil
 }
+
+// discoverMetadata resolves the AS metadata, honoring a configured
+// authServerMetadataUrl override (real's configuredMetadataUrl — https
+// only).
+func discoverMetadata(ctx context.Context, serverName string, cfg ServerConfig) (*OAuthMetadata, error) {
+	if cfg.OAuth != nil && cfg.OAuth.AuthServerMetadataURL != "" {
+		u := cfg.OAuth.AuthServerMetadataURL
+		if !strings.HasPrefix(u, "https://") {
+			return nil, fmt.Errorf("authServerMetadataUrl must use https:// (got %s)", u)
+		}
+		var md OAuthMetadata
+		if err := getJSON(ctx, u, &md); err != nil {
+			return nil, fmt.Errorf("http fetch of configured auth server metadata: %w", err)
+		}
+		return &md, nil
+	}
+	return DiscoverOAuthMetadata(ctx, serverURL(cfg))
+}
+
+func serverURL(cfg ServerConfig) string { return cfg.URL }
 
 // saveClientConfig writes the dynamic client registration into ~/.claude.json
 // mcpOAuthClientConfig[server] — where real CC keeps it.

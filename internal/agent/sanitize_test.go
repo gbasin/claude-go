@@ -153,8 +153,9 @@ func TestFastModeRequest(t *testing.T) {
 	req := l.buildRequest()
 	var oc map[string]string
 	json.Unmarshal(req.OutputConfig, &oc)
-	if oc["speed"] != "fast" || oc["effort"] != "high" {
-		t.Fatalf("output_config = %v", oc)
+	// 294: speed rides the request root, effort stays in output_config
+	if req.Speed != "fast" || oc["effort"] != "high" {
+		t.Fatalf("speed=%q output_config = %v", req.Speed, oc)
 	}
 	l.SetFastMode(false)
 	if l.FastMode {

@@ -260,7 +260,8 @@ func (c *Client) QuotaProbe(ctx context.Context) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, auxReqTimeout)
 	defer cancel()
-	_, acctUUID, devID := config.Account()
+	_, acctUUID, _ := config.Account()
+	devID := config.UserID()
 	inner, _ := json.Marshal(struct {
 		DeviceID    string `json:"device_id"`
 		AccountUUID string `json:"account_uuid"`
@@ -313,7 +314,8 @@ func (c *Client) QuotaProbe(ctx context.Context) {
 // tenguEvent builds one ClaudeCodeInternalEvent envelope matching the
 // captured event_data field set (078_req.http).
 func (c *Client) tenguEvent(name, model string, interactive bool, meta map[string]any) map[string]any {
-	_, acctUUID, devID := config.Account()
+	_, acctUUID, _ := config.Account()
+	devID := config.UserID()
 	org := config.OrganizationUUID()
 	subType := ""
 	if c.Creds != nil {

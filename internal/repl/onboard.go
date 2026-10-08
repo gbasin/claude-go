@@ -95,12 +95,12 @@ func runThemePicker(ks *keySource) string {
 	syntaxOn := true
 	for k := range dch {
 		switch {
-		case k.seq == "[A":
+		case k.seq == "[A" || k.b == 'k':
 			if sel > 0 {
 				sel--
 				draw()
 			}
-		case k.seq == "[B":
+		case k.seq == "[B" || k.b == 'j':
 			if sel < len(onboardThemes)-1 {
 				sel++
 				draw()

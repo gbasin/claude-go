@@ -963,7 +963,8 @@ func TestMaxThinkingTokens(t *testing.T) {
 		t.Fatalf("--max-thinking-tokens missing from wire:\n%s", truncStr(string(b), 500))
 	}
 
-	// env cap wins over the flag when smaller
+	// the env is a budget SOURCE (real mod_0706): it wins over the flag
+	// entirely, and the wire clamps it to the [1024, max-1] floor
 	rec2 := t.TempDir() + "/reqs2"
 	r = s.runEx(t, []string{
 		"CLAUDE_GO_MOCK_RECORD=" + rec2, "MAX_THINKING_TOKENS=500",
@@ -971,8 +972,8 @@ func TestMaxThinkingTokens(t *testing.T) {
 		"--max-thinking-tokens", "12345")
 	s.mustOK(t, r)
 	b, _ = os.ReadFile(filepath.Join(rec2, "001.json"))
-	if !bytes.Contains(b, []byte(`"budget_tokens":500`)) {
-		t.Fatalf("MAX_THINKING_TOKENS cap missing:\n%s", truncStr(string(b), 500))
+	if !bytes.Contains(b, []byte(`"budget_tokens":1024`)) {
+		t.Fatalf("MAX_THINKING_TOKENS budget missing:\n%s", truncStr(string(b), 500))
 	}
 }
 
