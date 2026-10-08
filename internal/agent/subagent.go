@@ -461,7 +461,7 @@ func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, m
 		}(),
 		Client:     r.Client,
 		Model:      m,
-		MaxTokens:  defaultMaxTokens,
+		MaxTokens:  MaxOutputFor(m),
 		MaxTurns:   taskBudget(),
 		Effort:     effortOr(effort, def.Effort, "medium"),
 		Entrypoint: r.Entrypoint,

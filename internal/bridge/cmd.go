@@ -29,6 +29,10 @@ type Options struct {
 	Spawn          string // --spawn same-dir|worktree|session (def same-dir)
 	Capacity       int    // --capacity (def 32 = real's Ar)
 	Chrome         *bool  // --[no-]chrome
+	AllowUnattended bool  // --allow-unattended-tool-calls
+	spawnSet        bool  // --spawn seen (real: may only be specified once)
+	capacitySet     bool  // --capacity seen (same)
+	createInDirSet  bool  // --[no-]create-session-in-dir seen
 	CreateInDir    *bool  // --[no-]create-session-in-dir (def on)
 	Verbose        bool
 	Debug          string
@@ -56,12 +60,16 @@ func parseOptions(args []string) (*Options, error) {
 				return nil, err
 			}
 			o.Name = v
+		case strings.HasPrefix(a, "--name="):
+			o.Name = a[len("--name="):]
 		case a == "--remote-control-session-name-prefix":
 			v, err := next()
 			if err != nil {
 				return nil, err
 			}
 			o.NamePrefix = v
+		case strings.HasPrefix(a, "--remote-control-session-name-prefix="):
+			o.NamePrefix = a[len("--remote-control-session-name-prefix="):]
 		case a == "-c" || a == "--continue":
 			o.Continue = true
 		case a == "--session-id":
@@ -70,6 +78,8 @@ func parseOptions(args []string) (*Options, error) {
 				return nil, err
 			}
 			o.SessionID = v
+		case strings.HasPrefix(a, "--session-id="):
+			o.SessionID = a[len("--session-id="):]
 		case a == "--permission-mode":
 			v, err := next()
 			if err != nil {
@@ -82,7 +92,7 @@ func parseOptions(args []string) (*Options, error) {
 				return nil, err
 			}
 			switch v {
-			case "same-dir", "worktree", "session":
+			case "same-dir", "worktree", "single-session":
 				o.Spawn = v
 			default:
 				return nil, fmt.Errorf("Unknown argument: --spawn %s\nRun 'claude remote-control --help' for usage.", v)
@@ -90,34 +100,45 @@ func parseOptions(args []string) (*Options, error) {
 		case strings.HasPrefix(a, "--spawn="):
 			v := a[len("--spawn="):]
 			switch v {
-			case "same-dir", "worktree", "session":
+			case "same-dir", "worktree", "single-session":
 				o.Spawn = v
 			default:
 				return nil, fmt.Errorf("Unknown argument: %s\nRun 'claude remote-control --help' for usage.", a)
 			}
-		case a == "--capacity":
-			v, err := next()
-			if err != nil {
-				return nil, err
+		case a == "--capacity" || strings.HasPrefix(a, "--capacity="):
+			if o.capacitySet {
+				return nil, fmt.Errorf("--capacity may only be specified once")
+			}
+			o.capacitySet = true
+			v := a
+			if a == "--capacity" {
+				var err error
+				v, err = next()
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				v = a[len("--capacity="):]
 			}
 			var n int
 			if _, err := fmt.Sscanf(v, "%d", &n); err != nil || n < 1 {
-				return nil, fmt.Errorf("Unknown argument: --capacity %s\nRun 'claude remote-control --help' for usage.", v)
-			}
-			o.Capacity = n
-		case strings.HasPrefix(a, "--capacity="):
-			var n int
-			if _, err := fmt.Sscanf(a[len("--capacity="):], "%d", &n); err != nil || n < 1 {
-				return nil, fmt.Errorf("Unknown argument: %s\nRun 'claude remote-control --help' for usage.", a)
+				return nil, fmt.Errorf("--capacity requires a positive integer (got: %s)", v)
 			}
 			o.Capacity = n
 		case a == "--chrome":
 			boolFlag(&o.Chrome, true)
 		case a == "--no-chrome":
 			boolFlag(&o.Chrome, false)
+		case a == "--allow-unattended-tool-calls":
+			o.AllowUnattended = true
+		case strings.HasPrefix(a, "--enable-live-preview") || strings.HasPrefix(a, "--preview-port"):
+			// real (mod_1403): these are gated "not available in this build"
+			return nil, fmt.Errorf("--enable-live-preview and --preview-port are not available in this build.")
 		case a == "--create-session-in-dir":
+			o.createInDirSet = true
 			boolFlag(&o.CreateInDir, true)
 		case a == "--no-create-session-in-dir":
+			o.createInDirSet = true
 			boolFlag(&o.CreateInDir, false)
 		case a == "-v" || a == "--verbose":
 			o.Verbose = true
@@ -141,8 +162,18 @@ func parseOptions(args []string) (*Options, error) {
 		o.NamePrefix = os.Getenv("CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX")
 	}
 	// real: --session-id can't combine with spawn flags or --continue.
+	// real's validation order (mod_1403):
+	if o.Spawn == "single-session" && o.capacitySet {
+		return nil, fmt.Errorf("--capacity cannot be used with --spawn=session (single-session mode has fixed capacity 1).")
+	}
+	if (o.SessionID != "" || o.Continue) && (o.spawnSet || o.capacitySet || o.createInDirSet) {
+		return nil, fmt.Errorf("--session-id and --continue cannot be used with --spawn, --capacity, or --create-session-in-dir.")
+	}
 	if o.SessionID != "" && o.Continue {
-		return nil, fmt.Errorf("--session-id cannot be used with --continue.")
+		return nil, fmt.Errorf("--session-id and --continue cannot be used together.")
+	}
+	if o.AllowUnattended && (o.SessionID != "" || o.Continue || o.Spawn == "single-session") {
+		return nil, fmt.Errorf("--allow-unattended-tool-calls cannot be used with --spawn=session, --session-id, or --continue.")
 	}
 	return o, nil
 }
@@ -460,7 +491,7 @@ func RunCLI(args []string, d *Deps) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if o.Spawn != "session" {
+	if o.Spawn != "single-session" {
 		fmt.Fprintf(os.Stderr, "Spawn mode: %s\n", o.Spawn)
 		fmt.Fprintf(os.Stderr, "Max concurrent sessions: %d\n", o.Capacity)
 	}

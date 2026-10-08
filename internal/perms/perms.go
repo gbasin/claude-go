@@ -73,7 +73,7 @@ func Check(mode Mode, rules *Rules, toolName string, input json.RawMessage, cwd 
 	// order: deny > ask > allow
 	if dd := d(func(s string) Decision {
 		for _, r := range deny(rules) {
-			if matchRuleAt(r, toolName, s, cwd) {
+			if matchRuleKind(r, toolName, s, cwd, kindDeny) {
 				return Deny
 			}
 		}
@@ -83,7 +83,7 @@ func Check(mode Mode, rules *Rules, toolName string, input json.RawMessage, cwd 
 	}
 	if dd := d(func(s string) Decision {
 		for _, r := range askList(rules) {
-			if matchRuleAt(r, toolName, s, cwd) {
+			if matchRuleKind(r, toolName, s, cwd, kindAsk) {
 				return Ask
 			}
 		}
@@ -95,7 +95,7 @@ func Check(mode Mode, rules *Rules, toolName string, input json.RawMessage, cwd 
 		allAllowed := true
 		matched := false
 		for _, r := range allow(rules) {
-			if matchRuleAt(r, toolName, s, cwd) {
+			if matchRuleKind(r, toolName, s, cwd, kindAllow) {
 				matched = true
 				break
 			}
@@ -145,7 +145,7 @@ func allSpecsAllowed(rules *Rules, toolName string, specs []string, cwd string) 
 	for _, s := range specs {
 		ok := false
 		for _, r := range allow(rules) {
-			if matchRuleAt(r, toolName, s, cwd) {
+			if matchRuleKind(r, toolName, s, cwd, kindAllow) {
 				ok = true
 				break
 			}
@@ -278,14 +278,34 @@ func matchRule(rule, toolName, spec string) bool {
 	return matchRuleAt(rule, toolName, spec, "")
 }
 
+// ruleKind distinguishes which list a rule came from — real validates
+// allow rules more strictly (wildcards only in the tool position of
+// mcp__<literal-server>__*; deny/ask rules may glob anywhere).
+type ruleKind int
+
+const (
+	kindAllow ruleKind = iota
+	kindDeny
+	kindAsk
+)
+
 // matchRuleAt additionally tries the spec relativized to cwd — real
 // groups file patterns by root (the dir the rule was written in).
 func matchRuleAt(rule, toolName, spec, cwd string) bool {
+	return matchRuleKind(rule, toolName, spec, cwd, kindAllow)
+}
+
+func matchRuleKind(rule, toolName, spec, cwd string, kind ruleKind) bool {
 	name, arg := rule, ""
 	hasArg := false
 	if i := strings.Index(rule, "("); i >= 0 && strings.HasSuffix(rule, ")") {
 		name, arg = rule[:i], rule[i+1:len(rule)-1]
 		hasArg = true
+	}
+	// real rejects MCP rules in parens form outright ("MCP rules do not
+	// support patterns in parentheses") — such a rule never matches.
+	if hasArg && strings.HasPrefix(name, "mcp__") {
+		return false
 	}
 	if name != toolName {
 		// bare mcp__server matches every tool on that server; an arg
@@ -296,7 +316,19 @@ func matchRuleAt(rule, toolName, spec, cwd string) bool {
 			}
 			return toolName == name+"__"+arg
 		}
-		return false
+		// wildcard tool names: allow rules only accept globs in the tool
+		// position of mcp__<literal-server>__* (real's Kxt); deny/ask
+		// rules may glob anywhere.
+		if strings.Contains(name, "*") {
+			if kind == kindAllow && !mcpToolGlobOK(name) {
+				return false
+			}
+			if !toolNameGlob(name, toolName) {
+				return false
+			}
+		} else {
+			return false
+		}
 	}
 	if !hasArg {
 		return true // bare "Bash" allows all bash
@@ -338,6 +370,9 @@ func matchRuleAt(rule, toolName, spec, cwd string) bool {
 //	interior * wildcard regex (* → .*, \* escaped)
 //	"Bash()"   exact "" — matches NOTHING
 func matchCmdPrefix(pat, cmd string) bool {
+	if strings.Contains(pat, "\x00") {
+		return false
+	}
 	cmd = strings.TrimSpace(cmd)
 	pat = strings.TrimRight(pat, " ")
 	if pat == "" {
@@ -353,40 +388,97 @@ func matchCmdPrefix(pat, cmd string) bool {
 	return re.MatchString(cmd)
 }
 
-// wildcardRegex converts real's pattern syntax to an anchored regex:
-// `*` → `.*`, `**` → `.*` (same for commands), `\*` → literal *,
-// `\\` → literal backslash; a trailing " *" → "( .*)?" so
-// `Bash(git push *)` also allows bare `git push`.
+// wildcardRegex replicates real's bJ transform exactly:
+//   - `\*` and `\\` escape to literal tokens first
+//   - regex specials .+?^${}()|[]\'" are escaped
+//   - `/**/` (one or more) → globstar `/(?:.*/)?` — a bare `**` stays `.*`
+//   - `*` → `.*`
+//   - a trailing " *" → "( .*)?" ONLY when the pattern has exactly one
+//     unescaped `*` (real: `S.endsWith(" .*") && b===1`)
 func wildcardRegex(pat string) *regexp.Regexp {
-	var b strings.Builder
-	b.WriteString("^")
-	trail := false
+	const escStar, escBS, globstar = "\x00ES\x00", "\x00EB\x00", "\x00GS\x00"
+	var p strings.Builder
+	stars := 0
 	for i := 0; i < len(pat); i++ {
 		ch := pat[i]
 		if ch == '\\' && i+1 < len(pat) && (pat[i+1] == '*' || pat[i+1] == '\\') {
-			b.WriteString(regexp.QuoteMeta(string(pat[i+1])))
+			if pat[i+1] == '*' {
+				p.WriteString(escStar)
+			} else {
+				p.WriteString(escBS)
+			}
 			i++
 			continue
 		}
-		if ch == ' ' && i+1 < len(pat) && pat[i+1] == '*' && i+2 == len(pat) {
-			// trailing " *" → optional arg segment
-			b.WriteString("( .*)?")
-			trail = true
-			break
-		}
 		if ch == '*' {
-			b.WriteString(".*")
-			continue
+			stars++
 		}
-		b.WriteString(regexp.QuoteMeta(string(ch)))
+		p.WriteByte(ch)
 	}
-	_ = trail
-	b.WriteString("$")
-	re, err := regexp.Compile(b.String())
+	s := p.String()
+	var esc strings.Builder
+	for i := 0; i < len(s); i++ {
+		if strings.IndexByte(".+?^${}()|[]\\'\"", s[i]) >= 0 {
+			esc.WriteByte('\\')
+		}
+		esc.WriteByte(s[i])
+	}
+	s = globstarSeq.ReplaceAllString(esc.String(), globstar)
+	s = strings.ReplaceAll(s, "*", ".*")
+	s = strings.ReplaceAll(s, globstar, "/(?:.*/)?")
+	s = strings.ReplaceAll(s, escStar, "\\*")
+	s = strings.ReplaceAll(s, escBS, "\\\\")
+	if strings.HasSuffix(s, " .*") && stars == 1 {
+		s = s[:len(s)-3] + "( .*)?"
+	}
+	re, err := regexp.Compile("^" + s + "$")
 	if err != nil {
 		return regexp.MustCompile("^$") // bad pattern matches nothing
 	}
 	return re
+}
+
+// globstarSeq is real's em: /(?:\*\*/)+ — a slash-globstar-slash run.
+var globstarSeq = regexp.MustCompile(`/(?:\*\*/)+`)
+
+// mcpToolGlobOK: an allow-rule tool name containing `*` is only valid
+// when the glob sits in the tool position — mcp__<literal-server>__<glob>
+// (real's Kxt: "globs are permitted only in the tool position after a
+// literal mcp__<server>__").
+func mcpToolGlobOK(name string) bool {
+	if !strings.HasPrefix(name, "mcp__") {
+		return false
+	}
+	rest := name[len("mcp__"):]
+	i := strings.Index(rest, "__")
+	if i < 0 {
+		return false
+	}
+	return !strings.Contains(rest[:i], "*")
+}
+
+// toolNameGlob matches a `*`-wildcard rule name against a tool name
+// (anchored, `*` → `.*`).
+func toolNameGlob(pat, name string) bool {
+	var b strings.Builder
+	b.WriteString("^")
+	for i := 0; i < len(pat); i++ {
+		if pat[i] == '*' {
+			b.WriteString(".*")
+			continue
+		}
+		b.WriteString(regexp.QuoteMeta(string(pat[i])))
+	}
+	b.WriteString("$")
+	re, err := regexp.Compile(b.String())
+	return err == nil && re.MatchString(name)
+}
+
+// MatchToolCall evaluates a permission-rule expression against a tool
+// call — hook `if` preconditions parse as rules (real's evaluateCondition
+// → jn + per-tool permission matcher).
+func MatchToolCall(rule, toolName string, input json.RawMessage, cwd string) bool {
+	return matchRuleAt(rule, toolName, toolSpec(toolName, input, cwd), cwd)
 }
 
 // matchGlob — gitignore semantics for file-path rules (real uses the

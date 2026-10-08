@@ -514,10 +514,10 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			type mo struct{ id, label, desc string }
 			models := []mo{
 				{"default", "Default (recommended)", "Opus 5.5 · Best for everyday, complex tasks"},
-				{"claude-opus-5-5", "Opus 5.5", "For complex work and everyday tasks"},
-				{"claude-sonnet-5-5", "Sonnet 5.5", "Most efficient for simpler tasks"},
-				{"claude-haiku-4-5-20251001", "Haiku 4.5", "Fastest for quick answers"},
-				{"claude-fable-5-1", "Fable 5.1", "For your toughest challenges"},
+				{"claude-opus-5-5", "Opus 5.5", "Best for everyday, complex tasks"},
+				{"claude-sonnet-5-5", "Sonnet 5.5", "Efficient for routine tasks"},
+				{"claude-haiku-5-5", "Haiku 5.5", "Fastest for quick answers"},
+				{"claude-fable-5-1", "Fable 5.1", "Most capable for your hardest and longest-running tasks"},
 			}
 			const extra = 9 // real: "… +9 models" (older/legacy rows)
 			sel := 0

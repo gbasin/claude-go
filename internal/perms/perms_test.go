@@ -122,7 +122,7 @@ func TestRuleCorners(t *testing.T) {
 		"Bash(git * --force)", // interior wildcard
 		"Bash(ls:*)",          // prefix rule
 		"mcp__github",         // bare server — all its tools
-		"mcp__sentry(list)",   // narrowed to one tool
+		"mcp__sentry__list",   // narrowed to one tool
 		"WebFetch(domain:example.com)",
 		"Edit(src/**)", // matches src itself + descendants
 	}}
@@ -154,10 +154,16 @@ func TestRuleCorners(t *testing.T) {
 		t.Error("bare mcp__github should allow all github tools")
 	}
 	if chk("mcp__sentry__list", "{}") != Allow {
-		t.Error("mcp__sentry(list) should allow the list tool")
+		t.Error("mcp__sentry__list should allow the list tool")
 	}
 	if chk("mcp__sentry__other", "{}") == Allow {
-		t.Error("mcp__sentry(list) must not allow other sentry tools")
+		t.Error("mcp__sentry__list must not allow other sentry tools")
+	}
+	// real rejects parens on MCP rules ("MCP rules do not support
+	// patterns in parentheses") — they match nothing
+	paren := &Rules{Allow: []string{"mcp__sentry(list)"}}
+	if Check(ModeDefault, paren, "mcp__sentry__list", j(`{}`), "/repo") == Allow {
+		t.Error("mcp__sentry(list) is an invalid rule and must not match")
 	}
 	if chk("WebFetch", "https://example.com/x") != Allow {
 		t.Error("WebFetch(domain:) should match the host")
@@ -188,5 +194,74 @@ func mkInput(tool, spec string) json.RawMessage {
 		return j(`{"url":"` + spec + `"}`)
 	default:
 		return j(`{"command":"` + spec + `","file_path":"` + spec + `"}`)
+	}
+}
+
+// Real's MCP wildcard validation (mod_0072.js Kxt): allow rules may glob
+// only the tool position of mcp__<literal-server>__*; deny/ask rules may
+// glob anywhere.
+func TestMcpWildcards(t *testing.T) {
+	in := j(`{}`)
+	allow := &Rules{Allow: []string{"mcp__github__*"}}
+	if Check(ModeDefault, allow, "mcp__github__get_issue", in, "/r") != Allow {
+		t.Error("mcp__github__* should allow all github tools")
+	}
+	if Check(ModeDefault, allow, "mcp__sentry__x", in, "/r") == Allow {
+		t.Error("mcp__github__* must not allow other servers")
+	}
+	// wildcard server name is NOT valid in an allow rule
+	allowSrv := &Rules{Allow: []string{"mcp__*"}}
+	if Check(ModeDefault, allowSrv, "mcp__github__x", in, "/r") == Allow {
+		t.Error("mcp__* is rejected in allow rules (Kxt)")
+	}
+	// ...but deny/ask rules may glob anywhere
+	deny := &Rules{Deny: []string{"mcp__*"}}
+	if Check(ModeDefault, deny, "mcp__github__x", in, "/r") != Deny {
+		t.Error("mcp__* deny rule should match every mcp tool")
+	}
+	askSrv := &Rules{Ask: []string{"mcp__*__delete*"}}
+	if Check(ModeDefault, askSrv, "mcp__github__delete_repo", in, "/r") != Ask {
+		t.Error("mcp__*__delete* ask rule should match")
+	}
+}
+
+// Real's globstar: `/**/` collapses to `/(?:.*/)?` — matches zero or more
+// dirs. A bare trailing `**` is just `.*`.
+func TestBashGlobstar(t *testing.T) {
+	r := &Rules{Allow: []string{"Bash(cat /a/**/b.txt)"}}
+	ok := func(cmd string) bool {
+		return Check(ModeDefault, r, "Bash", j(`{"command":"`+cmd+`"}`), "/r") == Allow
+	}
+	if !ok("cat /a/b.txt") {
+		t.Error("a/**/b should match a/b (zero dirs)")
+	}
+	if !ok("cat /a/x/y/b.txt") {
+		t.Error("a/**/b should match a/x/y/b")
+	}
+	if ok("cat /a/b.bin") {
+		t.Error("a/**/b must not match other filenames")
+	}
+}
+
+// trailing " *" becomes optional only when the pattern has exactly one
+// unescaped star (real: S.endsWith(" .*") && b===1)
+func TestBashTrailingStarCount(t *testing.T) {
+	r := &Rules{Allow: []string{"Bash(git * push *)"}}
+	ok := func(cmd string) bool {
+		return Check(ModeDefault, r, "Bash", j(`{"command":"`+cmd+`"}`), "/r") == Allow
+	}
+	if !ok("git -c push origin") {
+		t.Error("git * push * should match 'git -c push origin'")
+	}
+	if ok("git -c push") {
+		t.Error("with two stars the trailing ' *' is not optional")
+	}
+	// escaped star is literal, not a wildcard
+	r2 := &Rules{Allow: []string{`Bash(echo a\* b)`}}
+	if Check(ModeDefault, r2, "Bash", j(`{"command":"echo a* b"}`), "/r") != Allow {
+		t.Error(`a\* should match literal 'a* b'`)
+	}
+	if Check(ModeDefault, r2, "Bash", j(`{"command":"echo axb"}`), "/r") == Allow {
+		t.Error(`a\* must not act as a wildcard`)
 	}
 }
