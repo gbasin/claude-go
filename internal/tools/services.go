@@ -717,6 +717,21 @@ func RegisterSession(sessionID, cwd, name string) error {
 	// stash for the outbound <cross-session-message> envelope — real
 	// renders sender attribution + reply addressing from these attrs
 	selfPeerInfo.Store(struct{ Name, SessionID string }{Name: name, SessionID: sessionID})
+	// default rename handler — a peer "rename" control frame updates the
+	// registry record (nameSource "peer" like real's fleetview rename)
+	// and the outbound envelope name. The REPL may override with a
+	// richer handler via SetSessionRenamer.
+	SetSessionRenamer(func(n string) {
+		n = strings.TrimSpace(n)
+		if n == "" {
+			return
+		}
+		updateSessionFile(map[string]any{
+			"name": n, "nameSource": "peer",
+			"nameSince": time.Now().UnixMilli(),
+		})
+		selfPeerInfo.Store(struct{ Name, SessionID string }{Name: n, SessionID: sessionID})
+	})
 	b, err := json.MarshalIndent(e, "", "  ")
 	if err != nil {
 		return err
