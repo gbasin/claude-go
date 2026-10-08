@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"claude-go/internal/api"
 	"claude-go/internal/auth"
+	"claude-go/internal/hooks"
 	"claude-go/internal/mock"
 )
 
@@ -218,5 +221,97 @@ func TestDeferredCallRefused(t *testing.T) {
 	}
 	if !saw {
 		t.Error("un-loaded deferred call must fail with InputValidationError")
+	}
+}
+
+// TestHookBasePayload: runHook's stdin carries real's xd() base context —
+// prompt_id, effort{level} on per-turn-effort models, scratchpad_dir.
+func TestHookBasePayload(t *testing.T) {
+	l := mockLoop(t)
+	tmp := t.TempDir()
+	l.ToolCtx.CWD = tmp
+	dump := filepath.Join(tmp, "payload.json")
+	l.Hooks = hooks.Config{
+		string(hooks.UserPromptSubmit): []hooks.Matcher{{Hooks: []hooks.Command{
+			{Type: "command", Command: "cat > " + dump},
+		}}},
+	}
+	if _, err := l.Ask(context.Background(), "hi"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(dump)
+	if err != nil {
+		t.Fatal("hook stdin not dumped")
+	}
+	var p map[string]any
+	json.Unmarshal(b, &p)
+	if p["prompt_id"] == "" || p["prompt_id"] == nil {
+		t.Error("prompt_id missing from hook payload")
+	}
+	if p["hook_event_name"] != "UserPromptSubmit" {
+		t.Error("hook_event_name missing")
+	}
+	if eff, ok := p["effort"].(map[string]any); !ok || eff["level"] == "" {
+		t.Error("effort{level} missing on xhigh model")
+	}
+	if p["scratchpad_dir"] == "" || p["scratchpad_dir"] == nil {
+		t.Error("scratchpad_dir missing")
+	}
+	if p["permission_mode"] == "" {
+		t.Error("permission_mode missing")
+	}
+}
+
+// TestHookAllowAutoClassifier: in auto mode a PreToolUse hook's allow does
+// NOT bypass the classifier — real requires a classifier-sourced verdict.
+func TestHookAllowAutoClassifier(t *testing.T) {
+	l := mockLoop(t)
+	tmp := t.TempDir()
+	l.ToolCtx.CWD = tmp
+	l.PermMode = "auto"
+	var lastAsk atomic.Bool
+	l.ToolCtx.PermissionAsk = func() bool { return lastAsk.Load() }
+	l.ToolCtx.Permission = func(string, json.RawMessage, string) bool {
+		lastAsk.Store(true)
+		return false // unresolved → ask lane
+	}
+	var evals atomic.Int64
+	l.SafetyEval = func(ctx context.Context, name string, input json.RawMessage) (int, string, error) {
+		evals.Add(1)
+		return 10, "", nil // allow verdict
+	}
+	l.Hooks = hooks.Config{
+		string(hooks.PreToolUse): []hooks.Matcher{{Hooks: []hooks.Command{
+			{Type: "command", Command: `echo '{"hookSpecificOutput":{"permissionDecision":"allow"}}'`},
+		}}},
+	}
+	if _, err := l.Ask(context.Background(), `tool:Bash {"command":"echo hi"}`); err != nil {
+		t.Fatal(err)
+	}
+	if evals.Load() == 0 {
+		t.Error("auto mode must still run the classifier despite a hook allow")
+	}
+}
+
+// TestHookAllowNoClassifierDefaultMode: outside auto/plan mode a hook
+// allow dispatches directly (classifier not consulted).
+func TestHookAllowNoClassifierDefaultMode(t *testing.T) {
+	l := mockLoop(t)
+	l.ToolCtx.Permission = func(string, json.RawMessage, string) bool { return false }
+	var evals atomic.Int64
+	l.SafetyEval = func(ctx context.Context, name string, input json.RawMessage) (int, string, error) {
+		evals.Add(1)
+		return 10, "", nil
+	}
+	l.Hooks = hooks.Config{
+		string(hooks.PreToolUse): []hooks.Matcher{{Hooks: []hooks.Command{
+			{Type: "command", Command: `echo '{"hookSpecificOutput":{"permissionDecision":"allow"}}'`},
+		}}},
+	}
+	if _, err := l.Ask(context.Background(), `tool:Bash {"command":"echo hi"}`); err != nil {
+		t.Fatal(err)
+	}
+	if evals.Load() != 0 {
+		t.Error("default-mode hook allow should dispatch without the classifier")
 	}
 }
