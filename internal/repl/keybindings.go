@@ -218,6 +218,9 @@ func keystroke(k key) string {
 	case k.b >= 1 && k.b <= 26:
 		name = string(rune('a' + k.b - 1))
 		mods |= modCtrl
+	case k.b == 0x1f:
+		name = "-"
+		mods |= modCtrl // ctrl+_ / ctrl+- — real binds both to chat:undo
 	default:
 		r := k.r
 		if r == 0 && k.b >= 32 && k.b < 127 {

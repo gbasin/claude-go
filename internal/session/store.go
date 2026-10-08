@@ -218,12 +218,14 @@ func (s *Store) LogCompactBoundaryTrig(preTokens, kept int, trigger string) erro
 // LogInit writes the {type:"system",subtype:"init"} record CC emits at
 // session start.
 func (s *Store) LogInit(model string) error {
-	return s.LogInitMeta(model, "", "", "")
+	return s.LogInitMeta(model, "", "", "", "")
 }
 
-// LogInitMeta is LogInit carrying spawn lineage (--parent-session-id,
-// agent type, sys-prompt snapshot) when set.
-func (s *Store) LogInitMeta(model, parentSessionID, agentType, sysSnap string) error {
+// LogInitMeta is LogInit carrying optional metadata when set: spawn
+// lineage (--parent-session-id), agent type, sys-prompt snapshot, and the
+// session's permission mode (--inherit-permission-mode restores it on
+// resume).
+func (s *Store) LogInitMeta(model, parentSessionID, agentType, sysSnap, permMode string) error {
 	rec := map[string]any{
 		"type": "system", "subtype": "init",
 		"model": model, "cwd": s.CWD,
@@ -233,13 +235,37 @@ func (s *Store) LogInitMeta(model, parentSessionID, agentType, sysSnap string) e
 	if parentSessionID != "" {
 		rec["parentSessionId"] = parentSessionID
 	}
+	if p := os.Getenv("CLAUDE_GO_PARENT_SESSION_ID"); p != "" {
+		rec["parentSessionId"] = p // --parent-session-id lineage
+	}
 	if agentType != "" {
 		rec["agentType"] = agentType
 	}
 	if sysSnap != "" {
 		rec["systemPromptSnapshot"] = sysSnap
 	}
+	if permMode != "" {
+		rec["permissionMode"] = permMode
+	}
 	return s.LogRecord(rec)
+}
+
+// InitMode reads the init record's permissionMode back (resume restore).
+func InitMode(cwd, sessionID string) string {
+	b, err := os.ReadFile(filepath.Join(dir(cwd), sessionID+".jsonl"))
+	if err != nil {
+		return ""
+	}
+	for _, ln := range strings.Split(string(b), "\n") {
+		var rec struct {
+			Subtype string `json:"subtype"`
+			Mode    string `json:"permissionMode"`
+		}
+		if json.Unmarshal([]byte(ln), &rec) == nil && rec.Subtype == "init" {
+			return rec.Mode
+		}
+	}
+	return ""
 }
 
 // LogAttachment appends an attachment record
