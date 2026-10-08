@@ -2,6 +2,8 @@ package tools
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
 	"sync"
 )
 
@@ -51,6 +53,22 @@ func HandleElicit(server string, params json.RawMessage) map[string]any {
 	f := elicitFn
 	elicitMu.Unlock()
 	if f == nil {
+		// no form UI (print mode / bg worker): surface the question and take
+		// the CLAUDE_GO_ELICIT_ANSWER seam {action, content} for tests/SDK.
+		fmt.Fprintf(os.Stderr, "  %s asks: %s\n", server, p.Message)
+		if raw := os.Getenv("CLAUDE_GO_ELICIT_ANSWER"); raw != "" {
+			var a struct {
+				Action  string         `json:"action"`
+				Content map[string]any `json:"content"`
+			}
+			if json.Unmarshal([]byte(raw), &a) == nil && a.Action != "" {
+				out := map[string]any{"action": a.Action}
+				if len(a.Content) > 0 {
+					out["content"] = a.Content
+				}
+				return out
+			}
+		}
 		return map[string]any{"action": "decline"}
 	}
 	ans := f(req)

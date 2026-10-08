@@ -122,3 +122,25 @@ func TestSlashTable(t *testing.T) {
 	p.waitFor("Mock response to: alive-after-table", 30*time.Second)
 	p.exit()
 }
+
+// TestCopyCmd: /copy copies the last assistant text to the clipboard
+// (pbcopy stubbed on PATH — the print confirms the path ran).
+func TestCopyCmd(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.sendUntilEchoed(t, "hi\r", "❯ hi", 8)
+	p.waitFor("Mock response", 30*time.Second)
+	p.sendUntilEchoed(t, "/copy\r", "❯ /copy", 8)
+	p.waitFor("copied", 15*time.Second)
+	p.exit()
+}
+
+// TestAdvisorFlag: --advisor <model> pre-seeds the advisor model.
+func TestAdvisorFlag(t *testing.T) {
+	s := newSession(t)
+	p := s.runPTY(t, nil, "--mock", "--advisor", "claude-e2e-advisor-model")
+	p.waitFor("❯", 30*time.Second)
+	p.sendUntilEchoed(t, "/advisor\r", "❯ /advisor", 8)
+	p.waitFor("claude-e2e-advisor-model", 15*time.Second)
+	p.exit()
+}

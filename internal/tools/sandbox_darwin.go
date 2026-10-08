@@ -194,6 +194,12 @@ func buildSeatbeltProfile(s *SandboxSettings, cwd string, px *netproxy.Proxy, cr
 		sbRule(&b, "deny file-read*", withReal(denyRead))
 		sbRule(&b, "allow file-read-metadata", withReal(metaList))
 		sbRule(&b, "allow file-read*", withReal(allowRead))
+		// user's explicit denyRead must win over the allow blanket — cwd
+		// is in allowRead (it's writable), which would silently reopen a
+		// denied subpath under it. Re-deny after the allows, mirroring
+		// the denyWrite re-deny below.
+		sbRule(&b, "deny file-read*",
+			withReal(expandSandboxPaths(s.Filesystem.DenyRead, cwd)))
 
 		// writes: deny all, then allow the writable set, then re-deny
 		// denyWrite (which takes precedence over allowWrite).

@@ -332,6 +332,7 @@ func (c *Client) tenguEvent(name, model string, interactive bool, meta map[strin
 		"client_timestamp":    time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
 		"model":               model,
 		"session_id":          c.SessionID,
+		"parent_session_id":   c.ParentSessionID,
 		"user_type":           "external",
 		"betas":               eventBetas,
 		"env":                 tenguEnv(c.Creds != nil && !c.Creds.IsAPIKey),
