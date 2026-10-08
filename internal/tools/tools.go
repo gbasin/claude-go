@@ -296,6 +296,13 @@ type AgentRunner interface {
 	RunAgent(ctx *Context, description, prompt, subagentType, model, effort string, background bool) Result
 }
 
+// AgentRunnerTriState is implemented by runners that accept the raw
+// run_in_background tri-state for stats recording (real's recordSpawn
+// distinguishes omitted vs explicit).
+type AgentRunnerTriState interface {
+	RunAgentTriState(ctx *Context, description, prompt, subagentType, model, effort string, runInBackground *bool, background bool) Result
+}
+
 // Answerer answers a prompt over fetched page content (WebFetch's small model).
 type Answerer func(ctx context.Context, prompt, pageText string) (string, error)
 

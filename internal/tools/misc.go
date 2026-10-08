@@ -74,6 +74,9 @@ func execAgent(c *Context, raw json.RawMessage) Result {
 		}
 		sub = c.cloneForWorktree(worktreeSession.wtPath)
 	}
+	if xr, ok := c.Agent.(AgentRunnerTriState); ok {
+		return xr.RunAgentTriState(sub, in.Description, in.Prompt, st, in.Model, in.Effort, in.RunInBackground, bg)
+	}
 	return c.Agent.RunAgent(sub, in.Description, in.Prompt, st, in.Model, in.Effort, bg)
 }
 
