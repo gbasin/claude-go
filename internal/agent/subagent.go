@@ -37,6 +37,10 @@ type AgentDef struct {
 	SystemPrompt    string // markdown body of the agent file
 	Source          string // builtin|user|project|plugin|cli
 	BaseDir         string
+	// Unlisted keeps the type dispatchable but out of the env record's
+	// "Available agent types" listing — real's fork agent is registered
+	// for spawning but never appears in the listing (mod_0416 uOe).
+	Unlisted bool
 }
 
 // readOnlyDeny is the tool set built-in read-only agents (Explore, Plan)
@@ -49,11 +53,16 @@ var readOnlyDeny = []string{
 //go:embed prompts/agent_general_purpose.txt
 var generalPurposePrompt string
 
-// builtinAgentDefs are the default agent types (mod_0950:64).
+// builtinAgentDefs are the default agent types (mod_0416 uOe, 294).
+// Real registers: general-purpose, statusline-setup, the "claude"
+// catch-all, Explore+Plan, web-fetch (flag-gated), and claude-code-guide
+// (every entrypoint except the SDK family). The fork def stays
+// dispatchable but unlisted.
 var builtinAgentDefs = []AgentDef{
 	{
 		Name:   "general-purpose",
 		Source: "builtin",
+		Tools:  []string{"*"},
 		Description: "General-purpose agent for researching complex questions, searching for code, " +
 			"***REMOVED***" +
 			"***REMOVED***" +
@@ -79,48 +88,39 @@ var builtinAgentDefs = []AgentDef{
 		Model:           "inherit",
 		DisallowedTools: readOnlyDeny,
 		Description: "Software architect agent for designing implementation plans. Use this when you " +
-			"need to plan the implementation strategy for a task. Returns step-by-step plans",
+			"***REMOVED***" +
+			"identifies critical files, and considers architectural trade-offs.",
 		SystemPrompt: "You are a software architect agent. Explore the codebase read-only and " +
 			"return a concrete, step-by-step implementation plan. Do not modify files.",
 	},
 	{
 		Name:   "fork",
 		Source: "builtin",
-		Description: "A fork of the current session — inherits the parent's full conversation and " +
-			"continues with the parent model.",
+		Tools:  []string{"*"},
+		Description: "Fork — inherits full conversation context. Selected explicitly via " +
+			`subagent_type: "fork" when the fork gate is on; never the default.`,
+		Unlisted: true,
 	},
 	{
 		Name:   "claude",
 		Source: "builtin",
+		Tools:  []string{"*"},
 		Description: "Catch-all for any task that doesn't fit a more specific agent. FleetView's " +
 			"default when no agent name is typed.",
 	},
 	{
-		Name:   "code-simplifier",
+		Name:   "claude-code-guide",
 		Source: "builtin",
-		Description: "code-simplifier: Simplifies and refines code for clarity, consistency, and " +
-			"maintainability while preserving all functionality. Focuses on recently modified code " +
-			"unless instructed otherwise.",
-	},
-	{
-		Name:   "code-reviewer",
-		Source: "builtin",
-		Tools: []string{
-			"Task", "Bash", "Glob", "Grep", "LS", "ExitPlanMode", "Read", "Edit", "MultiEdit",
-			"Write", "NotebookRead", "NotebookEdit", "WebFetch", "TodoWrite", "WebSearch",
-		},
-		Description: "Expert code review specialist. Proactively reviews code for quality, security, " +
-			"and maintainability. Use immediately after writing or modifying code.",
-	},
-	{
-		Name:   "debugger",
-		Source: "builtin",
-		Description: "Debugging specialist for errors, test failures, and unexpected behavior. " +
-			"Use proactively when encountering any issues.",
+		Model:  "haiku",
+		Tools:  []string{"Bash", "Read", "WebFetch", "WebSearch"},
+		Description: `***REMOVED***` +
+			"`client.beta.messages.tool_runner`" + `) for running an agentic loop over your own tools, manual tool-use loops, Managed Agents for server-hosted agents with a managed sandbox, prompt caching, and general Anthropic SDK usage; (4) Claude Tag (Claude in Slack) - what it is, setting it up for a Slack workspace, ` +
+			"`/install-slack-app`" + `; (5) ` + "`claude plugin eval`" + ` (writing and running plugin eval suites, its JSON/report, sandbox, CI) and the ` + "`/skill-doctor`" + ` ***REMOVED***`,
 	},
 	{
 		Name:        "statusline-setup",
 		Source:      "builtin",
+		Model:       "sonnet",
 		Tools:       []string{"Read", "Edit"},
 		Description: "Use this agent to configure the user's Claude Code status line setting.",
 	},
@@ -449,10 +449,16 @@ func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, m
 		}
 		hooks.Run(r.Hooks, hooks.SubagentStart, payload, c.CWD)
 	}
+	parentAID := ""
+	if r.Parent != nil {
+		parentAID = r.Parent.LoopAgentID
+	}
 	sub := &Loop{
-		IsSubagent:   true,
-		AllowedTools: def.resolveAllowed(extraAllowed),
-		AppendSysP:   def.effectiveSystemPrompt(),
+		IsSubagent:    true,
+		LoopAgentID:   rec.AgentID,
+		ParentAgentID: parentAID,
+		AllowedTools:  def.resolveAllowed(extraAllowed),
+		AppendSysP:    def.effectiveSystemPrompt(),
 		ExtraSystem: func() []string {
 			if v := os.Getenv("CLAUDE_GO_APPEND_SUBAGENT_SYSTEM_PROMPT"); v != "" {
 				return []string{v}

@@ -45,7 +45,7 @@ type ContentBlock struct {
 	// (ToolSearch results — mod_0386.js mapToolResultToToolResultBlockParam).
 	ToolName  string          `json:"tool_name,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"` // tool_result content
-	IsError   bool            `json:"-"` // emitted only on tool_result blocks (see MarshalJSON)
+	IsError   bool            `json:"-"`                 // emitted only on tool_result blocks (see MarshalJSON)
 	Thinking  string          `json:"thinking,omitempty"`
 	Signature string          `json:"signature,omitempty"`
 	Source    *ImageSource    `json:"source,omitempty"`
@@ -132,7 +132,10 @@ type Request struct {
 	Diagnostics  json.RawMessage `json:"diagnostics,omitempty"`
 	Thread       json.RawMessage `json:"thread,omitempty"`
 	OutputConfig json.RawMessage `json:"output_config,omitempty"`
-	Stream       bool            `json:"stream"`
+	// real sends speed at the request root (...cR!==void 0&&{speed:cR},
+	// mod_0416) — not inside output_config
+	Speed  string `json:"speed,omitempty"`
+	Stream bool   `json:"stream"`
 
 	// Class overrides x-claude-code-request-class (default "main") —
 	// real uses "compaction", "auxiliary", "subagent", etc.
@@ -140,6 +143,9 @@ type Request struct {
 	// PromptID overrides the client's turn prompt-id — subagent requests
 	// carry their own (captured: distinct from the parent's).
 	PromptID string `json:"-"`
+	// AgentID/ParentAgentID ride x-claude-code-agent-id /
+	// x-claude-code-parent-agent-id on subagent requests (mod_0304).
+	AgentID, ParentAgentID string `json:"-"`
 	// Temperature is set only by aux-class calls (the title call sends 1).
 	Temperature *float64 `json:"temperature,omitempty"`
 }

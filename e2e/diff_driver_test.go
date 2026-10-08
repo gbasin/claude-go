@@ -18,8 +18,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -42,9 +42,9 @@ type diffScenario struct {
 	// oauthOnly drops ANTHROPIC_API_KEY from the child env — real's REPL
 	// gates on a "custom API key" approval dialog when it's set
 	oauthOnly bool
-	send        string // keystrokes once the prompt appears
-	waitFor     string // substring marking the turn complete
-	exitKeys    string // how to leave the REPL after the turn (default: ctrl-c x2)
+	send      string // keystrokes once the prompt appears
+	waitFor   string // substring marking the turn complete
+	exitKeys  string // how to leave the REPL after the turn (default: ctrl-c x2)
 }
 
 // diffRun is one binary's recorded wire activity for a scenario.
@@ -52,7 +52,7 @@ type diffRun struct {
 	label    string
 	bin      string
 	hits     []mock.Hit
-	bodies   [][]byte       // raw POST /v1/messages bodies, in order
+	bodies   [][]byte      // raw POST /v1/messages bodies, in order
 	headers  []http.Header // headers per body, same index
 	stdout   string
 	stderr   string
@@ -302,7 +302,7 @@ func absorbConditional(a, b any) {
 // decisions — their presence in the header set varies run to run.
 var conditionalBetas = map[string]bool{
 	"dangerous-tool-use-2026-09-03": true,
-	"afk-mode-2026-01-31":          true,
+	"afk-mode-2026-01-31":           true,
 }
 
 func stripConditionalBetas(v string) string {
@@ -373,13 +373,20 @@ func dumpGolden(t *testing.T, dir, label string, i int, reqLine string, hdrs htt
 // --- normalization -----------------------------------------------------------
 
 var (
-	uuidRe = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
-	tsRe   = regexp.MustCompile(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})`)
-	tmpRe  = regexp.MustCompile(`/(private/)?(tmp|var/folders)/[^\s"'\\]*`)
+	uuidRe  = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+	tsRe    = regexp.MustCompile(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})`)
+	tmpRe   = regexp.MustCompile(`/(private/)?(tmp|var/folders)/[^\s"'\\]*`)
 	msgidRe = regexp.MustCompile(`msg_[A-Za-z0-9_]+`)
 	// device_id lives inside the JSON-encoded metadata.user_id string —
 	// its quotes arrive escaped (\"...\")
 	devidRe = regexp.MustCompile(`\\"[a-f0-9]{64}\\"`)
+	// ~/.claude/projects/<slugged-cwd> embeds the run-specific home as a
+	// single-dash-joined token — the plain home replace can't reach it
+	projSlugRe = regexp.MustCompile(`\.claude/projects/[^\s"'\\]+`)
+	// <total_tokens> counts down from the 15M budget by real's tokenizer
+	// accounting — presence/shape compares, the number is content-derived
+	// matches both real's literal form and Go's \u003e-escaped form
+	totalTokRe = regexp.MustCompile(`total_tokens(>|\\u003e)[^<\\"]+`)
 )
 
 // normalizeWire scrubs per-run values out of a raw request body so the
@@ -395,6 +402,8 @@ func normalizeWire(raw []byte, r diffRun) []byte {
 	// device_id is a per-install random 64-hex (real's userID in
 	// .claude.json) — normalize like the other per-install ids
 	s = devidRe.ReplaceAllString(s, "<devid>")
+	s = projSlugRe.ReplaceAllString(s, `.claude/projects/<PROJ>`)
+	s = totalTokRe.ReplaceAllString(s, `total_tokens${1}N`)
 	return []byte(s)
 }
 

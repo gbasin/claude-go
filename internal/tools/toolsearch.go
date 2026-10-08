@@ -166,11 +166,14 @@ func toolSearchEnabled() bool {
 // legacy names (LS/MultiEdit/NotebookRead) aren't real tools in 294 at
 // all. Verified against the 2.1.294 -p wire via the diff harness.
 var hiddenInStandard = map[string]bool{
-	"DesignSync": true, "Glob": true, "Grep": true,
-	"ListMcpResourcesTool": true, "LS": true, "LSP": true,
-	"Monitor": true, "MultiEdit": true, "NotebookRead": true,
-	"PushNotification": true, "ReadMcpResourceDirTool": true,
-	"ReadMcpResourceTool": true, "RemoteTrigger": true, "TodoWrite": true,
+	"Artifact": true, "ArtifactComments": true, "ArtifactData": true,
+	"DesignSync": true, "EndConversation": true, "Glob": true,
+	"Grep": true, "ListMcpResourcesTool": true, "LS": true,
+	"LSP": true, "Monitor": true, "MultiEdit": true,
+	"NotebookRead": true, "PushNotification": true,
+	"ReadMcpResourceDirTool": true, "ReadMcpResourceTool": true,
+	"ReadNotifications": true, "RemoteTrigger": true,
+	"SendFeedback": true, "TodoWrite": true,
 }
 
 // IsDeferredTool mirrors h() in mod_0314.js: MCP tools always defer;
@@ -263,6 +266,7 @@ var subagentTools = []string{
 
 func RequestDefs(c *Context) []api.Tool {
 	out := requestDefs(c)
+	out = applyCLISchemaVariants(c, out)
 	// --advisor <model>: real's server-side advisor tool rides at the
 	// tail of tools[] ({type:"advisor_20260301"} — mod_0386.js Mvt).
 	// It only ships when an advisor model is configured — the builtin

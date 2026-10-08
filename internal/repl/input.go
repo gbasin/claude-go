@@ -15,6 +15,7 @@ type keySource struct {
 	ch     chan key
 	old    *term.State
 	kitty  bool // kitty keyboard protocol was enabled
+	mok    bool // xterm modifyOtherKeys pushed (non-kitty path)
 	// dialog, when non-nil, gets every key forwarded — the permission dialog
 	// owns stdin while open so the turn's busy-queue goroutine can't eat
 	// the user's answer.
@@ -45,10 +46,17 @@ func startKeys() (*keySource, error) {
 	ks := &keySource{ch: make(chan key, 256), old: st, replay: make(chan key, 256)}
 	os.Stdout.WriteString("\x1b[?2004h") // bracketed paste on
 	if kittyCapable() {
-		// kitty keyboard protocol: push flags (1 = disambiguate escape codes).
-		// Enables CSI-u reporting for ctrl+/alt+/shift+key combos.
+		// kitty keyboard protocol: push flags 5 = disambiguate (1) +
+		// report alternate keys (4) — real's `>5u`. Without bit 4 a
+		// shift+enter arrives as plain CR (or gets dropped), which ate
+		// the keypress entirely.
 		ks.kitty = true
-		os.Stdout.WriteString("\x1b[>1u")
+		os.Stdout.WriteString("\x1b[>5u")
+	} else {
+		// xterm modifyOtherKeys level 2 — the non-kitty path real uses
+		// (`>4;2m`) so ctrl+enter/shift+enter reach us as CSI 27;m;k~.
+		ks.mok = true
+		os.Stdout.WriteString("\x1b[>4;2m")
 	}
 	go ks.read()
 	return ks, nil
@@ -76,6 +84,8 @@ func (ks *keySource) stop() {
 func (ks *keySource) release() {
 	if ks.kitty {
 		os.Stdout.WriteString("\x1b[<u") // pop kitty flags
+	} else if ks.mok {
+		os.Stdout.WriteString("\x1b[>4m") // reset modifyOtherKeys
 	}
 	os.Stdout.WriteString("\x1b[?2004l")
 	term.Restore(int(os.Stdin.Fd()), ks.old)
@@ -87,7 +97,9 @@ func (ks *keySource) grab() {
 	}
 	os.Stdout.WriteString("\x1b[?2004h")
 	if ks.kitty {
-		os.Stdout.WriteString("\x1b[>1u")
+		os.Stdout.WriteString("\x1b[>5u")
+	} else if ks.mok {
+		os.Stdout.WriteString("\x1b[>4;2m")
 	}
 }
 
@@ -143,6 +155,12 @@ func (ks *keySource) read() {
 				i += 2
 				continue
 			}
+			if c == 0x1b && i+1 < n && (buf[i+1] == 0x7f || buf[i+1] == 8) {
+				// ESC + backspace = meta+backspace -> backward-kill-word
+				ks.push(key{b: 0x7f, mod: modAlt})
+				i++
+				continue
+			}
 			if c == 0x1b && i+1 < n && buf[i+1] >= 32 && buf[i+1] < 127 {
 				// ESC + printable = alt/meta+key (real treats them identically)
 				ks.push(key{b: buf[i+1], r: rune(buf[i+1]), mod: modAlt})
@@ -193,8 +211,11 @@ func decodeCSI(s string) key {
 		k := key{mod: uint8(mod)}
 		code := pnum(0)
 		switch {
-		case code == 13 && mod&modAlt != 0:
-			k.b, k.r = '\n', '\n' // alt+enter -> newline (matches option+enter)
+		case code == 13 && mod&modCtrl == 0 && mod&(modAlt|modShift) != 0:
+			// shift/alt+enter -> newline insert (real's jt: meta||shift
+			// -> insert("\n")). ctrl+enter stays CR so its binding
+			// (chat:sendNow) still resolves.
+			k.b, k.r = '\n', '\n'
 		case code == 13:
 			k.b = '\r'
 		case code == 10:
@@ -211,6 +232,15 @@ func decodeCSI(s string) key {
 				k.b = byte(code)
 			}
 		}
+		return k
+	}
+	if final == '~' && pnum(0) == 27 && len(nums) >= 3 {
+		// xterm modifyOtherKeys: CSI 27;<mods>;<code>~ — decode like CSI-u.
+		m2 := pnum(1)
+		if m2 > 0 {
+			m2--
+		}
+		k := decodeCSI("[" + strconv.Itoa(pnum(2)) + ";" + strconv.Itoa(m2+1) + "u")
 		return k
 	}
 	k := key{b: 0x1b, mod: uint8(mod)}
@@ -262,4 +292,3 @@ func (ks *keySource) push(k key) {
 		ks.ch <- k
 	}
 }
-
