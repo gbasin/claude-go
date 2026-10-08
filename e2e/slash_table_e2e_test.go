@@ -40,17 +40,17 @@ func TestSlashTable(t *testing.T) {
 		{"/usage", "this session:", ""},
 		{"/stats", "this session:", ""},
 		{"/agents", "wizard has been removed", ""},
-		{"/todos", "no todos", ""},
+		// /todos was an invented command — real 294 has no such row
 		{"/vim", "moved to /config", ""},
 		{"/keybindings", "keybindings.json", ""},
 		{"/ide", "no IDE detected", "IDE connected"},
 		{"/terminal-setup", "unsupported terminal", "macOS terminals only"}, // darwin: TERM_PROGRAM unset; linux: not a macOS terminal
 		{"/privacy-settings", "telemetry", ""},
 		{"/release-notes", "claude-go", ""},
-		{"/plugin", "plugins:", ""},
+		{"/plugin", "Plugins", ""},
 		{"/wellbeing", "break reminders", ""},
 		{"/powerup", "discover features", ""},
-		{"/skills", "no skills found", ""},
+		{"/skills", "Skills:", ""},
 		{"/mcp", "MCP servers", ""},
 		{"/memory", "memory dir:", ""},
 		{"/tasks", "background tasks", ""},
@@ -66,17 +66,20 @@ func TestSlashTable(t *testing.T) {
 		{"/output-style", "Available styles", ""},
 		{"/btw", "usage: /btw", ""},
 		{"/subtask", "usage: /subtask", ""},
-		{"/import", "reads a file into context", ""},
+		// real /import is tengu_import-gated (default off) → unknown
+		{"/import", "unknown command", ""},
 		{"/add-dir", "usage: /add-dir", ""},
 		{"/loop", "usage: /loop", ""},
-		{"/alias bad-arg", "usage: /alias", ""},
+		// /alias was invented — not in real's 294 tables → unknown
+		{"/alias bad-arg", "unknown command", ""},
 		{"/extra-usage", "renamed to /usage-credits", ""},
 		{"/usage-credits", "/login", ""},
 		{"/theme", "theme:", "daltonian"},
 		{"/chrome", "Chrome", ""},
 		{"/export exp-out.jsonl", "exported to", "export failed"},
-		// fresh session has no message chain → fork fails deterministically
-		{"/fork", "fork failed", "cannot fork"},
+		// real /fork <directive> spawns a background fork agent — a bare
+		// /fork is a usage error
+		{"/fork", "usage: /fork", ""},
 		{"/branch", "branched session", ""},
 		{"/permissions", "Permissions", ""},
 		{"/bug", "report issues at", ""},

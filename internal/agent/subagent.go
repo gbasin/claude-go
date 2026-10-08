@@ -449,10 +449,16 @@ func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, m
 		}
 		hooks.Run(r.Hooks, hooks.SubagentStart, payload, c.CWD)
 	}
+	parentAID := ""
+	if r.Parent != nil {
+		parentAID = r.Parent.LoopAgentID
+	}
 	sub := &Loop{
-		IsSubagent:   true,
-		AllowedTools: def.resolveAllowed(extraAllowed),
-		AppendSysP:   def.effectiveSystemPrompt(),
+		IsSubagent:    true,
+		LoopAgentID:   rec.AgentID,
+		ParentAgentID: parentAID,
+		AllowedTools:  def.resolveAllowed(extraAllowed),
+		AppendSysP:    def.effectiveSystemPrompt(),
 		ExtraSystem: func() []string {
 			if v := os.Getenv("CLAUDE_GO_APPEND_SUBAGENT_SYSTEM_PROMPT"); v != "" {
 				return []string{v}
