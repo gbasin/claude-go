@@ -532,9 +532,11 @@ func main() {
 	if !o.mockMode {
 		go func() {
 			feats, err := client.EvalCheck(context.Background(), "")
-			// empty-feature 200 => real's fallback header/beta set;
-			// transport errors keep the cached-flag production shape
-			client.MarkEvalFailed(err == nil && feats != nil && len(feats) == 0)
+			// any failed eval — transport error or empty features —
+			// switches real to the flag-unavailable wire set (captured:
+			// dangerous-tool-use + afk-mode + safeguards all drop out)
+			client.MarkEvalFailed(err != nil || feats == nil || len(feats) == 0)
+			api.CloseEvalDone()
 		}()
 		// real's startup burst around the first /v1/messages call: aux
 		// GETs (settings/bootstrap/skills/plugins/mcp_servers), a haiku
@@ -648,6 +650,11 @@ func main() {
 	loop.ToolCtx.Session = sessionID
 	email, acct, dev := config.Account()
 	loop.User = agent.UserConfig{Email: email, AccountUUID: acct, DeviceID: dev}
+	// real's first request waits on the GB client init — gate ours the
+	// same bounded way so flag-gated wire surface is decided, not racy
+	if !o.mockMode {
+		loop.EvalWait = client.EvalAwait
+	}
 	loop.AddDirs = o.addDirs
 	if o.sysPromptF != "" {
 		// real fatales on a missing --system-prompt-file (mod_0706)
@@ -684,6 +691,11 @@ func main() {
 	}
 	loop.ThinkingMode = o.thinkingMode
 	loop.ThinkingDisplay = o.thinkingDisp
+	// 294: stream-json output gets thinking display "updates" even on
+	// the sdk-cli entrypoint (verified: -p --output-format stream-json)
+	if loop.ThinkingDisplay == "" && o.outFormat == "stream-json" {
+		loop.ThinkingDisplay = "updates"
+	}
 	loop.ThinkingBudget = o.thinkingTok
 	st := config.Load(cwd)
 	st.ApplyEnv() // settings.env injects into the process + all children
