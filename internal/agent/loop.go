@@ -26,13 +26,19 @@ const defaultMaxTokens = 128000
 
 // Events surfaces streaming/tool activity to the UI.
 type Events struct {
-	OnTextDelta   func(text string)
-	OnThinking    func(text string)
-	OnToolUse     func(name string, input json.RawMessage)
-	OnToolResult  func(name string, r tools.Result)
-	OnUsage       func(u api.Usage)
-	OnCompact     func()
-	OnAutoCompact func(tokens int)
+	OnTextDelta func(text string)
+	OnThinking  func(text string)
+	OnToolUse   func(name string, input json.RawMessage)
+	// OnToolResult carries the tool_use block id — stream-json user
+	// events reference the real API-assigned id, not a fabricated one
+	OnToolResult func(name, toolUseID string, r tools.Result)
+	// OnAssistantMessage fires once per API response (per turn in the
+	// tool loop) — stream-json assistant events emit one per content
+	// block sharing the API's message.id
+	OnAssistantMessage func(resp *api.Response)
+	OnUsage            func(u api.Usage)
+	OnCompact          func()
+	OnAutoCompact      func(tokens int)
 	// OnCompactSpan fires with the message span about to be replaced by
 	// the compact summary — writers that log the transcript post-hoc
 	// (print mode, subagents) use it to persist the pre-compact history
@@ -615,6 +621,9 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 			l.costUSD, l.MaxBudgetUSD)
 	}
 	l.Messages = append(l.Messages, assistantMessage(resp))
+	if l.Events.OnAssistantMessage != nil {
+		l.Events.OnAssistantMessage(resp)
+	}
 
 	var results []api.ContentBlock
 	var batchCalls []map[string]any
@@ -732,7 +741,7 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 			r.Content += "\n\n" + post.Reason
 		}
 		if l.Events.OnToolResult != nil {
-			l.Events.OnToolResult(b.Name, r)
+			l.Events.OnToolResult(b.Name, b.ID, r)
 		}
 		results = append(results, toolResultBlock(b.ID, r))
 		batchCalls = append(batchCalls, map[string]any{
