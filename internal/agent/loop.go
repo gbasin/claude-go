@@ -165,6 +165,15 @@ func isXHighModel(m string) bool {
 }
 
 func (l *Loop) buildRequest() *api.Request {
+	model := l.Model
+	if l.IsSubagent {
+		model = l.subagentModel()
+	} else if model != "" {
+		// mainLoopModel for subagent "inherit" resolution (mod_0567.js) —
+		// child loops read CLAUDE_GO_MAIN_LOOP_MODEL since subagent.go's
+		// spawn-time Model can come from an agent def rather than the parent.
+		os.Setenv("CLAUDE_GO_MAIN_LOOP_MODEL", model)
+	}
 	if l.tokensLeft == 0 {
 		l.tokensLeft = tokenBudgetStart()
 	}
@@ -177,16 +186,23 @@ func (l *Loop) buildRequest() *api.Request {
 	}
 	// xhigh is fable-class only — opus rejects it ('This model does not
 	// support effort level xhigh'); map to the top supported tier.
-	if effort == "xhigh" && !isXHighModel(l.Model) {
+	if effort == "xhigh" && !isXHighModel(model) {
 		effort = "max"
 	}
 	// output_config only exists on per-turn-effort models (verified live:
 	// opus-4-8 rejects it — 'requires a model that supports per-turn
 	// effort'). Real omits the key for those models.
+	// CLAUDE_CODE_ALWAYS_ENABLE_EFFORT forces effort emission for models
+	// lacking declared effort support (real QE(), mod_0198.js).
+	effortCapable := isXHighModel(model) || envOn("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT")
 	var ocRaw json.RawMessage
-	if isXHighModel(l.Model) {
+	if effortCapable {
 		oc := map[string]string{"effort": effort}
-		if l.FastMode {
+		// Fast mode is firstParty-only and killed by
+		// CLAUDE_CODE_DISABLE_FAST_MODE (real jo(), mod_0137.js).
+		if l.FastMode && (l.Client == nil || l.Client.Provider == "" ||
+			l.Client.Provider == api.ProviderFirstParty) &&
+			!envOn("CLAUDE_CODE_DISABLE_FAST_MODE") {
 			oc["speed"] = "fast"
 		}
 		if l.CorrelationID != "" {
@@ -224,21 +240,26 @@ func (l *Loop) buildRequest() *api.Request {
 		outCfg = ocRaw
 	}
 	mt := l.MaxTokens
+	// CLAUDE_CODE_MAX_OUTPUT_TOKENS overrides max_tokens (real: parsed as a
+	// number; invalid or <= 0 is ignored).
+	if n, ok := maxOutputTokensEnv(); ok {
+		mt = n
+	}
 	if l.maxTokensClamp && mt > 64000 {
 		mt = 64000
 	}
-	l.Client.Model = l.Model // beta list is model-conditional
+	l.Client.Model = model // beta list is model-conditional
 	l.Client.Wants1m = l.Wants1m
 	class_ := ""
 	if l.IsSubagent {
 		class_ = "subagent"
 	}
-	sys := SystemBlocks(l.Entrypoint, l.CWD, l.Model, l.AppendSysP, l.ExtraSystem, l.SessionExtras, l.billingMeta(msgs), l.tokensLeft)
+	sys := SystemBlocks(l.Entrypoint, l.CWD, model, l.AppendSysP, l.ExtraSystem, l.SessionExtras, l.billingMeta(msgs), l.tokensLeft)
 	if l.IsSubagent {
 		sys = l.subagentSystemBlocks(msgs)
 	}
 	return &api.Request{
-		Model:             l.Model,
+		Model:             model,
 		MaxTokens:         mt,
 		Messages:          msgs,
 		System:            sys,
@@ -246,7 +267,7 @@ func (l *Loop) buildRequest() *api.Request {
 		PromptID:          l.subPromptID(),
 		Tools:             tools.RequestDefs(l.ToolCtx),
 		Metadata:          Metadata(l.Client.SessionID, l.User),
-		Thinking:          l.thinkingConfig(),
+		Thinking:          l.thinkingConfig(mt),
 		ContextManagement: DefaultContextManagement(),
 		Safeguards:        safeguards,
 		OutputConfig:      outCfg,
@@ -350,10 +371,10 @@ func (l *Loop) withEphemeralBreakpoint(msgs []api.Message) []api.Message {
 		if err := json.Unmarshal(out[i].Content, &blocks); err != nil || len(blocks) == 0 {
 			return
 		}
-		// ttl must match the system/env blocks (1h): the API enforces
+		// ttl must match the system/env blocks: the API enforces
 		// ttl ordering across tools→system→messages — a 5m block before
 		// a 1h block is rejected (live-verified 400)
-		blocks[len(blocks)-1].CacheControl = &api.CacheControl{Type: "ephemeral", TTL: "1h"}
+		blocks[len(blocks)-1].CacheControl = &api.CacheControl{Type: "ephemeral", TTL: l.promptCacheTTL()}
 		if raw, err := json.Marshal(blocks); err == nil {
 			out[i].Content = raw
 		}
@@ -440,13 +461,7 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 		// not as a user-message reminder — seed announcedDeferred so the
 		// first request's user message doesn't carry a duplicate
 		l.announcedDeferred = strings.Join(deferred, "\x00")
-		envCC := &api.CacheControl{Type: "ephemeral", TTL: "1h"}
-
-		if l.IsSubagent {
-			// subagent requests use plain ephemeral everywhere — no
-			// 1h ttls, no breakpoints (captured)
-			envCC = &api.CacheControl{Type: "ephemeral"}
-		}
+		envCC := &api.CacheControl{Type: "ephemeral", TTL: l.promptCacheTTL()}
 		envBlocks := api.BlocksMessage("system", []api.ContentBlock{{
 			Type:         "text",
 			Text:         EnvMessage(l.ToolCtx.CWD, l.Model, l.AddDirs, l.PermMode, l.Client.SessionID, l.SessionHookCtx, deferred, connectingServers(), l.tokensLeft),
@@ -989,27 +1004,162 @@ func (l *Loop) runAdvisor(ctx context.Context) tools.Result {
 	return tools.Result{Content: text}
 }
 
-func (l *Loop) thinkingConfig() json.RawMessage {
+func (l *Loop) thinkingConfig(mt int) json.RawMessage {
 	if l.noThinking {
 		return nil // stripped after a thinking-config 400
 	}
+	// CLAUDE_CODE_DISABLE_THINKING drops the thinking key entirely
+	// (mod_0416.js: iS suppresses even an explicit {"type":"disabled"}).
+	if envOn("CLAUDE_CODE_DISABLE_THINKING") {
+		return nil
+	}
 	if l.ThinkingMode == "disabled" {
 		return json.RawMessage(`{"type":"disabled"}`)
+	}
+	// MAX_THINKING_TOKENS (real Eco(), mod_0137.js): set -> >0 enables
+	// thinking at that budget; 0 or unparsable disables it. Budget clamps
+	// to [1024, maxTokens-1] like real's Math.max(1024, Math.min(sk-1, b)).
+	if v := strings.TrimSpace(os.Getenv("MAX_THINKING_TOKENS")); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f <= 0 {
+			return json.RawMessage(`{"type":"disabled"}`)
+		}
+		budget := int(f)
+		if mt > 1 && budget > mt-1 {
+			budget = mt - 1
+		}
+		if budget < 1024 {
+			budget = 1024
+		}
+		return json.RawMessage(`{"type":"enabled","budget_tokens":` + strconv.Itoa(budget) + `}`)
 	}
 	if l.ThinkingMode == "enabled" || l.ThinkingBudget > 0 || l.AlwaysThinking {
 		budget := l.ThinkingBudget
 		if budget <= 0 {
 			budget = 10000
 		}
-		if v := os.Getenv("MAX_THINKING_TOKENS"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 && n < budget {
-				budget = n
-			}
-		}
 		return json.RawMessage(`{"type":"enabled","budget_tokens":` + strconv.Itoa(budget) + `}`)
 	}
 	display := l.thinkingDisplay()
 	return json.RawMessage(`{"type":"adaptive","display":"` + display + `"}`)
+}
+
+// subagentModel resolves the model a subagent request goes out with
+// (mod_0567.js kpe()/b()): CLAUDE_CODE_SUBAGENT_MODEL pins the subagent
+// model — unset or "inherit" keeps the resolved (inherited) model.
+// CLAUDE_CODE_SUBAGENT_MODEL_FORCE additionally suppresses per-agent model
+// choices, falling back to the pin or the parent session's model
+// (CLAUDE_GO_MAIN_LOOP_MODEL, stamped by the main loop's buildRequest).
+func (l *Loop) subagentModel() string {
+	parent := os.Getenv("CLAUDE_GO_MAIN_LOOP_MODEL")
+	if parent == "" {
+		parent = l.Model
+	}
+	pin := strings.TrimSpace(os.Getenv("CLAUDE_CODE_SUBAGENT_MODEL"))
+	pinned := pin != "" && !strings.EqualFold(pin, "inherit")
+	if envOn("CLAUDE_CODE_SUBAGENT_MODEL_FORCE") {
+		if pinned {
+			return resolveSubagentAlias(pin)
+		}
+		return parent
+	}
+	if pinned && l.Model == parent {
+		return resolveSubagentAlias(pin)
+	}
+	return l.Model
+}
+
+// resolveSubagentAlias applies the same alias/env map as --model for the
+// subagent pin (real resolves the pin through Pt()).
+func resolveSubagentAlias(m string) string {
+	m = strings.TrimSuffix(strings.TrimSpace(m), "[1m]")
+	env := func(names ...string) string {
+		for _, n := range names {
+			if v := os.Getenv(n); v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+	switch strings.ToLower(m) {
+	case "opus", "best":
+		if v := env("ANTHROPIC_DEFAULT_OPUS_MODEL"); v != "" {
+			return v
+		}
+		return "claude-opus-5-5"
+	case "sonnet":
+		if v := env("ANTHROPIC_DEFAULT_SONNET_MODEL"); v != "" {
+			return v
+		}
+		return "claude-sonnet-5-5"
+	case "haiku":
+		if v := env("ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"); v != "" {
+			return v
+		}
+		return "claude-haiku-4-5-20251001"
+	case "fable":
+		if v := env("ANTHROPIC_DEFAULT_FABLE_MODEL"); v != "" {
+			return v
+		}
+		return defaultModel
+	case "default":
+		// pin=default -> the session default (env override or builtin)
+		if v := os.Getenv("ANTHROPIC_DEFAULT_MODEL"); v != "" &&
+			!strings.EqualFold(v, "default") && !strings.EqualFold(v, "inherit") {
+			return resolveSubagentAlias(v)
+		}
+		return defaultModel
+	}
+	return m
+}
+
+// maxOutputTokensEnv parses CLAUDE_CODE_MAX_OUTPUT_TOKENS the way real's
+// JEs() does (mod_0029.js): a Number() parse — non-numeric or <= 0 means
+// "no override".
+func maxOutputTokensEnv() (int, bool) {
+	v := strings.TrimSpace(os.Getenv("CLAUDE_CODE_MAX_OUTPUT_TOKENS"))
+	if v == "" {
+		return 0, false
+	}
+	n, err := strconv.ParseFloat(v, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return int(n), true
+}
+
+// promptCacheTTL mirrors Nen() (mod_0416.js): FORCE_PROMPT_CACHING_5M drops
+// all ttls; CLAUDE_CODE_PROMPT_CACHE_TTL overrides the main-thread ttl and
+// CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL the subagent one; only "1h" lands on
+// the wire (real emits ttl only for 1h). Unset keeps the captured defaults:
+// 1h on the main thread, bare ephemeral on subagents.
+func (l *Loop) promptCacheTTL() string {
+	if envOn("FORCE_PROMPT_CACHING_5M") {
+		return ""
+	}
+	name := "CLAUDE_CODE_PROMPT_CACHE_TTL"
+	if l.IsSubagent {
+		name = "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL"
+	}
+	if v, ok := os.LookupEnv(name); ok {
+		if strings.TrimSpace(v) == "1h" {
+			return "1h"
+		}
+		return ""
+	}
+	if l.IsSubagent {
+		return ""
+	}
+	return "1h"
+}
+
+// envOn mirrors real's Le() boolean env parse (1/true/yes/on).
+func envOn(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // ContextWarnThreshold is ~90% of the auto-compact window for the model.
