@@ -134,8 +134,11 @@ type Request struct {
 	OutputConfig json.RawMessage `json:"output_config,omitempty"`
 	// real sends speed at the request root (...cR!==void 0&&{speed:cR},
 	// mod_0416) — not inside output_config
-	Speed  string `json:"speed,omitempty"`
-	Stream bool   `json:"stream"`
+	Speed string `json:"speed,omitempty"`
+	// output_format: aux structured-output calls (session title) send it
+	// at the root — {type:"json_schema",schema:{...}} (sH, mod_0601)
+	OutputFormat json.RawMessage `json:"output_format,omitempty"`
+	Stream       bool            `json:"stream"`
 
 	// Class overrides x-claude-code-request-class (default "main") —
 	// real uses "compaction", "auxiliary", "subagent", etc.

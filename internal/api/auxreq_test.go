@@ -137,7 +137,7 @@ func TestQuotaProbe(t *testing.T) {
 	c.BaseURL = srv.URL
 	c.HTTP = srv.Client()
 
-	c.QuotaProbe(context.Background())
+	c.QuotaProbe(context.Background(), "claude-haiku-4-5-20251001")
 	if gotClass != "auxiliary" {
 		t.Fatalf("request-class = %q", gotClass)
 	}
