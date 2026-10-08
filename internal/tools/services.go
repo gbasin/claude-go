@@ -2331,6 +2331,20 @@ func SetPeerSessionBusy(b bool) { peerSessionBusy.Store(b) }
 // messages for approval rather than delivering mid-conversation.
 var peerPermModeFn atomic.Pointer[func() string]
 
+// peerIdleHookFn fires the TeammateIdle hook when a peer session's
+// idle/exited notice is admitted — wired from main to the loop's
+// hook runner (payload: teammate_name = sender address).
+var peerIdleHookFn atomic.Pointer[func(from string)]
+
+// SetPeerIdleHook registers the TeammateIdle hook callback.
+func SetPeerIdleHook(fn func(from string)) {
+	if fn == nil {
+		peerIdleHookFn.Store(nil)
+		return
+	}
+	peerIdleHookFn.Store(&fn)
+}
+
 // SetPeerPermMode registers the permission-mode getter used by the
 // messenger's hold gate (and, elsewhere, from_mode on outbound notices).
 func SetPeerPermMode(fn func() string) {
@@ -2687,6 +2701,12 @@ func handlePeerIdleNotice(f peerFrame) {
 	label := f.From
 	if label == "" {
 		label = "(peer session)"
+	}
+	// real's TeammateIdle hook — a peer session going idle
+	if f.State == "idle" || f.State == "exited" {
+		if fn := peerIdleHookFn.Load(); fn != nil {
+			(*fn)(f.From)
+		}
 	}
 	var text string
 	switch f.State {

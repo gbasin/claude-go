@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"claude-go/internal/hooks"
 	"bufio"
 	"claude-go/internal/config"
 	"context"
@@ -323,6 +324,19 @@ func execEnterWorktree(c *Context, raw json.RawMessage) Result {
 		return Result{Content: "Entered existing worktree at " + in.Path}
 	}
 
+	// real's WorktreeCreate hook can provision the worktree itself —
+	// hook stdout is the absolute path, which we then adopt
+	if c.FireHook != nil {
+		if h := c.FireHook(hooks.WorktreeCreate, map[string]any{"name": name}); h.Block {
+			return Result{Content: "WorktreeCreate hook blocked: " + h.Reason, IsError: true}
+		} else if p := strings.TrimSpace(h.PlainText); p != "" && filepath.IsAbs(p) {
+			c.CWD = p
+			worktreeSession.wtPath = p
+			worktreeSession.active = true
+			return Result{Content: "Entered worktree provisioned by WorktreeCreate hook at " + p}
+		}
+	}
+
 	// create inside <repo>/.claude/worktrees/ like real CC
 	wtPath := filepath.Join(root, ".claude", "worktrees", name)
 	// base ref: worktree.baseRef setting -> fresh uses origin/<default-branch>
@@ -465,6 +479,12 @@ func execExitWorktree(c *Context, raw json.RawMessage) Result {
 			out, _ := exec.Command("git", "-C", wtPath, "status", "--porcelain").Output()
 			if len(strings.TrimSpace(string(out))) > 0 {
 				return Result{Content: "worktree has uncommitted changes — commit them, or retry with discard_changes:true", IsError: true}
+			}
+		}
+		// real's WorktreeRemove hook — non-blocking, stderr shown to user
+		if c.FireHook != nil {
+			if h := c.FireHook(hooks.WorktreeRemove, map[string]any{"worktree_path": wtPath}); h.NonBlockErr != "" {
+				return Result{Content: "worktree remove hook error: " + h.NonBlockErr, IsError: true}
 			}
 		}
 		args := []string{"-C", origCWD, "worktree", "remove"}
