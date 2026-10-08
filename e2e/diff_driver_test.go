@@ -52,7 +52,8 @@ type diffRun struct {
 	label    string
 	bin      string
 	hits     []mock.Hit
-	bodies   [][]byte // raw POST /v1/messages bodies, in order
+	bodies   [][]byte       // raw POST /v1/messages bodies, in order
+	headers  []http.Header // headers per body, same index
 	stdout   string
 	stderr   string
 	code     int
@@ -172,6 +173,7 @@ func execAgainstMock(t *testing.T, label, bin string, sc diffScenario, cwd, home
 	}
 	r.hits = append(r.hits, srv.Hits...)
 	r.bodies = append(r.bodies, srv.Bodies...)
+	r.headers = append(r.headers, srv.Headers...)
 	if dir := os.Getenv("CLAUDE_GO_DIFF_DUMP"); dir != "" {
 		os.MkdirAll(dir, 0o755)
 		for i, b := range r.bodies {
@@ -255,6 +257,7 @@ func ptyAgainstMock(t *testing.T, label, bin string, sc diffScenario, cwd, home 
 	r.stdout = p.clean()
 	r.hits = append(r.hits, srv.Hits...)
 	r.bodies = append(r.bodies, srv.Bodies...)
+	r.headers = append(r.headers, srv.Headers...)
 	if dir := os.Getenv("CLAUDE_GO_DIFF_DUMP"); dir != "" {
 		os.MkdirAll(dir, 0o755)
 		for i, b := range r.bodies {
@@ -267,6 +270,44 @@ func ptyAgainstMock(t *testing.T, label, bin string, sc diffScenario, cwd, home 
 		}
 	}
 	return r
+}
+
+// volatileHeaders are values that legitimately differ between the two
+// binaries (tokens, ids, sizes) — presence/choice is compared, not bytes.
+var volatileHeaders = map[string]bool{
+	"authorization": true, "x-api-key": true, "content-length": true,
+	"x-claude-code-session-id": true, "x-client-request-id": true,
+	"x-stainless-retry-count": true, "x-claude-code-prompt-id": true,
+	"host": true, "user-agent": false, // version must match — compared
+}
+
+func diffHeaders(d *differ, a, b http.Header) {
+	am, bm := map[string]string{}, map[string]string{}
+	for k, v := range a {
+		am[strings.ToLower(k)] = strings.Join(v, ",")
+	}
+	for k, v := range b {
+		bm[strings.ToLower(k)] = strings.Join(v, ",")
+	}
+	for k, av := range am {
+		bv, ok := bm[k]
+		if !ok {
+			d.out = append(d.out, fmt.Sprintf("  headers[%q]: real=%q ours=<missing>", k, truncStr(av, 80)))
+			continue
+		}
+		if volatileHeaders[k] {
+			continue
+		}
+		if av != bv {
+			d.out = append(d.out, fmt.Sprintf("  headers[%q]: real=%q ours=%q", k,
+				truncStr(av, 110), truncStr(bv, 110)))
+		}
+	}
+	for k, bv := range bm {
+		if _, ok := am[k]; !ok {
+			d.out = append(d.out, fmt.Sprintf("  headers[%q]: real=<missing> ours=%q", k, truncStr(bv, 80)))
+		}
+	}
 }
 
 // dumpGolden writes a wireCapture-shaped golden (request_line + headers +
@@ -542,6 +583,9 @@ func runDiffScenario(t *testing.T, sc diffScenario) {
 			}
 			d := &differ{}
 			d.value("body", a, b)
+			if i < len(real.headers) && i < len(ours.headers) {
+				diffHeaders(d, real.headers[i], ours.headers[i])
+			}
 			if len(d.out) == 0 {
 				fmt.Fprintln(&rep, "  <identical after normalization>")
 			}
