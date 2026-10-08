@@ -833,6 +833,31 @@ func pluginSub(args []string) {
 			fatal("remove: %v", err)
 		}
 		fmt.Println("removed", args[1])
+	case "enable", "disable":
+		// real writes the settings enabledPlugins gate ("name@mkt": bool);
+		// the installed-file flag is not the toggle store
+		if len(args) < 2 {
+			fatal("usage: claude plugin " + args[0] + " <name[@marketplace]>")
+		}
+		key := args[1]
+		if !strings.Contains(key, "@") {
+			for _, p := range plugins.List() {
+				if p.Name == key {
+					key = p.Name + "@" + p.Marketplace
+					break
+				}
+			}
+		}
+		enable := args[0] == "enable"
+		editClaudeSettings(func(m map[string]any) {
+			en, _ := m["enabledPlugins"].(map[string]any)
+			if en == nil {
+				en = map[string]any{}
+			}
+			en[key] = enable
+			m["enabledPlugins"] = en
+		})
+		fmt.Printf("%s %s\n", args[0]+"d", key)
 	case "details":
 		if len(args) < 2 {
 			fatal("usage: claude plugin details <marketplace>")
@@ -846,7 +871,22 @@ func pluginSub(args []string) {
 			fmt.Printf("  %s — %s\n", p.Name, p.Description)
 		}
 	default:
-		fatal("unknown plugin subcommand: %s (list|install|remove|marketplace|details)", args[0])
+		fatal("unknown plugin subcommand: %s (list|install|remove|marketplace|details|enable|disable)", args[0])
+	}
+}
+
+// editClaudeSettings mutates ~/.claude/settings.json in place.
+func editClaudeSettings(mut func(map[string]any)) {
+	p := filepath.Join(config.ClaudeDir(), "settings.json")
+	m := map[string]any{}
+	if b, err := os.ReadFile(p); err == nil {
+		_ = json.Unmarshal(b, &m)
+	}
+	mut(m)
+	if b, err := json.MarshalIndent(m, "", "  "); err == nil {
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			fatal("write settings.json: " + err.Error())
+		}
 	}
 }
 

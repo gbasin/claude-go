@@ -366,23 +366,41 @@ func EnabledPluginDirs() []string {
 
 func settingsPluginGates() (map[string]bool, map[string]bool) {
 	en, dis := map[string]bool{}, map[string]bool{}
-	var s struct {
-		EnabledPlugins  map[string]bool `json:"enabledPlugins"`
-		DisabledPlugins map[string]bool `json:"disabledPlugins"`
-	}
-	if b, err := json.Marshal(config.UserSettings()); err == nil {
-		// a malformed value fails the whole file, like the old direct read
-		if json.Unmarshal(b, &s) != nil {
-			return en, dis
+	// real ORs enabledPlugins across local+project+user scopes — a true
+	// in any scope enables; disabledPlugins blocks from any scope
+	for _, sm := range []map[string]any{
+		config.UserSettings(),
+		config.ReadJSONMap(filepath.Join(config.ClaudeDir(), "settings.local.json")),
+		config.ReadJSONMap(filepath.Join(mustCWD(), ".claude", "settings.json")),
+	} {
+		var s struct {
+			EnabledPlugins  map[string]bool `json:"enabledPlugins"`
+			DisabledPlugins map[string]bool `json:"disabledPlugins"`
+		}
+		if b, err := json.Marshal(sm); err == nil {
+			if json.Unmarshal(b, &s) != nil {
+				continue
+			}
+		}
+		for k, v := range s.EnabledPlugins {
+			if v {
+				en[k] = true
+			}
+		}
+		for k, v := range s.DisabledPlugins {
+			if v {
+				dis[k] = true
+			}
 		}
 	}
-	for k, v := range s.EnabledPlugins {
-		en[k] = v
-	}
-	for k, v := range s.DisabledPlugins {
-		dis[k] = v
-	}
 	return en, dis
+}
+
+func mustCWD() string {
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return "."
 }
 
 func keys(m map[string]string) []string {
