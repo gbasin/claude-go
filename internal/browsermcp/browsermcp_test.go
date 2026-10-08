@@ -102,7 +102,7 @@ func TestHandshakeToolsList(t *testing.T) {
 		"params": map[string]any{
 			"protocolVersion": "2025-06-18",
 			"capabilities":    map[string]any{},
-			"clientInfo":      map[string]string{"name": "claude-go", "version": "2.1.294"},
+			"clientInfo":      map[string]string{"name": "claude-go", "version": "2.1.295"},
 		},
 	})
 	init := conn.read(t)

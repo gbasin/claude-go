@@ -700,7 +700,7 @@ func RegisterSession(sessionID, cwd, name string) error {
 		Entrypoint:          sessionEntrypoint(),
 		StartedAt:           now,
 		UpdatedAt:           now,
-		Version:             "2.1.294",
+		Version:             "2.1.295",
 		PeerProtocol:        peerProtoVersion, // Onr — real peer-protocol version gate
 		PeerFeatures:        peerFeatures(),
 		PidDomain:           pidDomain(),

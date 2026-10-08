@@ -473,7 +473,7 @@ func (c *Client) handshake() error {
 				},
 			},
 		},
-		"clientInfo": map[string]string{"name": "claude-go", "version": "2.1.294"},
+		"clientInfo": map[string]string{"name": "claude-go", "version": "2.1.295"},
 	}, &initRes)
 	if err != nil {
 		return fmt.Errorf("mcp %s initialize: %w", c.Name, err)

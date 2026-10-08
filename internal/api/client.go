@@ -20,7 +20,7 @@ import (
 	"claude-go/internal/config"
 )
 
-const Version = "2.1.294"
+const Version = "2.1.295"
 
 // betaFlags — real 2.1.294's base anthropic-beta list (captured through
 // the mock harness: the 289-era oauth/advisor-tool/advanced-tool-use/

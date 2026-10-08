@@ -314,8 +314,10 @@ func TestAuxStartupSequence(t *testing.T) {
 			if q.class != "auxiliary" {
 				t.Fatalf("quota probe request-class = %q", q.class)
 			}
-			if !strings.Contains(string(q.body), "claude-haiku-4-5") {
-				t.Fatalf("quota probe should use haiku, got %s", q.body)
+			// real probes with the RESOLVED session model (gnt @65597's
+			// model arg e), not a hardcoded haiku
+			if !strings.Contains(string(q.body), `"model"`) {
+				t.Fatalf("quota probe body missing model, got %s", q.body)
 			}
 		case q.method == "POST" && strings.HasPrefix(q.uri, "/api/event_logging/v2/batch"):
 			sawBatch = true
