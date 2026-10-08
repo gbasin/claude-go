@@ -132,7 +132,10 @@ type Request struct {
 	Diagnostics  json.RawMessage `json:"diagnostics,omitempty"`
 	Thread       json.RawMessage `json:"thread,omitempty"`
 	OutputConfig json.RawMessage `json:"output_config,omitempty"`
-	Stream       bool            `json:"stream"`
+	// Speed is real's top-level request field — "fast" when fast mode is
+	// on (mod_0386 spreads {speed} directly, not inside output_config)
+	Speed  string `json:"speed,omitempty"`
+	Stream bool   `json:"stream"`
 
 	// Class overrides x-claude-code-request-class (default "main") —
 	// real uses "compaction", "auxiliary", "subagent", etc.

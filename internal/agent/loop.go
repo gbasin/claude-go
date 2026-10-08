@@ -209,9 +209,6 @@ func (l *Loop) buildRequest() *api.Request {
 	}
 	if isXHighModel(l.Model) {
 		oc["effort"] = effort
-		if l.FastMode {
-			oc["speed"] = "fast"
-		}
 		if l.CorrelationID != "" {
 			oc["correlation_id"] = l.CorrelationID // real sends it inside output_config
 		}
@@ -303,6 +300,9 @@ func (l *Loop) buildRequest() *api.Request {
 		// alongside the message-threads beta (captured on haiku -p turn)
 		Thread: l.threadField(),
 		ExtraBody: extraBodyFields(),
+		// real spreads {speed:"fast"} at request TOP level — not inside
+		// output_config (mod_0386 Fl assembly)
+		Speed: map[bool]string{true: "fast"}[l.FastMode],
 	}
 }
 
