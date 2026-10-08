@@ -801,6 +801,13 @@ func main() {
 	}
 	loop.SessionStartSource = "startup"
 	tools.SetPeerPermMode(func() string { return loop.PermMode })
+	// TeammateIdle hook fires when an admitted peer idle/exited notice
+	// lands (real's per-teammate idle hook)
+	tools.SetPeerIdleHook(func(from string) {
+		loop.RunHookEvent(hooks.TeammateIdle, map[string]any{
+			"teammate_name": from, "team_name": "",
+		})
+	})
 	tools.RegisterSession(sessionID, cwd, "")
 	// interactive cli only — real's -p wire shows no title/walk-away
 	// calls (verified against captures)

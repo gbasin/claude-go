@@ -3,6 +3,7 @@ package tools
 
 import (
 	"claude-go/internal/config"
+	"claude-go/internal/hooks"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -78,6 +79,10 @@ type Context struct {
 	Discovered map[string]bool
 	// AllowedTools restricts the wire surface (--tools) — nil offers all.
 	AllowedTools []string
+	// FireHook runs a hooks event from inside a tool exec (TaskCreated,
+	// WorktreeCreate/Remove fire from tool bodies in real). Nil-safe:
+	// callers no-op when unset.
+	FireHook func(ev hooks.Event, extra map[string]any) hooks.Result
 }
 
 type readState struct {
