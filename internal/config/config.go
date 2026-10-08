@@ -3,10 +3,13 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -142,6 +145,37 @@ func Load(cwd string) *Settings {
 		}
 	}
 	return merged
+}
+
+var deviceIDRe = regexp.MustCompile(`^[a-f0-9]{64}$`)
+
+// DeviceID returns the stable per-install device id — real's sI()
+// (mod_0137): userID in ~/.claude.json when it's 64-hex, else a fresh
+// random 32-byte hex written back to userID.
+func DeviceID() string {
+	home, _ := os.UserHomeDir()
+	p := filepath.Join(home, ".claude.json")
+	var m map[string]any
+	b, _ := os.ReadFile(p)
+	if len(b) > 0 {
+		json.Unmarshal(b, &m)
+	}
+	if m == nil {
+		m = map[string]any{}
+	}
+	if v, ok := m["userID"].(string); ok && deviceIDRe.MatchString(v) {
+		return v
+	}
+	g := make([]byte, 32)
+	if _, err := rand.Read(g); err != nil {
+		return ""
+	}
+	id := hex.EncodeToString(g)
+	m["userID"] = id
+	if out, err := json.Marshal(m); err == nil {
+		os.WriteFile(p, out, 0o644)
+	}
+	return id
 }
 
 // Account reads account info from ~/.claude.json.
