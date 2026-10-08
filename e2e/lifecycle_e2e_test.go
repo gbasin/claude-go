@@ -196,6 +196,7 @@ func TestInterruptMidTurn(t *testing.T) {
 // answering 1 exits plan mode and the tool result reports it.
 func TestExitPlanModeApproval(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
 
 	// ExitPlanMode is deferred — ToolSearch loads its schema first
@@ -236,6 +237,7 @@ func TestSessionEndHook(t *testing.T) {
 // targets e2e — HTTP is upgraded to HTTPS and private IPs are rejected.
 func TestWebFetchPrivateRefusal(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	// WebFetch is deferred — ToolSearch loads its schema in the same turn
 	r := s.run(t, "--mock", "-p",
 		`calls:[{"name":"ToolSearch","input":{"query":"select:WebFetch"}},`+
@@ -406,6 +408,7 @@ func TestResumePickerInteractive(t *testing.T) {
 // web_search_20250305 tool with max_uses and domain filters intact.
 func TestWebSearchBackend(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	recDir := filepath.Join(t.TempDir(), "reqs")
 	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + recDir},
 		60*time.Second, "--mock", "-p",
@@ -464,6 +467,7 @@ func TestWebSearchBackend(t *testing.T) {
 // tool per session — the second call gets real's budget refusal text.
 func TestWebSearchBudget(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	r := s.runEx(t, []string{"CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION=1"},
 		60*time.Second, "--mock", "-p",
 		`calls:[{"name":"ToolSearch","input":{"query":"select:WebSearch"}},`+
@@ -537,6 +541,7 @@ func TestCustomSlashCommand(t *testing.T) {
 // tool references instead of loading schemas.
 func TestToolSearchKeyword(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	r := s.run(t, "--mock", "-p",
 		`tool:ToolSearch {"query":"notebook"}`,
 		"--permission-mode", "bypassPermissions",

@@ -353,7 +353,7 @@ func (c *Client) handshake() error {
 	err := c.call(ctx, "initialize", map[string]any{
 		"protocolVersion": ProtocolVersion,
 		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]string{"name": "claude-go", "version": "2.1.292"},
+		"clientInfo":      map[string]string{"name": "claude-go", "version": "2.1.294"},
 	}, &initRes)
 	if err != nil {
 		return fmt.Errorf("mcp %s initialize: %w", c.Name, err)

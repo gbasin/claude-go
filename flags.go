@@ -108,7 +108,7 @@ func stubName(flag string) string {
 }
 
 func parseCLI(args []string) *cliOpts {
-	o := &cliOpts{outFormat: "text", permMode: "default"}
+	o := &cliOpts{outFormat: "text", permMode: "auto"}
 
 	valueFlags := map[string]func(string){
 		"--model":           func(v string) { o.model = v },

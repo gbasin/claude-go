@@ -30,15 +30,29 @@ import (
 	"claude-go/internal/api"
 )
 
+// Hit is one observed HTTP request — method, path?query, response status.
+// The diff harness diffs real-vs-go request sequences, not just bodies.
+type Hit struct {
+	Method string
+	Path   string
+	Status int
+}
+
 type Server struct {
 	seq atomic.Int64
 	*http.Server
 	Addr     string
 	Requests atomic.Int64
 	LastBody []byte
-	// Bodies records every request body in order — golden-diff inspection.
+	// Bodies records every /v1/messages request body in order —
+	// golden-diff inspection.
 	Bodies [][]byte
-	mu     sync.Mutex
+	// Headers records the request headers alongside Bodies (golden
+	// captures carry the full header set real sends).
+	Headers []http.Header
+	// Hits records every request (any path) in order.
+	Hits []Hit
+	mu   sync.Mutex
 }
 
 // Start launches the mock on 127.0.0.1:0 and returns it.
@@ -56,10 +70,40 @@ func StartOn(addr string) (*Server, error) {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"type":"error","error":{"type":"not_found_error","message":"unknown path"}}`, 404)
 	})
-	s.Server = &http.Server{Handler: mux}
+	// record every request's method/path/status; CLAUDE_GO_MOCK_LOG=1 also
+	// prints them to stderr (useful when driving real claude via mockd)
+	s.Server = &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sw := &statusWriter{ResponseWriter: w, status: 200}
+		mux.ServeHTTP(sw, r)
+		h := Hit{Method: r.Method, Path: r.URL.RequestURI(), Status: sw.status}
+		s.mu.Lock()
+		s.Hits = append(s.Hits, h)
+		s.mu.Unlock()
+		if os.Getenv("CLAUDE_GO_MOCK_LOG") != "" {
+			fmt.Fprintf(os.Stderr, "mock: %s %s -> %d\n", h.Method, h.Path, h.Status)
+		}
+	})}
 	go s.Serve(ln)
 	s.Addr = "http://" + ln.Addr().String()
 	return s, nil
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// Flush forwards http.Flusher so SSE streaming still works through the
+// status-recording wrapper.
+func (w *statusWriter) Flush() {
+	if fl, ok := w.ResponseWriter.(http.Flusher); ok {
+		fl.Flush()
+	}
 }
 
 func writeErr(w http.ResponseWriter, code int, typ, msg string) {
@@ -84,6 +128,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	s.LastBody = raw
 	s.mu.Lock()
 	s.Bodies = append(s.Bodies, append([]byte{}, raw...))
+	s.Headers = append(s.Headers, r.Header.Clone())
 	n := len(s.Bodies)
 	s.mu.Unlock()
 	// CLAUDE_GO_MOCK_RECORD=<dir>: dump each request body — the golden

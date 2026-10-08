@@ -131,7 +131,7 @@ func (c *Client) StartupTraffic(ctx context.Context, model string) {
 		return // oauth-lane endpoints only (same gate as EvalCheck)
 	}
 	if model == "" {
-		model = "claude-fable-5-1"
+		model = "claude-opus-5-5"
 	}
 	ctx, cancel := context.WithTimeout(ctx, auxTotalBudget)
 	defer cancel()
@@ -464,7 +464,7 @@ func (c *Client) LogSessionStart(ctx context.Context, model string, interactive 
 		return
 	}
 	if model == "" {
-		model = "claude-fable-5-1"
+		model = "claude-opus-5-5"
 	}
 	ctx, cancel := context.WithTimeout(ctx, auxReqTimeout)
 	defer cancel()

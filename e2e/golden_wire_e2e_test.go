@@ -35,7 +35,7 @@ type wireCapture struct {
 }
 
 func TestGoldenRequestParity(t *testing.T) {
-	gb, err := os.ReadFile("testdata/realwire_print_fable.json")
+	gb, err := os.ReadFile("testdata/realwire_print_294.json")
 	if err != nil {
 		t.Skip("no golden capture")
 	}
@@ -136,11 +136,10 @@ func TestGoldenRequestParity(t *testing.T) {
 		t.Fatalf("diagnostics %s vs %s", ours.Diagnostics, golden.Body.Diagnostics)
 	}
 	// the headers real sends on every main request must exist in the golden
+	// (2.1.294 set — the 289-era request-identity headers are gone)
 	for _, must := range []string{
 		"anthropic-beta", "anthropic-version", "x-app",
 		"x-stainless-runtime", "x-claude-code-session-id",
-		"x-claude-code-prompt-id", "x-client-request-id",
-		"anthropic-dispatch-id", "x-claude-code-request-class",
 	} {
 		if _, ok := golden.Headers[must]; !ok {
 			t.Fatalf("golden missing expected header %q", must)
@@ -152,7 +151,7 @@ func TestGoldenRequestParity(t *testing.T) {
 // [user, sys-string hook ctx, asst tool_use+cc, user tool_result,
 // sys total_tokens+cc, sys-string parallel instruction].
 func TestGoldenToolLoopParity(t *testing.T) {
-	gb, err := os.ReadFile("testdata/realwire_toolloop_fable.json")
+	gb, err := os.ReadFile("testdata/realwire_toolloop_294.json")
 	if err != nil {
 		t.Skip("no golden capture")
 	}
