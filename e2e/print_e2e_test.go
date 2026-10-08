@@ -205,6 +205,7 @@ func TestDisallowedTools(t *testing.T) {
 // "requires interactive" error in -p.
 func TestPlanToolsNonInteractive(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	for _, tool := range []string{"EnterPlanMode", "ExitPlanMode"} {
 		r := s.run(t, "--mock", "-p",
 			`calls:[{"name":"ToolSearch","input":{"query":"select:`+tool+`"}},`+

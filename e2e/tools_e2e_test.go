@@ -87,6 +87,7 @@ func TestImageRead(t *testing.T) {
 // TestLSPGraceful: LSP on an extension with no server → error result, not a crash.
 func TestLSPGraceful(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	r := s.run(t, "--mock", "-p",
 		`calls:[{"name":"ToolSearch","input":{"query":"select:LSP"}},`+
 			`{"name":"LSP","input":{"operation":"diagnostics","filePath":"x.unknownext"}}]`,
@@ -104,6 +105,7 @@ func TestLSPGraceful(t *testing.T) {
 // TestCron: CronCreate registers a session job; CronList shows it.
 func TestCron(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	r := s.run(t, "--mock", "-p",
 		`calls:[{"name":"ToolSearch","input":{"query":"select:CronCreate,CronList"}},`+
 			`{"name":"CronCreate","input":{"cron":"*/5 * * * *","prompt":"tick-e2e"}},`+
@@ -124,6 +126,7 @@ func TestCron(t *testing.T) {
 // TestMonitor: Monitor launches a background task.
 func TestMonitor(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	r := s.run(t, "--mock", "-p",
 		`calls:[{"name":"ToolSearch","input":{"query":"select:Monitor"}},`+
 			`{"name":"Monitor","input":{"command":"echo hi","description":"e2e monitor"}}]`,

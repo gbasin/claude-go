@@ -139,7 +139,7 @@ func TestInteractiveBanner(t *testing.T) {
 	// compact banner (571b571) matches real 2.1.289: mascot + version +
 	// model line — "Claude Code v<ver>" and the model display name
 	contains(t, out, "Claude Code", "banner")
-	contains(t, out, "Fable", "model line")
+	contains(t, out, "Opus", "model line")
 	if !utf8OK(out) {
 		t.Fatalf("output is not valid UTF-8")
 	}
@@ -185,10 +185,11 @@ func TestPermissionPrompt(t *testing.T) {
 }
 
 // TestPermissionDeny: answering "4" (No — last option in real's list)
-// declines the tool.
+// declines the tool. Manual mode — real 294 defaults to auto, which
+// doesn't show the numbered prompt.
 func TestPermissionDeny(t *testing.T) {
 	s := newSession(t)
-	p := startREPL(t, s)
+	p := startREPL(t, s, "--permission-mode", "default")
 	p.send(`tool:Bash {"command":"echo deny-marker"}` + "\r")
 	p.waitFor("Do you want to proceed?", 30*time.Second)
 	// interactive denial renders "Permission for this tool use was denied

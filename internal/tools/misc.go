@@ -44,6 +44,7 @@ type agentIn struct {
 	Prompt          string `json:"prompt"`
 	SubagentType    string `json:"subagent_type"`
 	Model           string `json:"model"`
+	Effort          string `json:"effort"`
 	RunInBackground *bool  `json:"run_in_background"`
 	Isolation       string `json:"isolation"`
 }
@@ -73,7 +74,7 @@ func execAgent(c *Context, raw json.RawMessage) Result {
 		}
 		sub = c.cloneForWorktree(worktreeSession.wtPath)
 	}
-	return c.Agent.RunAgent(sub, in.Description, in.Prompt, st, in.Model, bg)
+	return c.Agent.RunAgent(sub, in.Description, in.Prompt, st, in.Model, in.Effort, bg)
 }
 
 // ---------- Skill ----------
@@ -204,11 +205,11 @@ func execSkill(c *Context, raw json.RawMessage) Result {
 		background := truthy(fm["background"])
 		var res Result
 		if xr, ok := c.Agent.(interface {
-			RunAgentAllowed(*Context, string, string, string, string, bool, []string) Result
+			RunAgentAllowed(*Context, string, string, string, string, string, bool, []string) Result
 		}); ok {
-			res = xr.RunAgentAllowed(c, desc, prompt, agentType, fm["model"], background, allowed)
+			res = xr.RunAgentAllowed(c, desc, prompt, agentType, fm["model"], fm["effort"], background, allowed)
 		} else {
-			res = c.Agent.RunAgent(c, desc, prompt, agentType, fm["model"], background)
+			res = c.Agent.RunAgent(c, desc, prompt, agentType, fm["model"], fm["effort"], background)
 		}
 		if res.IsError {
 			return res

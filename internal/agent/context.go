@@ -36,6 +36,7 @@ const (
 )
 
 var (
+	ephemeral         = &api.CacheControl{Type: "ephemeral"}
 	ephemeral1h       = &api.CacheControl{Type: "ephemeral", TTL: "1h"}
 	ephemeral1hGlobal = &api.CacheControl{Type: "ephemeral", TTL: "1h", Scope: "global"}
 )
@@ -64,28 +65,26 @@ func SystemBlocks(entrypoint string, cwd, model, appendPrompt string, extra, ses
 	// cc_prompt_id = the prompt uuid (== x-claude-code-prompt-id),
 	// cc_turn_origin = sdk|cli, cc_prompt_index = 0-based prompt count,
 	// cc_turn_index = 1-based request count this prompt
-	origin := "sdk"
-	if entrypoint == "cli" {
-		origin = "cli"
-	}
 	out := []api.SystemBlock{
+		// real 294's billing line is slim: version+suffix+entrypoint only
+		// (the cch/prompt_id/turn fields from 2.1.289 were dropped).
 		{Type: "text", Text: fmt.Sprintf(
-			"x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s; cch=%s; cc_prompt_id=%s; cc_turn_origin=%s; cc_prompt_index=%d; cc_turn_index=%d;%s",
-			version(), ccVersionSuffix(bill.FirstPrompt), entrypoint, cchHash(bill.ReqSeed), bill.PromptID, origin, bill.PromptIndex, bill.TurnIndex, workloadTag())},
+			"x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s;%s",
+			version(), ccVersionSuffix(bill.FirstPrompt), entrypoint, workloadTag())},
 	}
 	ident := identityCLI
 	if entrypoint != "cli" {
 		ident = identitySDK
 	}
-	// real's wire layout (captured): identity block carries NO
-	// cache_control; the main prompt gets {ephemeral,1h,scope:global}
-	out = append(out, api.SystemBlock{Type: "text", Text: ident})
+	// real 294: identity + main prompt both carry {type:"ephemeral"} —
+	// the 1h-ttl/global-scope markers from 2.1.289 are gone.
+	out = append(out, api.SystemBlock{Type: "text", Text: ident, CacheControl: ephemeral})
 
 	main := systemMain
 	if appendPrompt != "" {
 		main += "\n\n" + appendPrompt
 	}
-	out = append(out, api.SystemBlock{Type: "text", Text: main, CacheControl: ephemeral1hGlobal})
+	out = append(out, api.SystemBlock{Type: "text", Text: main, CacheControl: ephemeral})
 
 	// sys[3] — the session block (captured): model-conditional head +
 	// shared sections + cli extras. Fable gets the long variant (identity,
@@ -137,10 +136,12 @@ func SystemBlocks(entrypoint string, cwd, model, appendPrompt string, extra, ses
 		sess = strings.ReplaceAll(sess, "{{MCP_BLOCKS}}", "")
 		sess = strings.TrimRight(sess, "\n")
 		sess += mcpb.String()
-		out = append(out, api.SystemBlock{Type: "text", Text: sess, CacheControl: ephemeral1h})
+		// real 294 folds the session guidance into the main prompt
+		// block — no separate sys[3] on the wire.
+		out[len(out)-1].Text += "\n\n" + sess
 	}
 	for _, s := range extra {
-		out = append(out, api.SystemBlock{Type: "text", Text: s, CacheControl: ephemeral1h})
+		out = append(out, api.SystemBlock{Type: "text", Text: s, CacheControl: ephemeral})
 	}
 	return out
 }
@@ -171,7 +172,7 @@ func ClaudeMDContext(cwd string) string {
 		strings.TrimRight(b.String(), "\n") + "\n"
 }
 
-func FirstUserMessage(prompt, cwd, email string, memoryPaused bool) api.Message {
+func FirstUserMessage(prompt, cwd, email string, memoryPaused bool, model string) api.Message {
 	var blocks []api.ContentBlock
 	var claudeMD strings.Builder
 	for _, p := range claudeMDPaths(cwd) {
@@ -205,6 +206,8 @@ func FirstUserMessage(prompt, cwd, email string, memoryPaused bool) api.Message 
 			"the user's message. It describes the user's own account and workspace, so they don't " +
 			"need it reported back.\n</system-reminder>\n"})
 	}
+	blocks = append(blocks, api.ContentBlock{Type: "text",
+		Text: "<system-reminder>\n" + attributionReminder(cwd, model) + "\n</system-reminder>\n"})
 	blocks = append(blocks, expandUserImages(prompt)...)
 	return api.BlocksMessage("user", blocks)
 }
@@ -355,9 +358,7 @@ func Safeguards(permMode, cwd string, rules map[string][]string) json.RawMessage
 		}
 		return out
 	}
-	s := map[string]any{
-		"type": "dangerous_tool_use",
-		"classifier_context": map[string]any{
+	cc := map[string]any{
 			"v": 1, "permission_mode": permMode,
 			"platform": platformName(), "live_cwd": cwdp, "home_dir": config.Home(),
 			"rule_roots": map[string]string{
@@ -371,20 +372,29 @@ func Safeguards(permMode, cwd string, rules map[string][]string) json.RawMessage
 				"additional": []any{}, "network": []any{},
 				"block_reads_outside_working_directories": false,
 			},
-			"rules":              safeguardRulesMap(rules, mkRules),
-			"dropped":            safeguardDropped(rules, mkRules),
-			"auto_mode":          permMode == "auto",
-			"git_state":          gitState(cwdp),
+			"rules":    safeguardRulesMap(rules, mkRules),
+			"git_state": gitState(cwdp),
+			// real 294: auto_mode is an object of rule buckets, not a
+			// boolean; classify_all_shell + holdback are false by default;
+			// "dropped" is omitted when empty
+			"auto_mode": map[string]any{
+				"allow": []any{}, "soft_deny": []any{},
+				"hard_deny": []any{}, "environment": []any{},
+			},
 			"is_remote_mode":     false,
 			"restricted":         false,
-			"classify_all_shell": permMode == "auto",
-			// real's tail fields (captured 2.1.289)
-			"artifact_consent_holdback": true,
+			"classify_all_shell": false,
+			"artifact_consent_holdback": false,
 			"case_insensitive_paths":    false,
 			"user_identity":             os.Getenv("USER"),
-		},
 	}
-	b, _ := json.Marshal([]any{s})
+	if d := safeguardDropped(rules, mkRules); d != nil {
+		cc["dropped"] = d
+	}
+	b, _ := json.Marshal([]any{map[string]any{
+		"type":               "dangerous_tool_use",
+		"classifier_context": cc,
+	}})
 	return b
 }
 
@@ -395,7 +405,7 @@ func platformName() string {
 	return runtime.GOOS
 }
 
-func version() string { return "2.1.292" }
+func version() string { return "2.1.294" }
 
 // BillingMeta carries the per-turn values the billing sys[0] needs.
 type BillingMeta struct {

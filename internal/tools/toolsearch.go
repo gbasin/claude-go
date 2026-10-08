@@ -140,20 +140,37 @@ func toolSearchDescription() string {
 // "standard"|"tst"|"tst-auto" from ENABLE_TOOL_SEARCH + backend capability;
 // we only implement the client-side lane, so an explicit falsy value turns
 // deferral off and everything ships inline.
-// Default on: live wire capture (2.1.289, eval 404'd by the mock) shows
-// real shipping 12 tools — core set + ToolSearch + DeferredToolPlaceholder —
-// with MCP/extended tools deferred behind tool search. An explicit falsy
+// Real defaults to "standard" (no deferral) when the backend capability
+// probe fails — the 2.1.294 harness run ships all 28 tools inline. The
+// deferred lane needs an explicit ENABLE_TOOL_SEARCH opt-in (or backend
+// advertisement, which we never receive). An explicit falsy
 // ENABLE_TOOL_SEARCH still disables the lane.
 func toolSearchEnabled() bool {
 	v := os.Getenv("ENABLE_TOOL_SEARCH")
 	if v == "" {
-		return true
+		// real's PMe() (mod_0229.js) resolves "standard" when the backend
+		// capability probe fails — every mock-backed run, verified by the
+		// diff harness (real ships no ToolSearch). tst requires an explicit
+		// env opt-in or a backend advertisement we don't receive.
+		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "0", "false", "no", "off", "standard":
 		return false
 	}
 	return true
+}
+
+// hiddenInStandard is the set real keeps OFF the wire in standard mode —
+// deferred-pool-only tools have no ToolSearch door there, and the folded
+// legacy names (LS/MultiEdit/NotebookRead) aren't real tools in 294 at
+// all. Verified against the 2.1.294 -p wire via the diff harness.
+var hiddenInStandard = map[string]bool{
+	"DesignSync": true, "Glob": true, "Grep": true,
+	"ListMcpResourcesTool": true, "LS": true, "LSP": true,
+	"Monitor": true, "MultiEdit": true, "NotebookRead": true,
+	"PushNotification": true, "ReadMcpResourceDirTool": true,
+	"ReadMcpResourceTool": true, "RemoteTrigger": true, "TodoWrite": true,
 }
 
 // IsDeferredTool mirrors h() in mod_0314.js: MCP tools always defer;
@@ -247,19 +264,42 @@ var subagentTools = []string{
 func RequestDefs(c *Context) []api.Tool {
 	out := requestDefs(c)
 	// --advisor <model>: real's server-side advisor tool rides at the
-	// tail of tools[] ({type:"advisor_20260301"} — mod_0386.js Mvt)
-	if m := os.Getenv("CLAUDE_GO_ADVISOR"); m != "" {
-		raw, _ := json.Marshal(map[string]any{
-			"type": "advisor_20260301", "name": "advisor", "model": m})
-		out = append(out, api.Tool{Raw: raw})
+	// tail of tools[] ({type:"advisor_20260301"} — mod_0386.js Mvt).
+	// It only ships when an advisor model is configured — the builtin
+	// registration exists for dispatch, not the wire.
+	if m := advisorModelFor(c); m != "" && !advisorOnWire(out) {
+		out = append(out, api.Tool{Raw: advisorRaw(m)})
 	}
 	return out
 }
 
-func requestDefs(c *Context) []api.Tool {
-	if !toolSearchEnabled() {
-		return Defs()
+// advisorModelFor resolves the configured advisor model: the loop's
+// pick (settings/--advisor/CLAUDE_GO_ADVISOR → Context.AdvisorModel)
+// then the env seam directly.
+func advisorModelFor(c *Context) string {
+	if c != nil && c.AdvisorModel != "" {
+		return c.AdvisorModel
 	}
+	return os.Getenv("CLAUDE_GO_ADVISOR")
+}
+
+func advisorOnWire(out []api.Tool) bool {
+	for _, t := range out {
+		if t.Name == "advisor" {
+			return true
+		}
+	}
+	return false
+}
+
+func advisorRaw(model string) json.RawMessage {
+	raw, _ := json.Marshal(map[string]any{
+		"type": "advisor_20260301", "name": "advisor", "model": model})
+	return raw
+}
+
+func requestDefs(c *Context) []api.Tool {
+	search := toolSearchEnabled()
 	var out []api.Tool
 	var deferred []string
 	sub := c.Subagent
@@ -268,14 +308,31 @@ func requestDefs(c *Context) []api.Tool {
 		allowed[n] = true
 	}
 	for _, t := range All() {
+		if t.Def.Name == "advisor" && advisorModelFor(c) == "" {
+			continue // wire-gated: server block only when configured
+		}
 		if len(allowed) > 0 && !allowed[t.Def.Name] && t.Def.Name != "ToolSearch" {
 			continue
 		}
-		if IsDeferredTool(t) && !c.IsDiscovered(t.Def.Name) {
+		if !search && hiddenInStandard[t.Def.Name] {
+			continue
+		}
+		if search && IsDeferredTool(t) && !c.IsDiscovered(t.Def.Name) {
 			deferred = append(deferred, t.Def.Name)
 			continue
 		}
+		if t.Def.Name == "advisor" {
+			d := t.Def
+			d.Raw = advisorRaw(advisorModelFor(c))
+			out = append(out, d)
+			continue
+		}
 		out = append(out, t.Def)
+	}
+	// subagents get real's trimmed surface with SubagentHandback —
+	// independent of the deferral lane (captured in real's subagent wire)
+	if sub {
+		return subagentDefs(c, out, deferred)
 	}
 	if len(deferred) == 0 {
 		return out
@@ -295,26 +352,46 @@ func requestDefs(c *Context) []api.Tool {
 			break
 		}
 	}
-	// subagents get real's trimmed surface with SubagentHandback
-	if sub {
-		var sOut []api.Tool
-		seen := map[string]bool{}
-		for _, n := range subagentTools {
-			switch n {
-			case deferredPlaceholderName:
-				if len(deferred) > 0 {
-					sOut = append(sOut, ph)
-				}
-			default:
+	return out
+}
+
+// subagentDefs projects the parent's wire set onto real's trimmed
+// subagent surface (captured: subagents get a fixed core + SubagentHandback;
+// DeferredToolPlaceholder only when the deferral lane is on, advisor only
+// when configured).
+func subagentDefs(c *Context, parent []api.Tool, deferred []string) []api.Tool {
+	var sOut []api.Tool
+	seen := map[string]bool{}
+	for _, n := range subagentTools {
+		switch n {
+		case deferredPlaceholderName:
+			if len(deferred) > 0 {
+				sOut = append(sOut, api.Tool{
+					Name:         deferredPlaceholderName,
+					Description:  deferredPlaceholderDesc,
+					InputSchema:  json.RawMessage(`{"type":"object","properties":{}}`),
+					DeferLoading: true,
+				})
+			}
+		case "advisor":
+			if m := advisorModelFor(c); m != "" {
+				sOut = append(sOut, api.Tool{Raw: advisorRaw(m)})
+			}
+		case "ToolSearch":
+			if toolSearchEnabled() {
 				if t, ok := registry[n]; ok {
 					sOut = append(sOut, t.Def)
 					seen[n] = true
 				}
 			}
+		default:
+			if t, ok := registry[n]; ok {
+				sOut = append(sOut, t.Def)
+				seen[n] = true
+			}
 		}
-		return sOut
 	}
-	return out
+	return sOut
 }
 
 // --- the ToolSearch call (uGn.create.call in mod_0386.js) ---

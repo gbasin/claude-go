@@ -73,6 +73,7 @@ func TestListAgents(t *testing.T) {
 // agent's inbox.
 func TestSendMessage(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	r := s.run(t, "--mock", "-p",
 		`calls:[{"name":"ToolSearch","input":{"query":"select:SendMessage"}},`+
 			`{"name":"Agent","input":{"description":"e2e-mailbox","prompt":"linger"}},`+
@@ -88,6 +89,7 @@ func TestSendMessage(t *testing.T) {
 // TestCronList: CronList (deferred) reports the empty schedule.
 func TestCronList(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	r := s.run(t, "--mock", "-p",
 		`calls:[{"name":"ToolSearch","input":{"query":"select:CronList"}},`+
 			`{"name":"CronList","input":{}}]`,
@@ -103,6 +105,7 @@ func TestCronList(t *testing.T) {
 // the notebook read, then replace updates the cell source on disk.
 func TestNotebookEdit(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	nb := s.writeFile("nb.ipynb",
 		`{"cells":[{"id":"c1","cell_type":"code","source":"print(1)","metadata":{},"outputs":[],"execution_count":null}],"metadata":{},"nbformat":4,"nbformat_minor":5}`)
 
@@ -124,6 +127,7 @@ func TestNotebookEdit(t *testing.T) {
 // inside the repo; ExitWorktree keep returns to the original cwd.
 func TestWorktreeRoundTrip(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	// tool needs a git repo
 	git := func(args ...string) {
 		out, err := exec.Command("git", append([]string{"-C", s.cwd}, args...)...).CombinedOutput()
@@ -158,6 +162,7 @@ func TestWorktreeRoundTrip(t *testing.T) {
 // exits after the turn.
 func TestEndConversation(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
 	// deferred — ToolSearch loads the schema first
 	p.sendUntilEchoed(t,
@@ -188,6 +193,7 @@ func TestAdvisorTool(t *testing.T) {
 // CronList enumerates it.
 func TestCronCreateList(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	r := s.run(t, "--mock", "-p",
 		`calls:[{"name":"ToolSearch","input":{"query":"select:CronCreate,CronList"}},`+
 			`{"name":"CronCreate","input":{"cron":"0 9 * * *","prompt":"morning check"}},`+
@@ -204,6 +210,7 @@ func TestCronCreateList(t *testing.T) {
 // stopped by TaskStop (deferred tool).
 func TestTaskStopLive(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	r := s.run(t, "--mock", "-p",
 		`calls:[{"name":"ToolSearch","input":{"query":"select:TaskStop"}},`+
 			`{"name":"Bash","input":{"command":"sleep 60","run_in_background":true}},`+
@@ -233,6 +240,7 @@ func TestReadNotifications(t *testing.T) {
 // read-only-mode style and the file is never created.
 func TestPlanModeBlocksWrite(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
 
 	p.sendUntilEchoed(t,
@@ -381,6 +389,7 @@ func TestAtMention(t *testing.T) {
 // stdout becomes task-notifications.
 func TestMonitorArm(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	r := s.run(t, "--mock", "-p",
 		`calls:[{"name":"ToolSearch","input":{"query":"select:Monitor"}},`+
 			`{"name":"Monitor","input":{"command":"echo mon-e2e","timeout_ms":5000}}]`,
@@ -396,6 +405,7 @@ func TestMonitorArm(t *testing.T) {
 // sandbox may deny, either result is a clean surface).
 func TestPushNotification(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	r := s.run(t, "--mock", "-p",
 		`calls:[{"name":"ToolSearch","input":{"query":"select:PushNotification"}},`+
 			`{"name":"PushNotification","input":{"message":"e2e ping"}}]`,
@@ -444,8 +454,8 @@ func TestModelPicker(t *testing.T) {
 	p.waitFor("❯", 30*time.Second)
 	p.sendUntilEchoed(t, "/model\r", "❯ /model", 8)
 	p.waitFor("✔", 15*time.Second)
-	// cursor starts on the active model (fable); ↑×2 reaches Sonnet
-	p.send("\x1b[A\x1b[A\r")
+	// cursor starts on the active model (opus); ↓ reaches Sonnet
+	p.send("\x1b[B\r")
 	p.waitFor("model → claude-sonnet-5-5", 15*time.Second)
 
 	p.sendUntilEchoed(t, "hi\r", "❯ hi", 8)
@@ -473,6 +483,7 @@ func TestModelPicker(t *testing.T) {
 // server, design service) is absent.
 func TestRemainingToolsDispatch(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	// deferred tools need select first; harmless to select all
 	r := s.run(t, "--mock", "-p",
 		`calls:[{"name":"ToolSearch","input":{"query":"select:RemoteTrigger,LSP,DesignSync,ArtifactComments,ArtifactData,SendFeedback,SendFeedback,ReadNotifications,ScheduleWakeup"}},`+
@@ -546,6 +557,7 @@ func TestClaudeMDOnWire(t *testing.T) {
 // content search, directory listing all return real results.
 func TestSearchTools(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	s.writeFile("alpha-unique.go", "package x\n// MARKER-GREP-E2E\n")
 	s.writeFile("beta-unique.go", "package x\n")
 
@@ -578,6 +590,7 @@ func TestSearchTools(t *testing.T) {
 // TestMultiEdit: MultiEdit applies ordered find-replace pairs in one call.
 func TestMultiEdit(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	f := s.writeFile("editme.txt", "hello one\nhello two\n")
 	// Read first — Write-family tools require it
 
@@ -600,6 +613,7 @@ func TestMultiEdit(t *testing.T) {
 // TestNotebookRead: NotebookRead returns cell content for an .ipynb file.
 func TestNotebookRead(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	nb := s.writeFile("book.ipynb",
 		`{"cells":[{"cell_type":"code","execution_count":1,`+
 			`"source":["print(1)"],"outputs":[],"metadata":{}}],`+
@@ -617,6 +631,7 @@ func TestNotebookRead(t *testing.T) {
 // through the deferred surface.
 func TestTaskTools(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	// task tools are gated behind CLAUDE_CODE_TASK_TOOLS / tasks.enabled
 	p := s.runPTY(t, []string{"CLAUDE_CODE_TASK_TOOLS=1"},
 		"--mock", "--permission-mode", "bypassPermissions")
@@ -642,6 +657,7 @@ func TestTaskTools(t *testing.T) {
 // TestTodoWrite: TodoWrite manages the checklist — /todos shows it.
 func TestTodoWrite(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
 	p.sendUntilEchoed(t,
 		`calls:[{"name":"ToolSearch","input":{"query":"select:TodoWrite"}},`+
