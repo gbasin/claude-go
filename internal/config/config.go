@@ -3,12 +3,16 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -166,6 +170,44 @@ func Account() (email, accountUUID, deviceID string) {
 		deviceID = v
 	}
 	return email, accountUUID, deviceID
+}
+
+var (
+	userIDRe   = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	userIDMu   sync.Mutex
+	genUserID  string // process-lifetime cache (real's generatedUserID)
+)
+
+// UserID is real's sI() (mod_0137): ~/.claude.json's userID when it's a
+// 64-hex string, else a freshly generated 32-byte-hex id persisted back to
+// the config — the metadata.user_id device_id source.
+func UserID() string {
+	userIDMu.Lock()
+	defer userIDMu.Unlock()
+	home, _ := os.UserHomeDir()
+	p := filepath.Join(home, ".claude.json")
+	var m map[string]any
+	if b, err := os.ReadFile(p); err == nil {
+		_ = json.Unmarshal(b, &m)
+	}
+	if m == nil {
+		m = map[string]any{}
+	}
+	if v, ok := m["userID"].(string); ok && userIDRe.MatchString(v) {
+		return v
+	}
+	if genUserID != "" {
+		return genUserID
+	}
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return ""
+	}
+	id := hex.EncodeToString(raw)
+	genUserID = id
+	m["userID"] = id
+	WriteClaudeJSON(p, m)
+	return id
 }
 
 // OrganizationUUID reads oauthAccount.organizationUuid from ~/.claude.json

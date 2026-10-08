@@ -646,7 +646,8 @@ func main() {
 	loop.PermMode = o.permMode
 	loop.AppendSysP = o.appendSys
 	loop.ToolCtx.Session = sessionID
-	email, acct, dev := config.Account()
+	email, acct, _ := config.Account()
+	dev := config.UserID()
 	loop.User = agent.UserConfig{Email: email, AccountUUID: acct, DeviceID: dev}
 	loop.AddDirs = o.addDirs
 	if o.sysPromptF != "" {
