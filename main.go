@@ -1642,14 +1642,18 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 			}
 		}
 		res := map[string]any{
-			"type":               "result",
-			"subtype":            "success",
-			"is_error":           false,
-			"result":             out.String(),
-			"session_id":         l.Client.SessionID,
-			"duration_ms":        time.Since(start).Milliseconds(),
-			"duration_api_ms":    l.APIDuration().Milliseconds(),
-			"num_turns":          turns,
+			"type":            "result",
+			"subtype":         "success",
+			"is_error":        false,
+			"result":          out.String(),
+			"session_id":      l.Client.SessionID,
+			"duration_ms":     time.Since(start).Milliseconds(),
+			"duration_api_ms": l.APIDuration().Milliseconds(),
+			"num_turns":       turns,
+			// real's result enrichments: request-start latency + first-
+			// token latency + per-model usage context fields
+			"time_to_request_ms": l.TimeToRequest().Milliseconds(),
+			"ttft_ms":            l.TTFT().Milliseconds(),
 			"stop_reason":        resp.StopReason,
 			"total_cost_usd":     l.CostUSD(),
 			"permission_denials": []string{},
