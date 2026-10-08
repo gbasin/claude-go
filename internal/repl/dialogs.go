@@ -149,6 +149,9 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 		width = 120
 	}
 	rule := cyan153 + strings.Repeat("─", width)
+	if name == "ExitPlanMode" {
+		rule = token("planMode") + strings.Repeat("─", width) // plan-colored card (real)
+	}
 	dot := gray239 + strings.Repeat("╌", width)
 
 	// titles + questions are per-tool (captured):
@@ -167,6 +170,8 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 	case "Edit", "MultiEdit":
 		title = "Edit file"
 		question = "Do you want to make this edit to " + bold + fname + unbold + "?"
+	case "ExitPlanMode":
+		title = "Exit plan mode?" // real's plan-colored approval dialog
 	}
 	desc := permDesc(name, input, summary)
 	if desc == "" && isFileTool(name) {
@@ -180,34 +185,68 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 	if l.PermMode != "auto" && !isFileTool(name) {
 		tip = `Tip: auto mode handles these prompts for you — choose "switch to auto mode" below`
 	}
-	// options are per-tool-class (captured):
-	//   Bash:        Yes / always-allow-<grant> / switch-to-auto / No
-	//   file tools:  Yes / switch-to-acceptEdits / No
+	// options are per-tool-class — real 294's rows are input fields:
+	//   Yes (input row, "and tell Claude what to do next"),
+	//   "Yes, and don't ask again for <prefix> in <dir>" (editable
+	//   command prefix), "Yes, and switch to auto mode" (conditional),
+	//   No (input row, "and tell Claude what to do differently").
+	//   file tools: Yes / switch-to-acceptEdits / No
 	alwaysSpec := ruleSuggestion(name, summary)
-	alwaysLabel := alwaysSpec
-	if dir := outsideDir(name, input, l.ToolCtx.CWD); dir != "" {
-		alwaysLabel = "access to " + dir
+	// display form of the suggested rule — strip the Tool(...) wrapper
+	ruleDisp := alwaysSpec
+	if i := strings.IndexByte(alwaysSpec, '('); i >= 0 && strings.HasSuffix(alwaysSpec, ")") {
+		ruleDisp = alwaysSpec[i+1 : len(alwaysSpec)-1]
 	}
 	type opt struct {
-		label  string
-		action string
+		label       string
+		action      string
+		input       string // "feedback" | "prefix" — row carries an editable field
+		placeholder string
+		suffix      string // static text after the field (e.g. " in <dir>")
 	}
 	var opts []opt
-	opts = append(opts, opt{label: "Yes", action: "yes"})
+	opts = append(opts, opt{label: "Yes", action: "yes", input: "feedback",
+		placeholder: "and tell Claude what to do next"})
+	// the project dir shown in "in <dir>" — ~-abbreviated like real's Hn()
+	dirDisp := l.ToolCtx.CWD
+	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(dirDisp, home) {
+		dirDisp = "~" + dirDisp[len(home):]
+	}
+	outside := outsideDir(name, input, l.ToolCtx.CWD)
 	if isFileTool(name) && l.PermMode != "acceptEdits" {
 		// captured: "accept edits (...) commands)" + "(shift+tab)" bold
 		opts = append(opts, opt{
 			label:  "Yes, and switch to " + bold + "accept edits (auto-approve file edits and common file \n      commands)" + unbold + " for this session " + bold + "(shift+tab)" + unbold,
 			action: "acceptedits"})
 	} else if !isFileTool(name) {
-		if alwaysSpec != "" {
-			opts = append(opts, opt{label: fmt.Sprintf("Yes, and always allow %s from this project", alwaysLabel), action: "always"})
+		if outside != "" {
+			opts = append(opts, opt{
+				label:  "Yes, and always allow access to " + outside + " from this project",
+				action: "always"})
+		} else if alwaysSpec != "" {
+			// real: editable-prefix input row — the seed is the suggested
+			// prefix; editing it rewrites the persisted rule
+			opts = append(opts, opt{
+				label:  "Yes, and don't ask again for ",
+				action: "always",
+				input:  "prefix",
+				// real's input placeholder
+				placeholder: "command prefix (e.g., npm run *)",
+				suffix:      bold + " in " + dirDisp + unbold})
 		}
 		if l.PermMode != "auto" {
 			opts = append(opts, opt{label: "Yes, and switch to auto mode" + gray246 + " · auto mode handles these prompts for you" + "\x1b[39m", action: "automode"})
 		}
 	}
-	opts = append(opts, opt{label: "No", action: "no"})
+	opts = append(opts, opt{label: "No", action: "no", input: "feedback",
+		placeholder: "and tell Claude what to do differently"})
+	// per-option input text (feedback / edited prefix)
+	inputs := make([][]rune, len(opts))
+	for i := range opts {
+		if opts[i].input == "prefix" {
+			inputs[i] = []rune(ruleDisp)
+		}
+	}
 
 	sel := 0
 	renderRows := 0
@@ -236,17 +275,25 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 		put(dot)
 		put(" " + question)
 		for i, o := range opts {
+			row := o.label
+			if o.input != "" {
+				if len(inputs[i]) > 0 {
+					row += bold + string(inputs[i]) + unbold
+				} else {
+					row += gray246 + o.placeholder + "\x1b[39m"
+				}
+				row += o.suffix
+			}
 			if i == sel {
-				put(fmt.Sprintf(" %s❯%s %s%d. %s%s%s", cyan153, "\x1b[39m", gray246, i+1, cyan153, o.label, "\x1b[39m"))
+				put(fmt.Sprintf(" %s❯%s %s%d. %s%s%s", cyan153, "\x1b[39m", gray246, i+1, cyan153, row, "\x1b[39m"))
 			} else {
-				put(fmt.Sprintf("   %s%d. %s%s", gray246, i+1, "\x1b[39m", o.label))
+				put(fmt.Sprintf("   %s%d. %s%s", gray246, i+1, "\x1b[39m", row))
 			}
 		}
-		put(" " + gray246 + "Esc to cancel · Tab to amend" + reset)
+		put(" " + gray246 + "Esc to cancel · Tab to next field" + reset)
 		fmt.Print(sb.String())
 	}
 	draw()
-	deadline := time.Now().Add(permAskTimeout)
 	timeout := time.NewTimer(permAskTimeout)
 	defer timeout.Stop()
 	deny := func() (bool, string) {
@@ -257,6 +304,14 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 		}, l.ToolCtx.CWD)
 		return false, ""
 	}
+	denyWith := func(fb string) (bool, string, bool) {
+		hooks.Run(l.Hooks, hooks.PermissionDenied, map[string]any{
+			"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+			"tool_name": name, "tool_input": json.RawMessage(input),
+			"hook_event_name": "PermissionDenied", "permission_mode": l.PermMode,
+		}, l.ToolCtx.CWD)
+		return false, fb, true
+	}
 	for {
 		select {
 		case <-timeout.C:
@@ -266,6 +321,56 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 			if !ok {
 				return false, ""
 			}
+			submit := func() (bool, string, bool) {
+				// returns (allow, feedback, done) — done=false keeps the loop
+				fb := ""
+				if opts[sel].input == "feedback" {
+					fb = strings.TrimSpace(string(inputs[sel]))
+				}
+				switch opts[sel].action {
+				case "yes":
+					dprintln("  ✔ " + title + " approved")
+					return true, fb, true
+				case "no":
+					dprintln("  ✗ No")
+					if fb != "" {
+						return denyWith(fb)
+					}
+					ok, s := deny()
+					return ok, s, true
+				case "automode":
+					l.PermMode = "auto"
+					dprintln("  switched to auto mode — " + title + " approved")
+					return true, fb, true
+				case "acceptedits":
+					l.PermMode = "acceptEdits"
+					dprintln("  switched to accept edits — " + title + " approved")
+					return true, fb, true
+				case "always":
+					p.always[name] = true
+					spec := alwaysSpec
+					if opts[sel].input == "prefix" {
+						// the edited prefix becomes the persisted rule —
+						// empty submits as a plain allow (real's
+						// allowEmptySubmitToCancel)
+						pfx := strings.TrimSpace(string(inputs[sel]))
+						if pfx == "" {
+							return true, "", true
+						}
+						spec = name + "(" + pfx + ")"
+						if !strings.HasSuffix(pfx, ":*") && !strings.HasSuffix(pfx, "*") {
+							spec = name + "(" + pfx + ":*)"
+						}
+					}
+					if outside == "" && spec != "" {
+						addLocalPermissionRule(l.ToolCtx.CWD, spec)
+						dprintf("  %s%s added to permission allowlist%s\n", dim, spec, reset)
+					}
+					return true, fb, true
+				}
+				return false, "", true
+			}
+			_ = submit
 			switch {
 			case k.seq == "[A":
 				if sel > 0 {
@@ -280,29 +385,21 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 				}
 				continue
 			case k.b == '\t':
-				// Tab to amend — edit the tool's primary arg inline
-				// (command / file_path / pattern per tool type), Enter
-				// re-approves
-				field := map[string]string{
-					"Bash": "command", "Write": "file_path", "Edit": "file_path",
-					"MultiEdit": "file_path", "NotebookEdit": "notebook_path",
-					"Read": "file_path", "Glob": "pattern", "Grep": "pattern",
-					"WebFetch": "url",
-				}[name]
-				if field != "" {
-					var m map[string]any
-					json.Unmarshal(input, &m)
-					cur, _ := m[field].(string)
-					if cur == "" {
-						cur = content
-					}
-					if amended := amendCommand(dch, cur, deadline); amended != "" {
-						m[field] = amended
-						input, _ = json.Marshal(m)
-						content = amended
-						draw()
-					}
+				// real: tab = nextField — moves between input rows
+				if sel < len(opts)-1 {
+					sel++
+				} else {
+					sel = 0
 				}
+				draw()
+				continue
+			case k.seq == "[Z": // shift+tab — prevField
+				if sel > 0 {
+					sel--
+				} else {
+					sel = len(opts) - 1
+				}
+				draw()
 				continue
 			case k.b == 0x1b || k.b == 3:
 				dprintln("  Esc — denied")
@@ -311,29 +408,23 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 				sel = int(k.b - '1')
 				fallthrough
 			case k.b == '\r':
-				switch opts[sel].action {
-				case "yes":
-					dprintln("  ✔ " + title + " approved")
-					return true, ""
-				case "no":
-					dprintln("  ✗ No")
-					return deny()
-				case "automode":
-					l.PermMode = "auto"
-					dprintln("  switched to auto mode — " + title + " approved")
-					return true, ""
-				case "acceptedits":
-					l.PermMode = "acceptEdits"
-					dprintln("  switched to accept edits — " + title + " approved")
-					return true, ""
-				case "always":
-					p.always[name] = true
-					if alwaysSpec != "" {
-						addLocalPermissionRule(l.ToolCtx.CWD, alwaysSpec)
-						dprintf("  %s%s added to permission allowlist%s\n", dim, alwaysSpec, reset)
-					}
-					return true, ""
+				if a, fb, done := submit(); done {
+					return a, fb
 				}
+			case (k.b == 0x7f || k.b == 8) && len(inputs[sel]) > 0:
+				inputs[sel] = inputs[sel][:len(inputs[sel])-1]
+				draw()
+				continue
+			case k.r != 0 && k.r >= 32 && k.mod&(modAlt|modCtrl|modCmd) == 0 && opts[sel].input != "":
+				// typing goes into the selected row's input field —
+				// real's rows are editable inputs
+				inputs[sel] = append(inputs[sel], k.r)
+				draw()
+				continue
+			case k.b >= 32 && k.b < 127 && k.mod == 0 && opts[sel].input != "":
+				inputs[sel] = append(inputs[sel], rune(k.b))
+				draw()
+				continue
 			}
 		}
 	}
@@ -381,102 +472,6 @@ func permContent(name string, input json.RawMessage) string {
 		b = []byte(truncRunes(string(b), 200))
 	}
 	return string(b)
-}
-
-// amendCommand lets the user edit the Bash command inline (real's
-// "Tab to amend"); Enter returns the edited text, Esc cancels.
-func amendCommand(dch chan key, cur string, deadline time.Time) string {
-	buf := []rune(cur)
-	pos := len(buf)
-	gray := "\x1b[38;5;246m"
-	dprintf("  %samend command (enter applies, esc cancels):%s\n", gray, reset)
-	for {
-		dprintf("  > %s\r\x1b[K", string(buf))
-		if pos < len(buf) {
-			dprintf("\x1b[%dD", len(buf)-pos)
-		}
-		select {
-		case <-time.After(time.Until(deadline)):
-			return ""
-		case k, ok := <-dch:
-			if !ok {
-				return ""
-			}
-			switch {
-			case k.b == '\r':
-				dprintln()
-				return string(buf)
-			case k.b == 0x1b || k.b == 3:
-				dprintln()
-				return ""
-			case k.seq == "[D":
-				if pos > 0 {
-					pos--
-				}
-			case k.seq == "[C":
-				if pos < len(buf) {
-					pos++
-				}
-			case k.b == 0x7f || k.b == 8:
-				if pos > 0 {
-					buf = append(buf[:pos-1], buf[pos:]...)
-					pos--
-				}
-			case k.r != 0:
-				buf = append(buf[:pos], append([]rune{k.r}, buf[pos:]...)...)
-				pos++
-			}
-		}
-	}
-}
-
-// readFeedbackLine captures the one-line "tell Claude what to do
-// differently" text for option 4. Keys must come from the dialog channel
-// (dch) — reading ks.ch races the turn busy-loop, which is already
-// forwarding every key into dch (verified live: feedback text starved).
-// The auto-deny deadline stays armed — walking away mid-capture denies
-// with no feedback.
-func readFeedbackLine(dch chan key, deadline time.Time) string {
-	dprintf("  %stell Claude what to do differently:%s ", dim, reset)
-	var buf []rune
-	t := time.NewTimer(time.Until(deadline))
-	defer t.Stop()
-	for {
-		select {
-		case <-t.C:
-			dprintf("\n  %s⏵ auto-denied — unattended%s\n", dim, reset)
-			return ""
-		case k, ok := <-dch:
-			if !ok {
-				return ""
-			}
-			switch {
-			case k.b == '\r' || k.b == '\n':
-				dprintln()
-				return strings.TrimSpace(string(buf))
-			case k.b == 0x1b && k.seq == "":
-				dprintln()
-				return ""
-			case k.b == 3:
-				dprintln()
-				return ""
-			case k.b == 0x7f || k.b == 8:
-				if len(buf) > 0 {
-					buf = buf[:len(buf)-1]
-					os.Stdout.WriteString("\b \b")
-				}
-			case k.paste != "":
-				buf = append(buf, []rune(k.paste)...)
-				os.Stdout.WriteString(k.paste)
-			case k.r != 0:
-				buf = append(buf, k.r)
-				os.Stdout.WriteString(string(k.r))
-			case k.b >= 32 && k.b < 127:
-				buf = append(buf, rune(k.b))
-				os.Stdout.WriteString(string(k.b))
-			}
-		}
-	}
 }
 
 // askReason builds the mod_1477 decision-reason line shown above the

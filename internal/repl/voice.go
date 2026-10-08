@@ -1,8 +1,8 @@
 package repl
 
 import (
-	"os"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
