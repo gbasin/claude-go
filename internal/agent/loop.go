@@ -94,7 +94,7 @@ type Loop struct {
 	compactSummaryPending bool             // next user log is the compact continuation
 	compactKept           int
 	turnCount             int
-	turnOpening           bool // fresh user prompt pending its first request
+	turnOpening           bool   // fresh user prompt pending its first request
 	EvalWait              func() // awaits the GB flag eval (bounded) before request 1
 	toolCallsTotal        int
 	envIdx                int
@@ -108,6 +108,7 @@ type Loop struct {
 	LinesAdded            atomic.Int64 // /cost code-change tally
 	LinesRemoved          atomic.Int64
 	envSent               bool    // env composite has been on the wire once
+	envDropped            bool    // resume path: env record is not replayed
 	instrHookFired        bool    // InstructionsLoaded hooks fired once
 	Prefill               string  // --prefill: assistant continuation text appended after the first user message
 	OutputSchema          string  // --json-schema: structured-output schema JSON
@@ -124,15 +125,18 @@ type Loop struct {
 	// IsSubagent marks this loop as an Agent-spawned child — real's wire
 	// uses class subagent, the Agent-SDK identity line, cc_is_subagent
 	// in the billing header, and its own prompt-id.
-	IsSubagent       bool
-	subPID           string
-	handbackTail     bool // append the SubagentHandback reminder to msg[0]
-	noThinking       bool // thinking config dropped after a thinking 400
-	dropSafeguards   bool
-	dropOutputConfig bool
-	dropBetas        bool
-	maxTokensClamp   bool
-	lastTotal        int // last request's total input tokens (incl. cache)
+	IsSubagent bool
+	// LoopAgentID/ParentAgentID ride the x-claude-code-agent-id /
+	// -parent-agent-id headers on this loop's requests
+	LoopAgentID, ParentAgentID string
+	subPID                     string
+	handbackTail               bool // append the SubagentHandback reminder to msg[0]
+	noThinking                 bool // thinking config dropped after a thinking 400
+	dropSafeguards             bool
+	dropOutputConfig           bool
+	dropBetas                  bool
+	maxTokensClamp             bool
+	lastTotal                  int // last request's total input tokens (incl. cache)
 }
 
 func NewLoop(client *api.Client, cwd string) *Loop {
@@ -142,8 +146,8 @@ func NewLoop(client *api.Client, cwd string) *Loop {
 	}
 	tools.SetProjectDir(abs)
 	l := &Loop{
-		Client:     client,
-		Model:      defaultModel,
+		Client: client,
+		Model:  defaultModel,
 		// resolved per-model in buildRequest (MaxOutputFor) — the
 		// catalog default varies across models
 		MaxTokens:  0,
@@ -171,6 +175,15 @@ func isXHighModel(m string) bool {
 }
 
 func (l *Loop) buildRequest() *api.Request {
+	model := l.Model
+	if l.IsSubagent {
+		model = l.subagentModel()
+	} else if model != "" {
+		// mainLoopModel for subagent "inherit" resolution (mod_0567.js) —
+		// child loops read CLAUDE_GO_MAIN_LOOP_MODEL since subagent.go's
+		// spawn-time Model can come from an agent def rather than the parent.
+		os.Setenv("CLAUDE_GO_MAIN_LOOP_MODEL", model)
+	}
 	if l.tokensLeft == 0 {
 		l.tokensLeft = tokenBudgetStart()
 	}
@@ -183,18 +196,18 @@ func (l *Loop) buildRequest() *api.Request {
 	}
 	// xhigh is fable-class only — opus rejects it ('This model does not
 	// support effort level xhigh'); map to the top supported tier.
-	if effort == "xhigh" && !isXHighModel(l.Model) {
+	if effort == "xhigh" && !isXHighModel(model) {
 		effort = "max"
 	}
 	// output_config only exists on per-turn-effort models (verified live:
 	// opus-4-8 rejects it — 'requires a model that supports per-turn
 	// effort'). Real omits the key for those models.
+	// CLAUDE_CODE_ALWAYS_ENABLE_EFFORT forces effort emission for models
+	// lacking declared effort support (real QE(), mod_0198.js).
+	effortCapable := isXHighModel(model) || envOn("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT")
 	var ocRaw json.RawMessage
-	if isXHighModel(l.Model) {
+	if effortCapable {
 		oc := map[string]string{"effort": effort}
-		if l.FastMode {
-			oc["speed"] = "fast"
-		}
 		if l.CorrelationID != "" {
 			oc["correlation_id"] = l.CorrelationID // real sends it inside output_config
 		}
@@ -214,7 +227,10 @@ func (l *Loop) buildRequest() *api.Request {
 		}
 	}
 	l.syncDeferredPool()
-	msgs := l.withEphemeralBreakpoint(l.wireMessages())
+	// 294 puts no cache breakpoints inside messages — the only
+	// cache_control on the wire is the env record (req1) and the
+	// trailing tokens block (tool-loop reqs), both plain ephemeral
+	msgs := l.wireMessages()
 	if !l.IsSubagent {
 		// real's subagent requests carry plain ephemeral blocks, no
 		// 1h normalization or breakpoint budget (captured)
@@ -226,23 +242,29 @@ func (l *Loop) buildRequest() *api.Request {
 		l.EvalWait = nil
 	}
 	var safeguards json.RawMessage
-	// safeguards classifier_context rides when the GB flag eval left the
-	// dangerous-tool-use feature enabled — eval-unreachable runs omit it
-	if !l.dropSafeguards && !l.Client.EvalFailed() {
+	// safeguards classifier_context rides only when the turn opened a
+	// fresh request (mid-tool-loop msgs end in tool_result → omitted,
+	// real 294) AND the GB eval left the flag enabled
+	if !l.dropSafeguards && !tailEndsInToolResult(msgs) && !l.Client.EvalFailed() {
 		safeguards = Safeguards(l.PermMode, l.ToolCtx.CWD, l.PermRules)
 	}
 	var outCfg json.RawMessage
 	if !l.dropOutputConfig && ocRaw != nil {
 		outCfg = ocRaw
 	}
-	mt := l.MaxTokens
-	if mt <= 0 {
-		mt = MaxOutputFor(l.Model)
+	// real's chain: query override > CLAUDE_CODE_MAX_OUTPUT_TOKENS > the
+	// model's catalog default (mod_0416 sk)
+	mt := MaxOutputFor(l.Model)
+	if n, ok := maxOutputTokensEnv(); ok {
+		mt = n
+	}
+	if l.MaxTokens > 0 {
+		mt = l.MaxTokens
 	}
 	if l.maxTokensClamp && mt > 64000 {
 		mt = 64000
 	}
-	l.Client.Model = l.Model // beta list is model-conditional
+	l.Client.Model = model // beta list is model-conditional
 	l.Client.Wants1m = l.Wants1m
 	l.Client.AdvisorModel = l.AdvisorModel
 	l.Client.ThinkingDisplayUpdates = l.thinkingDisplay() == "updates"
@@ -250,21 +272,34 @@ func (l *Loop) buildRequest() *api.Request {
 	if l.IsSubagent {
 		class_ = "subagent"
 	}
-	sys := SystemBlocks(l.Entrypoint, l.CWD, l.Model, l.AppendSysP, l.ExtraSystem, l.SessionExtras, l.billingMeta(msgs), l.tokensLeft)
+	sys := SystemBlocks(l.Entrypoint, l.CWD, model, l.AppendSysP, l.ExtraSystem, l.SessionExtras, l.billingMeta(msgs), l.tokensLeft)
 	if l.IsSubagent {
 		sys = l.subagentSystemBlocks(msgs)
 	}
 	l.ToolCtx.AdvisorModel = l.AdvisorModel // advisor wire block follows the configured model
+	l.ToolCtx.Entrypoint = l.Entrypoint     // cli gets the interactive schema variants
+	// Fast mode is firstParty-only and killed by
+	// CLAUDE_CODE_DISABLE_FAST_MODE (real jo(), mod_0137.js); the flag rides
+	// the request ROOT in 294, not output_config
+	speed := ""
+	if l.FastMode && (l.Client == nil || l.Client.Provider == "" ||
+		l.Client.Provider == api.ProviderFirstParty) &&
+		!envOn("CLAUDE_CODE_DISABLE_FAST_MODE") {
+		speed = "fast"
+	}
 	return &api.Request{
-		Model:             l.Model,
+		Model:             model,
 		MaxTokens:         mt,
 		Messages:          msgs,
 		System:            sys,
 		Class:             class_,
 		PromptID:          l.subPromptID(),
+		Speed:             speed,
+		AgentID:           l.LoopAgentID,
+		ParentAgentID:     l.ParentAgentID,
 		Tools:             tools.RequestDefs(l.ToolCtx),
 		Metadata:          Metadata(l.Client.SessionID, l.User),
-		Thinking:          l.thinkingConfig(),
+		Thinking:          l.thinkingConfig(mt),
 		ContextManagement: DefaultContextManagement(),
 		Safeguards:        safeguards,
 		OutputConfig:      outCfg,
@@ -290,12 +325,19 @@ func (l *Loop) threadField() json.RawMessage {
 func (l *Loop) billingMeta(msgs []api.Message) BillingMeta {
 	// captured: first turn emits cc_prompt_index=0, cc_turn_index=1
 	b, _ := json.Marshal(msgs)
+	origin := "sdk"
+	if l.Entrypoint == "cli" {
+		origin = "cli"
+	}
 	return BillingMeta{
 		PromptID:    l.subPromptID(),
 		PromptIndex: l.turnCount - 1,
 		TurnIndex:   l.turnCount,
 		FirstPrompt: l.firstPrompt,
 		ReqSeed:     string(b),
+		Workload:    os.Getenv("CLAUDE_GO_WORKLOAD"),
+		IsSubagent:  l.IsSubagent,
+		TurnOrigin:  origin,
 	}
 }
 
@@ -315,7 +357,9 @@ func connectingServers() []string {
 // thread-enabled models (the same gate as threadField — haiku class);
 // other models omit the field entirely (verified on the 294 wire).
 func (l *Loop) diagnosticsField() json.RawMessage {
-	if !strings.Contains(l.Model, "haiku") {
+	// cache-diagnosis surface is main-lane only (real !Ly) — subagent and
+	// aux requests omit the field entirely
+	if l.IsSubagent || !strings.Contains(l.Model, "haiku") {
 		return nil
 	}
 	var lastID string
@@ -372,7 +416,7 @@ func (l *Loop) withEphemeralBreakpoint(msgs []api.Message) []api.Message {
 		if err := json.Unmarshal(out[i].Content, &blocks); err != nil || len(blocks) == 0 {
 			return
 		}
-		blocks[len(blocks)-1].CacheControl = &api.CacheControl{Type: "ephemeral"}
+		blocks[len(blocks)-1].CacheControl = &api.CacheControl{Type: "ephemeral", TTL: l.promptCacheTTL()}
 		if raw, err := json.Marshal(blocks); err == nil {
 			out[i].Content = raw
 		}
@@ -391,8 +435,8 @@ func (l *Loop) withEphemeralBreakpoint(msgs []api.Message) []api.Message {
 
 // Ask submits one user turn and runs the tool loop to completion.
 // MarkEnvSent marks the env composite as already-on-the-wire — used after
-// session resume, where real does not re-send it (hook ctx only).
-func (l *Loop) MarkEnvSent() { l.envSent = true; l.started = true }
+// session resume, where real replays only the hook string, not the record.
+func (l *Loop) MarkEnvSent() { l.envSent = true; l.envDropped = true; l.started = true }
 
 // ResetForNewSession clears turn-scoped wire state for /clear — the next
 // request is a fresh session: env composite is re-sent, ambient/hook
@@ -437,7 +481,7 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 				}
 			}
 		}
-		msg = FirstUserMessage(prompt, l.CWD, l.User.Email, l.MemoryPaused, l.Model)
+		msg = FirstUserMessage(prompt, l.CWD, l.User.Email, l.Model, l.MemoryPaused)
 		if l.handbackTail {
 			var blks []api.ContentBlock
 			if json.Unmarshal(msg.Content, &blks) == nil {
@@ -455,12 +499,12 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 		// not as a user-message reminder — seed announcedDeferred so the
 		// first request's user message doesn't carry a duplicate
 		l.announcedDeferred = strings.Join(deferred, "\x00")
-		// real 294 env block carries plain {type:ephemeral} — the 1h ttl
-		// from the 2.1.289 capture is gone (diff-verified)
-		envCC := &api.CacheControl{Type: "ephemeral"}
+		// 294 wire: plain ephemeral by default; CLAUDE_CODE_PROMPT_CACHE_TTL
+		// envs can re-add a ttl (promptCacheTTL "" → field omitted)
+		envCC := &api.CacheControl{Type: "ephemeral", TTL: l.promptCacheTTL()}
 		envBlocks := api.BlocksMessage("system", []api.ContentBlock{{
 			Type:         "text",
-			Text:         EnvMessage(l.ToolCtx.CWD, l.Model, l.AddDirs, l.PermMode, l.Client.SessionID, l.SessionHookCtx, deferred, connectingServers(), l.tokensLeft),
+			Text:         EnvMessage(l.ToolCtx.CWD, l.Model, l.AddDirs, l.PermMode, l.Entrypoint, l.Client.SessionID, l.SessionHookCtx, deferred, connectingServers(), l.tokensLeft),
 			CacheControl: envCC,
 		}})
 		if isXHighModel(l.Model) {
@@ -1104,27 +1148,162 @@ func (l *Loop) runAdvisor(ctx context.Context) tools.Result {
 	return tools.Result{Content: text}
 }
 
-func (l *Loop) thinkingConfig() json.RawMessage {
+func (l *Loop) thinkingConfig(mt int) json.RawMessage {
 	if l.noThinking {
 		return nil // stripped after a thinking-config 400
 	}
+	// CLAUDE_CODE_DISABLE_THINKING drops the thinking key entirely
+	// (mod_0416.js: iS suppresses even an explicit {"type":"disabled"}).
+	if envOn("CLAUDE_CODE_DISABLE_THINKING") {
+		return nil
+	}
 	if l.ThinkingMode == "disabled" {
 		return json.RawMessage(`{"type":"disabled"}`)
+	}
+	// MAX_THINKING_TOKENS (real Eco(), mod_0137.js): set -> >0 enables
+	// thinking at that budget; 0 or unparsable disables it. Budget clamps
+	// to [1024, maxTokens-1] like real's Math.max(1024, Math.min(sk-1, b)).
+	if v := strings.TrimSpace(os.Getenv("MAX_THINKING_TOKENS")); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f <= 0 {
+			return json.RawMessage(`{"type":"disabled"}`)
+		}
+		budget := int(f)
+		if mt > 1 && budget > mt-1 {
+			budget = mt - 1
+		}
+		if budget < 1024 {
+			budget = 1024
+		}
+		return json.RawMessage(`{"type":"enabled","budget_tokens":` + strconv.Itoa(budget) + `}`)
 	}
 	if l.ThinkingMode == "enabled" || l.ThinkingBudget > 0 || l.AlwaysThinking {
 		budget := l.ThinkingBudget
 		if budget <= 0 {
 			budget = 10000
 		}
-		if v := os.Getenv("MAX_THINKING_TOKENS"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 && n < budget {
-				budget = n
-			}
-		}
 		return json.RawMessage(`{"type":"enabled","budget_tokens":` + strconv.Itoa(budget) + `}`)
 	}
 	display := l.thinkingDisplay()
 	return json.RawMessage(`{"type":"adaptive","display":"` + display + `"}`)
+}
+
+// subagentModel resolves the model a subagent request goes out with
+// (mod_0567.js kpe()/b()): CLAUDE_CODE_SUBAGENT_MODEL pins the subagent
+// model — unset or "inherit" keeps the resolved (inherited) model.
+// CLAUDE_CODE_SUBAGENT_MODEL_FORCE additionally suppresses per-agent model
+// choices, falling back to the pin or the parent session's model
+// (CLAUDE_GO_MAIN_LOOP_MODEL, stamped by the main loop's buildRequest).
+func (l *Loop) subagentModel() string {
+	parent := os.Getenv("CLAUDE_GO_MAIN_LOOP_MODEL")
+	if parent == "" {
+		parent = l.Model
+	}
+	pin := strings.TrimSpace(os.Getenv("CLAUDE_CODE_SUBAGENT_MODEL"))
+	pinned := pin != "" && !strings.EqualFold(pin, "inherit")
+	if envOn("CLAUDE_CODE_SUBAGENT_MODEL_FORCE") {
+		if pinned {
+			return resolveSubagentAlias(pin)
+		}
+		return parent
+	}
+	if pinned && l.Model == parent {
+		return resolveSubagentAlias(pin)
+	}
+	return l.Model
+}
+
+// resolveSubagentAlias applies the same alias/env map as --model for the
+// subagent pin (real resolves the pin through Pt()).
+func resolveSubagentAlias(m string) string {
+	m = strings.TrimSuffix(strings.TrimSpace(m), "[1m]")
+	env := func(names ...string) string {
+		for _, n := range names {
+			if v := os.Getenv(n); v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+	switch strings.ToLower(m) {
+	case "opus", "best":
+		if v := env("ANTHROPIC_DEFAULT_OPUS_MODEL"); v != "" {
+			return v
+		}
+		return "claude-opus-5-5"
+	case "sonnet":
+		if v := env("ANTHROPIC_DEFAULT_SONNET_MODEL"); v != "" {
+			return v
+		}
+		return "claude-sonnet-5-5"
+	case "haiku":
+		if v := env("ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"); v != "" {
+			return v
+		}
+		return "claude-haiku-4-5-20251001"
+	case "fable":
+		if v := env("ANTHROPIC_DEFAULT_FABLE_MODEL"); v != "" {
+			return v
+		}
+		return defaultModel
+	case "default":
+		// pin=default -> the session default (env override or builtin)
+		if v := os.Getenv("ANTHROPIC_DEFAULT_MODEL"); v != "" &&
+			!strings.EqualFold(v, "default") && !strings.EqualFold(v, "inherit") {
+			return resolveSubagentAlias(v)
+		}
+		return defaultModel
+	}
+	return m
+}
+
+// maxOutputTokensEnv parses CLAUDE_CODE_MAX_OUTPUT_TOKENS the way real's
+// JEs() does (mod_0029.js): a Number() parse — non-numeric or <= 0 means
+// "no override".
+func maxOutputTokensEnv() (int, bool) {
+	v := strings.TrimSpace(os.Getenv("CLAUDE_CODE_MAX_OUTPUT_TOKENS"))
+	if v == "" {
+		return 0, false
+	}
+	n, err := strconv.ParseFloat(v, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return int(n), true
+}
+
+// promptCacheTTL mirrors Nen() (mod_0416.js): FORCE_PROMPT_CACHING_5M drops
+// all ttls; CLAUDE_CODE_PROMPT_CACHE_TTL overrides the main-thread ttl and
+// CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL the subagent one; only "1h" lands on
+// the wire (real emits ttl only for 1h). Unset keeps the captured defaults:
+// 1h on the main thread, bare ephemeral on subagents.
+func (l *Loop) promptCacheTTL() string {
+	if envOn("FORCE_PROMPT_CACHING_5M") {
+		return ""
+	}
+	name := "CLAUDE_CODE_PROMPT_CACHE_TTL"
+	if l.IsSubagent {
+		name = "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL"
+	}
+	if v, ok := os.LookupEnv(name); ok {
+		if strings.TrimSpace(v) == "1h" {
+			return "1h"
+		}
+		return ""
+	}
+	if l.IsSubagent {
+		return ""
+	}
+	return "1h"
+}
+
+// envOn mirrors real's Le() boolean env parse (1/true/yes/on).
+func envOn(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // ContextWarnThreshold is ~90% of the auto-compact window for the model.
@@ -1227,8 +1406,11 @@ func capBreakpoints(msgs []api.Message, sysReserved int) []api.Message {
 		blocks := blocksOf(m.Content)
 		dirty := false
 		for _, b := range blocks {
-			if b.CacheControl != nil && b.CacheControl.TTL != "" {
+			// 294 emits plain ephemeral everywhere — strip any ttl/scope
+			// a replayed transcript might still carry (live-captured)
+			if b.CacheControl != nil && (b.CacheControl.TTL != "" || b.CacheControl.Scope != "") {
 				b.CacheControl.TTL = ""
+				b.CacheControl.Scope = ""
 				dirty = true
 				changed = true
 			}
@@ -1285,28 +1467,43 @@ func (l *Loop) envWireTransform() []api.Message {
 	}
 	for i, m := range l.Messages {
 		if m.Role == "system" && i == envAt && l.envSent {
-			// real replays the env record on every later request as a
-			// bare-string system message (the block+cc form is req1 only)
-			if l.SessionHookCtx != "" {
-				msgs = append(msgs, api.StringMessage("system",
-					"SessionStart hook additional context: "+l.SessionHookCtx))
-			}
-			var blocks []api.ContentBlock
-			if err := json.Unmarshal(m.Content, &blocks); err == nil {
-				for _, b := range blocks {
-					if b.Text != "" {
-						em := api.StringMessage("system", b.Text)
-						em.OutputConfig = m.OutputConfig // real keeps it on the replayed env record
-						msgs = append(msgs, em)
-						break
-					}
+			if l.envDropped {
+				// resume path: real replays only the SessionStart hook
+				// context, not the env record (289 resume capture)
+				if l.SessionHookCtx != "" {
+					msgs = append(msgs, api.StringMessage("system",
+						"SessionStart hook additional context: "+l.SessionHookCtx))
 				}
+				continue
 			}
+			// in-session continuation: the env record stays in the
+			// conversation as a bare-string system message (294 capture)
+			em := api.StringMessage("system", envTextOf(m))
+			em.OutputConfig = m.OutputConfig
+			msgs = append(msgs, em)
 			continue
 		}
 		msgs = append(msgs, m)
 	}
 	return msgs
+}
+
+// envTextOf flattens the stored env record (block or string form) back to
+// its plain text for the bare-string resend on later requests.
+func envTextOf(m api.Message) string {
+	var blocks []api.ContentBlock
+	if err := json.Unmarshal(m.Content, &blocks); err == nil {
+		var b strings.Builder
+		for _, blk := range blocks {
+			b.WriteString(blk.Text)
+		}
+		return b.String()
+	}
+	var s string
+	if err := json.Unmarshal(m.Content, &s); err == nil {
+		return s
+	}
+	return ""
 }
 
 // coalesceRoles merges consecutive same-role user/assistant records into
@@ -1347,8 +1544,8 @@ func (l *Loop) wireMessages() []api.Message {
 	msgs := coalesceRoles(l.envWireTransform())
 	if l.envSent {
 		if tailEndsInToolResult(msgs) {
-			// tool-loop continuation: real appends the <total_tokens>
-			// block + parallel-calls instruction after the result
+			// tool-loop continuation: real appends only the
+			// <total_tokens> block after the result (294 capture)
 			msgs = append(msgs,
 				api.BlocksMessage("system", []api.ContentBlock{{
 					Type:         "text",
@@ -1364,7 +1561,7 @@ func (l *Loop) wireMessages() []api.Message {
 					msgs[n-1] = api.BlocksMessage("system", []api.ContentBlock{{
 						Type:         "text",
 						Text:         txt,
-						CacheControl: &api.CacheControl{Type: "ephemeral", TTL: "1h"},
+						CacheControl: &api.CacheControl{Type: "ephemeral"},
 					}})
 				}
 			}

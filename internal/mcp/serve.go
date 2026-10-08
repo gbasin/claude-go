@@ -1,143 +1,140 @@
-// serve.go — `claude mcp serve`: run claude-go AS an MCP server over
-// stdio, exposing the builtin tool registry to MCP clients (real's
-// startMCPServer, mod_2170.js). NDJSON framing: one JSON-RPC message
-// per line on stdin/stdout.
 package mcp
+
+// `claude mcp serve` — expose the agent's builtin tool surface as an MCP
+// server over stdio (real's serve: "Start the Claude Code MCP server").
+// Line-delimited JSON-RPC, same framing as a stdio transport server.
 
 import (
 	"bufio"
-	"claude-go/internal/api"
-	"claude-go/internal/tools"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+
+	"claude-go/internal/tools"
 )
 
-type serveReq struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id,omitempty"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params,omitempty"`
+// ServeOpts carries the serve-mode options (`-d/--debug`, --verbose).
+type ServeOpts struct {
+	Verbose bool
+	Debug   bool
 }
 
-type serveResp struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id"`
-	Result  any             `json:"result,omitempty"`
-	Error   *serveErr       `json:"error,omitempty"`
-}
+// Serve runs the MCP server on the given streams until EOF. It never
+// writes anything but JSON-RPC frames to w — logs go to errOut.
+func Serve(ctx context.Context, in io.Reader, w, errOut io.Writer, o ServeOpts) int {
+	if errOut == nil {
+		errOut = os.Stderr
+	}
+	cwd, _ := os.Getwd()
+	tc := &tools.Context{
+		Ctx: ctx,
+		CWD: cwd,
+		// serve mode is an explicit opt-in to expose the tool surface;
+		// the calling client drives it (real applies the same posture)
+		Permission:    func(string, json.RawMessage, string) bool { return true },
+		PermissionAsk: func() bool { return false },
+		AskUser: func(string, []string) (string, error) {
+			return "", fmt.Errorf("interactive prompts unavailable in mcp serve")
+		},
+		BgTasks: tools.NewBackground(),
+	}
+	dbg := func(f string, a ...any) {
+		if o.Verbose || o.Debug {
+			fmt.Fprintf(errOut, "[mcp serve] "+f+"\n", a...)
+		}
+	}
 
-type serveErr struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-// Serve runs the MCP server loop on stdin/stdout until EOF. ctx carries
-// the tool execution environment (cwd, session, permission policy).
-func Serve(ctx *tools.Context, stdin io.Reader, stdout io.Writer) error {
-	sc := bufio.NewScanner(stdin)
-	sc.Buffer(make([]byte, 0, 1<<20), 16<<20)
-	out := bufio.NewWriter(stdout)
+	wr := bufio.NewWriter(w)
 	write := func(v any) {
 		b, _ := json.Marshal(v)
-		out.Write(b)
-		out.WriteByte('\n')
-		out.Flush()
+		wr.Write(b)
+		wr.WriteByte('\n')
+		wr.Flush()
 	}
+	sc := bufio.NewScanner(in)
+	sc.Buffer(make([]byte, 1<<20), 8<<20)
 	for sc.Scan() {
 		line := sc.Bytes()
 		if len(line) == 0 {
 			continue
 		}
-		var req serveReq
+		var req struct {
+			JSONRPC string          `json:"jsonrpc"`
+			ID      json.RawMessage `json:"id"`
+			Method  string          `json:"method"`
+			Params  json.RawMessage `json:"params"`
+		}
 		if json.Unmarshal(line, &req) != nil {
 			continue
 		}
-		isNotify := len(req.ID) == 0
+		hasID := len(req.ID) > 0 && string(req.ID) != "null"
+		dbg("%s id=%s", req.Method, string(req.ID))
 		switch req.Method {
 		case "initialize":
-			write(serveResp{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
-				"protocolVersion": ProtocolVersion,
-				"capabilities": map[string]any{
-					"tools": map[string]any{"listChanged": true},
+			write(map[string]any{
+				"jsonrpc": "2.0", "id": req.ID,
+				"result": map[string]any{
+					"protocolVersion": ProtocolVersion,
+					"capabilities":    map[string]any{"tools": map[string]any{"listChanged": true}},
+					"serverInfo":      map[string]string{"name": "claude-go", "version": "2.1.292"},
 				},
-				"serverInfo": map[string]any{
-					"name": "claude-go", "version": api.Version,
-				},
-			}})
+			})
 		case "ping":
-			write(serveResp{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{}})
-		case "notifications/initialized", "notifications/cancelled",
-			"notifications/progress", "notifications/message":
-			// server ignores notifications
+			write(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{}})
 		case "tools/list":
-			write(serveResp{JSONRPC: "2.0", ID: req.ID,
-				Result: map[string]any{"tools": serveToolDefs(ctx)}})
-		case "tools/call":
-			write(toolsCall(ctx, req))
-		case "resources/list":
-			write(serveResp{JSONRPC: "2.0", ID: req.ID,
-				Result: map[string]any{"resources": []any{}}})
-		case "prompts/list":
-			write(serveResp{JSONRPC: "2.0", ID: req.ID,
-				Result: map[string]any{"prompts": []any{}}})
-		default:
-			if !isNotify {
-				write(serveResp{JSONRPC: "2.0", ID: req.ID,
-					Error: &serveErr{Code: -32601, Message: "method not found: " + req.Method}})
+			var list []map[string]any
+			for _, t := range tools.All() {
+				if t.IsMCP || t.IsHidden {
+					continue
+				}
+				list = append(list, map[string]any{
+					"name":        t.Def.Name,
+					"description": t.Def.Description,
+					"inputSchema": t.Def.InputSchema,
+				})
 			}
+			write(map[string]any{"jsonrpc": "2.0", "id": req.ID,
+				"result": map[string]any{"tools": list}})
+		case "tools/call":
+			var p struct {
+				Name      string          `json:"name"`
+				Arguments json.RawMessage `json:"arguments"`
+			}
+			_ = json.Unmarshal(req.Params, &p)
+			res := tools.Dispatch(tc, p.Name, p.Arguments)
+			content := []map[string]any{}
+			if len(res.Refs) > 0 {
+				for _, r := range res.Refs {
+					content = append(content, map[string]any{
+						"type": "tool_reference", "tool_name": r})
+				}
+			} else {
+				content = append(content, map[string]any{"type": "text", "text": res.Content})
+			}
+			write(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{
+				"content": content, "isError": res.IsError,
+			}})
+		case "resources/list":
+			write(map[string]any{"jsonrpc": "2.0", "id": req.ID,
+				"result": map[string]any{"resources": []any{}}})
+		case "resources/templates/list":
+			write(map[string]any{"jsonrpc": "2.0", "id": req.ID,
+				"result": map[string]any{"resourceTemplates": []any{}}})
+		case "prompts/list":
+			write(map[string]any{"jsonrpc": "2.0", "id": req.ID,
+				"result": map[string]any{"prompts": []any{}}})
+		default:
+			if !hasID {
+				continue // notification — nothing to answer
+			}
+			write(map[string]any{
+				"jsonrpc": "2.0", "id": req.ID,
+				"error": map[string]any{"code": -32601,
+					"message": "method not found: " + req.Method},
+			})
 		}
-	}
-	return sc.Err()
-}
-
-// serveToolDefs exposes non-interactive tools — real's serve set is the
-// enabled registry minus interactive-only/UI tools.
-func serveToolDefs(ctx *tools.Context) []map[string]any {
-	var out []map[string]any
-	for _, t := range tools.All() {
-		var schema map[string]any
-		if json.Unmarshal(t.Def.InputSchema, &schema) != nil || schema == nil {
-			// MCP spec requires an object — bare/null schemas get a
-			// permissive default (real's clients reject null inputSchema)
-			schema = map[string]any{"type": "object", "properties": map[string]any{}}
-		}
-		out = append(out, map[string]any{
-			"name":        t.Def.Name,
-			"description": t.Def.Description,
-			"inputSchema": schema,
-		})
-	}
-	return out
-}
-
-func toolsCall(ctx *tools.Context, req serveReq) serveResp {
-	var in struct {
-		Name string          `json:"name"`
-		Args json.RawMessage `json:"arguments"`
-	}
-	if json.Unmarshal(req.Params, &in) != nil || in.Name == "" {
-		return serveResp{JSONRPC: "2.0", ID: req.ID,
-			Error: &serveErr{Code: -32602, Message: "tools/call requires name"}}
-	}
-	r := tools.Dispatch(ctx, in.Name, in.Args)
-	return serveResp{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
-		"content": []map[string]any{
-			{"type": "text", "text": r.Content},
-		},
-		"isError": r.IsError,
-	}}
-}
-
-// ServeStdio is the `claude mcp serve` entry — MCP stdio transport on
-// process stdin/stdout.
-func ServeStdio(cwd string) int {
-	ctx := &tools.Context{Ctx: context.Background(), CWD: cwd}
-	if err := Serve(ctx, os.Stdin, os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, "mcp serve: "+err.Error())
-		return 1
 	}
 	return 0
 }

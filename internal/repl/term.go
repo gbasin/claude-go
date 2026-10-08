@@ -27,7 +27,7 @@ type editor struct {
 	hIdx            int
 	buf             []rune
 	pos             int
-	stashed         [][]rune // ctrl+s draft stash
+	stashed         []rune // ctrl+s draft stash — real's is single-slot
 	busyChord       []string
 	busyChordAt     time.Time
 	prompt          string
@@ -36,8 +36,25 @@ type editor struct {
 	mode            string            // "insert" | "normal"
 	pastes          map[string]string // placeholder -> pasted content
 	pasteN          int
-	lastCtrlC       time.Time
 	lastEsc         int64
+	escArmAt        time.Time // "Esc again to clear" window (non-empty draft)
+	exitArm         bool      // "Press <key> again to exit" armed (jz shared gate)
+	exitArmKey      string    // first arming key's display name
+	exitArmAt       time.Time
+	cleared         []rune   // held cleared draft — Up restores (real holdCleared)
+	clearedHist     bool     // held draft enters history if never restored
+	killRing        []string // emacs kill-ring (ring[0] = newest)
+	killLast        bool     // last key was a kill — consecutive kills coalesce
+	wasKill         bool     // killLast captured at insertKey entry
+	yankPos         int      // yanked span start (-1 = no live yank)
+	yankLen         int
+	yankIdx         int
+	changeKeys      []key  // vim: recorded keystrokes of the last change (.)
+	pendingKeys     []key  // vim: accumulating the in-flight op sequence
+	recIns          []rune // vim: text inserted during the current change
+	recordingIns    bool
+	lastInsText     []rune                       // vim: inserted text of the last change (.)
+	searchIdx       int                          // ctrl+r: index of current match in e.history
 	completer       func(prefix string) []string // slash command completion
 	acOpen          bool                         // autocomplete menu visible
 	acDesc          func(name string) string     // per-item description
@@ -63,6 +80,8 @@ type editor struct {
 	vimOp           rune
 	vimFind         rune
 	vimPendingG     rune
+	vimObj          byte // i/a text-object prefix awaiting the object char
+	repCnt          int  // r<count> pending replace count
 	vimCount        int
 	vimCountRaw     int
 	vimVisual       int
@@ -70,10 +89,10 @@ type editor struct {
 	lastFindCh      rune
 	lastFindDir     rune
 	lastDel         string
-	lastChange      rune
 	undoStack       [][]rune
 	undoPos         []int
 	kb              map[string]string // canonical chord -> action (keybindings.go)
+	kbResolve       map[string]string // ctx+action -> display chord for hints
 	kbPrefix        map[string]bool   // canonical chord prefixes awaiting more keys
 	kbUnbound       map[string]bool   // chords explicitly unbound via keybindings.json
 	pendingChord    []string          // matched chord-prefix strokes
@@ -256,6 +275,9 @@ func (e *editor) redraw() {
 }
 
 func (e *editor) insert(rs ...rune) {
+	e.yankPos = -1
+	e.escArmAt = time.Time{} // typing disarms "Esc again to clear"
+	e.flushCleared()         // typing after a clear commits the held draft to history
 	for _, r := range rs {
 		e.buf = append(e.buf, 0)
 		copy(e.buf[e.pos+1:], e.buf[e.pos:])
@@ -267,6 +289,8 @@ func (e *editor) insert(rs ...rune) {
 }
 
 func (e *editor) del(back bool) {
+	e.yankPos = -1
+	e.escArmAt = time.Time{}
 	if back {
 		if e.pos > 0 {
 			e.buf = append(e.buf[:e.pos-1], e.buf[e.pos:]...)
@@ -281,6 +305,7 @@ func (e *editor) del(back bool) {
 
 // submitLine returns the final text with paste placeholders expanded.
 func (e *editor) submitLine() string {
+	e.flushCleared() // a held cleared draft precedes this line in history
 	l := string(e.buf)
 	for ph, content := range e.pastes {
 		l = strings.ReplaceAll(l, ph, content)
@@ -297,14 +322,21 @@ func (e *editor) submitLine() string {
 	return l
 }
 
-// expandPaste replaces a multi-line paste with a CC-style placeholder.
+// expandPaste replaces a big paste with a CC-style placeholder — real
+// wraps when len > 800 OR newlines > min(rows-10,2) (~2); "+N lines" is
+// the NEWLINE count and is omitted for a single-line paste (mod_0304 zee).
 func (e *editor) expandPaste(pasted string) string {
+	pasted = strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(pasted)
+	pasted = strings.ReplaceAll(pasted, "\t", "    ")
 	nl := strings.Count(pasted, "\n")
-	if nl == 0 && len(pasted) < 200 {
+	if len(pasted) <= 800 && nl <= 2 {
 		return pasted
 	}
 	e.pasteN++
-	ph := fmt.Sprintf("[Pasted text #%d +%d lines]", e.pasteN, nl+1)
+	ph := fmt.Sprintf("[Pasted text #%d]", e.pasteN)
+	if nl > 0 {
+		ph = fmt.Sprintf("[Pasted text #%d +%d lines]", e.pasteN, nl)
+	}
 	// the content the model actually receives, wrapped like CC does
 	e.pastes[ph] = fmt.Sprintf("<pasted_content id=\"%d\">\n%s\n</pasted_content>", e.pasteN, pasted)
 	return ph
@@ -392,7 +424,7 @@ func (e *editor) readLine(ks *keySource) readResult {
 			suspendToShell(ks, e.redraw)
 			continue
 		}
-		if e.vim && e.mode == "normal" {
+		if e.vim && e.mode != "insert" {
 			if r := e.vimKey(k); r != nil {
 				return *r
 			}
@@ -408,6 +440,12 @@ func (e *editor) insertKey(k key) *readResult {
 	c := k.b
 	wasInsert := e.insGroup
 	e.insGroup = false // any non-insert key closes the previous group
+	e.wasKill = e.killLast
+	e.killLast = false // any non-kill key breaks the kill chain
+	if e.exitArm && k.b != 4 && k.b != 3 {
+		e.exitArm = false // an unrelated key press disarms the exit gate
+		e.exitArmKey = ""
+	}
 	if os.Getenv("CG_DBGKEY") != "" {
 		fmt.Fprintf(os.Stderr, "[dbgkey b=%d seq=%q] ", c, k.seq)
 	}
@@ -479,11 +517,38 @@ func (e *editor) insertKey(k key) *readResult {
 	case k.paste != "":
 		e.insert([]rune(e.expandPaste(k.paste))...)
 	case k.seq == "[A":
-		e.histPrev()
+		// real's mt(): cursor up one wrapped row first; history only
+		// when already on the draft's top row
+		if !e.cursorUp() {
+			e.histPrev()
+		}
 	case k.seq == "[B":
-		e.histNext()
-	case k.seq == "[C":
+		if !e.cursorDown() {
+			e.histNext()
+		}
+	case c == 16: // ctrl+p — same as Up (real's mt + w at top row)
+		if !e.cursorUp() {
+			e.histPrev()
+		}
+	case c == 14: // ctrl+n — same as Down (real's ht + v at bottom row)
+		if !e.cursorDown() {
+			e.histNext()
+		}
+	case c == 2: // ctrl+b — char left
+		if e.pos > 0 {
+			e.pos--
+			e.redraw()
+		}
+	case c == 6: // ctrl+f — char right
 		if e.pos < len(e.buf) {
+			e.pos++
+			e.redraw()
+		}
+	case k.seq == "[C":
+		if k.mod&modCmd != 0 { // super+right -> logical line end (real)
+			e.pos = e.lineEnd()
+			e.redraw()
+		} else if e.pos < len(e.buf) {
 			e.pos++
 			e.redraw()
 		}
@@ -511,7 +576,10 @@ func (e *editor) insertKey(k key) *readResult {
 			}
 			return nil
 		}
-		if e.pos > 0 {
+		if k.mod&modCmd != 0 { // super+left -> logical line start (real)
+			e.pos = e.lineStart()
+			e.redraw()
+		} else if e.pos > 0 {
 			e.pos--
 			e.redraw()
 		}
@@ -522,7 +590,11 @@ func (e *editor) insertKey(k key) *readResult {
 		e.pos = len(e.buf)
 		e.redraw()
 	case k.seq == "[3~":
-		e.del(false)
+		if k.mod&(modAlt|modCmd) != 0 {
+			e.killToLineEnd() // meta|super+delete -> kill-to-end (real)
+		} else {
+			e.del(false)
+		}
 	case c == 3: // ctrl-C
 		return e.interruptKey()
 	case c == 4: // ctrl-D
@@ -538,8 +610,20 @@ func (e *editor) insertKey(k key) *readResult {
 			return nil
 		}
 		return e.submitKey()
+	case c == 0x7f && k.mod&(modAlt|modCmd|modCtrl) != 0:
+		e.backwardKillWord() // meta|super|ctrl+backspace (real's Vt table)
 	case c == 0x7f || c == 8:
 		e.del(true)
+	case k.mod&modAlt != 0 && k.r == 'b':
+		e.pos = e.wordBack()
+		e.redraw()
+	case k.mod&modAlt != 0 && k.r == 'f':
+		e.pos = e.wordFwd()
+		e.redraw()
+	case k.mod&modAlt != 0 && k.r == 'd':
+		e.killWordFwd()
+	case k.mod&modAlt != 0 && k.r == 'y':
+		e.yankPop()
 	case c == 1:
 		e.pos = e.lineStart()
 		e.redraw()
@@ -547,19 +631,13 @@ func (e *editor) insertKey(k key) *readResult {
 		e.pos = e.lineEnd()
 		e.redraw()
 	case c == 11:
-		e.buf = e.buf[:e.pos]
-		e.redraw()
+		e.killToLineEnd() // real: kill to line end -> kill-ring
 	case c == 21:
-		e.buf = e.buf[e.pos:]
-		e.pos = 0
-		e.redraw()
+		e.killToLineStart() // real: kill to line start -> kill-ring
 	case c == 23:
-		for e.pos > 0 && e.buf[e.pos-1] == ' ' {
-			e.del(true)
-		}
-		for e.pos > 0 && e.buf[e.pos-1] != ' ' {
-			e.del(true)
-		}
+		e.backwardKillWord() // deleteWORDBefore -> kill-ring prepend
+	case c == 25:
+		e.yankKill() // editor-layer ctrl+y (real's Kt["y"]) — kill-ring yank
 	case k.seq == "[A" && e.acOpen:
 		if e.acSel > 0 {
 			e.acSel--
@@ -618,12 +696,18 @@ func (e *editor) insertKey(k key) *readResult {
 			e.pushUndo()
 		}
 		e.insGroup = true
+		if e.recordingIns {
+			e.recIns = append(e.recIns, k.r)
+		}
 		e.insert(k.r)
 	case c >= 32 && c < 127 && k.mod&^modShift == 0:
 		if !wasInsert {
 			e.pushUndo()
 		}
 		e.insGroup = true
+		if e.recordingIns {
+			e.recIns = append(e.recIns, rune(c))
+		}
 		e.insert(rune(c))
 	}
 	return nil
@@ -662,20 +746,66 @@ func (e *editor) vimKey(k key) *readResult {
 		e.redraw()
 		return nil
 	case "[A":
-		e.histPrev()
+		e.pos = e.lineAbove()
+		e.redraw()
 		return nil
 	case "[B":
-		e.histNext()
+		e.pos = e.lineBelow()
+		e.redraw()
 		return nil
 	}
 	if c == '\r' {
 		e.closeBox()
 		return &readResult{line: e.submitLine(), ok: true}
 	}
-	if e.mode == "visual" {
+	// Chat/Global bindings stay live inside vim modes (real's keymap is
+	// active under the vim state machine — ctrl+c interrupt, ctrl+d exit,
+	// meta+p picker…). Plain letters and 'space' are vim commands, never
+	// bindings.
+	if cs := keystroke(k); cs != "" && cs != "space" {
+		for _, ctx := range [2]string{"Chat", "Global"} {
+			if r, handled := e.dispatchKb(k, ctx, cs); handled {
+				return r
+			}
+		}
+	}
+	if e.mode == "visual" || e.mode == "vline" {
 		return e.visualKey(k)
 	}
-
+	// every normal-mode key extends the candidate change sequence
+	e.pendingKeys = append(e.pendingKeys, k)
+	// r<char> pending — consume the replacement char
+	if e.vimReplace {
+		e.vimReplace = false
+		if c >= 32 && c != 0x1b {
+			e.pushUndo()
+			for i := 0; i < e.repCnt && e.pos+i < len(e.buf); i++ {
+				if e.buf[e.pos+i] != '\n' {
+					e.buf[e.pos+i] = rune(c)
+				}
+			}
+			e.noteChange()
+			e.redraw()
+		} else {
+			e.pendingKeys = nil
+		}
+		return nil
+	}
+	// i/a text-object pending under an operator (diw, ci", ya(…)
+	if e.vimObj != 0 {
+		kind := e.vimObj
+		e.vimObj = 0
+		if s2, en2, ok := e.textObjRange(kind, rune(c)); ok {
+			op := e.vimOp
+			e.vimOp = 0
+			e.applyOpRange(op, s2, en2, false)
+		} else {
+			e.vimOp = 0
+			e.pendingKeys = nil
+		}
+		e.vimCount = 0
+		return nil
+	}
 	// find-char states (f/F/t/T awaiting target)
 	if e.vimFind != 0 {
 		fc := e.vimFind
@@ -685,8 +815,21 @@ func (e *editor) vimKey(k key) *readResult {
 			e.lastFindDir = fc
 			np := e.findChar(e.lastFindCh, fc)
 			if np >= 0 {
-				e.vimApplyOrMove(np, fc == 't' || fc == 'T')
+				if e.vimOp != 0 {
+					op := e.vimOp
+					e.vimOp = 0
+					e.applyOp(op, np)
+				} else {
+					e.pos = np
+					e.pendingKeys = nil
+					e.redraw()
+				}
+			} else {
+				e.pendingKeys = nil
 			}
+		} else {
+			e.vimOp = 0
+			e.pendingKeys = nil
 		}
 		return nil
 	}
@@ -718,6 +861,10 @@ func (e *editor) vimKey(k key) *readResult {
 			e.vimOp = op
 			e.vimFind = rune(c)
 			return nil
+		case 'i', 'a':
+			e.vimOp = op
+			e.vimObj = byte(c)
+			return nil
 		case 'g':
 			// operator g — fall through to gg
 			e.vimPendingG = op
@@ -731,16 +878,24 @@ func (e *editor) vimKey(k key) *readResult {
 			start, end := e.linelRange(c, lines)
 			e.applyOpRange(op, start, end, true)
 		case 0x1b:
-			// cancelled
+			e.pendingKeys = nil // operator cancelled
+		default:
+			e.pendingKeys = nil
 		}
 		e.vimCount = 0
 		return nil
 	}
-	// g-pending (gg, g_ motions)
+	// g-pending (gg, gj, gk motions)
 	if e.vimPendingG != 0 {
 		op := e.vimPendingG
 		e.vimPendingG = 0
-		if c == 'g' {
+		e.pendingKeys = nil // motions are neutral for '.'
+		switch {
+		case c == 'j' && op == 'm':
+			e.cursorDown() // gj — display-row down (real)
+		case c == 'k' && op == 'm':
+			e.cursorUp() // gk — display-row up (real)
+		case c == 'g':
 			if op == 'm' {
 				e.pos = 0
 				e.redraw()
@@ -765,69 +920,85 @@ func (e *editor) vimKey(k key) *readResult {
 	if cnt == 0 {
 		cnt = 1
 	}
-	repeat := func() { e.lastChange = rune(c) }
+	changeIns := func() { // change that enters INSERT — record ins text for '.'
+		e.noteChange()
+		e.startInsRec()
+	}
 	switch c {
 	case 'i':
+		changeIns()
 		toInsert()
 	case 'a':
 		e.pos = min(len(e.buf), e.pos+1)
+		changeIns()
 		toInsert()
 	case 'A':
 		e.pos = e.lineEnd()
+		changeIns()
 		toInsert()
 	case 'I':
 		e.pos = e.lineStart()
+		changeIns()
 		toInsert()
 	case 'o':
 		e.pos = e.lineEnd()
+		changeIns()
 		e.pushUndo()
 		e.insert('\n')
 		toInsert()
-		repeat()
 	case 'O':
 		e.pos = e.lineStart()
+		changeIns()
 		e.pushUndo()
 		e.insert('\n')
 		e.pos--
 		toInsert()
-		repeat()
 	case 'h', 0x7f:
+		e.pendingKeys = nil
 		e.pos = max(0, e.pos-cnt)
 		e.redraw()
 	case 'l', ' ':
+		e.pendingKeys = nil
 		if len(e.buf) > 0 {
 			e.pos = min(len(e.buf)-1, e.pos+cnt)
 		}
 		e.redraw()
 	case 'j':
+		e.pendingKeys = nil
 		for i := 0; i < cnt; i++ {
 			e.pos = e.lineBelow()
 		}
 		e.redraw()
 	case 'k':
+		e.pendingKeys = nil
 		for i := 0; i < cnt; i++ {
 			e.pos = e.lineAbove()
 		}
 		e.redraw()
 	case 'w', 'W':
+		e.pendingKeys = nil
 		for i := 0; i < cnt; i++ {
 			e.pos = e.wordFwd()
 		}
 		e.redraw()
 	case 'b', 'B':
+		e.pendingKeys = nil
 		for i := 0; i < cnt; i++ {
 			e.pos = e.wordBack()
 		}
 		e.redraw()
 	case 'e', 'E':
+		e.pendingKeys = nil
 		for i := 0; i < cnt; i++ {
 			e.pos = e.wordEnd()
 		}
 		e.redraw()
 	case '0':
+		e.pendingKeys = nil
 		e.pos = e.lineStart()
 		e.redraw()
 	case '^':
+		e.pendingKeys = nil
 		p := e.lineStart()
 		for p < len(e.buf) && (e.buf[p] == ' ' || e.buf[p] == '\t') {
 			p++
@@ -835,9 +1006,11 @@ func (e *editor) vimKey(k key) *readResult {
 		e.pos = p
 		e.redraw()
 	case '$':
+		e.pendingKeys = nil
 		e.pos = max(e.lineStart(), e.lineEnd()-1)
 		e.redraw()
 	case 'G':
+		e.pendingKeys = nil
 		if e.vimCountRaw > 0 {
 			e.pos = e.lineStartOf(e.vimCountRaw - 1)
 		} else {
@@ -845,13 +1018,15 @@ func (e *editor) vimKey(k key) *readResult {
 		}
 		e.redraw()
 	case 'g':
-		e.vimPendingG = 'm' // gg marker
+		e.vimPendingG = 'm' // gg/gj/gk marker — resolution clears pending
 	case 'f', 'F', 't', 'T':
 		e.vimFind = rune(c)
 	case ';':
+		e.pendingKeys = nil
 		e.pos = e.findChar(e.lastFindCh, e.lastFindDir)
 		e.redraw()
 	case ',':
+		e.pendingKeys = nil
 		e.pos = e.findChar(e.lastFindCh, flipDir(e.lastFindDir))
 		e.redraw()
 	case 'x':
@@ -860,16 +1035,16 @@ func (e *editor) vimKey(k key) *readResult {
 			e.buf = append(e.buf[:e.pos], e.buf[e.pos+1:]...)
 		}
 		e.recordReg(e.lastDel, 0)
+		e.noteChange()
 		e.redraw()
-		repeat()
 	case 'X':
 		e.pushUndo()
 		for i := 0; i < cnt && e.pos > 0; i++ {
 			e.buf = append(e.buf[:e.pos-1], e.buf[e.pos:]...)
 			e.pos--
 		}
+		e.noteChange()
 		e.redraw()
-		repeat()
 	case 'd', 'c', 'y', '>', '<':
 		e.vimOp = rune(c)
 		if cnt > 0 {
@@ -879,15 +1054,16 @@ func (e *editor) vimKey(k key) *readResult {
 		e.pushUndo()
 		e.lastDel = string(e.buf[e.pos:e.lineEnd()])
 		e.buf = e.buf[:e.pos]
+		e.noteChange()
 		e.redraw()
-		repeat()
 	case 'C':
 		e.pushUndo()
 		e.lastDel = string(e.buf[e.pos:e.lineEnd()])
 		e.buf = e.buf[:e.pos]
+		changeIns()
 		toInsert()
-		repeat()
 	case 'Y':
+		e.pendingKeys = nil // yank isn't a '.'-change
 		s, en := e.linelRange('j', 0)
 		e.lastDel = string(e.buf[s:en])
 		e.redraw()
@@ -896,18 +1072,19 @@ func (e *editor) vimKey(k key) *readResult {
 		for i := 0; i < cnt && e.pos < len(e.buf); i++ {
 			e.buf = append(e.buf[:e.pos], e.buf[e.pos+1:]...)
 		}
+		changeIns()
 		toInsert()
-		repeat()
 	case 'S':
 		e.pushUndo()
 		s, en := e.linelRange('j', 0)
 		e.lastDel = string(e.buf[s:en])
 		e.buf = append(e.buf[:s], e.buf[en:]...)
 		e.pos = s
+		changeIns()
 		toInsert()
-		repeat()
 	case 'r':
 		e.vimReplace = true
+		e.repCnt = cnt
 	case 'p':
 		if e.lastDel != "" {
 			e.pushUndo()
@@ -918,9 +1095,26 @@ func (e *editor) vimKey(k key) *readResult {
 			for i := 0; i < cnt; i++ {
 				e.buf = append(e.buf[:at], append([]rune(e.lastDel), e.buf[at:]...)...)
 			}
+			e.pos = at
+			e.noteChange()
+			e.redraw()
+		}
+	case 'P':
+		if e.lastDel != "" {
+			e.pushUndo()
+			at := e.pos
+			if strings.Contains(e.lastDel, "\n") {
+				at = e.lineStart()
+			}
+			for i := 0; i < cnt; i++ {
+				e.buf = append(e.buf[:at], append([]rune(e.lastDel), e.buf[at:]...)...)
+			}
+			e.pos = at
+			e.noteChange()
 			e.redraw()
 		}
 	case 'u':
+		e.pendingKeys = nil
 		e.undo()
 	case '.':
 		e.dotRepeat()
@@ -934,8 +1128,8 @@ func (e *editor) vimKey(k key) *readResult {
 				e.buf[e.pos] = r + 32
 			}
 			e.pos++
+			e.noteChange()
 			e.redraw()
-			repeat()
 		}
 	case 'J':
 		e.pushUndo()
@@ -944,22 +1138,175 @@ func (e *editor) vimKey(k key) *readResult {
 			e.buf[le] = ' '
 			e.buf = append(e.buf[:le+1], append([]rune{}, e.buf[le+1:]...)...)
 		}
+		e.noteChange()
 		e.redraw()
-		repeat()
 	case 'v':
 		e.vimVisual = e.pos // visual anchor
 		e.mode = "visual"
 		e.redraw()
+	case 'V':
+		e.vimVisual = e.pos
+		e.mode = "vline" // VISUAL-LINE (real)
+		e.redraw()
 	case '?':
+		e.pendingKeys = nil
 		// help hint — real shows keybindings; noop visually
 	case '/':
+		e.pendingKeys = nil
 		e.histSearch = true
 		e.searchBuf = e.searchBuf[:0]
 		e.redrawSearch()
 	case 0x1b:
+		e.pendingKeys = nil
 		// already normal
+	default:
+		e.pendingKeys = nil
 	}
 	return nil
+}
+
+// noteChange snapshots the accumulated keystroke sequence as the last
+// recorded change (real's recordChange — '.' replays it).
+func (e *editor) noteChange() {
+	e.changeKeys = append([]key(nil), e.pendingKeys...)
+	e.pendingKeys = nil
+}
+
+// startInsRec begins recording insert-mode text for '.'-replay (real's
+// recordedChange captures op keystrokes + the typed text).
+func (e *editor) startInsRec() {
+	e.recordingIns = true
+	e.recIns = e.recIns[:0]
+}
+
+// textObjRange resolves an i/a text object to a buffer range (real's Zn).
+func (e *editor) textObjRange(kind byte, obj rune) (int, int, bool) {
+	inner := kind == 'i'
+	switch obj {
+	case 'w', 'W':
+		s, en := e.pos, e.pos
+		for s > 0 && !isWordSep(e.buf[s-1]) {
+			s--
+		}
+		for en < len(e.buf) && !isWordSep(e.buf[en]) {
+			en++
+		}
+		if !inner {
+			if en < len(e.buf) {
+				for en < len(e.buf) && isWordSep(e.buf[en]) {
+					en++
+				}
+			} else {
+				for s > 0 && isWordSep(e.buf[s-1]) {
+					s--
+				}
+			}
+		}
+		if s == en {
+			return 0, 0, false
+		}
+		return s, en, true
+	case '"', '\'', '`':
+		q := obj
+		st, en := -1, -1
+		for i := e.pos - 1; i >= 0 && e.buf[i] != '\n'; i-- {
+			if e.buf[i] == q {
+				st = i
+				break
+			}
+		}
+		for i := e.pos; i < len(e.buf) && e.buf[i] != '\n'; i++ {
+			if e.buf[i] == q {
+				en = i
+				break
+			}
+		}
+		if st < 0 || en <= st {
+			return 0, 0, false
+		}
+		if inner {
+			return st + 1, en, true
+		}
+		return st, en + 1, true
+	case '(', ')', 'b':
+		return e.pairRange('(', ')', inner)
+	case '[', ']':
+		return e.pairRange('[', ']', inner)
+	case '{', '}', 'B':
+		return e.pairRange('{', '}', inner)
+	case '<', '>':
+		return e.pairRange('<', '>', inner)
+	case 'p': // paragraph: blank-line-delimited block
+		st := e.lineStart()
+		for st > 0 {
+			// find start of the previous logical line
+			ps := st - 1
+			for ps > 0 && e.buf[ps-1] != '\n' {
+				ps--
+			}
+			if ps == st-1 { // previous line is blank — block starts at st
+				break
+			}
+			st = ps
+		}
+		en := e.lineEnd()
+		for en < len(e.buf) {
+			ns := en + 1
+			ne := ns
+			for ne < len(e.buf) && e.buf[ne] != '\n' {
+				ne++
+			}
+			if ne == ns { // next line is blank — block ends here
+				break
+			}
+			en = ne
+		}
+		if !inner && en < len(e.buf) {
+			en++ // around: include the trailing newline
+		}
+		return st, en, true
+	}
+	return 0, 0, false
+}
+
+// pairRange finds the innermost balanced open/close pair around pos.
+func (e *editor) pairRange(open, close rune, inner bool) (int, int, bool) {
+	depth, st := 0, -1
+	for i := e.pos; i >= 0; i-- {
+		if e.buf[i] == close {
+			depth++
+		}
+		if e.buf[i] == open {
+			if depth == 0 {
+				st = i
+				break
+			}
+			depth--
+		}
+	}
+	if st < 0 {
+		return 0, 0, false
+	}
+	depth, en := 0, -1
+	for i := st + 1; i < len(e.buf); i++ {
+		if e.buf[i] == open {
+			depth++
+		}
+		if e.buf[i] == close {
+			if depth == 0 {
+				en = i
+				break
+			}
+			depth--
+		}
+	}
+	if en < 0 {
+		return 0, 0, false
+	}
+	if inner {
+		return st + 1, en, true
+	}
+	return st, en + 1, true
 }
 
 func flipDir(d rune) rune {
@@ -1211,6 +1558,12 @@ func (e *editor) complete() {
 }
 
 func (e *editor) histPrev() {
+	// real's Up handler: a held cleared draft restores before history
+	// pages — "a cleared prompt stays reachable with Up" (2.1.x changelog)
+	if e.restoreCleared() {
+		return
+	}
+	e.flushCleared()
 	if len(e.history) == 0 {
 		return
 	}
@@ -1231,6 +1584,7 @@ func (e *editor) histPrev() {
 }
 
 func (e *editor) histNext() {
+	e.flushCleared()
 	if e.hIdx == -1 {
 		return
 	}
@@ -1285,53 +1639,137 @@ func (e *editor) registerDefaultActions() {
 
 // ---- shared key actions (invoked by the switch and by keybindings) ----
 
-// interruptKey is ctrl-C / app:interrupt: clear buffer; double-tap exits.
+// exitArmWindow is real's jz double-press timeout (800ms).
+const exitArmWindow = 800 * time.Millisecond
+
+// armExit is the shared ctrl+c/ctrl+d exit gate (real's Mt/jz + ut): the
+// first key press arms "Press <key> again to exit" — the name sticks to
+// whichever key armed it — and any second press inside the window exits.
+func (e *editor) armExit(name string) *readResult {
+	if e.exitArm && time.Since(e.exitArmAt) >= exitArmWindow {
+		e.exitArm = false // stale arm — next press re-arms
+		e.exitArmKey = ""
+	}
+	if e.exitArm {
+		e.exitArm = false
+		e.closeBox()
+		return &readResult{quit: true}
+	}
+	if e.exitArmKey == "" {
+		e.exitArmKey = name
+	}
+	e.exitArm = true
+	e.exitArmAt = time.Now()
+	compInline("\r\x1b[K  " + dim + "Press " + e.exitArmKey + " again to exit" + reset)
+	e.redraw()
+	return nil
+}
+
+// interruptKey is ctrl-C / app:interrupt: holds the cleared draft (it
+// re-enters history / Up restores it — real's holdCleared), clears, and
+// arms the double-press exit gate.
 func (e *editor) interruptKey() *readResult {
-	if len(e.buf) > 0 {
-		e.buf = e.buf[:0]
-		e.pos = 0
-		e.redraw()
-	} else if time.Since(e.lastCtrlC) < 2*time.Second {
-		e.closeBox()
-		return &readResult{quit: true}
-	} else {
-		e.lastCtrlC = time.Now()
-		compInline("\r\x1b[K  " + dim + "Press Ctrl-C again to exit" + reset)
-		e.redraw()
-	}
-	return nil
+	e.holdCleared(true)
+	return e.armExit("Ctrl-C")
 }
 
-// exitKey is ctrl-D / app:exit: quit on empty buffer, else delete forward.
+// exitKey is ctrl-D / app:exit: non-empty buffer -> delete forward (real
+// `It()`); empty buffer -> arm "Press Ctrl-D again to exit", 2nd exits.
 func (e *editor) exitKey() *readResult {
-	if len(e.buf) == 0 {
-		e.closeBox()
-		return &readResult{quit: true}
+	if len(e.buf) > 0 {
+		e.del(false)
+		return nil
 	}
-	e.del(false)
-	return nil
+	return e.armExit("Ctrl-D")
 }
 
-// cancelKey is esc / chat:cancel: vim insert->normal; else clear buffer with
-// double-esc opening the rewind selector.
+// cancelKey is esc / chat:cancel: vim insert->normal; on a non-empty draft
+// the first esc shows "Esc again to clear" and the second (within 800ms)
+// saves the draft to history then clears (real's Wt jz gate); on empty
+// input esc-esc opens the rewind/message selector (real's AA jz).
 func (e *editor) cancelKey() *readResult {
-	if e.vim {
+	if e.vim && e.mode == "insert" {
 		e.mode = "normal"
 		if e.pos > 0 {
 			e.pos--
 		}
+		if e.recordingIns {
+			e.recordingIns = false
+			e.lastInsText = append([]rune(nil), e.recIns...)
+		}
 		e.redraw()
 		return nil
 	}
-	if e.lastEsc > 0 && time.Since(time.Unix(0, e.lastEsc)) < 400*time.Millisecond {
-		e.lastEsc = 0
-		return &readResult{rewind: true}
+	if len(e.buf) == 0 {
+		if e.lastEsc > 0 && time.Since(time.Unix(0, e.lastEsc)) < exitArmWindow {
+			e.lastEsc = 0
+			return &readResult{rewind: true}
+		}
+		e.lastEsc = time.Now().UnixNano()
+		return nil
 	}
-	e.lastEsc = time.Now().UnixNano()
-	e.buf = e.buf[:0]
-	e.pos = 0
+	if !e.escArmAt.IsZero() && time.Since(e.escArmAt) < exitArmWindow {
+		e.escArmAt = time.Time{}
+		// real: the esc-esc clear saves the draft to history directly
+		l := string(e.buf)
+		if strings.TrimSpace(l) != "" {
+			e.pushUndo()
+			e.history = append(e.history, l)
+			appendHistoryFile(l)
+		}
+		e.buf = e.buf[:0]
+		e.pos = 0
+		e.redraw()
+		return nil
+	}
+	e.escArmAt = time.Now()
+	compInline("\r\x1b[K  " + dim + "Esc again to clear" + reset)
 	e.redraw()
 	return nil
+}
+
+// holdCleared stashes the current draft as "cleared" — real's holdCleared:
+// Up restores it (restoreCleared); if the user moves on without restoring,
+// it enters prompt history (flushCleared).
+func (e *editor) holdCleared(intoHistory bool) {
+	if strings.TrimSpace(string(e.buf)) == "" {
+		return
+	}
+	e.flushCleared() // an earlier unrestored draft commits to history now
+	e.pushUndo()
+	e.cleared = append([]rune(nil), e.buf...)
+	e.clearedHist = intoHistory
+	e.buf = e.buf[:0]
+	e.pos = 0
+}
+
+// restoreCleared pops a held cleared draft back into the buffer — real's
+// Up handler calls this before paging history.
+func (e *editor) restoreCleared() bool {
+	if e.cleared == nil || len(e.buf) > 0 {
+		return false
+	}
+	e.buf = e.cleared
+	e.pos = len(e.buf)
+	e.cleared = nil
+	e.redraw()
+	return true
+}
+
+// flushCleared commits a held cleared draft to history (real's #v — runs
+// when the draft was never restored before the next edit/history event).
+func (e *editor) flushCleared() {
+	if e.cleared == nil {
+		return
+	}
+	if e.clearedHist {
+		l := string(e.cleared)
+		if strings.TrimSpace(l) != "" {
+			e.history = append(e.history, l)
+			appendHistoryFile(l)
+		}
+	}
+	e.cleared = nil
 }
 
 // submitKey is enter / chat:submit (with \-continuation -> newline).
@@ -1361,6 +1799,10 @@ func (e *editor) clearInput() {
 func (e *editor) startSearch() {
 	e.histSearch = true
 	e.searchBuf = e.searchBuf[:0]
+	e.searchIdx = -1
+	if e.hIdx == -1 {
+		e.saved = append([]rune(nil), e.buf...) // ctrl+c restores this draft
+	}
 	e.redrawSearch()
 }
 
@@ -1526,49 +1968,97 @@ func (e *editor) externalEditor() *readResult {
 	return nil
 }
 
-// searchKey handles ctrl+r history search mode.
+// searchKey handles ctrl+r history search — real's HistorySearch context:
+// enter executes the match, esc/tab accept it into the buffer, ctrl+c
+// cancels back to the pre-search draft, ctrl+r cycles to the next older
+// match, ctrl+s cycles scope.
 func (e *editor) searchKey(k key) *readResult {
 	c := k.b
-	switch {
-	case c == 3 || (c == 0x1b && k.seq == ""): // esc/ctrl-c exits search
-		e.histSearch = false
-		e.searchBuf = e.searchBuf[:0]
-		if !e.zoneEdit {
-			os.Stdout.WriteString("\r\x1b[2K" + e.prompt)
-		}
-		e.redraw()
-	case c == '\r':
+	accept := func() {
 		e.histSearch = false
 		if m := e.searchMatch(); m != "" {
 			e.buf = []rune(m)
 			e.pos = len(e.buf)
 		}
 		e.searchBuf = e.searchBuf[:0]
+		if !e.zoneEdit {
+			os.Stdout.WriteString("\r\x1b[2K" + e.prompt)
+		}
 		e.redraw()
+	}
+	switch {
+	case c == 3: // ctrl+c — historySearch:cancel (restore pre-search draft)
+		e.histSearch = false
+		e.buf = append([]rune(nil), e.saved...)
+		e.pos = len(e.buf)
+		e.searchBuf = e.searchBuf[:0]
+		if !e.zoneEdit {
+			os.Stdout.WriteString("\r\x1b[2K" + e.prompt)
+		}
+		e.redraw()
+	case (c == 0x1b && k.seq == "") || c == '\t': // esc/tab — historySearch:accept
+		accept()
+	case c == '\r': // enter — historySearch:execute (accept + submit)
+		e.histSearch = false
+		if m := e.searchMatch(); m != "" {
+			e.buf = []rune(m)
+			e.pos = len(e.buf)
+		}
+		e.searchBuf = e.searchBuf[:0]
+		return e.submitKey()
 	case c == 0x7f || c == 8:
 		if len(e.searchBuf) > 0 {
 			e.searchBuf = e.searchBuf[:len(e.searchBuf)-1]
+			e.searchIdx = -1 // re-match from newest
 		}
 		e.redrawSearch()
-	case c == 18: // ctrl+r again cycles matches — naive: keep searching
-		e.redrawSearch()
+	case c == 18: // ctrl+r — historySearch:next (cycle to next older match)
+		e.searchNext()
+	case c == 19: // ctrl+s — historySearch:cycleScope (single scope: inert)
 	case c >= 32 && c < 127:
 		e.searchBuf = append(e.searchBuf, rune(c))
+		e.searchIdx = -1 // query changed — re-match from newest
 		e.redrawSearch()
 	}
 	return nil
 }
 
+// searchMatch returns the current match — searchIdx pins the cycled
+// position; -1 means "search from newest" (subsequence match, newest first).
 func (e *editor) searchMatch() string {
+	if e.searchIdx >= 0 && e.searchIdx < len(e.history) {
+		return e.history[e.searchIdx]
+	}
 	q := string(e.searchBuf)
-	// subsequence match against history, newest first
 	for i := len(e.history) - 1; i >= 0; i-- {
 		h := e.history[i]
 		if subseq(q, h) {
+			e.searchIdx = i
 			return h
 		}
 	}
 	return ""
+}
+
+// searchNext walks to the next older match, wrapping to newest — real's
+// ctrl+r cycling.
+func (e *editor) searchNext() {
+	q := string(e.searchBuf)
+	start := e.searchIdx - 1
+	for i := start; i >= 0; i-- {
+		if subseq(q, e.history[i]) {
+			e.searchIdx = i
+			e.redrawSearch()
+			return
+		}
+	}
+	for i := len(e.history) - 1; i > start; i-- {
+		if subseq(q, e.history[i]) {
+			e.searchIdx = i
+			e.redrawSearch()
+			return
+		}
+	}
 }
 
 func subseq(q, s string) bool {
@@ -1612,11 +2102,35 @@ func (e *editor) undo() {
 	e.redraw()
 }
 
+// dotRepeat replays the last recorded change — real's '.' replays the
+// whole command (op keystrokes + the inserted text of an insert burst).
 func (e *editor) dotRepeat() {
-	if e.lastChange == 0 {
+	if len(e.changeKeys) == 0 {
 		return
 	}
-	e.vimKey(key{b: byte(e.lastChange)})
+	keys := append([]key(nil), e.changeKeys...)
+	ins := append([]rune(nil), e.lastInsText...)
+	e.pendingKeys = nil
+	for _, k := range keys {
+		if e.mode == "visual" || e.mode == "vline" {
+			e.visualKey(k)
+		} else {
+			e.vimKey(k)
+		}
+	}
+	if e.mode == "insert" {
+		e.recordingIns = false // replayed text isn't a new recording
+		if len(ins) > 0 {
+			e.insert(ins...)
+		}
+		e.mode = "normal"
+		if e.pos > 0 {
+			e.pos--
+		}
+	}
+	e.changeKeys = keys
+	e.lastInsText = ins
+	e.redraw()
 }
 
 func (e *editor) recordReg(s string, _ int) { e.lastDel = s }
@@ -1733,6 +2247,7 @@ func (e *editor) applyOpRange(op rune, s, en int, linewise bool) {
 	case 'd', 'c', 'y':
 		e.lastDel = string(e.buf[s:en])
 		if op == 'y' {
+			e.pendingKeys = nil // yanks aren't '.'-changes
 			e.redraw()
 			return
 		}
@@ -1741,8 +2256,9 @@ func (e *editor) applyOpRange(op rune, s, en int, linewise bool) {
 		e.pos = s
 		if op == 'c' {
 			e.mode = "insert"
+			e.startInsRec()
 		}
-		e.lastChange = op
+		e.noteChange()
 	case '>':
 		e.pushUndo()
 		for p := s; p < en && p < len(e.buf); p++ {
@@ -1754,6 +2270,7 @@ func (e *editor) applyOpRange(op rune, s, en int, linewise bool) {
 			}
 		}
 		e.pos = s
+		e.noteChange()
 	case '<':
 		e.pushUndo()
 		var nb []rune
@@ -1767,6 +2284,7 @@ func (e *editor) applyOpRange(op rune, s, en int, linewise bool) {
 		}
 		e.buf = nb
 		e.pos = min(s, len(e.buf))
+		e.noteChange()
 	}
 	e.redraw()
 }
@@ -1789,6 +2307,7 @@ func (e *editor) linewiseOp(op rune) {
 	}
 	if op == 'y' {
 		e.lastDel = string(e.buf[s:en])
+		e.pendingKeys = nil
 		e.redraw()
 		return
 	}
@@ -1859,53 +2378,272 @@ func (e *editor) lineCount() int {
 	return n
 }
 
-// visualKey handles VISUAL mode: motions extend the anchor selection,
-// operators apply to the selection.
+// selRange returns the active visual selection as [start,end); in
+// visual-line mode it extends to whole lines (newline-inclusive).
+func (e *editor) selRange() (int, int) {
+	s, en := min(e.vimVisual, e.pos), max(e.vimVisual, e.pos)+1
+	if en > len(e.buf) {
+		en = len(e.buf)
+	}
+	if e.mode == "vline" {
+		for s > 0 && e.buf[s-1] != '\n' {
+			s--
+		}
+		for en < len(e.buf) && e.buf[en-1] != '\n' {
+			en++
+		}
+	}
+	return s, en
+}
+
+// visualKey handles VISUAL and VISUAL-LINE modes: motions extend the
+// anchor selection, operators apply to it (real's `No` dispatch).
 func (e *editor) visualKey(k key) *readResult {
 	c := k.b
+	vline := e.mode == "vline"
 	exit := func() { e.mode = "normal"; e.vimVisual = -1; e.redraw() }
-	switch c {
-	case 0x1b, 'v':
+	// r<char> replaces every selected char with the target (real visual r)
+	if e.vimReplace {
+		e.vimReplace = false
+		e.pendingKeys = append(e.pendingKeys, k)
+		if c >= 32 && c != 0x1b {
+			s, en := e.selRange()
+			e.pushUndo()
+			for i := s; i < en && i < len(e.buf); i++ {
+				if e.buf[i] != '\n' {
+					e.buf[i] = rune(c)
+				}
+			}
+			e.noteChange()
+			e.mode = "normal"
+			e.vimVisual = -1
+			e.pos = s
+			e.redraw()
+			return nil
+		}
+		e.pendingKeys = nil
 		exit()
 		return nil
-	case 'h', 0x7f:
-		if e.pos > 0 {
-			e.pos--
+	}
+	// i/a text object pending — select the object's range
+	if e.vimObj != 0 {
+		kind := e.vimObj
+		e.vimObj = 0
+		e.pendingKeys = nil // object selection isn't itself a change
+		if s2, en2, ok := e.textObjRange(kind, rune(c)); ok {
+			e.vimVisual = s2
+			e.pos = max(s2, en2-1)
+			e.redraw()
 		}
+		return nil
+	}
+	// find-char pending — the target extends the selection
+	if e.vimFind != 0 {
+		fc := e.vimFind
+		e.vimFind = 0
+		e.pendingKeys = nil
+		if c >= 32 {
+			e.lastFindCh = rune(c)
+			e.lastFindDir = fc
+			e.pos = e.findChar(e.lastFindCh, fc)
+			e.redraw()
+		}
+		return nil
+	}
+	if e.vimPendingG == 'm' {
+		e.vimPendingG = 0
+		e.pendingKeys = nil
+		if c == 'g' {
+			e.pos = 0
+			e.redraw()
+		}
+		return nil
+	}
+	// count prefix (real visual motions take counts)
+	if c >= '1' && c <= '9' || (c == '0' && e.vimCount > 0) {
+		e.vimCount = min(10000, e.vimCount*10+int(c-'0'))
+		return nil
+	}
+	e.pendingKeys = append(e.pendingKeys, k)
+	cnt := e.vimCount
+	e.vimCount = 0
+	if cnt == 0 {
+		cnt = 1
+	}
+	neutral := func() { e.pendingKeys = nil }
+	change := func(op rune) {
+		s, en := e.selRange()
+		e.mode = "normal"
+		e.vimVisual = -1
+		e.applyOpRange(op, s, en, vline)
+		e.noteChange()
+		if op == 'c' {
+			e.mode = "insert"
+			e.startInsRec()
+		}
+		e.pos = s
+	}
+	switch c {
+	case 0x1b:
+		e.pendingKeys = nil
+		exit()
+		return nil
+	case 'v':
+		e.pendingKeys = nil
+		if vline {
+			e.mode = "visual" // V in vline switches to charwise (real)
+			e.redraw()
+		} else {
+			exit()
+		}
+		return nil
+	case 'V':
+		e.pendingKeys = nil
+		e.mode = "vline"
+		e.redraw()
+		return nil
+	case 'h', 0x7f:
+		e.pos = max(0, e.pos-cnt)
 		e.redraw()
 	case 'l', ' ':
-		if e.pos < len(e.buf)-1 {
-			e.pos++
+		if len(e.buf) > 0 {
+			e.pos = min(len(e.buf)-1, e.pos+cnt)
+		}
+		e.redraw()
+	case 'j':
+		for i := 0; i < cnt; i++ {
+			e.pos = e.lineBelow()
+		}
+		e.redraw()
+	case 'k':
+		for i := 0; i < cnt; i++ {
+			e.pos = e.lineAbove()
 		}
 		e.redraw()
 	case 'w', 'W':
-		e.pos = e.wordFwd()
+		for i := 0; i < cnt; i++ {
+			e.pos = e.wordFwd()
+		}
 		e.redraw()
 	case 'b', 'B':
-		e.pos = e.wordBack()
+		for i := 0; i < cnt; i++ {
+			e.pos = e.wordBack()
+		}
 		e.redraw()
 	case 'e', 'E':
-		e.pos = e.wordEnd()
+		for i := 0; i < cnt; i++ {
+			e.pos = e.wordEnd()
+		}
 		e.redraw()
 	case '0':
 		e.pos = e.lineStart()
 		e.redraw()
+	case '^':
+		p := e.lineStart()
+		for p < len(e.buf) && (e.buf[p] == ' ' || e.buf[p] == '\t') {
+			p++
+		}
+		e.pos = p
+		e.redraw()
 	case '$':
 		e.pos = max(e.lineStart(), e.lineEnd()-1)
 		e.redraw()
+	case 'g':
+		e.vimPendingG = 'm'
+	case 'G':
+		if cnt > 1 {
+			e.pos = e.lineStartOf(cnt - 1)
+		} else {
+			e.pos = e.lineStartOf(e.lineCount() - 1)
+		}
+		e.redraw()
+	case 'f', 'F', 't', 'T':
+		e.vimFind = rune(c)
+	case ';':
+		e.pos = e.findChar(e.lastFindCh, e.lastFindDir)
+		e.redraw()
+	case ',':
+		e.pos = e.findChar(e.lastFindCh, flipDir(e.lastFindDir))
+		e.redraw()
+	case 'i', 'a':
+		e.vimObj = byte(c)
 	case 'o':
 		e.pos, e.vimVisual = e.vimVisual, e.pos // swap anchor/cursor
 		e.redraw()
-	case 'd', 'x', 'y', 'c':
-		s, en := min(e.pos, e.vimVisual), max(e.pos, e.vimVisual)+1
+	case 'd', 'x':
 		op := rune(c)
 		if c == 'x' {
 			op = 'd'
 		}
+		change(op)
+	case 'y':
+		change('y')
+	case 'c':
+		change('c')
+	case '>':
+		change('>')
+	case '<':
+		change('<')
+	case '~':
+		s, en := e.selRange()
+		e.pushUndo()
+		for i := s; i < en && i < len(e.buf); i++ {
+			r := e.buf[i]
+			if r >= 'a' && r <= 'z' {
+				e.buf[i] = r - 32
+			} else if r >= 'A' && r <= 'Z' {
+				e.buf[i] = r + 32
+			}
+		}
+		e.noteChange()
 		e.mode = "normal"
 		e.vimVisual = -1
-		e.applyOpRange(op, s, en, false)
-		return nil
+		e.pos = s
+		e.redraw()
+	case 'J':
+		// join the selected lines with single spaces
+		s, en := e.selRange()
+		e.pushUndo()
+		var nb []rune
+		first := true
+		for i := s; i < en && i < len(e.buf); i++ {
+			if e.buf[i] == '\n' && i+1 < en {
+				nb = append(nb, ' ')
+				first = false
+				continue
+			}
+			nb = append(nb, e.buf[i])
+			first = false
+		}
+		_ = first
+		e.buf = append(e.buf[:s], append(nb, e.buf[en:]...)...)
+		e.noteChange()
+		e.mode = "normal"
+		e.vimVisual = -1
+		e.pos = s
+		e.redraw()
+	case 'p', 'P':
+		if e.lastDel != "" {
+			s, en := e.selRange()
+			e.pushUndo()
+			e.buf = append(e.buf[:s], e.buf[en:]...)
+			at := s
+			if c == 'p' && strings.Contains(e.lastDel, "\n") {
+				at = min(len(e.buf), e.lineEndAt(s)+1)
+			}
+			for i := 0; i < cnt; i++ {
+				e.buf = append(e.buf[:at], append([]rune(e.lastDel), e.buf[at:]...)...)
+			}
+			e.pos = at
+			e.noteChange()
+		}
+		e.mode = "normal"
+		e.vimVisual = -1
+		e.redraw()
+	case 'r':
+		e.vimReplace = true
+	default:
+		neutral()
 	}
 	return nil
 }
@@ -1988,31 +2726,245 @@ func (e *editor) toggleFastMode() {
 
 func (e *editor) toggleThinking() { thinkingHidden.Store(!thinkingHidden.Load()) }
 
-// stashLine saves the current draft and clears the input (ctrl+s — the
-// editor stash in real CC).
-func (e *editor) stashLine() {
-	if len(e.buf) == 0 {
+// stashOrPop is ctrl+s (real chat:stash): a non-empty draft is stashed and
+// the input clears (single-slot stashedPrompt, not a stack); ctrl+s again
+// on an empty input pops the stashed draft back (real's popStash).
+func (e *editor) stashOrPop() {
+	if len(e.buf) > 0 {
+		e.flushCleared()
+		e.pushUndo()
+		e.stashed = append([]rune(nil), e.buf...)
+		e.buf = nil
+		e.pos = 0
+		e.redraw()
 		return
 	}
-	e.stashed = append(e.stashed, e.buf)
+	if e.stashed != nil {
+		e.pushUndo()
+		e.buf = e.stashed
+		e.stashed = nil
+		e.pos = len(e.buf)
+		e.redraw()
+	}
+}
+
+// ---- emacs kill-ring (real's `se` store: Kt/Gt maps in mod_0263) ----
+
+// killAdd pushes killed text on the ring — consecutive kills coalesce
+// (prepend for backward kills, append for forward kills).
+func (e *editor) killAdd(text string, prepend bool) {
+	if text == "" {
+		return
+	}
+	if e.wasKill && len(e.killRing) > 0 {
+		if prepend {
+			e.killRing[0] = text + e.killRing[0]
+		} else {
+			e.killRing[0] += text
+		}
+	} else {
+		e.killRing = append([]string{text}, e.killRing...)
+		if len(e.killRing) > 30 {
+			e.killRing = e.killRing[:30]
+		}
+	}
+	e.killLast = true
+}
+
+// killToLineEnd is ctrl+k — kill to end of logical line (or the newline
+// itself when at EOL).
+func (e *editor) killToLineEnd() {
+	en := e.lineEnd()
+	if en == e.pos && en < len(e.buf) {
+		en++ // at EOL the kill takes the newline (real deleteToLineEnd)
+	}
+	e.killAdd(string(e.buf[e.pos:en]), false)
 	e.pushUndo()
-	e.buf = nil
-	e.pos = 0
-	compInline(fmt.Sprintf("\r\n%s  stashed draft (ctrl+y to yank)%s\r\n", dim, reset))
+	e.buf = append(e.buf[:e.pos], e.buf[en:]...)
 	e.redraw()
 }
 
-// yankLine pops the most recent stashed draft back into the input
-// (ctrl+y — the hint printed by stashLine).
-func (e *editor) yankLine() {
-	if len(e.stashed) == 0 {
+// killToLineStart is ctrl+u — kill back to start of logical line.
+func (e *editor) killToLineStart() {
+	st := e.lineStart()
+	e.killAdd(string(e.buf[st:e.pos]), true)
+	e.pushUndo()
+	e.buf = append(e.buf[:st], e.buf[e.pos:]...)
+	e.pos = st
+	e.redraw()
+}
+
+// killWordFwd is meta+d — kill the next word forward.
+func (e *editor) killWordFwd() {
+	p := e.pos
+	for p < len(e.buf) && isWordSep(e.buf[p]) {
+		p++
+	}
+	for p < len(e.buf) && !isWordSep(e.buf[p]) {
+		p++
+	}
+	e.killAdd(string(e.buf[e.pos:p]), false)
+	e.pushUndo()
+	e.buf = append(e.buf[:e.pos], e.buf[p:]...)
+	e.redraw()
+}
+
+// backwardKillWord is meta/ctrl+backspace and ctrl+w — kill the word
+// behind the cursor.
+func (e *editor) backwardKillWord() {
+	p := e.pos
+	for p > 0 && isWordSep(e.buf[p-1]) {
+		p--
+	}
+	for p > 0 && !isWordSep(e.buf[p-1]) {
+		p--
+	}
+	e.killAdd(string(e.buf[p:e.pos]), true)
+	e.pushUndo()
+	e.buf = append(e.buf[:p], e.buf[e.pos:]...)
+	e.pos = p
+	e.redraw()
+}
+
+// yankKill is the editor-layer ctrl+y — insert the newest kill-ring entry.
+func (e *editor) yankKill() {
+	if len(e.killRing) == 0 {
 		return
 	}
-	e.pushUndo()
-	e.buf = e.stashed[len(e.stashed)-1]
-	e.stashed = e.stashed[:len(e.stashed)-1]
-	e.pos = len(e.buf)
+	t := e.killRing[0]
+	st := e.pos
+	e.insert([]rune(t)...)
+	e.yankPos = st
+	e.yankLen = len([]rune(t))
+	e.yankIdx = 0
+}
+
+// yankPop is meta+y — swap the last yank for the next ring entry.
+func (e *editor) yankPop() {
+	if e.yankPos < 0 || len(e.killRing) == 0 || e.pos != e.yankPos+e.yankLen {
+		return
+	}
+	e.yankIdx = (e.yankIdx + 1) % len(e.killRing)
+	t := []rune(e.killRing[e.yankIdx])
+	nb := append([]rune(nil), e.buf[:e.yankPos]...)
+	nb = append(nb, t...)
+	nb = append(nb, e.buf[e.yankPos+e.yankLen:]...)
+	e.buf = nb
+	e.pos = e.yankPos + len(t)
+	e.yankLen = len(t)
 	e.redraw()
+}
+
+// ---- wrapped-row cursor movement (real's mt/ht: up/down move between
+// visual lines of the draft before reaching history) ----
+
+// boxTextW is the usable text width of one composer row — mirrors what
+// boxFrame uses so wrapped-row math matches the rendered layout.
+func (e *editor) boxTextW() int {
+	w := compW
+	if w <= 0 {
+		w = 80
+	}
+	t := w - visWidth(e.prompt)
+	if t < 4 {
+		t = 4
+	}
+	return t
+}
+
+func visRunes(rs []rune) int { return visWidth(string(rs)) }
+
+// wrapRows is how many screen rows a logical line of `cells` columns
+// occupies at width w — a line of exactly w cells still needs a second
+// row only when followed by more text (deferred wrap), so it counts 1.
+func wrapRows(cells, w int) int {
+	if cells <= 0 {
+		return 1
+	}
+	return (cells + w - 1) / w
+}
+
+// visualPos returns the wrapped row/column of e.pos plus the draft's
+// total wrapped-row count.
+func (e *editor) visualPos() (row, col, rows int) {
+	w := e.boxTextW()
+	ls := 0
+	seen := false
+	for i := 0; i <= len(e.buf); i++ {
+		if i != len(e.buf) && e.buf[i] != '\n' {
+			continue
+		}
+		cells := visRunes(e.buf[ls:i])
+		lr := wrapRows(cells, w)
+		if !seen && e.pos <= i {
+			seen = true
+			cc := visRunes(e.buf[ls:e.pos])
+			row = rows + cc/w
+			col = cc % w
+			if cc > 0 && cc%w == 0 && e.pos == len(e.buf) {
+				// deferred-wrap cursor stays on the filled row
+				row--
+				col = w
+			}
+		}
+		rows += lr
+		ls = i + 1
+	}
+	return
+}
+
+// posAtRowCol resolves a wrapped row+column back to a buffer offset.
+func (e *editor) posAtRowCol(row, col int) int {
+	w := e.boxTextW()
+	ls, cur := 0, 0
+	for i := 0; i <= len(e.buf); i++ {
+		if i != len(e.buf) && e.buf[i] != '\n' {
+			continue
+		}
+		cells := visRunes(e.buf[ls:i])
+		lr := wrapRows(cells, w)
+		if row < cur+lr {
+			want := (row-cur)*w + col
+			if want > cells {
+				want = cells
+			}
+			pos, cw := ls, 0
+			for pos < i && cw < want {
+				rw := visRunes(e.buf[pos : pos+1])
+				if cw+rw > want {
+					break
+				}
+				cw += rw
+				pos++
+			}
+			return pos
+		}
+		cur += lr
+		ls = i + 1
+	}
+	return len(e.buf)
+}
+
+// cursorUp moves the cursor one wrapped row up — false on the top row.
+func (e *editor) cursorUp() bool {
+	row, col, _ := e.visualPos()
+	if row == 0 {
+		return false
+	}
+	e.pos = e.posAtRowCol(row-1, col)
+	e.redraw()
+	return true
+}
+
+// cursorDown moves the cursor one wrapped row down — false on the last row.
+func (e *editor) cursorDown() bool {
+	row, col, rows := e.visualPos()
+	if row >= rows-1 {
+		return false
+	}
+	e.pos = e.posAtRowCol(row+1, col)
+	e.redraw()
+	return true
 }
 
 // showShortcuts prints the keyboard-shortcut overlay ('?' on empty input).
@@ -2020,12 +2972,16 @@ func (e *editor) showShortcuts() {
 	var b strings.Builder
 	b.WriteString("\r\n\x1b[2m")
 	rows := [][2]string{
-		{"enter", "submit"}, {"shift+tab", "cycle permission mode"},
+		{"enter", "submit"}, {"shift+enter", "newline"},
+		{"shift+tab", "cycle permission mode"},
 		{"ctrl+c", "interrupt · twice to exit"}, {"ctrl+d", "exit"},
 		{"ctrl+l", "clear input"}, {"ctrl+r", "search history"},
 		{"ctrl+o", "transcript view"}, {"ctrl+t", "toggle todos"},
 		{"ctrl+g / ctrl+x ctrl+e", "external editor"},
-		{"ctrl+_ / ctrl+-", "undo"}, {"ctrl+s", "stash draft"},
+		{"ctrl+_ / ctrl+-", "undo"}, {"ctrl+s", "stash/pop draft"},
+		{"ctrl+k / ctrl+u / ctrl+w", "kill to end/start/word"},
+		{"ctrl+y / meta+y", "yank / cycle kill-ring"},
+		{"meta+b / meta+f / meta+d", "word back/fwd/kill"},
 		{"meta+p", "model picker"}, {"meta+o", "fast mode"},
 		{"meta+t", "toggle thinking"}, {"esc esc", "rewind"},
 		{"<any> while running", "queue the message"},

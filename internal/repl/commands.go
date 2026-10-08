@@ -160,11 +160,25 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		// real's /hooks: read-only menu of configured hooks grouped by
 		// event ("Enter to view · Esc to close"), not a doc prompt
 		hooksMenu(l, ks)
-	case "resume":
-		compSuspend() // the picker draws with \x1b[J — un-pin the live zone
-		id := pickSession(l.ToolCtx.CWD, ks, l.Client.SessionID)
-		compResume()
-		if id != "" {
+	case "resume", "continue":
+		// real takes [conversation id or search term]: a unique match
+		// resumes directly, anything else opens the picker
+		var id string
+		if arg != "" {
+			id = resolveSessionArg(l.ToolCtx.CWD, l.Client.SessionID, arg)
+			if id == "" {
+				dprintf("  no session matches %q\n", arg)
+			}
+		}
+		if id == "" && arg == "" {
+			compSuspend() // the picker draws with \x1b[J — un-pin the live zone
+			id = pickSession(l.ToolCtx.CWD, ks, l.Client.SessionID)
+			compResume()
+		}
+		if id == "" {
+			break
+		}
+		{
 			if msgs, err := session.Load(l.ToolCtx.CWD, id); err == nil {
 				// real's /resume switches to the picked session — same
 				// transcript continues: rebind the store at <id>.jsonl so
@@ -209,12 +223,51 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "diff":
 		diffCmdKS(l, ks)
 	case "review", "code-review":
-		dprintln("  reviewing (medium effort)…")
-		body := bundledCodeReview
-		if arg != "" {
-			body = "Review target: `" + arg + "`\n\n" + body
+		// real (mod_0683 Ce/ho): [<level>|ultra] [--fix] [--comment]
+		// [<pr#>|<branch>|<path>] [--max-findings <n>|all] — "ultra"
+		// dispatches to the ultrareview command, a level word sets the
+		// review effort and sticks (codeReviewLastEffort), everything
+		// else is the review target
+		ra := parseCodeReviewArgs(arg)
+		if ra.ultra {
+			ultrareviewCmd(l, ra.rest)
+			break
 		}
-		go l.Ask(context.Background(), body)
+		if ra.unrecognized != "" {
+			dprintf("  Ignoring unrecognized effort %q; valid: %s\n",
+				ra.unrecognized, strings.Join(codeReviewLevels, ", "))
+		}
+		eff := ra.level
+		if eff == "" {
+			if last, _ := config.UserSetting("codeReviewLastEffort").(string); last != "" {
+				eff = last
+				dprintf("  reviewing (reusing %s effort, the level you typed last time — type a level like /code-review high to change it)\n", eff)
+			} else {
+				eff = "medium"
+				dprintln("  reviewing (medium effort)…")
+			}
+		} else {
+			config.WriteUserSetting("codeReviewLastEffort", eff)
+			dprintf("  reviewing (%s effort)…\n", eff)
+		}
+		body := bundledCodeReview
+		var pre string
+		if ra.target != "" {
+			pre += "Review target: `" + ra.target + "`\n\n"
+		}
+		if eff != "medium" {
+			pre += "Review effort: " + eff + "\n\n"
+		}
+		if ra.maxFindings != "" {
+			pre += "Report at most " + ra.maxFindings + " findings.\n\n"
+		}
+		if ra.fix {
+			pre += "After reporting the findings, apply the fixes to the working tree.\n\n"
+		}
+		if ra.comment {
+			pre += "Post the findings as inline comments on the PR under review.\n\n"
+		}
+		go l.Ask(context.Background(), pre+body)
 	case "security-review":
 		dprintln("  analyzing code changes for security risks…")
 		runBundledPrompt(l, bundledSecurityReview, arg)
@@ -277,7 +330,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "insights":
 		dprintln("  analyzing your sessions…")
 		go l.Ask(context.Background(), insightsPrompt())
-	case "bug":
+	case "bug", "share":
 		url := "https://github.com/anthropics/claude-code/issues"
 		dprintln("  report issues at", url)
 		openURL(url)
@@ -294,9 +347,9 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		}
 		go l.Ask(context.Background(),
 			`Create an Agent with subagent_type "statusline-setup" and the prompt "`+n+`"`)
-	case "tasks":
+	case "tasks", "bashes":
 		tasksCmd(l)
-	case "theme", "color":
+	case "theme":
 		if arg == "" {
 			if pick := runThemePicker(ks); pick != "" {
 				applyTheme(pick, l.CWD)
@@ -308,42 +361,26 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		applyTheme(arg, l.CWD)
 		persistTheme(l.CWD, arg)
 		dprintf("  theme set to %s\n", arg)
-	case "alias":
-		aliasCmd(l, arg)
 	case "login":
 		loginCmd()
+	case "version":
+		// real prints VERSION + optional " (built <BUILD_TIME>)" — our
+		// const carries the replicated upstream version
+		dprintln("  " + api.Version)
 	case "logout":
 		logoutCmd()
 	case "keybindings":
 		dprintln("  edit ~/.claude/keybindings.json")
 	case "ide":
 		ideCmd()
-	case "files":
-		out, _ := exec.Command("git", "-C", l.ToolCtx.CWD, "ls-files").CombinedOutput()
-		dprintf("%s", string(out))
-	case "todos":
-		// real's /todos view: the live TodoWrite list (ctrl+t overlay too)
-		if txt := tools.TodosText(); txt != "" {
-			dprintln("  Todos:")
-			for _, ln := range strings.Split(txt, "\n") {
-				dprintln("   ", ln)
-			}
-		} else {
-			dprintln("  no todos")
-		}
 	case "release-notes":
 		dprintln("  claude-go", api.Version)
 	case "terminal-setup":
 		dprintln("  keybindings installed: none needed (Go build)")
 	case "privacy-settings":
 		dprintln("  telemetry: none in claude-go")
-	case "plugin":
-		dprintln("  plugins: load skills from ~/.claude/skills and project skills dirs")
-	case "import":
-		dprintln("  /import <path> reads a file into context")
-		if arg != "" {
-			l.Ask(context.Background(), "Please incorporate this file's contents: "+arg)
-		}
+	case "plugin", "plugins", "marketplace":
+		pluginCmd(l, cmd, arg)
 	case "btw":
 		if arg == "" {
 			dprintln("  usage: /btw <side question> — answered without adding to the main context")
@@ -383,7 +420,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		}()
 	case "feedback":
 		dprintln("  feedback: https://github.com/gbasin/claude-go/issues")
-	case "rename":
+	case "rename", "name":
 		if arg == "" {
 			dprintln("  usage: /rename <title>")
 			return false // handled (return true exits the REPL)
@@ -392,9 +429,9 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			currentStore.LogTitle(arg)
 		}
 		dprintf("  %s⎿%s  Session renamed to: %s\n", dim, reset, arg)
-	case "teleport":
+	case "teleport", "tp":
 		teleportCmd(l)
-	case "remote-control":
+	case "remote-control", "rc":
 		remoteControlCmd(l, arg)
 	case "remote-env":
 		remoteEnvCmd(l, arg)
@@ -421,28 +458,27 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "ultrareview":
 		ultrareviewCmd(l, arg)
 	case "fork":
+		// real (mod_0416): "Spawn a background agent that inherits the
+		// full conversation" <directive> — gated off under ua() (agent
+		// contexts); ours maps ua() to coordinator mode
 		if tools.IsCoordinatorMode() {
-			// uIn (mod_1512.js): keepParent fork refused (reason coordinator_mode)
 			dprintln("  " + tools.MsgForkCoordinator)
 			return false
 		}
-		if currentStore == nil {
-			dprintln("  (no transcript store — cannot fork)")
-			return false // handled (return true exits the REPL)
+		if l.ToolCtx.Agent == nil {
+			dprintln("  (sub-agents unavailable)")
+			return false
 		}
-		old := l.Client.SessionID
-		nw, msgs, err := session.Fork(l.CWD, old)
-		if err != nil {
-			dprintln("  fork failed:", err)
-			return false // handled (return true exits the REPL)
+		if arg == "" {
+			dprintln("  usage: /fork <directive> — copies this conversation into a background session")
+			return false
 		}
-		l.Client.SessionID = nw.SessionID
-		l.Messages = msgs
-		l.MarkEnvSent()
-		currentStore = nw
-		l.Transcript = nw.Path
-		logResync.Store(int32(len(msgs))) // fork already re-logged the chain
-		dprintf("  forked to session %s (%d messages carried)\n", nw.SessionID[:8], len(msgs))
+		forkRes := l.ToolCtx.Agent.RunAgent(l.ToolCtx, "fork", arg, "fork", "", "", true)
+		if forkRes.IsError {
+			dprintln("  fork failed:", forkRes.Content)
+		} else {
+			dprintln(" ", forkRes.Content)
+		}
 	case "rewind", "checkpoint", "undo":
 		if p, err := tools.Checkpoints.Rewind(); err != nil {
 			dprintln(" ", err)
@@ -519,7 +555,53 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 				{"claude-haiku-5-5", "Haiku 5.5", "Fastest for quick answers"},
 				{"claude-fable-5-1", "Fable 5.1", "Most capable for your hardest and longest-running tasks"},
 			}
-			const extra = 9 // real: "… +9 models" (older/legacy rows)
+			// ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL replaces the
+			// family row (real's sessionPickerChoices): the entry then selects
+			// the env id, labeled by _NAME/_DESCRIPTION when provided.
+			for i, f := range []struct{ env, fam string }{
+				{"OPUS", "Opus"}, {"SONNET", "Sonnet"}, {"HAIKU", "Haiku"}, {"FABLE", "Fable"},
+			} {
+				mid := strings.TrimSpace(os.Getenv("ANTHROPIC_DEFAULT_" + f.env + "_MODEL"))
+				if mid == "" {
+					continue
+				}
+				r := &models[i+1]
+				r.id = mid
+				if n := strings.TrimSpace(os.Getenv("ANTHROPIC_DEFAULT_" + f.env + "_MODEL_NAME")); n != "" {
+					r.label = n
+				} else {
+					r.label = "Custom " + f.fam + " model"
+				}
+				if d := strings.TrimSpace(os.Getenv("ANTHROPIC_DEFAULT_" + f.env + "_MODEL_DESCRIPTION")); d != "" {
+					r.desc = d
+				} else {
+					r.desc = fmt.Sprintf("Custom %s model (%s)", f.fam, mid)
+				}
+			}
+			// ANTHROPIC_CUSTOM_MODEL_OPTION{,_NAME,_DESCRIPTION} appends a
+			// free entry (real: sessionTail; skipped when it duplicates a row).
+			if cid := strings.TrimSpace(os.Getenv("ANTHROPIC_CUSTOM_MODEL_OPTION")); cid != "" {
+				dup := false
+				for _, m := range models {
+					if m.id == cid {
+						dup = true
+						break
+					}
+				}
+				if !dup {
+					label := strings.TrimSpace(os.Getenv("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"))
+					if label == "" {
+						label = cid
+					}
+					desc := strings.TrimSpace(os.Getenv("ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"))
+					if desc == "" {
+						desc = "Custom model (" + cid + ")"
+					}
+					models = append(models, mo{cid, label, desc})
+				}
+			}
+			const extra = 9   // real: "… +9 models" (older/legacy rows)
+			var filter []rune // real's "Type to search" narrows the list
 			sel := 0
 			for i, m := range models {
 				if l.Model == m.id {
@@ -528,25 +610,47 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			}
 			cyan := "\x1b[38;5;153m"
 			rows := len(models) + 6 // title+desc+models+overflow+effort+footer
+			shown := func() []int {
+				var idx []int
+				q := strings.ToLower(string(filter))
+				for i, m := range models {
+					if q == "" || strings.Contains(strings.ToLower(m.label+" "+m.id), q) {
+						idx = append(idx, i)
+					}
+				}
+				return idx
+			}
 			draw := func() {
 				var sb strings.Builder
 				sb.WriteString(fmt.Sprintf("\x1b[%dA\r", rows))
 				sb.WriteString(fmt.Sprintf("\x1b[K  %sSelect model%s\r\n", bold, reset))
 				sb.WriteString("\x1b[K  " + dim + "Switch between Claude models. Your pick becomes the default for new" + reset + "\r\n")
 				sb.WriteString("\x1b[K  " + dim + "sessions. For other/previous model names, specify with --model." + reset + "\r\n")
-				for i, m := range models {
-					cur := fmt.Sprintf("%d. ", i+1)
-					pad := "   "
-					if i == sel {
-						cur = menuCyan + "❯" + reset + fmt.Sprintf(" %d. ", i+1)
-						pad = " "
+				sh := shown()
+				if len(sh) == 0 {
+					sb.WriteString(fmt.Sprintf("\x1b[K  %sNo models match \"%s\"%s\r\n", dim, string(filter), reset))
+					for range models[1:] {
+						sb.WriteString("\x1b[K\r\n")
 					}
-					mark := ""
-					if l.Model == m.id || (m.id == "default" && l.Model == "") {
-						mark = " " + cyan + "✔" + reset
+				} else {
+					for i, mi := range sh {
+						m := models[mi]
+						cur := fmt.Sprintf("%d. ", mi+1)
+						pad := "   "
+						if i == sel {
+							cur = menuCyan + "❯" + reset + fmt.Sprintf(" %d. ", mi+1)
+							pad = " "
+						}
+						mark := ""
+						if l.Model == m.id || (m.id == "default" && l.Model == "") {
+							mark = " " + cyan + "✔" + reset
+						}
+						sb.WriteString(fmt.Sprintf("\x1b[K %s %s%s%s %s%s%s\r\n",
+							pad, cur, m.label, mark, dim, m.desc, reset))
 					}
-					sb.WriteString(fmt.Sprintf("\x1b[K %s %s%s%s %s%s%s\r\n",
-						pad, cur, m.label, mark, dim, m.desc, reset))
+					for i := len(sh); i < len(models); i++ {
+						sb.WriteString("\x1b[K\r\n") // keep row count stable
+					}
 				}
 				sb.WriteString(fmt.Sprintf("\x1b[K  %s… +%d models%s\r\n", dim, extra, reset))
 				eff := l.Effort
@@ -554,8 +658,18 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 					eff = "medium"
 				}
 				eff = strings.ToUpper(eff[:1]) + eff[1:]
-				sb.WriteString(fmt.Sprintf("\x1b[K  %s◐ %s effort ←/→ to adjust%s\r\n", dim, eff, reset))
-				sb.WriteString(fmt.Sprintf("\x1b[K  %sEnter to set as default · s to use this session only · Esc to cancel%s\r\n", dim, reset))
+				def := ""
+				if l.Effort == "" || l.Effort == "medium" {
+					def = " (default)" // real tags the default effort
+				}
+				sb.WriteString(fmt.Sprintf("\x1b[K  %s◐ %s effort%s ←/→ to adjust%s\r\n", dim, eff, def, reset))
+				foot := "Enter to set as default · s to use this session only · Esc to cancel"
+				if len(filter) > 0 {
+					foot = "Type to filter · Esc to clear"
+				} else {
+					foot = "Type to search · " + foot
+				}
+				sb.WriteString(fmt.Sprintf("\x1b[K  %s%s%s\r\n", dim, foot, reset))
 				fmt.Print(sb.String())
 			}
 			compSuspend()
@@ -574,6 +688,16 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			dprintln()
 			draw()
 			efforts := []string{"low", "medium", "high", "xhigh", "max"}
+			cur := func() int {
+				sh := shown()
+				if len(sh) == 0 {
+					return -1
+				}
+				if sel >= len(sh) {
+					sel = len(sh) - 1
+				}
+				return sh[sel]
+			}
 			for k := range dch {
 				switch {
 				case k.seq == "[A" || k.b == 'k':
@@ -581,8 +705,8 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 						sel--
 						draw()
 					}
-				case k.seq == "[B":
-					if sel < len(models)-1 {
+				case k.seq == "[B" || k.b == 'j':
+					if sel < len(shown())-1 {
 						sel++
 						draw()
 					}
@@ -602,17 +726,32 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 							break
 						}
 					}
+				case (k.b == 0x7f || k.b == 8) && len(filter) > 0:
+					filter = filter[:len(filter)-1]
+					sel = 0
+					draw()
 				case k.b == 0x1b || k.b == 3:
+					if len(filter) > 0 {
+						filter = filter[:0] // esc clears the search (real)
+						draw()
+						continue
+					}
 					dprintln()
 					return false
-				case k.b == 's':
-					l.Model = models[sel].id
-					sessionOnlyModel = true
-					dprintln()
-					dprintln("  model →", l.Model, "(this session only)")
+				case k.b == 's' && len(filter) == 0:
+					if ci := cur(); ci >= 0 {
+						l.Model = models[ci].id
+						sessionOnlyModel = true
+						dprintln()
+						dprintln("  model →", l.Model, "(this session only)")
+					}
 					return false
 				case k.b == '\r':
-					l.Model = models[sel].id
+					ci := cur()
+					if ci < 0 {
+						continue
+					}
+					l.Model = models[ci].id
 					sessionOnlyModel = false
 					if m, path := config.ReadClaudeJSON(); m != nil {
 						m["model"] = l.Model
@@ -623,6 +762,10 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 					dprintln()
 					dprintln("  model →", l.Model)
 					return false
+				case k.r != 0 && k.r >= 32:
+					filter = append(filter, k.r)
+					sel = 0
+					draw()
 				}
 			}
 		}
@@ -679,7 +822,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		cdCmd(l, arg)
 	case "stop":
 		stopCmd(l)
-	case "restart":
+	case "restart", "update":
 		restartCmd(l, ks)
 	case "oauth-refresh":
 		oauthRefreshCmd()
@@ -722,6 +865,83 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		url := "https://github.com/anthropics/claude-code/issues"
 		dprintln("  file an issue at", url)
 		openURL(url)
+	case "color":
+		colorCmd(ed, arg)
+	case "mobile", "ios", "android":
+		mobileCmd()
+	case "desktop", "app":
+		desktopCmd(l)
+	case "session", "remote":
+		sessionCmd(l)
+	case "list-agents", "peers":
+		listAgentsCmd(l)
+	case "recap":
+		recapCmd(l)
+	case "tui":
+		tuiCmd(arg)
+	case "upgrade":
+		// real (mod_0416 $wo): "Upgrade to Max for higher rate limits
+		// and more Opus" — opens the claude.ai upgrade page
+		const up = "https://claude.ai/upgrade/max?utm_source=claude_code"
+		if openURL(up) {
+			dprintln("  Opening upgrade options in your browser…")
+		} else {
+			dprintln("  Upgrade to Max for higher rate limits and more Opus:", up)
+		}
+	case "install":
+		installCmd(arg)
+	case "workflows":
+		workflowsCmd(l)
+	case "daemon":
+		daemonCmd(l, arg)
+	case "web-setup":
+		// real (mod_0360): "Set up cloud sessions with your GitHub
+		// account" — drives GitHub connection for claude.ai/code
+		if !hasOAuth(l) {
+			dprintln("  " + bridge.MsgTeleportNoAuth)
+			break
+		}
+		const wu = "https://claude.ai/code/onboarding?magic=github-app-setup"
+		if !openURL(wu) {
+			dprintln("  Connect GitHub for cloud sessions:", wu)
+		} else {
+			dprintln("  Opening GitHub connection setup…")
+		}
+	case "commit", "commit-push-pr":
+		// real skills q5t/cso (mod_0683): commit workflow; push+PR variant
+		// adds the push and gh pr create steps
+		body := bundledCommit
+		if cmd == "commit-push-pr" {
+			body = bundledCommitPushPR
+			dprintln("  committing, pushing, and opening a PR…")
+		} else {
+			dprintln("  creating commit…")
+		}
+		if arg == "" {
+			body = strings.ReplaceAll(body, "## User guidance\n\n$ARG\n\n", "")
+		} else {
+			body = strings.ReplaceAll(body, "$ARG", arg)
+		}
+		go l.Ask(context.Background(), interpolateBang(body, l.ToolCtx.CWD))
+	case "verify":
+		// real skill Qte (mod_0683): drive the changed flow end-to-end
+		dprintln("  verifying the change end-to-end…")
+		body := bundledVerify
+		if arg != "" {
+			body += "\n\n## User Request\n\n" + arg
+		}
+		go l.Ask(context.Background(), body)
+	case "simplify":
+		dprintln("  simplifying the changed code…")
+		body := bundledSimplify
+		if arg != "" {
+			body = "Review target: `" + arg + "`\n\n" + body
+		}
+		go l.Ask(context.Background(), body)
+	case "setup-claude", "setup-cowork":
+		// real skill xls (mod_1756): "Guided setup — pick a role,
+		// install a plugin, try a skill, connect tools"
+		go l.Ask(context.Background(), bundledSetupClaude)
 	default:
 		if fetch, ok := tools.ResolveMCPPrompt(cmd); ok {
 			// MCP prompt → fetch its messages and run them as the turn
@@ -2303,9 +2523,8 @@ var helpTable = map[string]helpEntry{
 	"diff":               {"Session", "show git diff summary", false},
 	"exit":               {"Session", "quit", false},
 	"export":             {"Session", "[path] write transcript to file", false},
-	"fork":               {"Session", "fork the session", false},
+	"fork":               {"Session", "<directive> spawn a background agent that inherits the conversation", false},
 	"goal":               {"Session", "<goal> work until the goal holds", false},
-	"import":             {"Session", "<path> read a file into context", false},
 	"loop":               {"Session", "<interval> <prompt> schedule a recurring prompt", false},
 	"memory":             {"Session", "memory files", false},
 	"resume":             {"Session", "resume a session", false},
@@ -2317,7 +2536,12 @@ var helpTable = map[string]helpEntry{
 	"background":         {"Session", "background tasks (alias: /bg)", false},
 	"cd":                 {"Session", "<path> move this session to a new working directory", false},
 	"copy":               {"Session", "[N] copy the last response to the clipboard", false},
-	"restart":            {"Session", "restart and keep this session", false},
+	"restart":            {"Session", "restart and keep this session (alias: /update)", false},
+	"session":            {"Session", "show this session's cloud URL", false},
+	"recap":              {"Session", "generate a one-line session recap", false},
+	"list-agents":        {"Session", "list subagents and sessions you can message (alias: /peers)", false},
+	"daemon":             {"Session", "background services and routines", false},
+	"workflows":          {"Session", "running and completed workflows", false},
 	"stop":               {"Session", "stop running background tasks", false},
 	"teleport":           {"Session", "move this session to the cloud", false},
 	"remote-control":     {"Session", "on|off|status connect this session to Remote Control", false},
@@ -2332,10 +2556,8 @@ var helpTable = map[string]helpEntry{
 	"chrome":             {"Config", "on|off Claude in Chrome enabled by default", false},
 	"ultraplan":          {"Tools", "<prompt> draft an editable plan in a cloud session", false},
 	"ultrareview":        {"Tools", "[PR#|instructions] cloud agent that finds and verifies bugs in your branch", false},
-	"todos":              {"Session", "todo list", false},
 	// Config
 	"advisor":          {"Config", "[model|off] pick the model the advisor tool consults", false},
-	"alias":            {"Config", "manage command aliases", false},
 	"autocompact":      {"Config", "[auto|<tokens>] set the auto-compact window size", false},
 	"brief":            {"Config", "toggle brief-only mode", false},
 	"config":           {"Config", "get/set settings (alias: /settings)", false},
@@ -2364,7 +2586,19 @@ var helpTable = map[string]helpEntry{
 	"statusline":       {"Config", "configure the status line (spawns statusline-setup)", false},
 	"terminal-setup":   {"Config", "install terminal keybindings", false},
 	"theme":            {"Config", "set theme", false},
+	"tui":              {"Config", "[default|fullscreen] set the terminal UI renderer", false},
 	"voice":            {"Config", "[hold|tap|off] toggle voice dictation", false},
+	"version":          {"External", "show this session's version", false},
+	"upgrade":          {"External", "upgrade to Max for higher rate limits and more Opus", false},
+	"mobile":           {"External", "QR code for the Claude mobile app", false},
+	"desktop":          {"External", "continue this session in Claude Desktop", false},
+	"install":          {"Config", "install Claude Code native build", false},
+	"web-setup":        {"Config", "set up cloud sessions with your GitHub account", false},
+	"commit":           {"Tools", "create a git commit", false},
+	"commit-push-pr":   {"Tools", "commit, push, and open a PR", false},
+	"verify":           {"Tools", "verify a change end-to-end", false},
+	"simplify":         {"Tools", "clean up changed code without changing behavior", false},
+	"setup-claude":     {"Tools", "guided Claude Code setup (alias: /setup-cowork)", false},
 	// Tools (prompt skills + tool-ish builtins)
 	"ant-trace":                {"Tools", "toggle per-request trace output", false},
 	"artifacts":                {"Tools", "list artifacts published this session", false},
@@ -2390,7 +2624,6 @@ var helpTable = map[string]helpEntry{
 	"agents":                   {"Tools", "list agent types", false},
 	"skills":                   {"Tools", "list skills", false},
 	"hooks":                    {"Tools", "hooks documentation", false},
-	"files":                    {"Tools", "list tracked files", false},
 	"plugin":                   {"Tools", "plugin management", false},
 	// External / misc
 	"bug":           {"External", "report an issue", false},
@@ -2404,15 +2637,29 @@ var helpTable = map[string]helpEntry{
 	"bg":             {"", "", true},
 	"breaks":         {"", "", true},
 	"break-reminder": {"", "", true},
-	"color":          {"", "", true},
+	"color":          {"Config", "<name|default> set the prompt bar color for this session", false},
 	"downtime":       {"", "", true},
-	"low":            {"", "", true},
 	"memory-pause":   {"", "", true},
 	"new":            {"", "", true},
 	"quit":           {"", "", true},
 	"reset":          {"", "", true},
 	"proactive":      {"", "", true},
 	"routines":       {"", "", true},
+	"android":        {"", "", true},
+	"app":            {"", "", true},
+	"bashes":         {"", "", true},
+	"continue":       {"", "", true},
+	"ios":            {"", "", true},
+	"marketplace":    {"", "", true},
+	"name":           {"", "", true},
+	"peers":          {"", "", true},
+	"plugins":        {"", "", true},
+	"rc":             {"", "", true},
+	"remote":         {"", "", true},
+	"setup-cowork":   {"", "", true},
+	"share":          {"", "", true},
+	"tp":             {"", "", true},
+	"update":         {"", "", true},
 	"toggle-memory":  {"", "", true},
 }
 
@@ -2490,10 +2737,28 @@ func memoryCmd(l *agent.Loop, arg string) {
 	}
 }
 
+// mcpCmd is /mcp [reconnect (<server>|all)|enable|disable [<server>|all]]
+// (mod_0416 Fco + the "mcp local" non-interactive twin). enable/disable
+// persist to enabledMcpjsonServers/disabledMcpjsonServers like real's
+// panel toggles; reconnect retries failed servers (ours reconnect on the
+// next session start — the servers record the intent).
 func mcpCmd(l *agent.Loop, arg string) {
-	if arg == "reconnect" || strings.HasPrefix(arg, "reconnect ") {
-		dprintln("  reconnecting MCP servers…")
-		return // real retries every failed server; ours reconnect on next turn
+	fields := strings.Fields(arg)
+	switch fields0(fields) {
+	case "reconnect":
+		target := "all"
+		if len(fields) > 1 {
+			target = fields[1]
+		}
+		if target == "all" {
+			dprintln("  reconnecting all failed MCP servers…")
+		} else {
+			dprintf("  reconnecting %s…\n", target)
+		}
+		return
+	case "enable", "disable":
+		mcpSetEnabled(fields[1:], fields[0] == "enable")
+		return
 	}
 	// real's /mcp: ●/○ status dot + name + transport + tool count
 	dprintf("  %sMCP servers%s\n", bold, reset)
@@ -2509,6 +2774,90 @@ func mcpCmd(l *agent.Loop, arg string) {
 			dprintf("    %s● %s%s  %s%d tools%s\n", green, r.Name, reset, dim, r.Tools, reset)
 		}
 	}
+}
+
+func fields0(f []string) string {
+	if len(f) == 0 {
+		return ""
+	}
+	return f[0]
+}
+
+// mcpSetEnabled mirrors real's /mcp enable|disable [<server>|all]: moves
+// the name between enabledMcpjsonServers and disabledMcpjsonServers in
+// user settings. "all" or a bare verb covers every known server name.
+func mcpSetEnabled(names []string, enable bool) {
+	rows := tools.MCPServerStatus()
+	targets := names
+	if len(targets) == 0 || (len(targets) == 1 && targets[0] == "all") {
+		targets = nil
+		for _, r := range rows {
+			targets = append(targets, r.Name) // all known
+		}
+		if len(targets) == 0 {
+			dprintln("  no MCP servers configured")
+			return
+		}
+	} else {
+		known := map[string]bool{}
+		for _, r := range rows {
+			known[r.Name] = true
+		}
+		ok := targets[:0]
+		for _, n := range targets {
+			if known[n] {
+				ok = append(ok, n)
+			} else {
+				dprintf("  no MCP server named %q\n", n)
+			}
+		}
+		targets = ok
+		if len(targets) == 0 {
+			return
+		}
+	}
+	asStrs := func(v any) []string {
+		var out []string
+		if a, ok := v.([]any); ok {
+			for _, e := range a {
+				if s, ok := e.(string); ok {
+					out = append(out, s)
+				}
+			}
+		}
+		return out
+	}
+	en := asStrs(config.UserSetting("enabledMcpjsonServers"))
+	dis := asStrs(config.UserSetting("disabledMcpjsonServers"))
+	add, drop := func(l []string, n string) []string {
+		for _, s := range l {
+			if s == n {
+				return l
+			}
+		}
+		return append(l, n)
+	},
+		func(l []string, n string) []string {
+			out := l[:0]
+			for _, s := range l {
+				if s != n {
+					out = append(out, s)
+				}
+			}
+			return out
+		}
+	for _, n := range targets {
+		if enable {
+			en, dis = add(en, n), drop(dis, n)
+			dprintf("  enabled %s\n", n)
+		} else {
+			dis, en = add(dis, n), drop(en, n)
+			dprintf("  disabled %s\n", n)
+		}
+	}
+	config.WriteUserSetting("enabledMcpjsonServers", en)
+	config.WriteUserSetting("disabledMcpjsonServers", dis)
+	dprintln("  " + dim + "takes effect on the next session start" + reset)
 }
 
 func permissionsCmd(l *agent.Loop, arg string) {
@@ -2806,31 +3155,6 @@ func tasksCmd(l *agent.Loop) {
 		}
 		dprintf("  %s [%s] %s\n", t.ID, st, t.Command)
 	}
-}
-
-func aliasCmd(l *agent.Loop, arg string) {
-	p := filepath.Join(config.ClaudeDir(), "aliases.json")
-	var m map[string]string
-	b, _ := os.ReadFile(p)
-	json.Unmarshal(b, &m)
-	if m == nil {
-		m = map[string]string{}
-	}
-	if arg == "" {
-		for k, v := range m {
-			dprintf("  /%s -> %s\n", k, v)
-		}
-		return
-	}
-	name, target, ok := strings.Cut(arg, "=")
-	if !ok {
-		dprintln(`  usage: /alias name="/real command"`)
-		return
-	}
-	m[strings.TrimSpace(name)] = strings.Trim(strings.TrimSpace(target), `"`)
-	out, _ := json.MarshalIndent(m, "", "  ")
-	os.WriteFile(p, out, 0o644)
-	dprintf("  alias /%s -> %s\n", strings.TrimSpace(name), m[strings.TrimSpace(name)])
 }
 
 func effortCmd(l *agent.Loop, arg string, ks *keySource) {

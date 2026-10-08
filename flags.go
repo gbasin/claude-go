@@ -25,6 +25,8 @@ type cliOpts struct {
 	model        string
 	outFormat    string
 	maxTurns     int
+	maxTurnsSet  bool // --max-turns given (beats CLAUDE_CODE_MAX_TURNS)
+	allowBypass  bool // bypassPermissions available this session
 	permMode     string
 	permModeSet  bool
 	appendSys    string
@@ -117,7 +119,12 @@ func parseCLI(args []string) *cliOpts {
 		"--permission-mode": func(v string) { o.permMode = v; o.permModeSet = true },
 		"--output-format":   func(v string) { o.outFormat = v },
 		"--input-format":    func(v string) { o.inFormat = v },
-		"--max-turns":       func(v string) { fmt.Sscanf(v, "%d", &o.maxTurns) },
+		"--max-turns": func(v string) {
+			if n, err := strconv.Atoi(v); err == nil {
+				o.maxTurns = n
+				o.maxTurnsSet = true
+			}
+		},
 		"--max-thinking-tokens": func(v string) {
 			if n, err := strconv.Atoi(v); err == nil {
 				o.thinkingTok = n
@@ -243,18 +250,23 @@ func parseCLI(args []string) *cliOpts {
 			// died on credentials
 			os.Setenv("CLAUDE_GO_MOCK", "1")
 		},
-		"-d":                                   func() { o.debug = true },
-		"--debug":                              func() { o.debug = true },
-		"-d2e":                                 func() { o.debug = true },
-		"--debug-to-stderr":                    func() { o.debug = true },
-		"--verbose":                            func() { o.verbose = true },
-		"--bare":                               func() { o.bareMode = true },
-		"--init-only":                          func() { o.initOnly = true },
-		"--include-hook-events":                func() { o.hookEvents = true },
-		"--include-partial-messages":           func() { o.partialMsgs = true },
-		"--replay-user-messages":               func() { o.replayUser = true },
-		"--dangerously-skip-permissions":       func() { o.permMode = "bypassPermissions" },
-		"--allow-dangerously-skip-permissions": func() { o.permMode = "bypassPermissions" },
+		"-d":                         func() { o.debug = true },
+		"--debug":                    func() { o.debug = true },
+		"-d2e":                       func() { o.debug = true },
+		"--debug-to-stderr":          func() { o.debug = true },
+		"--verbose":                  func() { o.verbose = true },
+		"--bare":                     func() { o.bareMode = true },
+		"--init-only":                func() { o.initOnly = true },
+		"--include-hook-events":      func() { o.hookEvents = true },
+		"--include-partial-messages": func() { o.partialMsgs = true },
+		"--replay-user-messages":     func() { o.replayUser = true },
+		"--dangerously-skip-permissions": func() {
+			o.permMode = "bypassPermissions"
+			o.allowBypass = true
+		},
+		// --allow-dangerously-skip-permissions only makes bypass available —
+		// it does not enable it (mod_0006.js: allowBypass flag, not a mode).
+		"--allow-dangerously-skip-permissions": func() { o.allowBypass = true },
 		"-c":                                   func() { o.cont = true },
 		"--bg":                                 func() { o.bgMode = true },
 		"--background":                         func() { o.bgMode = true },
@@ -404,6 +416,36 @@ func applyBetaFlags(extra string) {
 		ch += "\n"
 	}
 	os.Setenv("ANTHROPIC_CUSTOM_HEADERS", ch+"anthropic-beta: "+full)
+}
+
+// envOn mirrors real's Le() boolean env parse: trimmed lowercase must be
+// one of 1/true/yes/on — any other value (incl. other non-empty strings) is
+// off. Shared by the CLAUDE_CODE_* boolean envs handled in main.
+func envOn(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// envBetas returns the ANTHROPIC_BETAS env betas (mod_0137.js): comma-
+// separated, trimmed, empty entries dropped, afk-mode entries filtered out —
+// afk-mode is reserved to the feature gate and cannot be forced via env.
+func envBetas() string {
+	v := os.Getenv("ANTHROPIC_BETAS")
+	if v == "" {
+		return ""
+	}
+	var out []string
+	for _, b := range strings.Split(v, ",") {
+		b = strings.TrimSpace(b)
+		if b == "" || strings.Contains(b, "afk-mode") {
+			continue
+		}
+		out = append(out, b)
+	}
+	return strings.Join(out, ",")
 }
 
 // --- --agents -------------------------------------------------------------

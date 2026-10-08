@@ -63,7 +63,7 @@ func showTranscript(l *agent.Loop, ks *keySource) {
 				top = 0
 			}
 			draw()
-		case k.seq == "[6~" || k.b == 'f' || k.b == 6: // pgdn / ctrl+f
+		case k.seq == "[6~" || k.b == 'f' || k.b == 6 || k.b == ' ': // pgdn / ctrl+f / space (real)
 			top += viewH
 			if top+viewH > len(lines) {
 				top = max(0, len(lines)-viewH)
@@ -81,10 +81,10 @@ func showTranscript(l *agent.Loop, ks *keySource) {
 				top = 0
 			}
 			draw()
-		case k.b == 'g':
+		case k.b == 'g' || k.seq == "[H" || k.seq == "[1~" || k.seq == "[7~": // g / home (real)
 			top = 0
 			draw()
-		case k.b == 'G':
+		case k.b == 'G' || k.seq == "[F" || k.seq == "[4~" || k.seq == "[8~": // G / end (real)
 			top = max(0, len(lines)-viewH)
 			draw()
 		case k.b == 5: // ctrl+e — transcript:toggleShowAll

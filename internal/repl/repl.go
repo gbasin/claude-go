@@ -235,7 +235,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 		default:
 			reason, cfg := askReason(l, name, input)
 			ok, feedback := pr.askEx(l, ks, name, summary, reason, cfg, input)
-			if !ok && feedback != "" {
+			if feedback != "" {
 				queuePermFeedback(feedback)
 			}
 			return ok
@@ -262,10 +262,12 @@ func RunWithStore(l *agent.Loop, store Store) {
 			return // meta+t collapsed (real hides thinking by default display)
 		}
 		if !thinkingSeen {
-			streamPrint(dim + "✻ Thinking…" + reset)
+			// real renders "✻ Thinking…" dim + italic and the summary
+			// body in dim italic (mod_1551 dimColor+italic)
+			streamPrint(dim + "\x1b[3m✻ Thinking…" + reset)
 			thinkingSeen = true
 		}
-		streamWrite(dim + t + reset)
+		streamWrite(dim + "\x1b[3m" + t + reset)
 	}
 	l.Events.OnToolUse = func(name string, input json.RawMessage) {
 		// real's spinner keeps animating through tool execution — the
@@ -288,16 +290,37 @@ func RunWithStore(l *agent.Loop, store Store) {
 			return
 		}
 		lines := strings.Split(strings.TrimRight(r.Content, "\n"), "\n")
-		max := 5
 		if briefMode.Load() {
-			max = 1 // brief mode: tool previews collapse to one line
+			// brief mode: tool previews collapse to one line
+			streamPrint(fmt.Sprintf("  %s⎿%s  %s", dim, reset, trunc(lines[0], 113)))
+			return
 		}
-		for i, ln := range lines {
-			if i >= max {
-				streamPrint(fmt.Sprintf("  %s⎿%s  … +%d lines (ctrl+o to expand)", dim, reset, len(lines)-max))
-				break
+		// real's fold (mod_0397): wrap each result line at cols-10, show
+		// the first 3 WRAPPED rows (all 4 in the grace case), then
+		// "… +N lines (<key> to expand)" with the resolved transcript key
+		w := compW
+		if w <= 0 {
+			w = 80
+		}
+		ew := max(w-10, 10)
+		var rows []string
+		for _, ln := range lines {
+			for _, seg := range softWrap(ln, ew) {
+				rows = append(rows, strings.TrimRight(seg, " \t"))
 			}
-			streamPrint(fmt.Sprintf("  %s⎿%s  %s", dim, reset, trunc(ln, 113)))
+		}
+		const fold = 3
+		above, rem := rows, 0
+		if len(rows) > fold+1 {
+			above, rem = rows[:fold], len(rows)-fold
+		}
+		for _, ln := range above {
+			streamPrint(fmt.Sprintf("  %s⎿%s  %s", dim, reset, compClamp(ln, w)))
+		}
+		if rem > 0 {
+			key := ed.resolvedChord("Global", "app:toggleTranscript", "ctrl+o")
+			streamPrint(fmt.Sprintf("  %s⎿%s  … +%d %s (%s to expand)",
+				dim, reset, rem, pluralize(rem, "line", "lines"), key))
 		}
 	}
 	historySessionID = l.Client.SessionID
@@ -1416,13 +1439,15 @@ func printStatus(l *agent.Loop, ed *editor) {
 }
 
 var slashCommands = []string{
-	"add-dir", "agents", "alias", "bug", "clear", "color", "compact",
-	"config", "context", "cost", "diff", "doctor", "export", "exit",
-	"feedback", "files", "help", "hooks", "ide", "import", "init",
-	"keybindings", "login", "logout", "mcp", "memory", "model", "output-style",
-	"permissions", "plugin", "privacy-settings", "quit", "radio", "release-notes",
-	"resume", "review", "status", "statusline", "tasks", "terminal-setup",
-	"theme", "todos", "usage", "voice",
+	"add-dir", "agents", "bug", "clear", "color", "compact", "config",
+	"context", "cost", "daemon", "desktop", "diff", "doctor", "export",
+	"exit", "feedback", "fork", "help", "hooks", "ide", "init",
+	"keybindings", "list-agents", "login", "logout", "mcp", "memory",
+	"mobile", "model", "output-style", "permissions", "plugin",
+	"privacy-settings", "quit", "radio", "recap", "release-notes",
+	"resume", "review", "session", "status", "statusline", "tasks",
+	"terminal-setup", "theme", "tui", "upgrade", "usage", "version",
+	"voice", "workflows",
 }
 
 func termWidth() (int, error) {
@@ -1977,7 +2002,7 @@ func SlashCommandNames() []string {
 }
 
 func builtinSlashCommands() []string {
-	return []string{"add-dir", "advisor", "agents", "alias", "allowed-tools", "ant-trace", "artifacts", "auto", "autocompact", "background", "batch", "bg", "branch", "break-reminder", "breaks", "brief", "btw", "bug", "cd", "checkpoint", "checkup", "chrome", "clear", "cloud-plugins", "code-review", "color", "compact", "config", "context", "copy", "cost", "debug", "debug-tool-call", "design-consent", "design-login", "design-revoke", "diff", "doctor", "downtime", "effort", "env", "exit", "experiments", "export", "extra-usage", "fast", "feedback", "fewer-permission-prompts", "files", "focus", "fork", "goal", "heapdump", "help", "high", "hooks", "ide", "import", "init", "insights", "install-github-app", "issue", "keybindings", "keybindings-help", "login", "logout", "loop", "low", "max", "mcp", "medium", "memory", "memory-pause", "memory-types", "model", "new", "oauth-refresh", "output-style", "pause-memory", "permissions", "plan", "plugin", "powerup", "pr", "privacy-settings", "proactive", "quit", "radio", "release-notes", "reload-plugins", "reload-skills", "remote-control", "remote-env", "rename", "reset", "restart", "resume", "review", "rewind", "routines", "run", "sandbox", "schedule", "scroll-speed", "security-review", "settings", "settings-review", "setup-bedrock", "setup-vertex", "skills", "stats", "status", "statusline", "stop", "subtask", "tasks", "teleport", "terminal-setup", "theme", "todos", "toggle-memory", "ultraplan", "ultrareview", "undo", "update-config", "usage", "usage-credits", "voice", "wellbeing", "xhigh"}
+	return []string{"add-dir", "advisor", "agents", "allowed-tools", "android", "ant-trace", "app", "artifacts", "autocompact", "background", "bashes", "batch", "bg", "branch", "break-reminder", "breaks", "brief", "btw", "bug", "cd", "checkpoint", "checkup", "chrome", "clear", "cloud-plugins", "code-review", "color", "commit", "commit-push-pr", "compact", "config", "context", "continue", "copy", "cost", "daemon", "debug", "debug-tool-call", "design-consent", "design-login", "design-revoke", "desktop", "diff", "doctor", "downtime", "effort", "env", "exit", "experiments", "export", "extra-usage", "fast", "feedback", "fewer-permission-prompts", "focus", "fork", "goal", "heapdump", "help", "hooks", "ide", "init", "insights", "install", "install-github-app", "ios", "issue", "keybindings", "keybindings-help", "list-agents", "login", "logout", "loop", "marketplace", "mcp", "memory", "memory-pause", "memory-types", "mobile", "model", "name", "new", "oauth-refresh", "output-style", "pause-memory", "peers", "permissions", "plan", "plugin", "plugins", "powerup", "pr", "privacy-settings", "proactive", "quit", "radio", "rc", "recap", "release-notes", "reload-plugins", "reload-skills", "remote", "remote-control", "remote-env", "rename", "reset", "restart", "resume", "review", "rewind", "routines", "run", "sandbox", "schedule", "scroll-speed", "security-review", "session", "settings", "settings-review", "setup-bedrock", "setup-claude", "setup-cowork", "setup-vertex", "share", "simplify", "skills", "stats", "status", "statusline", "stop", "subtask", "tasks", "teleport", "terminal-setup", "theme", "toggle-memory", "tp", "tui", "ultraplan", "ultrareview", "undo", "update", "update-config", "upgrade", "usage", "usage-credits", "verify", "version", "voice", "web-setup", "wellbeing", "workflows"}
 }
 
 // currentStore is set by RunWithStore so slash commands can write records.

@@ -8,6 +8,8 @@ import (
 	"claude-go/internal/config"
 	"claude-go/internal/plugins"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +38,16 @@ type ServerConfig struct {
 	// Authorization is a convenience field: sets the Authorization request
 	// header (e.g. "Bearer ${MCP_TOKEN}") without listing it in Headers.
 	Authorization string `json:"authorization,omitempty"`
+	// Timeout is the per-server request timeout in ms — real's config
+	// `timeout` field (>=1000, clamped to ~30min). Overrides
+	// MCP_TOOL_TIMEOUT for tools/call.
+	Timeout int `json:"timeout,omitempty"`
+	// Enabled gates auto-connect — real's per-server enable flag
+	// (/mcp enable|disable, "enable before reconnect"). nil → enabled.
+	Enabled *bool `json:"enabled,omitempty"`
+	// OAuth carries the server's client-registration pins
+	// (--client-id/--client-secret/--callback-port/--xaa on mcp add).
+	OAuth *OAuthConfig `json:"oauth,omitempty"`
 
 	// --- claude.ai connector fields (mod_0386.js SLn) ---
 	// Populated by FetchClaudeAIConfigs for Type "claudeai-proxy"; never
@@ -63,15 +75,113 @@ type ServerConfig struct {
 	CachedInitResponse     json.RawMessage `json:"-"`
 	DiscoverSupport        string          `json:"-"` // "supported" | "legacy"
 	CachedDiscoverResponse json.RawMessage `json:"-"`
+
+	// raw is the verbatim config JSON — the mcpOAuth credential key is a
+	// hash over {type,url,headers} that must reproduce real's
+	// JSON.stringify byte order, which map round-tripping would lose.
+	raw json.RawMessage
+}
+
+// OAuthConfig is the optional per-server oauth block (`oauth:` in config).
+type OAuthConfig struct {
+	ClientID              string `json:"clientId,omitempty"`
+	ClientSecret          string `json:"clientSecret,omitempty"`
+	CallbackPort          int    `json:"callbackPort,omitempty"`
+	AuthServerMetadataURL string `json:"authServerMetadataUrl,omitempty"`
+	XAA                   bool   `json:"xaa,omitempty"`
+}
+
+// UnmarshalJSON keeps the original bytes in raw.
+func (c *ServerConfig) UnmarshalJSON(b []byte) error {
+	type plain ServerConfig
+	var p plain
+	if err := json.Unmarshal(b, &p); err != nil {
+		return err
+	}
+	*c = ServerConfig(p)
+	c.raw = append(c.raw[:0], b...)
+	return nil
+}
+
+// credKey is real's Hl(name,cfg): "<name>|<sha256({type,url,headers})[:16]>".
+// The hashed object serializes exactly {type,url,headers:headers||{}} in
+// that field order; when we still hold the original config bytes the
+// headers member is lifted verbatim (real hashes JSON.stringify of the
+// config, preserving its key order).
+func (c ServerConfig) credKey(name string) string {
+	var tj, uj, hj json.RawMessage
+	var haveT, haveU bool
+	hasRaw := len(c.raw) > 0
+	if hasRaw {
+		var m map[string]json.RawMessage
+		if json.Unmarshal(c.raw, &m) == nil {
+			tj, uj, hj = m["type"], m["url"], m["headers"]
+			_, haveT = m["type"]
+			_, haveU = m["url"]
+		}
+	} else {
+		haveT, haveU = true, true // code-built configs behave as defined
+	}
+	// JSON.stringify drops undefined fields — type/url only appear when
+	// present in the config; headers is `headers||{}` so always emitted.
+	var obj []byte
+	obj = append(obj, '{')
+	sep := []byte(nil)
+	emit := func(key string, v json.RawMessage) {
+		obj = append(obj, sep...)
+		obj = append(obj, key...)
+		obj = append(obj, v...)
+		sep = []byte(",")
+	}
+	if len(tj) > 0 {
+		emit(`"type":`, tj)
+	} else if c.Type != "" && haveT {
+		emit(`"type":`, json.RawMessage(strconv.Quote(c.Type)))
+	}
+	if len(uj) > 0 {
+		emit(`"url":`, uj)
+	} else if c.URL != "" && haveU {
+		emit(`"url":`, json.RawMessage(strconv.Quote(c.URL)))
+	}
+	if len(hj) == 0 {
+		hj, _ = json.Marshal(c.Headers)
+		if len(hj) == 0 || string(hj) == "null" {
+			hj = []byte("{}")
+		}
+	}
+	emit(`"headers":`, hj)
+	obj = append(obj, '}')
+	sum := sha256.Sum256(obj)
+	return name + "|" + hex.EncodeToString(sum[:])[:16]
 }
 
 // LoadConfigs merges mcpServers from ~/.claude.json and <cwd>/.mcp.json.
-// Project (.mcp.json) entries are gated: enabledMcpjsonServers allows,
-// disabledMcpjsonServers removes, enableAllProjectMcpServers trusts all.
+// ~/.claude.json contributes two scopes: top-level mcpServers (user) and
+// projects["<cwd>"].mcpServers (local — real's default `mcp add` target;
+// local wins on name conflicts). Project (.mcp.json) entries are gated:
+// enabledMcpjsonServers allows, disabledMcpjsonServers removes,
+// enableAllProjectMcpServers trusts all.
 func LoadConfigs(cwd string) map[string]ServerConfig {
 	out := map[string]ServerConfig{}
 	home, _ := os.UserHomeDir()
 	st := config.Load(cwd)
+	merge := func(servers map[string]ServerConfig, gated bool) {
+		for n, c := range servers {
+			if gated && !st.EnableAllProjectMcpServers {
+				if sliceHas(st.DisabledMcpjsonServers, n) {
+					continue
+				}
+				if !sliceHas(st.EnabledMcpjsonServers, n) {
+					// untrusted project servers are skipped until approved
+					// (real prompts; non-interactive contexts skip)
+					if os.Getenv("CLAUDE_GO_APPROVE_MCP") == "" {
+						continue
+					}
+				}
+			}
+			out[n] = c
+		}
+	}
 	for _, p := range []string{
 		filepath.Join(home, ".claude.json"),
 		filepath.Join(cwd, ".mcp.json"),
@@ -89,29 +199,20 @@ func LoadConfigs(cwd string) map[string]ServerConfig {
 		if json.Unmarshal(b, &top) != nil {
 			continue
 		}
-		raw, ok := top["mcpServers"]
-		if !ok {
-			continue
-		}
 		var servers map[string]ServerConfig
-		if json.Unmarshal(raw, &servers) != nil {
-			continue
+		if json.Unmarshal(top["mcpServers"], &servers) == nil {
+			merge(servers, strings.HasSuffix(p, ".mcp.json"))
 		}
-		isProject := strings.HasSuffix(p, ".mcp.json")
-		for n, c := range servers {
-			if isProject && !st.EnableAllProjectMcpServers {
-				if sliceHas(st.DisabledMcpjsonServers, n) {
-					continue
-				}
-				if !sliceHas(st.EnabledMcpjsonServers, n) {
-					// untrusted project servers are skipped until approved
-					// (real prompts; non-interactive contexts skip)
-					if os.Getenv("CLAUDE_GO_APPROVE_MCP") == "" {
-						continue
-					}
+		if strings.HasSuffix(p, ".claude.json") {
+			// local scope: projects["<cwd>"].mcpServers
+			var projects map[string]struct {
+				Servers map[string]ServerConfig `json:"mcpServers"`
+			}
+			if json.Unmarshal(top["projects"], &projects) == nil {
+				if proj, ok := projects[cwd]; ok {
+					merge(proj.Servers, false)
 				}
 			}
-			out[n] = c
 		}
 	}
 	// plugin .mcp.json: each enabled plugin dir may declare servers;
@@ -259,13 +360,18 @@ type Client struct {
 	// Roots, if set, answers roots/list server requests with the session's
 	// workspace roots (project dir + add-dirs).
 	Roots func() []map[string]string
+	// ElicitURL answers url-mode elicitation/create — should surface
+	// params.url to the user (real shows an "open link" dialog). Nil →
+	// default handler prints the URL to stderr and accepts.
+	ElicitURL func(url, elicitationID string) map[string]any
 
-	tr      transport
-	cmd     *exec.Cmd // stdio only
-	seq     atomic.Int64
-	mu      sync.Mutex
-	pending map[string]chan rpcResp
-	closed  atomic.Bool
+	tr          transport
+	cmd         *exec.Cmd     // stdio only
+	toolTimeout time.Duration // per-server `timeout` or MCP_TOOL_TIMEOUT
+	seq         atomic.Int64
+	mu          sync.Mutex
+	pending     map[string]chan rpcResp
+	closed      atomic.Bool
 	// toolsListErr records a failed tools/list during handshake (v.toolsListError
 	// in mod_1797.js); discoveryBearerRejected marks a 401/403 there
 	// (v.discoveryBearerRejected). Both gate the ever-connected write-back.
@@ -293,6 +399,7 @@ func Connect(name string, cfg ServerConfig) (*Client, error) {
 	}
 	var c *Client
 	var err error
+	toolTimeout := mcpToolTimeout(cfg.Timeout)
 	switch typ {
 	case "stdio":
 		c, err = connectStdio(name, cfg)
@@ -300,6 +407,8 @@ func Connect(name string, cfg ServerConfig) (*Client, error) {
 		c, err = connectHTTP(name, cfg)
 	case "sse":
 		c, err = connectSSE(name, cfg)
+	case "ws":
+		c, err = connectWSTransport(name, cfg)
 	case "claudeai-proxy":
 		c, err = connectClaudeAIProxy(name, cfg)
 	default:
@@ -309,6 +418,7 @@ func Connect(name string, cfg ServerConfig) (*Client, error) {
 		recordStatus(name, "failed", err.Error(), "")
 		return nil, err
 	}
+	c.toolTimeout = toolTimeout
 	if err := c.handshake(); err != nil {
 		var ae *AuthError
 		if asAuthErr(err, &ae) {
@@ -350,10 +460,20 @@ func (c *Client) handshake() error {
 		Capabilities json.RawMessage `json:"capabilities"`
 		Instructions string          `json:"instructions"`
 	}
+	// real advertises roots (listChanged), elicitation, and tasks —
+	// servers gate roots/list and elicitation/create on these
 	err := c.call(ctx, "initialize", map[string]any{
 		"protocolVersion": ProtocolVersion,
-		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]string{"name": "claude-go", "version": "2.1.294"},
+		"capabilities": map[string]any{
+			"roots":       map[string]any{"listChanged": true},
+			"elicitation": map[string]any{},
+			"tasks": map[string]any{
+				"requests": map[string]any{
+					"elicitation": map[string]any{"create": map[string]any{}},
+				},
+			},
+		},
+		"clientInfo": map[string]string{"name": "claude-go", "version": "2.1.294"},
 	}, &initRes)
 	if err != nil {
 		return fmt.Errorf("mcp %s initialize: %w", c.Name, err)
@@ -501,12 +621,27 @@ func (c *Client) handleServerRequest(id json.RawMessage, method string, params j
 	} else if method == "ping" {
 		resp = map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "result": map[string]any{}}
 	} else if method == "elicitation/create" {
-		// real renders a form (Elicit hook); nil handler → decline
-		action := map[string]any{"action": "decline"}
-		if c.Elicit != nil {
-			action = c.Elicit(params)
+		// real renders a form (Elicit hook); nil handler → decline.
+		// URL mode (params.mode=="url") carries {url, elicitationId}: the
+		// user completes the flow in a browser and the server confirms
+		// with notifications/elicitation/complete — we surface the URL
+		// and acknowledge, matching real's "MCP input: open link" flow.
+		var p struct {
+			Mode          string `json:"mode"`
+			URL           string `json:"url"`
+			ElicitationID string `json:"elicitationId"`
 		}
-		resp = map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "result": action}
+		_ = json.Unmarshal(params, &p)
+		if p.Mode == "url" && p.URL != "" {
+			resp = map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id),
+				"result": c.elicitURL(p.URL, p.ElicitationID)}
+		} else {
+			action := map[string]any{"action": "decline"}
+			if c.Elicit != nil {
+				action = c.Elicit(params)
+			}
+			resp = map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "result": action}
+		}
 	} else {
 		resp = map[string]any{
 			"jsonrpc": "2.0", "id": json.RawMessage(id),
@@ -520,6 +655,17 @@ func (c *Client) handleServerRequest(id json.RawMessage, method string, params j
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	c.tr.send(ctx, b)
+}
+
+// elicitURL handles a url-mode elicitation: real opens a dialog that links
+// the user to params.url; the headless default announces it on stderr and
+// accepts (the server confirms via notifications/elicitation/complete).
+func (c *Client) elicitURL(url, elicitationID string) map[string]any {
+	if c.ElicitURL != nil {
+		return c.ElicitURL(url, elicitationID)
+	}
+	fmt.Fprintf(os.Stderr, "  [mcp %s] server requests you open: %s\n", c.Name, url)
+	return map[string]any{"action": "accept"}
 }
 
 func (c *Client) call(ctx context.Context, method string, params any, out any) error {
@@ -576,7 +722,11 @@ func (c *Client) CallTool(ctx context.Context, name string, args json.RawMessage
 		json.Unmarshal(args, &params)
 	}
 	var res callResult
-	ctx2, cancel := context.WithTimeout(ctx, 120*time.Second)
+	to := c.toolTimeout
+	if to <= 0 {
+		to = 120 * time.Second
+	}
+	ctx2, cancel := context.WithTimeout(ctx, to)
 	defer cancel()
 	err := c.call(ctx2, "tools/call", map[string]any{
 		"name": name, "arguments": params,
@@ -898,6 +1048,24 @@ func mcpTimeout() time.Duration {
 func mcpConnectTimeout() time.Duration {
 	return mcpEnvMS("MCP_CONNECT_TIMEOUT_MS", 5_000)
 }
+
+// MCP_TOOL_TIMEOUT (ms) bounds tools/call — real's default is ~5min and a
+// per-server `timeout` config field (>=1000ms, clamped to ~30min) overrides
+// the env. cfgMs<=0 falls through to the env/default chain.
+func mcpToolTimeout(cfgMs int) time.Duration {
+	const minMS, maxMS = 1000, 30 * 60 * 1000
+	if cfgMs > 0 {
+		if cfgMs < minMS {
+			cfgMs = minMS
+		}
+		if cfgMs > maxMS {
+			cfgMs = maxMS
+		}
+		return time.Duration(cfgMs) * time.Millisecond
+	}
+	return mcpEnvMS("MCP_TOOL_TIMEOUT", 300_000)
+}
+
 func mcpEnvMS(name string, def int) time.Duration {
 	if v := os.Getenv(name); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 2147483647 {
