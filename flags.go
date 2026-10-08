@@ -25,6 +25,7 @@ type cliOpts struct {
 	model        string
 	outFormat    string
 	maxTurns     int
+	taskBudget   int
 	permMode     string
 	permModeSet  bool
 	appendSys    string
@@ -116,6 +117,14 @@ func parseCLI(args []string) *cliOpts {
 		"--effort":          func(v string) { o.effort = v },
 		"--permission-mode": func(v string) { o.permMode = v; o.permModeSet = true },
 		"--output-format":   func(v string) { o.outFormat = v },
+		// real: positive int → output_config.task_budget {type:"tokens"}
+		"--task-budget": func(v string) {
+			n, err := strconv.Atoi(v)
+			if err != nil || n <= 0 {
+				fatal("--task-budget must be a positive integer")
+			}
+			o.taskBudget = n
+		},
 		"--input-format":    func(v string) { o.inFormat = v },
 		"--max-turns":       func(v string) { fmt.Sscanf(v, "%d", &o.maxTurns) },
 		"--max-thinking-tokens": func(v string) {
@@ -196,7 +205,7 @@ func parseCLI(args []string) *cliOpts {
 		"--channels", "--dangerously-load-development-channels",
 		"--plugin-dir", "--plugin-dir-no-mcp", "--plugin-url",
 		"--remote-control-session-name-prefix",
-		"--task-budget", "--teammate-mode",
+		"--teammate-mode",
 		"--environment", "--pool", "--ref", "--on-branch",
 		"--project-config-root",
 		"--attach-serve",

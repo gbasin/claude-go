@@ -142,6 +142,35 @@ type Request struct {
 	PromptID string `json:"-"`
 	// Temperature is set only by aux-class calls (the title call sends 1).
 	Temperature *float64 `json:"temperature,omitempty"`
+
+	// ExtraBody holds CLAUDE_CODE_EXTRA_BODY fields — real's XY() spreads
+	// the env's JSON object into the request body verbatim.
+	ExtraBody map[string]any `json:"-"`
+}
+
+// MarshalJSON merges ExtraBody into the request object — real's XY()
+// seeds these into the request before assembly so CLI-driven fields win
+// over env-driven ones.
+func (r *Request) MarshalJSON() ([]byte, error) {
+	type plain Request
+	b, err := json.Marshal((*plain)(r))
+	if err != nil || len(r.ExtraBody) == 0 {
+		return b, err
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(b, &m) != nil {
+		return b, nil
+	}
+	// real's XY() lands via a later object spread — env fields override
+	// built ones (except output_config, which seeds Aa before CLI fields)
+	for k, v := range r.ExtraBody {
+		raw, err := json.Marshal(v)
+		if err != nil {
+			continue
+		}
+		m[k] = raw
+	}
+	return json.Marshal(m)
 }
 
 // SSE event types from stream=true
