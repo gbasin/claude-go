@@ -748,3 +748,76 @@ func TestSpinnerDuringToolExec(t *testing.T) {
 		t.Fatalf("hook status never rendered; sawEsc=%v hookRan=%v", sawEsc, herr == nil)
 	}
 }
+
+// TestTranscriptView: ctrl+o opens the full transcript view; esc/q exits.
+func TestTranscriptView(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.sendUntilEchoed(t, "marker-turn-text\r", "❯ marker-turn-text", 8)
+	p.waitFor("Mock response", 30*time.Second)
+	p.send("\x0f") // ctrl+o
+	out := p.waitFor("transcript", 15*time.Second)
+	_ = out
+	p.send("q") // exit view
+	p.waitFor("❯", 15*time.Second)
+	p.exit()
+}
+
+// TestClearInput: ctrl+l clears the draft buffer.
+func TestClearInput(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.send("draft-to-clear")
+	time.Sleep(300 * time.Millisecond)
+	p.send("\x0c") // ctrl+l
+	time.Sleep(300 * time.Millisecond)
+	p.send("fresh-line\r")
+	out := p.waitFor("Mock response to: fresh-line", 30*time.Second)
+	_ = out
+	p.exit()
+}
+
+// TestUndoKey: ctrl+_ undoes the last edit — the typed text leaves the
+// live buffer (submitted result contains nothing).
+func TestUndoKey(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.waitFor("❯", 30*time.Second)
+	p.send("undome")
+	time.Sleep(400 * time.Millisecond)
+	p.send("\x1f") // ctrl+_ — undoes the insert
+	time.Sleep(300 * time.Millisecond)
+	p.send("realtext\r")
+	p.waitFor("Mock response to: realtext", 30*time.Second)
+	// "undome" never submitted if undo reverted the buffer
+	p.exit()
+}
+
+// TestNewlineKey: ctrl+j inserts a newline in the buffer — the line
+// renders across two editor rows.
+func TestNewlineKey(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.waitFor("❯", 30*time.Second)
+	p.send("line-one")
+	p.send("\x0a") // ctrl+j — newline insert
+	p.send("line-two")
+	out := p.waitFor("line-two", 15*time.Second)
+	if !strings.Contains(out, "line-one") {
+		t.Fatalf("newline insert lost line-one:\n%s", truncStr(out, 500))
+	}
+	p.exit()
+}
+
+// TestImagePasteNoImage: ctrl+v with an empty clipboard falls back to
+// text paste (stubbed pbpaste/osascript return nothing — no hang).
+func TestImagePasteNoImage(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.waitFor("❯", 30*time.Second)
+	p.send("\x16") // ctrl+v — imagePaste
+	time.Sleep(1 * time.Second)
+	p.send("still-alive\r")
+	p.waitFor("Mock response to: still-alive", 30*time.Second)
+	p.exit()
+}
