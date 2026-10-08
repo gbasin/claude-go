@@ -253,6 +253,29 @@ func (s *Store) LogInitMeta(model, parentSessionID, agentType, sysSnap, permMode
 	return s.LogRecord(rec)
 }
 
+// InitSysPromptSnapshot reads the init record's systemPromptSnapshot
+// (resume restore — real reuses it verbatim until compaction).
+func InitSysPromptSnapshot(cwd, sessionID string) string {
+	b, err := os.ReadFile(filepath.Join(dir(cwd), sessionID+".jsonl"))
+	if err != nil {
+		return ""
+	}
+	for _, ln := range strings.Split(string(b), "\n") {
+		var rec struct {
+			Type     string `json:"type"`
+			Subtype  string `json:"subtype"`
+			Snapshot string `json:"systemPromptSnapshot"`
+		}
+		if json.Unmarshal([]byte(ln), &rec) != nil {
+			continue
+		}
+		if rec.Type == "system" && rec.Subtype == "init" && rec.Snapshot != "" {
+			return rec.Snapshot
+		}
+	}
+	return ""
+}
+
 // InitMode reads the init record's permissionMode back (resume restore).
 func InitMode(cwd, sessionID string) string {
 	b, err := os.ReadFile(filepath.Join(dir(cwd), sessionID+".jsonl"))

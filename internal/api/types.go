@@ -132,8 +132,8 @@ type Request struct {
 	Diagnostics  json.RawMessage `json:"diagnostics,omitempty"`
 	Thread       json.RawMessage `json:"thread,omitempty"`
 	OutputConfig json.RawMessage `json:"output_config,omitempty"`
-	// real sends speed at the request root (...cR!==void 0&&{speed:cR},
-	// mod_0416) — not inside output_config
+	// Speed is real's top-level request field — "fast" when fast mode is
+	// on (mod_0386 spreads {speed} directly, not inside output_config)
 	Speed string `json:"speed,omitempty"`
 	// output_format: aux structured-output calls (session title) send it
 	// at the root — {type:"json_schema",schema:{...}} (sH, mod_0601)
@@ -151,6 +151,35 @@ type Request struct {
 	AgentID, ParentAgentID string `json:"-"`
 	// Temperature is set only by aux-class calls (the title call sends 1).
 	Temperature *float64 `json:"temperature,omitempty"`
+
+	// ExtraBody holds CLAUDE_CODE_EXTRA_BODY fields — real's XY() spreads
+	// the env's JSON object into the request body verbatim.
+	ExtraBody map[string]any `json:"-"`
+}
+
+// MarshalJSON merges ExtraBody into the request object — real's XY()
+// seeds these into the request before assembly so CLI-driven fields win
+// over env-driven ones.
+func (r *Request) MarshalJSON() ([]byte, error) {
+	type plain Request
+	b, err := json.Marshal((*plain)(r))
+	if err != nil || len(r.ExtraBody) == 0 {
+		return b, err
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(b, &m) != nil {
+		return b, nil
+	}
+	// real's XY() lands via a later object spread — env fields override
+	// built ones (except output_config, which seeds Aa before CLI fields)
+	for k, v := range r.ExtraBody {
+		raw, err := json.Marshal(v)
+		if err != nil {
+			continue
+		}
+		m[k] = raw
+	}
+	return json.Marshal(m)
 }
 
 // SSE event types from stream=true

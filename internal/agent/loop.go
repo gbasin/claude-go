@@ -52,52 +52,65 @@ type Events struct {
 
 // Loop runs the query/tool-use cycle.
 type Loop struct {
-	Client                *api.Client
-	Model                 string
-	Wants1m               bool // [1m] suffix → context-1m beta
-	MaxTokens             int
-	Effort                string
-	Entrypoint            string // "cli" or "sdk-cli"
-	PermMode              string
-	CWD                   string
-	AppendSysP            string
-	ExtraSystem           []string
-	SessionExtras         []string // spliced into the sys[3] session block
-	PermRules             map[string][]string
-	AddDirs               []string
-	User                  UserConfig
-	Messages              []api.Message
-	ToolCtx               *tools.Context
-	OnHookEvent           func(rec map[string]any) // --include-hook-events: stream-json hook records
-	Events                Events
-	MaxTurns              int // 0 = unlimited
-	started               bool
-	UsageTotal            api.Usage
-	Transcript            string // path to JSONL transcript (for compact notes)
-	Hooks                 hooks.Config
-	inCompact             bool
-	AllowedTools          []string         // nil = all
-	Goal                  string           // /goal stop-condition
-	Bare                  bool             // --bare: skip auto-discovery
-	FallbackModel         string           // --fallback-model retry chain
-	ThinkingMode          string           // --thinking enabled|disabled
-	ThinkingDisplay       string           // --thinking-display updates|omitted
-	ThinkingBudget        int              // --max-thinking-tokens
-	SessionStartSource    string           // startup|resume|clear|compact|fork
-	SessionEndReason      string           // clear|logout|prompt_input_exit|other
-	SessionEndFired       bool             // SessionEnd hook already ran — main skips its duplicate fire
-	FastMode              bool             // fast mode: output_config.speed="fast"
-	ParentSessionID       string           // --parent-session-id lineage marker
-	SysPromptSnapshot     string           // --system-prompt-snapshot digest/label
-	TeammateCtx           *TeammateContext // --agent-id/-name/--team-name triad
-	ProactivityOff        bool             // --proactivity off (gates proactive nudges)
-	AutoCompactWindow     string           // settings autoCompactWindow ("auto"|"500k"|N)
-	AdvisorModel          string           // settings advisorModel — the /advisor pick
-	CorrelationID         string           // --correlation-id → output_config.correlation_id
-	MemoryPaused          bool             // /pause-memory: skip MEMORY.md injection
-	AlwaysThinking        bool             // settings alwaysThinkingEnabled
-	pendingTrigger        string           // last compact trigger for the boundary record
-	compactSummaryPending bool             // next user log is the compact continuation
+	Client             *api.Client
+	Model              string
+	Wants1m            bool // [1m] suffix → context-1m beta
+	MaxTokens          int
+	Effort             string
+	Entrypoint         string // "cli" or "sdk-cli"
+	PermMode           string
+	CWD                string
+	AppendSysP         string
+	ExtraSystem        []string
+	SessionExtras      []string // spliced into the sys[3] session block
+	PermRules          map[string][]string
+	AddDirs            []string
+	User               UserConfig
+	Messages           []api.Message
+	ToolCtx            *tools.Context
+	OnHookEvent        func(rec map[string]any) // --include-hook-events: stream-json hook records
+	Events             Events
+	MaxTurns           int // 0 = unlimited
+	started            bool
+	UsageTotal         api.Usage
+	Transcript         string // path to JSONL transcript (for compact notes)
+	Hooks              hooks.Config
+	inCompact          bool
+	AllowedTools       []string // nil = all
+	Goal               string   // /goal stop-condition
+	Bare               bool     // --bare: skip auto-discovery
+	FallbackModel      string   // --fallback-model retry chain
+	ThinkingMode       string   // --thinking enabled|disabled
+	ThinkingDisplay    string   // --thinking-display updates|omitted
+	ThinkingBudget     int      // --max-thinking-tokens
+	SessionStartSource string   // startup|resume|clear|compact|fork
+	SessionEndReason   string   // clear|logout|prompt_input_exit|other
+	SessionEndFired    bool     // SessionEnd hook already ran — main skips its duplicate fire
+	FastMode           bool     // fast mode: output_config.speed="fast"
+	ParentSessionID    string   // --parent-session-id lineage marker
+	// SysPromptSnapshot records the rendered system prompt on the first
+	// request — real sends the record verbatim on every later request and
+	// resume, until compaction (--system-prompt-snapshot, default on).
+	SysPromptSnapshot string
+	// SysPromptSnapshotOff is --system-prompt-snapshot off — the prompt
+	// renders fresh every request (prompt-text iteration).
+	SysPromptSnapshotOff bool
+	sysSnapshot          []api.SystemBlock
+	TeammateCtx          *TeammateContext // --agent-id/-name/--team-name triad
+	ProactivityOff       bool             // --proactivity off (gates proactive nudges)
+	AutoCompactWindow    string           // settings autoCompactWindow ("auto"|"500k"|N)
+	AdvisorModel         string           // settings advisorModel — the /advisor pick
+	CorrelationID        string           // --correlation-id → output_config.correlation_id
+	// TaskBudget is --task-budget <tokens> — real's API-side token
+	// budget: output_config.task_budget={type:"tokens",total[,remaining]}
+	// plus the task-budgets-2026-03-13 beta. remaining decrements by the
+	// tokens each request consumed (real's padded-countdown, mod_0595).
+	TaskBudget            int
+	taskBudgetRemaining   int64
+	MemoryPaused          bool   // /pause-memory: skip MEMORY.md injection
+	AlwaysThinking        bool   // settings alwaysThinkingEnabled
+	pendingTrigger        string // last compact trigger for the boundary record
+	compactSummaryPending bool   // next user log is the compact continuation
 	compactKept           int
 	turnCount             int
 	turnOpening           bool   // fresh user prompt pending its first request
@@ -214,23 +227,47 @@ func (l *Loop) buildRequest() *api.Request {
 	// lacking declared effort support (real QE(), mod_0198.js).
 	effortCapable := isXHighModel(model) || envOn("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT")
 	var ocRaw json.RawMessage
-	if effortCapable {
-		oc := map[string]string{"effort": effort}
-		if l.CorrelationID != "" {
-			oc["correlation_id"] = l.CorrelationID // real sends it inside output_config
+	oc := map[string]any{}
+	eb := extraBodyFields()
+	// real's Aa = {...Ji.output_config} — CLAUDE_CODE_EXTRA_BODY's
+	// output_config seeds the map BEFORE the CLI writers run (bWo/wWo
+	// both skip keys the env already provided)
+	if ocEB, ok := eb["output_config"].(map[string]any); ok {
+		for k, v := range ocEB {
+			oc[k] = v
 		}
-		ocRaw, _ = json.Marshal(oc)
+		delete(eb, "output_config")
+	}
+	if effortCapable {
+		oc["effort"] = effort
+	}
+	if l.CorrelationID != "" {
+		oc["correlation_id"] = l.CorrelationID // real sends it inside output_config
+	}
+	if l.TaskBudget > 0 {
+		if _, seeded := oc["task_budget"]; !seeded {
+			// {type:"tokens", total, remaining?} — remaining absent on
+			// the first request, then decremented by each turn's usage
+			tb := map[string]any{"type": "tokens", "total": l.TaskBudget}
+			if l.taskBudgetRemaining > 0 {
+				tb["remaining"] = l.taskBudgetRemaining
+			}
+			oc["task_budget"] = tb
+		}
 	}
 	var outFmt json.RawMessage
 	if l.OutputSchema != "" {
 		// --json-schema → real's outputFormat → wire `output_format` at
-		// the request root (sH, mod_0601) — not output_config.format
+		// the request root (sH, mod_0601/mod_0409) — not output_config
 		var sch any
 		if json.Unmarshal([]byte(l.OutputSchema), &sch) == nil {
 			outFmt, _ = json.Marshal(map[string]any{
 				"type": "json_schema", "schema": sch,
 			})
 		}
+	}
+	if len(oc) > 0 {
+		ocRaw, _ = json.Marshal(oc)
 	}
 	l.syncDeferredPool()
 	// 294 puts no cache breakpoints inside messages — the only
@@ -274,13 +311,26 @@ func (l *Loop) buildRequest() *api.Request {
 	l.Client.Wants1m = l.Wants1m
 	l.Client.AdvisorModel = l.AdvisorModel
 	l.Client.ThinkingDisplayUpdates = l.thinkingDisplay() == "updates"
+	if l.TaskBudget > 0 && !containsStr(l.Client.ExtraBetas, "task-budgets-2026-03-13") {
+		l.Client.ExtraBetas = append(l.Client.ExtraBetas, "task-budgets-2026-03-13")
+	}
 	class_ := ""
 	if l.IsSubagent {
 		class_ = "subagent"
 	}
-	sys := SystemBlocks(l.Entrypoint, l.CWD, model, l.AppendSysP, l.ExtraSystem, l.SessionExtras, l.billingMeta(msgs), l.tokensLeft)
+	var sys []api.SystemBlock
 	if l.IsSubagent {
 		sys = l.subagentSystemBlocks(msgs)
+	} else if l.sysSnapshot != nil && !l.SysPromptSnapshotOff {
+		sys = l.sysSnapshot // recorded — verbatim until compaction
+	} else {
+		sys = SystemBlocks(l.Entrypoint, l.CWD, model, l.AppendSysP, l.ExtraSystem, l.SessionExtras, l.billingMeta(msgs), l.tokensLeft)
+		if !l.SysPromptSnapshotOff {
+			l.sysSnapshot = sys
+			if b, err := json.Marshal(sys); err == nil {
+				l.SysPromptSnapshot = string(b) // persisted on the init record
+			}
+		}
 	}
 	l.ToolCtx.AdvisorModel = l.AdvisorModel // advisor wire block follows the configured model
 	l.ToolCtx.Entrypoint = l.Entrypoint     // cli gets the interactive schema variants
@@ -315,7 +365,8 @@ func (l *Loop) buildRequest() *api.Request {
 		Diagnostics: l.diagnosticsField(),
 		// thread:{type:"create"} — real sends it on haiku-class requests
 		// alongside the message-threads beta (captured on haiku -p turn)
-		Thread: l.threadField(),
+		Thread:    l.threadField(),
+		ExtraBody: eb,
 	}
 }
 
@@ -613,8 +664,18 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 	}
 	l.lastTotal = resp.Usage.InputTokens + resp.Usage.CacheReadInputTokens +
 		resp.Usage.CacheCreationInputTokens
-	l.tokensLeft -= int64(resp.Usage.InputTokens + resp.Usage.OutputTokens +
+	spent := int64(resp.Usage.InputTokens + resp.Usage.OutputTokens +
 		resp.Usage.CacheReadInputTokens + resp.Usage.CacheCreationInputTokens)
+	l.tokensLeft -= spent
+	if l.TaskBudget > 0 {
+		if l.taskBudgetRemaining <= 0 {
+			l.taskBudgetRemaining = int64(l.TaskBudget)
+		}
+		l.taskBudgetRemaining -= spent
+		if l.taskBudgetRemaining < 0 {
+			l.taskBudgetRemaining = 0
+		}
+	}
 	l.costUSD += modelCostUSD(l.Model, resp.Usage)
 	if l.MaxBudgetUSD > 0 && l.costUSD > l.MaxBudgetUSD {
 		l.Messages = append(l.Messages, assistantMessage(resp))
@@ -1159,6 +1220,21 @@ func retryableErr(err error) bool {
 	return strings.Contains(s, "429") || strings.Contains(s, "529") ||
 		strings.Contains(s, "overloaded") || strings.Contains(s, "rate_limit") ||
 		strings.Contains(s, "500") || strings.Contains(s, "502") || strings.Contains(s, "503")
+}
+
+// extraBodyFields parses CLAUDE_CODE_EXTRA_BODY — real's XY(): a JSON
+// object whose keys merge into the request body (output_config seeds
+// ours rather than replacing it).
+func extraBodyFields() map[string]any {
+	raw := os.Getenv("CLAUDE_CODE_EXTRA_BODY")
+	if raw == "" {
+		return nil
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(raw), &m) != nil || m == nil {
+		return nil
+	}
+	return m
 }
 
 // runAdvisor answers an advisor tool_use: a second model call over the
@@ -1737,6 +1813,22 @@ func (l *Loop) subagentSystemBlocks(msgs []api.Message) []api.SystemBlock {
 			CacheControl: &api.CacheControl{Type: "ephemeral"}})
 	}
 	return out
+}
+
+// RestoreSysPromptSnapshot seeds the snapshot from a resumed
+// conversation's init record — real reuses the recorded prompt verbatim.
+func (l *Loop) RestoreSysPromptSnapshot(raw string) {
+	var blocks []api.SystemBlock
+	if json.Unmarshal([]byte(raw), &blocks) == nil && len(blocks) > 0 {
+		l.sysSnapshot = blocks
+	}
+}
+
+// ReleaseSysPromptSnapshot clears the snapshot — real's boundary is
+// compaction; afterwards the prompt renders fresh again.
+func (l *Loop) ReleaseSysPromptSnapshot() {
+	l.sysSnapshot = nil
+	l.SysPromptSnapshot = ""
 }
 
 // subPromptID: subagent requests carry their own prompt-id (captured —
