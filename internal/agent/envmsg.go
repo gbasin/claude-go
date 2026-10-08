@@ -201,9 +201,11 @@ func EnvMessage(cwd, model string, addDirs []string, permMode, entrypoint, sessi
 		"fragile, such as exact or multi-line replacements, or sed/awk flags that differ between GNU and BSD/macOS."
 	switch permMode {
 	case "auto":
-		b.WriteString("\nWhile auto mode is active:\n\n" + bashSteer + "\n")
+		// the skills-index tail already emitted the blank line — real has
+		// exactly one blank before this heading (294 capture)
+		b.WriteString("While auto mode is active:\n\n" + bashSteer + "\n")
 	case "bypassPermissions":
-		b.WriteString("\nWhile bypass permissions mode is active:\n\n" + bashSteer + "\n")
+		b.WriteString("While bypass permissions mode is active:\n\n" + bashSteer + "\n")
 	}
 	if tokensLeft > 0 {
 		fmt.Fprintf(&b, "\n<total_tokens>%d tokens left</total_tokens>\n", tokensLeft)
