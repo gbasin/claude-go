@@ -633,6 +633,11 @@ func (c *Client) applyAuth(req *http.Request) error {
 				return err
 			}
 			req.Header.Set("x-api-key", tok)
+			// the complementary auth lane is env-driven, not exclusive:
+			// an oauth token env still rides as Bearer (real's SDK)
+			if t := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); t != "" {
+				req.Header.Set("Authorization", "Bearer "+t)
+			}
 			return nil
 		}
 		// Workload identity federation (mod_0282.js / mod_0304.js): when no
@@ -662,8 +667,14 @@ func (c *Client) applyClaudeCreds(req *http.Request) error {
 	}
 	if c.Creds.IsAPIKey {
 		req.Header.Set("x-api-key", tok)
+		if t := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); t != "" {
+			req.Header.Set("Authorization", "Bearer "+t)
+		}
 	} else {
 		req.Header.Set("Authorization", "Bearer "+tok)
+		if k := os.Getenv("ANTHROPIC_API_KEY"); k != "" {
+			req.Header.Set("x-api-key", k)
+		}
 	}
 	return nil
 }

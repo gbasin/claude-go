@@ -64,18 +64,12 @@ func AuxBillingLine(entrypoint, firstUserText, reqSeed string) string {
 }
 
 func SystemBlocks(entrypoint string, cwd, model, appendPrompt string, extra, sessionExtras []string, bill BillingMeta, tokensLeft int64) []api.SystemBlock {
-	// billing fields (captured): cch = per-install hash suffix,
-	// cc_prompt_id = the prompt uuid (== x-claude-code-prompt-id),
-	// cc_turn_origin = sdk|cli, cc_prompt_index = 0-based prompt count,
-	// cc_turn_index = 1-based request count this prompt
-	origin := "sdk"
-	if entrypoint == "cli" {
-		origin = "cli"
-	}
+	// real 294 billing (captured): version+hash suffix + entrypoint ONLY —
+	// the cch/prompt-id/turn fields from 289 are gone
 	out := []api.SystemBlock{
 		{Type: "text", Text: fmt.Sprintf(
-			"x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s; cch=%s; cc_prompt_id=%s; cc_turn_origin=%s; cc_prompt_index=%d; cc_turn_index=%d;%s",
-			version(), ccVersionSuffix(bill.FirstPrompt), entrypoint, cchHash(bill.ReqSeed), bill.PromptID, origin, bill.PromptIndex, bill.TurnIndex, workloadTag())},
+			"x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s;",
+			version(), ccVersionSuffix(bill.FirstPrompt), entrypoint)},
 	}
 	ident := identityCLI
 	if entrypoint != "cli" {
@@ -423,7 +417,7 @@ func platformName() string {
 	return runtime.GOOS
 }
 
-func version() string { return "2.1.292" }
+func version() string { return "2.1.294" }
 
 // BillingMeta carries the per-turn values the billing sys[0] needs.
 type BillingMeta struct {

@@ -380,6 +380,9 @@ var (
 	// device_id lives inside the JSON-encoded metadata.user_id string —
 	// its quotes arrive escaped (\"...\")
 	devidRe = regexp.MustCompile(`\\"[a-f0-9]{64}\\"`)
+	// ~/.claude/projects/<slugged-cwd> embeds the run-specific home as a
+	// single-dash-joined token — the plain home replace can't reach it
+	projSlugRe = regexp.MustCompile(`\.claude/projects/[^\s"'\\]+`)
 )
 
 // normalizeWire scrubs per-run values out of a raw request body so the
@@ -395,6 +398,7 @@ func normalizeWire(raw []byte, r diffRun) []byte {
 	// device_id is a per-install random 64-hex (real's userID in
 	// .claude.json) — normalize like the other per-install ids
 	s = devidRe.ReplaceAllString(s, "<devid>")
+	s = projSlugRe.ReplaceAllString(s, `.claude/projects/<PROJ>`)
 	return []byte(s)
 }
 
