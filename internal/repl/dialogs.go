@@ -92,6 +92,16 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 		}, l.ToolCtx.CWD)
 		switch pr.Permission {
 		case "allow":
+			// real persists the hook's updatedPermissions rules
+			// (hookSpecificOutput.updatedPermissions) into local settings
+			if len(pr.UpdatedPermissions) > 0 {
+				var add []string
+				if json.Unmarshal(pr.UpdatedPermissions, &add) == nil {
+					for _, rule := range add {
+						addLocalPermissionRule(l.ToolCtx.CWD, rule)
+					}
+				}
+			}
 			return true, ""
 		case "deny":
 			return false, pr.Reason
