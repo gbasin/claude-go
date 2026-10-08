@@ -28,10 +28,27 @@ func TestDeferredExcludedAndDiscovered(t *testing.T) {
 	}
 	if !(idx["Skill"]+1 == idx["ToolSearch"] &&
 		idx["Workflow"]+1 == idx["DeferredToolPlaceholder"] &&
-		idx["DeferredToolPlaceholder"]+1 == idx["Write"] &&
-		idx["Write"]+1 == idx["advisor"]) {
+		idx["DeferredToolPlaceholder"]+1 == idx["Write"]) {
 		t.Fatalf("order = %v", names)
 	}
+	// advisor is a wire-gated server block — absent until configured.
+	if _, ok := idx["advisor"]; ok {
+		t.Fatal("advisor must not ship without a configured model")
+	}
+	t.Setenv("CLAUDE_GO_ADVISOR", "claude-sonnet-5-5")
+	defsA := RequestDefs(&Context{})
+	var adv map[string]any
+	foundAdv := false
+	for _, d := range defsA {
+		if d.Name == "advisor" {
+			foundAdv = true
+			json.Unmarshal(d.Raw, &adv)
+		}
+	}
+	if !foundAdv || adv["type"] != "advisor_20260301" || adv["model"] != "claude-sonnet-5-5" {
+		t.Fatalf("configured advisor must tail tools[] with its model, got %v", adv)
+	}
+	t.Setenv("CLAUDE_GO_ADVISOR", "")
 	phIdx := idx["DeferredToolPlaceholder"]
 	if !defs[phIdx].DeferLoading {
 		t.Error("placeholder must carry defer_loading:true")

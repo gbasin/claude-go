@@ -60,6 +60,10 @@ type Context struct {
 	// Subagent marks Agent-spawned contexts — RequestDefs adds
 	// SubagentHandback to the wire set.
 	Subagent      bool
+	// AdvisorModel is the configured advisor model (--advisor /
+	// advisorModel / /advisor). Empty → the advisor server block stays
+	// off the wire (real only ships it when configured).
+	AdvisorModel string
 	Notes         []string // queued system notes from background tasks
 	Answerer      Answerer // WebFetch page-answer model
 	Searcher      Searcher // WebSearch backend
@@ -286,7 +290,7 @@ func (c *Context) WasRead(path string) (readState, bool) {
 
 // AgentRunner abstracts sub-agent execution.
 type AgentRunner interface {
-	RunAgent(ctx *Context, description, prompt, subagentType, model string, background bool) Result
+	RunAgent(ctx *Context, description, prompt, subagentType, model, effort string, background bool) Result
 }
 
 // Answerer answers a prompt over fetched page content (WebFetch's small model).

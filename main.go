@@ -53,7 +53,7 @@ Usage:
 Flags:
   -p, --print                   print response and exit
   --exec, -m <prompt>           execute prompt non-interactively and exit
-  --model <model>               model (default claude-fable-5-1)
+  --model <model>               model (default claude-opus-5-5)
   --effort <level>              reasoning effort: low|medium|high|xhigh|max|auto
   --agent <name>                run as a named agent type
   --agents <json>               inline agent definitions ({name:{description,prompt,tools}})
@@ -1814,7 +1814,7 @@ func startupModel(cwd, flagModel string) string {
 		m = resolveModel(os.Getenv("ANTHROPIC_MODEL"))
 	}
 	if m == "" {
-		m = "claude-fable-5-1"
+		m = "claude-opus-5-5"
 	}
 	return m
 }

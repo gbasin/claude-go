@@ -206,6 +206,7 @@ func (m *sseMCPServer) sawMethods() []string {
 func TestMCPSSEToolCall(t *testing.T) {
 	srv := newSSEMCPServer(t)
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	s.writeSettings(`{"enableAllProjectMcpServers":true}`)
 	s.writeFile(".mcp.json", fmt.Sprintf(
 		`{"mcpServers":{"ssetest":{"type":"sse","url":%q}}}`, srv.srv.URL+"/sse"))
@@ -249,6 +250,7 @@ func TestMCPSSEToolCall(t *testing.T) {
 func TestMCPSSEDeferredRefusal(t *testing.T) {
 	srv := newSSEMCPServer(t)
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	s.writeSettings(`{"enableAllProjectMcpServers":true}`)
 	s.writeFile(".mcp.json", fmt.Sprintf(
 		`{"mcpServers":{"ssetest":{"type":"sse","url":%q}}}`, srv.srv.URL+"/sse"))
@@ -338,6 +340,7 @@ func (m *httpMCPServer) handle(w http.ResponseWriter, r *http.Request) {
 func TestMCPHTTPToolCall(t *testing.T) {
 	srv := newHTTPMCPServer(t)
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	s.writeSettings(`{"enableAllProjectMcpServers":true}`)
 	s.writeFile(".mcp.json", fmt.Sprintf(
 		`{"mcpServers":{"httptest":{"type":"http","url":%q}}}`, srv.srv.URL+"/mcp"))
@@ -381,6 +384,7 @@ func TestMCPHTTPToolCall(t *testing.T) {
 func TestMCPResources(t *testing.T) {
 	srv := newSSEMCPServer(t)
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	s.writeSettings(`{"enableAllProjectMcpServers":true}`)
 	s.writeFile(".mcp.json", fmt.Sprintf(
 		`{"mcpServers":{"ssetest":{"type":"sse","url":%q}}}`, srv.srv.URL+"/sse"))
@@ -438,6 +442,7 @@ func TestMCPOAuthNeedsAuth(t *testing.T) {
 func TestMCPListChanged(t *testing.T) {
 	srv := newSSEMCPServer(t)
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	s.writeSettings(`{"enableAllProjectMcpServers":true}`)
 	s.writeFile(".mcp.json", fmt.Sprintf(
 		`{"mcpServers":{"ssetest":{"type":"sse","url":%q}}}`, srv.srv.URL+"/sse"))
@@ -553,6 +558,7 @@ func TestMCPToolError(t *testing.T) {
 	srv := newSSEMCPServer(t)
 	srv.addTool("fail", "always errors")
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	s.writeSettings(`{"enableAllProjectMcpServers":true}`)
 	s.writeFile(".mcp.json", fmt.Sprintf(
 		`{"mcpServers":{"ssetest":{"type":"sse","url":%q}}}`, srv.srv.URL+"/sse"))

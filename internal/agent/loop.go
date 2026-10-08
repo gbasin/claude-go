@@ -21,8 +21,8 @@ import (
 	"claude-go/internal/tools"
 )
 
-const defaultModel = "claude-fable-5-1"
-const defaultMaxTokens = 64000
+const defaultModel = "claude-opus-5-5"
+const defaultMaxTokens = 128000
 
 // Events surfaces streaming/tool activity to the UI.
 type Events struct {
@@ -94,6 +94,7 @@ type Loop struct {
 	compactSummaryPending bool             // next user log is the compact continuation
 	compactKept           int
 	turnCount             int
+	turnOpening           bool // fresh user prompt pending its first request
 	toolCallsTotal        int
 	envIdx                int
 	announcedRemoved      string // deferred removals already announced
@@ -143,7 +144,7 @@ func NewLoop(client *api.Client, cwd string) *Loop {
 		MaxTokens:  defaultMaxTokens,
 		Effort:     "",
 		Entrypoint: "sdk-cli",
-		PermMode:   "default",
+		PermMode:   "auto",
 		CWD:        abs,
 		ToolCtx: &tools.Context{
 			Ctx: context.Background(),
@@ -216,7 +217,9 @@ func (l *Loop) buildRequest() *api.Request {
 	}
 	msgs = sanitizeReplayed(msgs)
 	var safeguards json.RawMessage
-	if !l.dropSafeguards {
+	// real sends the safeguards classifier_context on a turn's opening
+	// request only — tool-loop continuations omit it (294 capture)
+	if !l.dropSafeguards && l.turnOpening {
 		safeguards = Safeguards(l.PermMode, l.ToolCtx.CWD, l.PermRules)
 	}
 	var outCfg json.RawMessage
@@ -224,6 +227,9 @@ func (l *Loop) buildRequest() *api.Request {
 		outCfg = ocRaw
 	}
 	mt := l.MaxTokens
+	if mt <= 0 {
+		mt = MaxOutputFor(l.Model)
+	}
 	if l.maxTokensClamp && mt > 64000 {
 		mt = 64000
 	}
@@ -237,6 +243,7 @@ func (l *Loop) buildRequest() *api.Request {
 	if l.IsSubagent {
 		sys = l.subagentSystemBlocks(msgs)
 	}
+	l.ToolCtx.AdvisorModel = l.AdvisorModel // advisor wire block follows the configured model
 	return &api.Request{
 		Model:             l.Model,
 		MaxTokens:         mt,
@@ -250,9 +257,8 @@ func (l *Loop) buildRequest() *api.Request {
 		ContextManagement: DefaultContextManagement(),
 		Safeguards:        safeguards,
 		OutputConfig:      outCfg,
-		// real sends diagnostics.previous_message_id on every request —
-		// null on the first turn, the last assistant message id after
-		// (message-threads-2026-08-12 beta machinery)
+		// diagnostics.previous_message_id rides the message-threads beta —
+		// thread-enabled models only (absent on opus/sonnet wire in 294)
 		Diagnostics: l.diagnosticsField(),
 		// thread:{type:"create"} — real sends it on haiku-class requests
 		// alongside the message-threads beta (captured on haiku -p turn)
@@ -294,8 +300,13 @@ func connectingServers() []string {
 	return out
 }
 
-// diagnosticsField builds {"previous_message_id": <last assistant id>}.
+// diagnosticsField builds {"previous_message_id": <last assistant id>} on
+// thread-enabled models (the same gate as threadField — haiku class);
+// other models omit the field entirely (verified on the 294 wire).
 func (l *Loop) diagnosticsField() json.RawMessage {
+	if !strings.Contains(l.Model, "haiku") {
+		return nil
+	}
 	var lastID string
 	for i := len(l.Messages) - 1; i >= 0; i-- {
 		if l.Messages[i].Role != "assistant" {
@@ -350,21 +361,14 @@ func (l *Loop) withEphemeralBreakpoint(msgs []api.Message) []api.Message {
 		if err := json.Unmarshal(out[i].Content, &blocks); err != nil || len(blocks) == 0 {
 			return
 		}
-		// ttl must match the system/env blocks (1h): the API enforces
-		// ttl ordering across tools→system→messages — a 5m block before
-		// a 1h block is rejected (live-verified 400)
-		blocks[len(blocks)-1].CacheControl = &api.CacheControl{Type: "ephemeral", TTL: "1h"}
+		blocks[len(blocks)-1].CacheControl = &api.CacheControl{Type: "ephemeral"}
 		if raw, err := json.Marshal(blocks); err == nil {
 			out[i].Content = raw
 		}
 	}
-	for i := len(out) - 1; i >= 0; i-- {
-		if out[i].Role == "assistant" {
-			put(i)
-			return out
-		}
-	}
-	// first request: breakpoint on the env system record (real's req1)
+	// real 294: the breakpoint is on the last block of the LAST message —
+	// the env record on req1, the trailing <total_tokens> system record
+	// on continuations (never the assistant tool_use).
 	for i := len(out) - 1; i >= 0; i-- {
 		if out[i].Role != "user" {
 			put(i)
@@ -422,7 +426,7 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 				}
 			}
 		}
-		msg = FirstUserMessage(prompt, l.CWD, l.User.Email, l.MemoryPaused)
+		msg = FirstUserMessage(prompt, l.CWD, l.User.Email, l.MemoryPaused, l.Model)
 		if l.handbackTail {
 			var blks []api.ContentBlock
 			if json.Unmarshal(msg.Content, &blks) == nil {
@@ -440,13 +444,9 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 		// not as a user-message reminder — seed announcedDeferred so the
 		// first request's user message doesn't carry a duplicate
 		l.announcedDeferred = strings.Join(deferred, "\x00")
-		envCC := &api.CacheControl{Type: "ephemeral", TTL: "1h"}
-
-		if l.IsSubagent {
-			// subagent requests use plain ephemeral everywhere — no
-			// 1h ttls, no breakpoints (captured)
-			envCC = &api.CacheControl{Type: "ephemeral"}
-		}
+		// real 294 env block carries plain {type:ephemeral} — the 1h ttl
+		// from the 2.1.289 capture is gone (diff-verified)
+		envCC := &api.CacheControl{Type: "ephemeral"}
 		envBlocks := api.BlocksMessage("system", []api.ContentBlock{{
 			Type:         "text",
 			Text:         EnvMessage(l.ToolCtx.CWD, l.Model, l.AddDirs, l.PermMode, l.Client.SessionID, l.SessionHookCtx, deferred, connectingServers(), l.tokensLeft),
@@ -518,6 +518,9 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		return nil, fmt.Errorf("max turns (%d) reached", l.MaxTurns)
 	}
 	l.ToolCtx.Ctx = ctx
+	// safeguards classifier_context rides only a turn's opening request —
+	// tool-loop continuations (depth>0) omit it (real 294 wire)
+	l.turnOpening = depth == 0
 	if l.ToolCtx.OnCwdChanged == nil {
 		// default CwdChanged hook — the REPL installs a transcript-logging
 		// variant; this covers -p and other non-interactive callers
@@ -869,14 +872,18 @@ func toolResultBlock(id string, r tools.Result) api.ContentBlock {
 		content, _ := json.Marshal(blocks)
 		return api.ContentBlock{Type: "tool_result", ToolUseID: id, Content: content}
 	}
-	content, _ := json.Marshal(resultBlocks(r))
+	// real 294 sends tool_result content as a bare string for plain text
+	// results — the block-array form is only for image/mixed payloads
+	blocks := resultBlocks(r)
+	var content json.RawMessage
+	if len(blocks) == 1 && blocks[0].Type == "text" {
+		content, _ = json.Marshal(blocks[0].Text)
+	} else {
+		content, _ = json.Marshal(blocks)
+	}
 	if r.IsError && !strings.Contains(r.Content, "<tool_use_error>") {
 		// real wraps every error result in <tool_use_error> tags
-		wrapped, _ := json.Marshal([]api.ContentBlock{{
-			Type: "text",
-			Text: "<tool_use_error>" + strings.TrimSpace(r.Content) + "</tool_use_error>",
-		}})
-		content = wrapped
+		content, _ = json.Marshal("<tool_use_error>" + strings.TrimSpace(r.Content) + "</tool_use_error>")
 	}
 	return api.ContentBlock{Type: "tool_result", ToolUseID: id, Content: content, IsError: r.IsError}
 }
@@ -1102,9 +1109,9 @@ func capBreakpoints(msgs []api.Message, sysReserved int) []api.Message {
 		}
 	}
 	allowed := 4 - sysReserved
-	// normalize surviving message breakpoints to 1h — a stale 5m
-	// breakpoint (e.g. replayed transcript) before the 1h env block
-	// violates the API's ttl ordering and 400s even when count is fine
+	// normalize surviving message breakpoints to plain ephemeral — a
+	// replayed transcript can carry a stale ttl marker that violates the
+	// API's ttl ordering against the bare ephemeral blocks real 294 emits
 	out2 := make([]api.Message, len(msgs))
 	copy(out2, msgs)
 	changed := false
@@ -1112,10 +1119,8 @@ func capBreakpoints(msgs []api.Message, sysReserved int) []api.Message {
 		blocks := blocksOf(m.Content)
 		dirty := false
 		for _, b := range blocks {
-			// real only ever emits 1h breakpoints in messages (captures);
-			// a stale 5m before a trailing 1h breaks ttl ordering
-			if b.CacheControl != nil && b.CacheControl.TTL != "1h" {
-				b.CacheControl.TTL = "1h"
+			if b.CacheControl != nil && b.CacheControl.TTL != "" {
+				b.CacheControl.TTL = ""
 				dirty = true
 				changed = true
 			}
@@ -1172,9 +1177,22 @@ func (l *Loop) envWireTransform() []api.Message {
 	}
 	for i, m := range l.Messages {
 		if m.Role == "system" && i == envAt && l.envSent {
+			// real replays the env record on every later request as a
+			// bare-string system message (the block+cc form is req1 only)
 			if l.SessionHookCtx != "" {
 				msgs = append(msgs, api.StringMessage("system",
 					"SessionStart hook additional context: "+l.SessionHookCtx))
+			}
+			var blocks []api.ContentBlock
+			if err := json.Unmarshal(m.Content, &blocks); err == nil {
+				for _, b := range blocks {
+					if b.Text != "" {
+						em := api.StringMessage("system", b.Text)
+						em.OutputConfig = m.OutputConfig // real keeps it on the replayed env record
+						msgs = append(msgs, em)
+						break
+					}
+				}
 			}
 			continue
 		}
@@ -1227,9 +1245,8 @@ func (l *Loop) wireMessages() []api.Message {
 				api.BlocksMessage("system", []api.ContentBlock{{
 					Type:         "text",
 					Text:         fmt.Sprintf("<total_tokens>%d tokens left</total_tokens>", l.tokensLeft),
-					CacheControl: &api.CacheControl{Type: "ephemeral", TTL: "1h"},
-				}}),
-				api.StringMessage("system", "First privately list what you need next; then request every item that doesn't depend on another's result in this one response."))
+					CacheControl: &api.CacheControl{Type: "ephemeral"},
+				}}))
 		} else if l.ambientPending {
 			// this turn's ambient record (persisted as a bare string)
 			// rides as the trailing cached block — real's exact shape
@@ -1362,9 +1379,8 @@ func mcpErrKind(err error) string {
 func (l *Loop) subagentSystemBlocks(msgs []api.Message) []api.SystemBlock {
 	bill := l.billingMeta(msgs)
 	billing := fmt.Sprintf(
-		"x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s; cch=%s; cc_is_subagent=true; cc_prompt_id=%s;",
-		version(), ccVersionSuffix(bill.FirstPrompt), l.Entrypoint,
-		cchHash(bill.ReqSeed), bill.PromptID)
+		"x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s; cc_is_subagent=true;",
+		version(), ccVersionSuffix(bill.FirstPrompt), l.Entrypoint)
 	out := []api.SystemBlock{
 		{Type: "text", Text: billing},
 		{Type: "text", Text: `You are a Claude agent, built on Anthropic's Claude Agent SDK.`, CacheControl: &api.CacheControl{Type: "ephemeral"}},

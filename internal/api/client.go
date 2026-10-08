@@ -20,7 +20,7 @@ import (
 	"claude-go/internal/config"
 )
 
-const Version = "2.1.292"
+const Version = "2.1.294"
 
 // betaFlags in real's exact wire order (captured from claude 2.1.289
 // default-model request through the mitm relay).
@@ -364,22 +364,11 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 			}
 		}
 		applyCustomHeaders(req)
-		// real sets these on every main request (verified in wire
-		// captures): dispatch-id is a constant, prompt-id is stable across
-		// a turn's retries/subrequests, client-request-id is fresh per
-		// request attempt.
-		req.Header.Set("anthropic-dispatch-id", "v2d")
-		class_ := "main"
-		if r, ok := body.(*Request); ok && r.Class != "" {
-			class_ = r.Class
-		}
-		req.Header.Set("x-claude-code-request-class", class_)
-		pid := c.PromptID()
-		if r, ok := body.(*Request); ok && r.PromptID != "" {
-			pid = r.PromptID
-		}
-		req.Header.Set("x-claude-code-prompt-id", pid)
-		req.Header.Set("x-client-request-id", newUUID())
+		// real 294 dropped the 289-era request-identity headers
+		// (anthropic-dispatch-id, x-claude-code-request-class,
+		// x-claude-code-prompt-id, x-client-request-id) on main requests —
+		// verified against a fresh wire capture.
+		_ = newUUID // keep helper referenced
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
 			lastErr = err
