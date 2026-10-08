@@ -41,8 +41,8 @@ func clearColorEnv(t *testing.T) {
 
 func TestBannerDark(t *testing.T) {
 	clearColorEnv(t)
-	got := captureBanner(t, func() { welcomeBanner("2.1.294", 40, "dark", false) })
-	want := "\x1b[38;2;215;119;87mWelcome to Claude Code \x1b[39m\x1b[2mv2.1.294 \x1b[22m" + "\n" +
+	got := captureBanner(t, func() { welcomeBanner("2.1.295", 40, "dark", false) })
+	want := "\x1b[38;2;215;119;87mWelcome to Claude Code \x1b[39m\x1b[2mv2.1.295 \x1b[22m" + "\n" +
 		".........................................................." + "\n" +
 		"                                                          " + "\n" +
 		"     *                                       █████▓▓░     " + "\n" +
@@ -65,8 +65,8 @@ func TestBannerDark(t *testing.T) {
 
 func TestBannerLight(t *testing.T) {
 	clearColorEnv(t)
-	got := captureBanner(t, func() { welcomeBanner("2.1.294", 40, "light", false) })
-	want := "\x1b[38;2;215;119;87mWelcome to Claude Code \x1b[39m\x1b[2mv2.1.294 \x1b[22m" + "\n" +
+	got := captureBanner(t, func() { welcomeBanner("2.1.295", 40, "light", false) })
+	want := "\x1b[38;2;215;119;87mWelcome to Claude Code \x1b[39m\x1b[2mv2.1.295 \x1b[22m" + "\n" +
 		".........................................................." + "\n" +
 		"                                                          " + "\n" +
 		"                                                          " + "\n" +
@@ -89,8 +89,8 @@ func TestBannerLight(t *testing.T) {
 
 func TestBannerAppleDark(t *testing.T) {
 	clearColorEnv(t)
-	got := captureBanner(t, func() { welcomeBanner("2.1.294", 40, "dark", true) })
-	want := "\x1b[38;2;215;119;87mWelcome to Claude Code \x1b[39m\x1b[2mv2.1.294 \x1b[22m" + "\n" +
+	got := captureBanner(t, func() { welcomeBanner("2.1.295", 40, "dark", true) })
+	want := "\x1b[38;2;215;119;87mWelcome to Claude Code \x1b[39m\x1b[2mv2.1.295 \x1b[22m" + "\n" +
 		".........................................................." + "\n" +
 		"                                                          " + "\n" +
 		"     *                                       █████▓▓░     " + "\n" +
@@ -113,8 +113,8 @@ func TestBannerAppleDark(t *testing.T) {
 
 func TestBannerAppleLight(t *testing.T) {
 	clearColorEnv(t)
-	got := captureBanner(t, func() { welcomeBanner("2.1.294", 40, "light", true) })
-	want := "\x1b[38;2;215;119;87mWelcome to Claude Code \x1b[39m\x1b[2mv2.1.294 \x1b[22m" + "\n" +
+	got := captureBanner(t, func() { welcomeBanner("2.1.295", 40, "light", true) })
+	want := "\x1b[38;2;215;119;87mWelcome to Claude Code \x1b[39m\x1b[2mv2.1.295 \x1b[22m" + "\n" +
 		".........................................................." + "\n" +
 		"                                                          " + "\n" +
 		"                                                          " + "\n" +
@@ -140,8 +140,8 @@ func TestBannerAppleLight(t *testing.T) {
 // children are ["v", VERSION], not ["v", VERSION, " "].
 func TestBannerFallback(t *testing.T) {
 	clearColorEnv(t)
-	got := captureBanner(t, func() { welcomeBanner("2.1.294", 20, "dark", false) })
-	want := "\x1b[38;2;215;119;87mWelcome to Claude Code \x1b[39m\x1b[2mv2.1.294\x1b[22m" + "\n"
+	got := captureBanner(t, func() { welcomeBanner("2.1.295", 20, "dark", false) })
+	want := "\x1b[38;2;215;119;87mWelcome to Claude Code \x1b[39m\x1b[2mv2.1.295\x1b[22m" + "\n"
 	if got != want {
 		t.Fatalf("fallback mismatch:\ngot  %q\nwant %q", got, want)
 	}
@@ -150,11 +150,11 @@ func TestBannerFallback(t *testing.T) {
 // Boundary: exactly 30 rows still gets the full art (gate is N < 30).
 func TestBannerRowsBoundary(t *testing.T) {
 	clearColorEnv(t)
-	at30 := captureBanner(t, func() { welcomeBanner("2.1.294", 30, "dark", false) })
+	at30 := captureBanner(t, func() { welcomeBanner("2.1.295", 30, "dark", false) })
 	if !strings.Contains(at30, "█████▓▓░") {
 		t.Fatalf("rows=30 should render full art, got %q", at30)
 	}
-	at29 := captureBanner(t, func() { welcomeBanner("2.1.294", 29, "dark", false) })
+	at29 := captureBanner(t, func() { welcomeBanner("2.1.295", 29, "dark", false) })
 	if strings.Contains(at29, "█") {
 		t.Fatalf("rows=29 should be text fallback, got %q", at29)
 	}
@@ -178,7 +178,7 @@ func TestBannerThemeVariants(t *testing.T) {
 			[]string{"\x1b[91mWelcome", "█████▓▓░"}},
 	}
 	for _, tc := range cases {
-		got := captureBanner(t, func() { welcomeBanner("2.1.294", 40, tc.theme, false) })
+		got := captureBanner(t, func() { welcomeBanner("2.1.295", 40, tc.theme, false) })
 		for _, want := range tc.contains {
 			if !strings.Contains(got, want) {
 				t.Fatalf("%s: missing %q in %q", tc.name, want, got)
@@ -192,11 +192,11 @@ func TestBannerThemeVariants(t *testing.T) {
 func TestBannerNoColor(t *testing.T) {
 	t.Setenv("FORCE_COLOR", "")
 	t.Setenv("NO_COLOR", "1")
-	got := captureBanner(t, func() { welcomeBanner("2.1.294", 40, "dark", false) })
+	got := captureBanner(t, func() { welcomeBanner("2.1.295", 40, "dark", false) })
 	if strings.ContainsRune(got, 0x1b) {
 		t.Fatalf("NO_COLOR output contains escapes: %q", got)
 	}
-	if !strings.Contains(got, "Welcome to Claude Code v2.1.294") || !strings.Contains(got, "█████▓▓░") {
+	if !strings.Contains(got, "Welcome to Claude Code v2.1.295") || !strings.Contains(got, "█████▓▓░") {
 		t.Fatalf("NO_COLOR output missing art: %q", got)
 	}
 }

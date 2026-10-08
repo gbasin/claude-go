@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 
+	"claude-go/internal/api"
 	"claude-go/internal/tools"
 )
 
@@ -78,7 +79,7 @@ func Serve(ctx context.Context, in io.Reader, w, errOut io.Writer, o ServeOpts) 
 				"result": map[string]any{
 					"protocolVersion": ProtocolVersion,
 					"capabilities":    map[string]any{"tools": map[string]any{"listChanged": true}},
-					"serverInfo":      map[string]string{"name": "claude-go", "version": "2.1.292"},
+					"serverInfo":      map[string]string{"name": "claude-go", "version": api.Version},
 				},
 			})
 		case "ping":

@@ -419,7 +419,7 @@ func platformName() string {
 	return runtime.GOOS
 }
 
-func version() string { return "2.1.294" }
+func version() string { return "2.1.295" }
 
 // BillingMeta carries the per-turn values the billing sys[0] needs.
 type BillingMeta struct {
