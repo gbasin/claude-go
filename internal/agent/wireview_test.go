@@ -39,29 +39,27 @@ func TestWireMessagesShape(t *testing.T) {
 		api.BlocksMessage("assistant", []api.ContentBlock{{Type: "tool_use", ID: "t1", Name: "Bash"}}),
 		api.BlocksMessage("user", []api.ContentBlock{{Type: "tool_result", ToolUseID: "t1"}}))
 	r2 := l.wireMessages()
-	// [user, sys-string hook, asst, user, sys total_tokens, sys parallel]
+	// real 294 req2: [user, sys-string hook, sys-string env, asst, user,
+	// sys total_tokens+cc] — no trailing parallel instruction
 	if len(r2) != 6 {
 		t.Fatalf("req2 len %d", len(r2))
 	}
-	// msg1: bare string form
+	// msg1: bare-string hook ctx
 	var s string
 	if err := json.Unmarshal(r2[1].Content, &s); err != nil || !strings.Contains(s, "hook-ctx") {
 		t.Fatalf("msg1 should be bare-string hook ctx: %s", r2[1].Content)
 	}
-	// msg4: total_tokens block w/ cc
+	// msg2: env record replayed as a bare string
+	var es string
+	if err := json.Unmarshal(r2[2].Content, &es); err != nil || es != "ENV" {
+		t.Fatalf("msg2 should be bare-string env record: %s", r2[2].Content)
+	}
+	// msg5: total_tokens block w/ cc
 	var tt []api.ContentBlock
-	json.Unmarshal(r2[4].Content, &tt)
+	json.Unmarshal(r2[5].Content, &tt)
 	if !strings.Contains(tt[0].Text, "total_tokens") || tt[0].CacheControl == nil {
 		t.Fatal("total_tokens block missing cc")
 	}
-	// msg5: parallel instruction bare string
-	var ps string
-	if err := json.Unmarshal(r2[5].Content, &ps); err != nil || !strings.Contains(ps, "First privately list") {
-		t.Fatalf("msg5 wrong: %s", r2[5].Content)
-	}
-	// breakpoint on the assistant tool_use block
-	var ab []api.ContentBlock
-	json.Unmarshal(r2[2].Content, &ab)
 }
 
 // New-turn ambient block: when ambientPending, the persisted string

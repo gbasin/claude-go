@@ -31,6 +31,7 @@ type AgentDef struct {
 	Tools           []string // nil or ["*"] = all tools
 	DisallowedTools []string
 	Model           string // "", or "inherit" for parent model
+	Effort          string // "", or an effort level from frontmatter
 	Color           string
 	InitialPrompt   string // prefix for the subagent's first user message
 	SystemPrompt    string // markdown body of the agent file
@@ -253,6 +254,7 @@ func parseAgentFile(path, source string) (AgentDef, bool) {
 		Tools:           parseToolList(fm["tools"]),
 		DisallowedTools: parseToolList(fm["disallowedTools"]),
 		Model:           fm["model"],
+		Effort:          fm["effort"],
 		Color:           fm["color"],
 		InitialPrompt:   fm["initialPrompt"],
 		SystemPrompt:    body,
@@ -384,17 +386,26 @@ type Runner struct {
 	Parent *Loop
 }
 
-func (r *Runner) RunAgent(c *tools.Context, description, prompt, subagentType, model string, background bool) tools.Result {
-	return r.runAgent(c, description, prompt, subagentType, model, background, nil)
+func (r *Runner) RunAgent(c *tools.Context, description, prompt, subagentType, model, effort string, background bool) tools.Result {
+	return r.runAgent(c, description, prompt, subagentType, model, effort, background, nil)
 }
 
 // RunAgentAllowed extends RunAgent with an extra tool allowlist (skills pass
 // their allowed-tools frontmatter through to the spawned agent).
-func (r *Runner) RunAgentAllowed(c *tools.Context, description, prompt, subagentType, model string, background bool, allowedTools []string) tools.Result {
-	return r.runAgent(c, description, prompt, subagentType, model, background, allowedTools)
+func (r *Runner) RunAgentAllowed(c *tools.Context, description, prompt, subagentType, model, effort string, background bool, allowedTools []string) tools.Result {
+	return r.runAgent(c, description, prompt, subagentType, model, effort, background, allowedTools)
 }
 
-func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, model string, background bool, extraAllowed []string) tools.Result {
+func effortOr(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, model, effort string, background bool, extraAllowed []string) tools.Result {
 	if subagentType == "" {
 		subagentType = "general-purpose"
 	}
@@ -452,7 +463,7 @@ func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, m
 		Model:      m,
 		MaxTokens:  defaultMaxTokens,
 		MaxTurns:   taskBudget(),
-		Effort:     "medium",
+		Effort:     effortOr(effort, def.Effort, "medium"),
 		Entrypoint: r.Entrypoint,
 		PermMode:   r.PermMode,
 		CWD:        c.CWD,

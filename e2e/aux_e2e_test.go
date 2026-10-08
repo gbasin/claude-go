@@ -55,6 +55,15 @@ type auxRecorder struct {
 	reqs []recReq
 }
 
+// bodyHasMaxTokens reports whether a request body carries max_tokens==n
+// (string matching trips on 128000 containing ":1").
+func bodyHasMaxTokens(body []byte, n int) bool {
+	var v struct {
+		MT int `json:"max_tokens"`
+	}
+	return json.Unmarshal(body, &v) == nil && v.MT == n
+}
+
 func newAuxRecorder(t *testing.T) *auxRecorder {
 	t.Helper()
 	r := &auxRecorder{nonStreamText: "aux-server reply"}
@@ -300,7 +309,7 @@ func TestAuxStartupSequence(t *testing.T) {
 	var sawProbe, sawBatch, sawMain bool
 	for _, q := range reqs {
 		switch {
-		case q.method == "POST" && strings.Contains(string(q.body), `"max_tokens":1`):
+		case q.method == "POST" && bodyHasMaxTokens(q.body, 1):
 			sawProbe = true
 			if q.class != "auxiliary" {
 				t.Fatalf("quota probe request-class = %q", q.class)
@@ -311,7 +320,7 @@ func TestAuxStartupSequence(t *testing.T) {
 		case q.method == "POST" && strings.HasPrefix(q.uri, "/api/event_logging/v2/batch"):
 			sawBatch = true
 		case q.method == "POST" && strings.HasPrefix(q.uri, "/v1/messages") &&
-			!strings.Contains(string(q.body), `"max_tokens":1`):
+			!bodyHasMaxTokens(q.body, 1):
 			sawMain = true
 		}
 		if q.method == "GET" && q.uri == "/api/oauth/account/settings" && q.auth != "Bearer" {
@@ -343,7 +352,7 @@ func TestAuxGatedByAPIKey(t *testing.T) {
 		if q.method == "GET" {
 			t.Fatalf("aux GET fired on api-key lane: %s", q.uri)
 		}
-		if strings.Contains(string(q.body), `"max_tokens":1`) {
+		if bodyHasMaxTokens(q.body, 1) {
 			t.Fatal("quota probe fired on api-key lane")
 		}
 		if strings.HasPrefix(q.uri, "/api/event_logging") || strings.HasPrefix(q.uri, "/api/eval") {
@@ -364,7 +373,7 @@ func TestAuxDisabledByEnv(t *testing.T) {
 		if q.method == "GET" {
 			t.Fatalf("aux GET fired despite DISABLE_NONESSENTIAL_TRAFFIC: %s", q.uri)
 		}
-		if strings.Contains(string(q.body), `"max_tokens":1`) {
+		if bodyHasMaxTokens(q.body, 1) {
 			t.Fatal("quota probe fired despite DISABLE_NONESSENTIAL_TRAFFIC")
 		}
 	}
@@ -649,6 +658,7 @@ func TestSafetyEvalStage2Blocks(t *testing.T) {
 func TestSubagentWire(t *testing.T) {
 	rec := newAuxRecorder(t)
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	r := s.runAux(t, rec, nil, "-p",
 		`tool:Agent {"description":"e2e-sub","prompt":"SUB-E2E-PROMPT"}`,
 		"--permission-mode", "bypassPermissions",
@@ -685,8 +695,8 @@ func TestSubagentWire(t *testing.T) {
 		"You are a Claude agent, built on Anthropic's Claude Agent SDK." {
 		t.Fatalf("subagent identity line wrong: %+v", req.System)
 	}
-	if !strings.Contains(req.System[0].Text, "cc_prompt_id=") {
-		t.Fatalf("subagent billing missing its own prompt_id: %s", req.System[0].Text)
+	if !strings.Contains(req.System[0].Text, "cc_is_subagent=true") {
+		t.Fatalf("subagent billing missing its marker: %s", req.System[0].Text)
 	}
 	var names []string
 	for _, tl := range req.Tools {
@@ -793,6 +803,7 @@ func TestTokenRefreshRace(t *testing.T) {
 // NEXT request's tools[] carries Glob's full schema (MarkDiscovered).
 func TestDeferredToolMaterializes(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	r, bodies := recordRequests(t, s, "-p",
 		`calls:[{"name":"ToolSearch","input":{"query":"select:Glob"}}]`)
 	s.mustOK(t, r)
@@ -1054,7 +1065,7 @@ func TestFallbackModel(t *testing.T) {
 		sawModels = append(sawModels, body.Model)
 		// only the main lane's model gets the 529 — aux probes (haiku)
 		// must serve normally or they'd eat the retry
-		if body.Model == "claude-fable-5-1" {
+		if body.Model == "claude-opus-5-5" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(529)
 			fmt.Fprint(w, `{"type":"error","error":{"type":"overloaded_error","message":"busy"}}`)
@@ -1150,6 +1161,7 @@ func TestVerboseDebug(t *testing.T) {
 // in the subagent's wire system prompt.
 func TestAppendSubagentSystemPrompt(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	rec := t.TempDir() + "/reqs"
 	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, 60*time.Second,
 		"--mock", "--permission-mode", "bypassPermissions", "-p",

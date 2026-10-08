@@ -779,6 +779,7 @@ func TestPermissionRequestDeny(t *testing.T) {
 // Pre/PostModelSwitch (fast-mode toggle).
 func TestHookMatrixRound2(t *testing.T) {
 	s := newSession(t)
+	s.env = append(s.env, "ENABLE_TOOL_SEARCH=1")
 	dump := filepath.Join(s.cwd, "matrix2.jsonl")
 	s.writeFile(".claude/settings.json",
 		`{"hooks":{`+
