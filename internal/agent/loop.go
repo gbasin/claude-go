@@ -649,13 +649,18 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		if len(pre.UpdatedInput) > 0 {
 			b.Input = pre.UpdatedInput // hooks can rewrite tool_input
 		}
-		// autoLane: real's auto mode requires a classifier verdict for
-		// unresolvable calls — an allow from a hook does NOT short-circuit
-		// it (decisionReason must be type==="classifier"). SafetyEval is
-		// only wired in the non-interactive auto path, where Permission is
-		// a pure rules check (no prompt), so consulting it here is safe.
+		// autoLane: real's auto mode consults the classifier for every
+		// non-read-only call — saved allow rules and hook allows do NOT
+		// apply (the decisionReason must be type==="classifier").
+		// SafetyEval is only wired in the non-interactive auto path,
+		// where Permission is a pure rules check (no prompt), so
+		// consulting it here is safe.
 		autoLane := (l.PermMode == "auto" || l.PermMode == "plan") &&
 			l.SafetyEval != nil && l.ToolCtx.Permission != nil
+		permOK := l.ToolCtx.Permission == nil ||
+			l.ToolCtx.Permission(b.Name, b.Input, toolSummary(b.Name, b.Input))
+		needsReview := autoLane && !readOnlyTool(b.Name) &&
+			!(pre.Permission == "deny" || pre.Block)
 		if b.Name == "advisor" {
 			// the advisor tool forwards the whole conversation to a second
 			// model call and returns its advice — real client behavior
@@ -666,10 +671,9 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 				reason = "blocked by hook"
 			}
 			r = tools.Result{Content: "Tool call blocked by hook: " + reason, IsError: true}
-		} else if pre.Permission == "allow" && !autoLane {
+		} else if pre.Permission == "allow" && !needsReview {
 			r = l.dispatch(b.Name, b.Input) // hook approved — skip the prompt
-		} else if l.ToolCtx.Permission != nil &&
-			!l.ToolCtx.Permission(b.Name, b.Input, toolSummary(b.Name, b.Input)) {
+		} else if needsReview || !permOK {
 			// unresolvable permission goes to real's auto-mode security
 			// monitor — eval failure blocks with real's exact error text.
 			if l.SafetyEval != nil && l.ToolCtx.PermissionAsk != nil && l.ToolCtx.PermissionAsk() {
@@ -1781,4 +1785,16 @@ func stopFailureClass(err error) string {
 		}
 	}
 	return "server_error"
+}
+
+// readOnlyTool: real's auto-mode classifier skips read-only tools.
+func readOnlyTool(name string) bool {
+	switch name {
+	case "Read", "Glob", "Grep", "LS", "LSP", "TodoWrite",
+		"NotebookRead", "CronList", "ListAgents", "TaskOutput",
+		"ListMcpResourcesTool", "ReadMcpResourceTool",
+		"ReadMcpResourceDirTool":
+		return true
+	}
+	return false
 }
