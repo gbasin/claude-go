@@ -52,7 +52,8 @@ type diffRun struct {
 	label    string
 	bin      string
 	hits     []mock.Hit
-	bodies   [][]byte // raw POST /v1/messages bodies, in order
+	bodies   [][]byte       // raw POST /v1/messages bodies, in order
+	headers  []http.Header // headers per body, same index
 	stdout   string
 	stderr   string
 	code     int
@@ -172,6 +173,7 @@ func execAgainstMock(t *testing.T, label, bin string, sc diffScenario, cwd, home
 	}
 	r.hits = append(r.hits, srv.Hits...)
 	r.bodies = append(r.bodies, srv.Bodies...)
+	r.headers = append(r.headers, srv.Headers...)
 	if dir := os.Getenv("CLAUDE_GO_DIFF_DUMP"); dir != "" {
 		os.MkdirAll(dir, 0o755)
 		for i, b := range r.bodies {
@@ -255,6 +257,7 @@ func ptyAgainstMock(t *testing.T, label, bin string, sc diffScenario, cwd, home 
 	r.stdout = p.clean()
 	r.hits = append(r.hits, srv.Hits...)
 	r.bodies = append(r.bodies, srv.Bodies...)
+	r.headers = append(r.headers, srv.Headers...)
 	if dir := os.Getenv("CLAUDE_GO_DIFF_DUMP"); dir != "" {
 		os.MkdirAll(dir, 0o755)
 		for i, b := range r.bodies {
@@ -267,6 +270,83 @@ func ptyAgainstMock(t *testing.T, label, bin string, sc diffScenario, cwd, home 
 		}
 	}
 	return r
+}
+
+// volatileHeaders are values that legitimately differ between the two
+// binaries (tokens, ids, sizes) — presence/choice is compared, not bytes.
+var volatileHeaders = map[string]bool{
+	"authorization": true, "x-api-key": true, "content-length": true,
+	"x-claude-code-session-id": true, "x-client-request-id": true,
+	"x-stainless-retry-count": true, "x-claude-code-prompt-id": true,
+	"host": true, "user-agent": false, // version must match — compared
+}
+
+// absorbConditional drops fields whose presence varies with real's
+// per-session GB/auto-mode rollout — the shape still compares when
+// both sides emit them.
+func absorbConditional(a, b any) {
+	am, aok := a.(map[string]any)
+	bm, bok := b.(map[string]any)
+	if !aok || !bok {
+		return
+	}
+	_, ra := am["safeguards"]
+	_, rb := bm["safeguards"]
+	if ra != rb {
+		delete(am, "safeguards")
+		delete(bm, "safeguards")
+	}
+}
+
+// conditionalBetas ride real's per-session auto-mode / GB rollout
+// decisions — their presence in the header set varies run to run.
+var conditionalBetas = map[string]bool{
+	"dangerous-tool-use-2026-09-03": true,
+	"afk-mode-2026-01-31":          true,
+}
+
+func stripConditionalBetas(v string) string {
+	parts := strings.Split(v, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		if !conditionalBetas[p] {
+			out = append(out, p)
+		}
+	}
+	return strings.Join(out, ",")
+}
+
+func diffHeaders(d *differ, a, b http.Header) {
+	am, bm := map[string]string{}, map[string]string{}
+	for k, v := range a {
+		am[strings.ToLower(k)] = strings.Join(v, ",")
+	}
+	for k, v := range b {
+		bm[strings.ToLower(k)] = strings.Join(v, ",")
+	}
+	for k, av := range am {
+		bv, ok := bm[k]
+		if !ok {
+			d.out = append(d.out, fmt.Sprintf("  headers[%q]: real=%q ours=<missing>", k, truncStr(av, 80)))
+			continue
+		}
+		if volatileHeaders[k] {
+			continue
+		}
+		if k == "anthropic-beta" {
+			av = stripConditionalBetas(av)
+			bv = stripConditionalBetas(bv)
+		}
+		if av != bv {
+			d.out = append(d.out, fmt.Sprintf("  headers[%q]: real=%q ours=%q", k,
+				truncStr(av, 110), truncStr(bv, 110)))
+		}
+	}
+	for k, bv := range bm {
+		if _, ok := am[k]; !ok {
+			d.out = append(d.out, fmt.Sprintf("  headers[%q]: real=<missing> ours=%q", k, truncStr(bv, 80)))
+		}
+	}
 }
 
 // dumpGolden writes a wireCapture-shaped golden (request_line + headers +
@@ -297,6 +377,9 @@ var (
 	tsRe   = regexp.MustCompile(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})`)
 	tmpRe  = regexp.MustCompile(`/(private/)?(tmp|var/folders)/[^\s"'\\]*`)
 	msgidRe = regexp.MustCompile(`msg_[A-Za-z0-9_]+`)
+	// device_id lives inside the JSON-encoded metadata.user_id string —
+	// its quotes arrive escaped (\"...\")
+	devidRe = regexp.MustCompile(`\\"[a-f0-9]{64}\\"`)
 )
 
 // normalizeWire scrubs per-run values out of a raw request body so the
@@ -309,6 +392,9 @@ func normalizeWire(raw []byte, r diffRun) []byte {
 	s = uuidRe.ReplaceAllString(s, "<uuid>")
 	s = tsRe.ReplaceAllString(s, "<ts>")
 	s = msgidRe.ReplaceAllString(s, "<msgid>")
+	// device_id is a per-install random 64-hex (real's userID in
+	// .claude.json) — normalize like the other per-install ids
+	s = devidRe.ReplaceAllString(s, "<devid>")
 	return []byte(s)
 }
 
@@ -540,8 +626,16 @@ func runDiffScenario(t *testing.T, sc diffScenario) {
 			if err := json.Unmarshal(normalizeWire(ours.bodies[i], ours), &b); err != nil {
 				t.Fatalf("%s: ours req[%d] not JSON: %v", sc.name, i, err)
 			}
+			// safeguards is GB-flag/auto-mode gated in real — verified
+			// nondeterministic across same-env runs (say-hi had it,
+			// tool-loop didn't). Compare its shape when both send it;
+			// presence alone isn't a divergence.
+			absorbConditional(a, b)
 			d := &differ{}
 			d.value("body", a, b)
+			if i < len(real.headers) && i < len(ours.headers) {
+				diffHeaders(d, real.headers[i], ours.headers[i])
+			}
 			if len(d.out) == 0 {
 				fmt.Fprintln(&rep, "  <identical after normalization>")
 			}

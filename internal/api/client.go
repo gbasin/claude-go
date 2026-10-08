@@ -22,10 +22,11 @@ import (
 
 const Version = "2.1.294"
 
-// betaFlags in real's exact wire order (captured from claude 2.1.289
-// default-model request through the mitm relay).
+// betaFlags — real 2.1.294's base anthropic-beta list (captured through
+// the mock harness: the 289-era oauth/advisor-tool/advanced-tool-use/
+// clear-at/thinking-binding-controls/extended-cache-ttl/cache-diagnosis
+// entries are either gone or now conditional).
 const betaFlags = "claude-code-20250219," +
-	"oauth-2025-04-20," +
 	"interleaved-thinking-2025-05-14," +
 	"thinking-token-count-2026-05-13," +
 	"context-management-2025-06-27," +
@@ -33,15 +34,9 @@ const betaFlags = "claude-code-20250219," +
 	"mid-conversation-system-2026-04-07," +
 	"per-turn-control-2026-07-01," +
 	"mid-conversation-tool-changes-2026-07-01," +
-	"advisor-tool-2026-03-01," +
-	"advanced-tool-use-2025-11-20," +
-	"mid-conversation-system-clear-at-2026-08-21," +
 	"effort-2025-11-24," +
 	"dangerous-tool-use-2026-09-03," +
-	"thinking-binding-controls-2026-08-01," +
-	"afk-mode-2026-01-31," +
-	"extended-cache-ttl-2025-04-11," +
-	"cache-diagnosis-2026-04-07"
+	"afk-mode-2026-01-31"
 
 // streamTimeout is the per-request deadline for streaming calls, matching
 // the SDK's default timeout (X-Stainless-Timeout: 600). Applied to the
@@ -69,6 +64,15 @@ type Client struct {
 	Provider        Provider
 	Model           string // drives model-conditional betas (1m family)
 	Wants1m         bool   // [1m] suffix on configured model → context-1m beta
+	AdvisorModel    string // configured advisor → advisor-tool beta
+	// EvalFailed marks the GB eval unreachable — real drops the
+	// flag-gated betas (dangerous-tool-use, afk-mode) and the
+	// safeguards classifier block.
+	EvalFailedFlag bool
+	// ThinkingDisplayUpdates — the thinking-display-updates beta rides
+	// whenever the request uses thinking display "updates" (cli
+	// entrypoint or --output-format stream-json), not entrypoint alone.
+	ThinkingDisplayUpdates bool
 	RemoteEnv       bool   // eval hasRemoteEnvironment attr
 	evalFailed      bool   // eval returned empty features (fallback state)
 	RetryCount      int    // exposed for x-stainless-retry-count
@@ -143,17 +147,20 @@ func (c *Client) betaHeaderValue() string {
 	evalFailed := c.evalFailed
 	c.mu.Unlock()
 	if evalFailed {
-		// eval-unreachable fallback (captured): the four default-on betas
-		// appear, context-1m is absent (needs a positive flag)
-		return "claude-code-20250219,oauth-2025-04-20," +
-			"interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13," +
-			"context-management-2025-06-27,prompt-caching-scope-2026-01-05," +
-			"mid-conversation-system-2026-04-07,per-turn-control-2026-07-01," +
-			"mid-conversation-tool-changes-2026-07-01,advisor-tool-2026-03-01," +
-			"advanced-tool-use-2025-11-20,mid-conversation-system-clear-at-2026-08-21," +
-			"effort-2025-11-24,dangerous-tool-use-2026-09-03," +
-			"thinking-binding-controls-2026-08-01,afk-mode-2026-01-31," +
-			"extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07"
+		// eval-unreachable fallback: the GB-gated betas drop out
+		// (dangerous-tool-use, afk-mode — captured absent when eval
+		// failed) and context-1m is absent (needs a positive flag)
+		b := betaFlags
+		for _, drop := range []string{"dangerous-tool-use-2026-09-03", "afk-mode-2026-01-31"} {
+			b = strings.Replace(b, ","+drop, "", 1)
+			b = strings.Replace(b, drop+",", "", 1)
+		}
+		if c.Entrypoint == EntryCLI {
+			b = strings.Replace(b,
+				"effort-2025-11-24",
+				"effort-2025-11-24,thinking-display-updates-2026-08-18", 1)
+		}
+		return b
 	}
 	// context-1m needs a positive server flag — the captured wire shows it
 	// absent even with a [1m]-configured model and eval unreachable.
@@ -162,17 +169,32 @@ func (c *Client) betaHeaderValue() string {
 		parts = append(parts[:2], append([]string{"context-1m-2025-08-07"}, parts[2:]...)...)
 		betas = strings.Join(parts, ",")
 	}
-	if c.Entrypoint == EntryCLI {
-		// real's cli order: ...thinking-binding-controls, thinking-display-
-		// updates, afk-mode, extended-cache-ttl, cache-diagnosis
+	if c.Entrypoint == EntryCLI || c.ThinkingDisplayUpdates {
+		// thinking-display-updates rides the display mode — cli
+		// entrypoint AND stream-json output (294 captures)
 		betas = strings.Replace(betas,
-			"thinking-binding-controls-2026-08-01,afk-mode-2026-01-31",
-			"thinking-binding-controls-2026-08-01,thinking-display-updates-2026-08-18,afk-mode-2026-01-31", 1)
+			"afk-mode-2026-01-31",
+			"thinking-display-updates-2026-08-18,afk-mode-2026-01-31", 1)
+	}
+	// advisor-tool beta rides only when an advisor is configured
+	if c.AdvisorModel != "" {
+		betas = strings.Replace(betas,
+			"mid-conversation-tool-changes-2026-07-01",
+			"mid-conversation-tool-changes-2026-07-01,advisor-tool-2026-03-01", 1)
+	}
+	// advanced-tool-use marks the deferred/ToolSearch lane — only when
+	// tool search is enabled (real's standard path omits it)
+	if envTruthy("ENABLE_TOOL_SEARCH") {
+		betas = strings.Replace(betas,
+			"mid-conversation-tool-changes-2026-07-01",
+			"mid-conversation-tool-changes-2026-07-01,advanced-tool-use-2025-11-20", 1)
 	}
 	// haiku-class requests carry the message-threads beta + thread field
 	// (captured: haiku -p turn had both; fable/opus did not)
 	if strings.Contains(c.Model, "haiku") {
-		betas += ",message-threads-2026-08-12"
+		// haiku-class requests carry the threads + cache-diagnosis betas
+		// (diagnostics.previous_message_id rides cache-diagnosis)
+		betas += ",message-threads-2026-08-12,cache-diagnosis-2026-04-07"
 	}
 	return betas
 }

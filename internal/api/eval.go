@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"runtime"
 
 	"claude-go/internal/config"
@@ -45,9 +46,12 @@ type evalRequest struct {
 }
 
 // EvalCheck fires real's startup flag-eval call:
-// POST {base}/api/eval/{sdkKey}, UA claude-code/<v>, beta oauth-2025-04-20,
-// Accept */* — and merges the feature map into .claude.json's
-// cachedGrowthBookFeatures exactly like real. Returns the feature map so
+// POST https://api.anthropic.com/api/eval-authed/{sdkKey} (authed lane —
+// real's rO apiHost is the hardcoded first-party host, unaffected by
+// ANTHROPIC_BASE_URL), falling back to /api/eval/{sdkKey} — UA
+// claude-code/<v>, beta oauth-2025-04-20, Accept */* — and merges the
+// feature map into .claude.json's cachedGrowthBookFeatures exactly
+// like real. Returns the feature map so
 // callers can gate flag-dependent wire behavior; err is non-nil when the
 // eval can't be performed (real then runs on flag defaults — the
 // "eval-failed" header set).
@@ -84,7 +88,7 @@ func (c *Client) EvalCheck(ctx context.Context, ua string) (map[string]any, erro
 		ForcedVariations: map[string]any{},
 		ForcedFeatures:   []any{},
 	})
-	url := c.evalBase() + "/api/eval/" + evalSDKKey
+	url := c.evalBase() + "/api/eval-authed/" + evalSDKKey
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -127,11 +131,6 @@ func (c *Client) EvalCheck(ctx context.Context, ua string) (map[string]any, erro
 // NOT honor ANTHROPIC_BASE_URL (verified: eval kept hitting prod while
 // messages were redirected, and headers stayed production-shaped).
 func (c *Client) evalBase() string {
-	// honor the same base-URL override as the messages path so tests and
-	// proxies never touch the real API (eval is aux telemetry anyway)
-	if b := c.BaseURL; b != "" {
-		return b
-	}
 	return "https://api.anthropic.com"
 }
 
@@ -141,4 +140,34 @@ func (c *Client) MarkEvalFailed(f bool) {
 	c.mu.Lock()
 	c.evalFailed = f
 	c.mu.Unlock()
+}
+
+// evalDone closes when the startup eval resolves (ok or failed).
+var evalDone = make(chan struct{})
+var evalDoneOnce sync.Once
+
+// EvalAwait waits for the startup eval with real's bounded init window.
+// The loop calls this before the first request so flag-gated surface is
+// deterministic; a still-pending eval after the cap counts as failed.
+func (c *Client) EvalAwait() {
+	select {
+	case <-evalDone:
+	case <-time.After(4 * time.Second):
+		c.MarkEvalFailed(true)
+	}
+}
+
+// CloseEvalDone releases EvalAwait — called once the eval outcome has
+// been marked (MarkEvalFailed first, so the flag state is visible).
+func CloseEvalDone() {
+	evalDoneOnce.Do(func() { close(evalDone) })
+}
+
+// EvalFailed reports whether the flag eval is known-bad — real drops
+// GB-gated wire surface (dangerous-tool-use beta, safeguards) in that
+// state.
+func (c *Client) EvalFailed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.evalFailed
 }
