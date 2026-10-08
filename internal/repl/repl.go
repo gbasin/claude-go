@@ -1414,13 +1414,15 @@ func printStatus(l *agent.Loop, ed *editor) {
 }
 
 var slashCommands = []string{
-	"add-dir", "agents", "alias", "bug", "clear", "color", "compact",
-	"config", "context", "cost", "diff", "doctor", "export", "exit",
-	"feedback", "files", "help", "hooks", "ide", "import", "init",
-	"keybindings", "login", "logout", "mcp", "memory", "model", "output-style",
-	"permissions", "plugin", "privacy-settings", "quit", "radio", "release-notes",
-	"resume", "review", "status", "statusline", "tasks", "terminal-setup",
-	"theme", "todos", "usage", "voice",
+	"add-dir", "agents", "bug", "clear", "color", "compact", "config",
+	"context", "cost", "daemon", "desktop", "diff", "doctor", "export",
+	"exit", "feedback", "fork", "help", "hooks", "ide", "init",
+	"keybindings", "list-agents", "login", "logout", "mcp", "memory",
+	"mobile", "model", "output-style", "permissions", "plugin",
+	"privacy-settings", "quit", "radio", "recap", "release-notes",
+	"resume", "review", "session", "status", "statusline", "tasks",
+	"terminal-setup", "theme", "tui", "upgrade", "usage", "version",
+	"voice", "workflows",
 }
 
 func termWidth() (int, error) {
@@ -1975,7 +1977,7 @@ func SlashCommandNames() []string {
 }
 
 func builtinSlashCommands() []string {
-	return []string{"add-dir", "advisor", "agents", "alias", "allowed-tools", "ant-trace", "artifacts", "auto", "autocompact", "background", "batch", "bg", "branch", "break-reminder", "breaks", "brief", "btw", "bug", "cd", "checkpoint", "checkup", "chrome", "clear", "cloud-plugins", "code-review", "color", "compact", "config", "context", "copy", "cost", "debug", "debug-tool-call", "design-consent", "design-login", "design-revoke", "diff", "doctor", "downtime", "effort", "env", "exit", "experiments", "export", "extra-usage", "fast", "feedback", "fewer-permission-prompts", "files", "focus", "fork", "goal", "heapdump", "help", "high", "hooks", "ide", "import", "init", "insights", "install-github-app", "issue", "keybindings", "keybindings-help", "login", "logout", "loop", "low", "max", "mcp", "medium", "memory", "memory-pause", "memory-types", "model", "new", "oauth-refresh", "output-style", "pause-memory", "permissions", "plan", "plugin", "powerup", "pr", "privacy-settings", "proactive", "quit", "radio", "release-notes", "reload-plugins", "reload-skills", "remote-control", "remote-env", "rename", "reset", "restart", "resume", "review", "rewind", "routines", "run", "sandbox", "schedule", "scroll-speed", "security-review", "settings", "settings-review", "setup-bedrock", "setup-vertex", "skills", "stats", "status", "statusline", "stop", "subtask", "tasks", "teleport", "terminal-setup", "theme", "todos", "toggle-memory", "ultraplan", "ultrareview", "undo", "update-config", "usage", "usage-credits", "voice", "wellbeing", "xhigh"}
+	return []string{"add-dir", "advisor", "agents", "allowed-tools", "android", "ant-trace", "app", "artifacts", "autocompact", "background", "bashes", "batch", "bg", "branch", "break-reminder", "breaks", "brief", "btw", "bug", "cd", "checkpoint", "checkup", "chrome", "clear", "cloud-plugins", "code-review", "color", "commit", "commit-push-pr", "compact", "config", "context", "continue", "copy", "cost", "daemon", "debug", "debug-tool-call", "design-consent", "design-login", "design-revoke", "desktop", "diff", "doctor", "downtime", "effort", "env", "exit", "experiments", "export", "extra-usage", "fast", "feedback", "fewer-permission-prompts", "focus", "fork", "goal", "heapdump", "help", "hooks", "ide", "init", "insights", "install", "install-github-app", "ios", "issue", "keybindings", "keybindings-help", "list-agents", "login", "logout", "loop", "marketplace", "mcp", "memory", "memory-pause", "memory-types", "mobile", "model", "name", "new", "oauth-refresh", "output-style", "pause-memory", "peers", "permissions", "plan", "plugin", "plugins", "powerup", "pr", "privacy-settings", "proactive", "quit", "radio", "rc", "recap", "release-notes", "reload-plugins", "reload-skills", "remote", "remote-control", "remote-env", "rename", "reset", "restart", "resume", "review", "rewind", "routines", "run", "sandbox", "schedule", "scroll-speed", "security-review", "session", "settings", "settings-review", "setup-bedrock", "setup-claude", "setup-cowork", "setup-vertex", "share", "simplify", "skills", "stats", "status", "statusline", "stop", "subtask", "tasks", "teleport", "terminal-setup", "theme", "toggle-memory", "tp", "tui", "ultraplan", "ultrareview", "undo", "update", "update-config", "upgrade", "usage", "usage-credits", "verify", "version", "voice", "web-setup", "wellbeing", "workflows"}
 }
 
 // currentStore is set by RunWithStore so slash commands can write records.
