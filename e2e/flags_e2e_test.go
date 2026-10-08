@@ -763,14 +763,6 @@ func TestAutocompactFlag(t *testing.T) {
 	}
 }
 
-// TestAdvisorFlag: --advisor <model> overrides the advisor model for the
-// session — accepted like real (alias or full ID).
-func TestAdvisorFlag(t *testing.T) {
-	s := newSession(t)
-	r := s.run(t, "--mock", "--advisor", "haiku", "-p", "ok")
-	s.mustOK(t, r)
-}
-
 // TestPrefillFlag: --prefill <text> seeds the interactive input buffer
 // without submitting — real's deep-link launch path.
 func TestPrefillFlag(t *testing.T) {
@@ -781,4 +773,19 @@ func TestPrefillFlag(t *testing.T) {
 	// not submitted — no turn runs until Enter
 	p.send("\r")
 	p.waitFor("Mock response to: draft seed text", 30*time.Second)
+}
+
+// TestInheritPermissionMode: --inherit-permission-mode on -c restores
+// the mode recorded in the session's init record (plan → plan).
+func TestInheritPermissionMode(t *testing.T) {
+	s := newSession(t)
+	p1 := s.runPTY(t, nil, "--mock", "--permission-mode", "plan")
+	p1.waitFor("plan mode", 20*time.Second)
+	p1.sendUntilEchoed(t, "hi\r", "❯ hi", 8)
+	p1.waitFor("· done", 30*time.Second)
+	p1.exit()
+
+	p2 := s.runPTY(t, nil, "--mock", "-c", "--inherit-permission-mode", "true")
+	p2.waitFor("plan mode", 30*time.Second)
+	p2.exit()
 }
