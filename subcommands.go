@@ -493,8 +493,8 @@ func agentsSub(args []string) {
 	cwd := mustGetwd()
 	fmt.Println("agent types:")
 	for _, n := range []string{
-		"general-purpose", "Explore", "Plan", "claude",
-		"code-simplifier", "code-reviewer", "debugger", "statusline-setup",
+		"general-purpose", "statusline-setup", "claude", "Explore", "Plan",
+		"claude-code-guide",
 	} {
 		fmt.Printf("  %s (built-in)\n", n)
 	}
