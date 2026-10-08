@@ -790,7 +790,7 @@ func pluginSub(args []string) {
 			for n, p := range mkts {
 				fmt.Printf("%s: %s\n", n, p)
 			}
-		case "remove":
+		case "remove", "rm":
 			// real: `plugin marketplace remove <name> [--scope <scope>]`
 			// — --scope selects the settings scope, the name is positional
 			name := ""
@@ -811,8 +811,17 @@ func pluginSub(args []string) {
 			}
 			fmt.Println("removed marketplace", name)
 		case "update":
+			// real: `marketplace update [name]` — all when omitted
+			want := ""
+			if len(args) > 2 {
+				want = args[2]
+			}
 			for n, p := range plugins.ListMarketplaces() {
-				if strings.HasPrefix(p, plugins.SyncedBase()) || strings.Contains(p, "/marketplaces/") {
+				if want != "" && n != want {
+					continue
+				}
+				if strings.HasPrefix(p, plugins.SyncedBase()) || strings.Contains(p, "/marketplaces/") ||
+					func() bool { fi, e := os.Stat(filepath.Join(p, ".git")); return e == nil && fi.IsDir() }() {
 					out, err := exec.Command("git", "-C", p, "pull", "--ff-only").CombinedOutput()
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "%s: pull failed: %s\n", n, out)
@@ -941,6 +950,60 @@ func pluginSub(args []string) {
 			m["enabledPlugins"] = en
 		})
 		fmt.Printf("%s %s\n", args[0]+"d", key)
+	case "init", "new":
+		if len(args) < 2 {
+			fatal("usage: claude plugin init <name>")
+		}
+		// real scaffolds under ~/.claude/skills/<name>/ — auto-loaded
+		dir := filepath.Join(config.ClaudeDir(), "skills", args[1])
+		os.MkdirAll(filepath.Join(dir, ".claude-plugin"), 0o755)
+		manifest, _ := json.MarshalIndent(map[string]any{
+			"name": args[1], "version": "0.0.0",
+		}, "", "  ")
+		os.WriteFile(filepath.Join(dir, ".claude-plugin", "plugin.json"), manifest, 0o644)
+		fmt.Println("created plugin skeleton at", dir)
+	case "tag":
+		// real: `plugin tag [path]` — creates {name}--v{version} git tag
+		dir := "."
+		if len(args) > 1 {
+			dir = args[1]
+		}
+		b, err := os.ReadFile(filepath.Join(dir, ".claude-plugin", "plugin.json"))
+		if err != nil {
+			fatal("tag: %v", err)
+		}
+		var man struct {
+			Name, Version string
+		}
+		json.Unmarshal(b, &man)
+		if man.Name == "" || man.Version == "" {
+			fatal("tag: plugin.json needs name + version")
+		}
+		tag := man.Name + "--v" + man.Version
+		out, err := exec.Command("git", "-C", dir, "tag", tag).CombinedOutput()
+		if err != nil {
+			fatal("tag: %s", out)
+		}
+		fmt.Println("tagged", tag)
+	case "prune", "autoremove":
+		// real removes auto-installed deps no longer needed — ours tracks
+		// no dep graph, so prune removes installs not enabled in settings
+		en, _ := plugins.SettingsPluginGates()
+		var removed []string
+		for _, p := range plugins.List() {
+			key := p.Name + "@" + p.Marketplace
+			if en[key] {
+				continue
+			}
+			if err := plugins.Remove(p.Name); err == nil {
+				removed = append(removed, key)
+			}
+		}
+		if len(removed) == 0 {
+			fmt.Println("nothing to prune")
+		} else {
+			fmt.Println("pruned:", strings.Join(removed, ", "))
+		}
 	case "details":
 		if len(args) < 2 {
 			fatal("usage: claude plugin details <marketplace>")
