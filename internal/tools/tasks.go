@@ -171,6 +171,16 @@ func execTaskCreate(c *Context, raw json.RawMessage) Result {
 	tasksMu.Lock()
 	t := SessionTask{ID: nextTaskID(), Subject: in.Subject, Description: in.Desc,
 		ActiveForm: in.ActiveForm, Status: "pending", Metadata: in.Metadata}
+	// real's TaskCreated hook — exit 2 prevents creation (stderr to model)
+	if c.FireHook != nil {
+		if h := c.FireHook("TaskCreated", map[string]any{
+			"task_id": t.ID, "task_subject": t.Subject,
+			"task_description": t.Description,
+		}); h.Block {
+			tasksMu.Unlock()
+			return Result{Content: "Task creation blocked by TaskCreated hook: " + h.Reason, IsError: true}
+		}
+	}
 	tasksList = append(tasksList, t)
 	persistTasks(c)
 	tasksMu.Unlock()
