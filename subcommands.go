@@ -433,7 +433,21 @@ func pluginSub(args []string) {
 		if len(args) < 2 {
 			fatal("usage: claude plugin install <name[@marketplace]>")
 		}
-		name, mkt := args[1], ""
+		// real 294 accepts --marketplace <mkt> alongside name@mkt
+		var rest []string
+		mkt := ""
+		for i := 1; i < len(args); i++ {
+			if args[i] == "--marketplace" && i+1 < len(args) {
+				mkt = args[i+1]
+				i++
+			} else {
+				rest = append(rest, args[i])
+			}
+		}
+		name := ""
+		if len(rest) > 0 {
+			name = rest[0]
+		}
 		if i := strings.Index(name, "@"); i > 0 {
 			name, mkt = name[:i], name[i+1:]
 		}
