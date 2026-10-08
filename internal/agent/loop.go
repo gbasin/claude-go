@@ -150,14 +150,17 @@ type Loop struct {
 	// LoopAgentID/ParentAgentID ride the x-claude-code-agent-id /
 	// -parent-agent-id headers on this loop's requests
 	LoopAgentID, ParentAgentID string
-	subPID                     string
-	handbackTail               bool // append the SubagentHandback reminder to msg[0]
-	noThinking                 bool // thinking config dropped after a thinking 400
-	dropSafeguards             bool
-	dropOutputConfig           bool
-	dropBetas                  bool
-	maxTokensClamp             bool
-	lastTotal                  int // last request's total input tokens (incl. cache)
+	// Depth is the agent nesting level — main loop 0, first subagent 1
+	// (drives subagent_stats max_depth/spawned_by_subagents)
+	Depth            int
+	subPID           string
+	handbackTail     bool // append the SubagentHandback reminder to msg[0]
+	noThinking       bool // thinking config dropped after a thinking 400
+	dropSafeguards   bool
+	dropOutputConfig bool
+	dropBetas        bool
+	maxTokensClamp   bool
+	lastTotal        int // last request's total input tokens (incl. cache)
 }
 
 func NewLoop(client *api.Client, cwd string) *Loop {

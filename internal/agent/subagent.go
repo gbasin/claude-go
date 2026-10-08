@@ -389,6 +389,13 @@ func (r *Runner) RunAgent(c *tools.Context, description, prompt, subagentType, m
 	return r.runAgent(c, description, prompt, subagentType, model, effort, background, nil)
 }
 
+// RunAgentTriState is RunAgent with the raw run_in_background tri-state —
+// the stats recorder distinguishes an omitted field ("unset") from
+// explicit true/false like real's recordSpawn.
+func (r *Runner) RunAgentTriState(c *tools.Context, description, prompt, subagentType, model, effort string, runInBackground *bool, background bool) tools.Result {
+	return r.runAgentRaw(c, description, prompt, subagentType, model, effort, background, nil, runInBackground)
+}
+
 // RunAgentAllowed extends RunAgent with an extra tool allowlist (skills pass
 // their allowed-tools frontmatter through to the spawned agent).
 func (r *Runner) RunAgentAllowed(c *tools.Context, description, prompt, subagentType, model, effort string, background bool, allowedTools []string) tools.Result {
@@ -405,6 +412,10 @@ func effortOr(vals ...string) string {
 }
 
 func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, model, effort string, background bool, extraAllowed []string) tools.Result {
+	return r.runAgentRaw(c, description, prompt, subagentType, model, effort, background, extraAllowed, nil)
+}
+
+func (r *Runner) runAgentRaw(c *tools.Context, description, prompt, subagentType, model, effort string, background bool, extraAllowed []string, runInBackground *bool) tools.Result {
 	if subagentType == "" {
 		subagentType = "general-purpose"
 	}
@@ -431,6 +442,11 @@ func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, m
 	if name == "" {
 		name = def.Name
 	}
+	depth := 1
+	if r.Parent != nil {
+		depth = r.Parent.Depth + 1
+	}
+	recordSpawn(r.Client.SessionID, def.Name, runInBackground, background, depth)
 	rec := &tools.AgentRecord{
 		Name:    name,
 		AgentID: tools.NewAgentID(),
@@ -454,6 +470,7 @@ func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, m
 	}
 	sub := &Loop{
 		IsSubagent:    true,
+		Depth:         depth,
 		LoopAgentID:   rec.AgentID,
 		ParentAgentID: parentAID,
 		AllowedTools:  def.resolveAllowed(extraAllowed),
@@ -497,6 +514,7 @@ func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, m
 	sub.handbackTail = true
 	finish := func(res tools.Result) tools.Result {
 		rec.Finish(res.Content)
+		recordComplete(r.Client.SessionID, res.IsError)
 		if c.Session != "" {
 			_ = tools.NotifyOnIdle(c.Session,
 				fmt.Sprintf("[agent %q completed] %s", rec.Name, firstLine(res.Content)))
@@ -520,6 +538,7 @@ func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, m
 	}
 	res := r.runAgentTurn(sub, prompt, c, rec)
 	rec.Finish(res.Content)
+	recordComplete(r.Client.SessionID, res.IsError)
 	// real wraps results with usage stats
 	out := res.Content
 	if sub.UsageTotal.OutputTokens > 0 || sub.UsageTotal.InputTokens > 0 {

@@ -790,7 +790,7 @@ func main() {
 		loop.AutoCompactWindow = o.autoCompact // --autocompact <auto|tokens>
 	}
 	loop.CorrelationID = o.correlationID // --correlation-id (server-side telemetry)
-	loop.TaskBudget = o.taskBudget         // --task-budget → output_config.task_budget
+	loop.TaskBudget = o.taskBudget       // --task-budget → output_config.task_budget
 	loop.AdvisorModel = st.AdvisorModel
 	if o.advisor != "" {
 		loop.AdvisorModel = o.advisor // --advisor <model> (alias or full ID)
@@ -1692,22 +1692,41 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 			"duration_ms":     time.Since(start).Milliseconds(),
 			"duration_api_ms": l.APIDuration().Milliseconds(),
 			"num_turns":       turns,
-			// real's result enrichments: request-start latency + first-
-			// token latency + per-model usage context fields
-			"time_to_request_ms": l.TimeToRequest().Milliseconds(),
-			"ttft_ms":            l.TTFT().Milliseconds(),
-			"stop_reason":        resp.StopReason,
-			"total_cost_usd":     l.CostUSD(),
-			"permission_denials": []string{},
-			"fast_mode_state":    l.FastMode,
-			"uuid":               session.NewID(),
-			"usage":              fullUsage(resp.Usage),
+			// real's result enrichments (captured stream-json): request-
+			// start + first-token latencies, terminal accounting, per-
+			// session subagent stats, null-origin human turns
+			"time_to_request_ms":     l.TimeToRequest().Milliseconds(),
+			"ttft_ms":                l.TTFT().Milliseconds(),
+			"ttft_stream_ms":         l.TTFT().Milliseconds(),
+			"first_content_frame_ms": l.TTFT().Milliseconds(),
+			"queued_turn_count":      0,
+			"result_index":           0,
+			"safety_stops":           0,
+			"terminal_reason":        "completed",
+			"api_error_status":       nil,
+			"origin":                 nil,
+			"stop_reason":            resp.StopReason,
+			"total_cost_usd":         l.CostUSD(),
+			"permission_denials":     []string{},
+			"subagent_stats":         agent.SubagentStats(l.Client.SessionID),
+			// fast mode is off in the sdk-cli lane — real's reason string
+			"fast_mode_state":           map[bool]string{true: "on", false: "off"}[l.FastMode],
+			"fast_mode_disabled_reason": fastModeDisabledReason(l),
+			"uuid":                      session.NewID(),
+			"usage":                     fullUsage(resp.Usage),
 			"modelUsage": map[string]any{l.Model: map[string]any{
 				"inputTokens":              resp.Usage.InputTokens,
 				"outputTokens":             resp.Usage.OutputTokens,
 				"cacheReadInputTokens":     resp.Usage.CacheReadInputTokens,
 				"cacheCreationInputTokens": resp.Usage.CacheCreationInputTokens,
 				"costUSD":                  l.CostUSD(),
+				"webSearchRequests":        0,
+				"contextWindow":            l.ContextWindowSize(),
+				"maxOutputTokens":          agent.MaxOutputFor(l.Model),
+				"thinkingTokens":           0,
+				"canonicalModel":           l.Model,
+				"provider":                 "firstParty",
+				"costBasis":                "list",
 			}},
 		}
 		if schema != "" {
@@ -2429,9 +2448,12 @@ func apiKeySource() string {
 
 // fullUsage expands api.Usage to real's stream-json usage object.
 func fullUsage(u api.Usage) map[string]any {
+	// real's full usage block (captured): token details + service tier +
+	// iterations + speed + geo — the extras ride the same response usage
 	return map[string]any{
 		"input_tokens":                u.InputTokens,
 		"output_tokens":               u.OutputTokens,
+		"output_tokens_details":       map[string]any{"thinking_tokens": 0},
 		"cache_creation_input_tokens": u.CacheCreationInputTokens,
 		"cache_read_input_tokens":     u.CacheReadInputTokens,
 		"server_tool_use": map[string]any{
@@ -2441,7 +2463,20 @@ func fullUsage(u api.Usage) map[string]any {
 		"cache_creation": map[string]any{
 			"ephemeral_1h_input_tokens": 0, "ephemeral_5m_input_tokens": u.CacheCreationInputTokens,
 		},
+		"inference_geo":   "",
+		"iterations":      []any{},
+		"speed":           "standard",
+		"fallback_credit": nil,
 	}
+}
+
+// fastModeDisabledReason mirrors real's Z1()/l8() result for the sdk-cli
+// lane — fast mode requires interactive opt-in; off otherwise.
+func fastModeDisabledReason(l *agent.Loop) string {
+	if l.FastMode {
+		return ""
+	}
+	return "sdk_opt_in_required"
 }
 
 // fireInstructionsLoaded emits InstructionsLoaded for each CLAUDE.md /
