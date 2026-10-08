@@ -542,9 +542,22 @@ func (res *Result) runOne(c Config, ev Event, m Matcher, h Command, payload map[
 		}
 		return
 	}
+	if h.Type == "script" {
+		// real's script hooks execute a bundled script — treat the
+		// file/script field as the command path
+		target := h.File
+		if target == "" {
+			target = h.Script
+		}
+		if target == "" {
+			res.NonBlockErr += "script-type hook has no file\n"
+			return
+		}
+		h = Command{Type: "command", Command: target}
+	}
 	if h.Type != "command" && h.Type != "" {
-		// mcp_tool / script / callback / function need host machinery the
-		// hooks package doesn't own — warn rather than silently skip.
+		// mcp_tool / callback / function need host machinery the hooks
+		// package doesn't own — warn rather than silently skip.
 		res.NonBlockErr += fmt.Sprintf("%s-type hooks are not supported; use a command-type hook\n", h.Type)
 		res.Records = append(res.Records, Record{HookID: newHookID(), Event: string(ev), Command: hookLabel(h), ExitCode: -1, Outcome: "skipped"})
 		return

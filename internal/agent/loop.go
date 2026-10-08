@@ -153,6 +153,12 @@ type Loop struct {
 	// OnSessionTitle wires hookSpecificOutput.sessionTitle → the
 	// transcript's custom-title record.
 	OnSessionTitle func(string)
+	// WatchPaths accumulate extra FileChanged watcher paths from
+	// SessionStart hook watchPaths output.
+	WatchPaths []string
+	// InitialUserMessage is the SessionStart hook's opening-message
+	// override (hookSpecificOutput.initialUserMessage).
+	InitialUserMessage string
 	// Depth is the agent nesting level — main loop 0, first subagent 1
 	// (drives subagent_stats max_depth/spawned_by_subagents)
 	Depth            int
