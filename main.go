@@ -314,11 +314,26 @@ func main() {
 	if o.sdkURL != "" {
 		os.Setenv("ANTHROPIC_BASE_URL", o.sdkURL)
 	}
-	if o.betas != "" {
-		applyBetaFlags(o.betas)
+	// --betas flag + ANTHROPIC_BETAS env both append to the beta header
+	// (mod_0137.js VN()); env entries get the afk-mode filter.
+	if extra := o.betas; extra != "" {
+		if eb := envBetas(); eb != "" {
+			extra += "," + eb
+		}
+		applyBetaFlags(extra)
+	} else if eb := envBetas(); eb != "" {
+		applyBetaFlags(eb)
 	}
 	if o.hookEvents {
 		os.Setenv("CLAUDE_GO_INCLUDE_HOOK_EVENTS", "1")
+	}
+	// CLAUDE_CODE_SAFE_MODE is the env equivalent of --safe-mode
+	// (mod_0029.js Pr(): env || flag).
+	if envOn("CLAUDE_CODE_SAFE_MODE") {
+		os.Setenv("CLAUDE_GO_SAFE_MODE", "1")
+	}
+	if o.allowBypass {
+		os.Setenv("CLAUDE_GO_ALLOW_BYPASS_PERMISSIONS", "1")
 	}
 	flagReplayUser = o.replayUser
 	flagPartial = o.partialMsgs
@@ -643,7 +658,24 @@ func main() {
 	}
 	loop.Wants1m = wants1m
 	loop.MaxTurns = o.maxTurns
+	if !o.maxTurnsSet {
+		// CLAUDE_CODE_MAX_TURNS (real XEs(), mod_0029.js): flag wins; the env
+		// is a positive-integer override — malformed values are a hard error.
+		if t := strings.TrimSpace(os.Getenv("CLAUDE_CODE_MAX_TURNS")); t != "" {
+			if n, err := strconv.Atoi(t); err == nil && n > 0 {
+				loop.MaxTurns = n
+			} else {
+				fatal(`CLAUDE_CODE_MAX_TURNS must be a positive integer; got %q`, t)
+			}
+		}
+	}
 	loop.PermMode = o.permMode
+	// CLAUDE_CODE_PLAN_MODE_REQUIRED is the env equivalent of
+	// --plan-mode-required (mod_0124.js c7t() reads it as a M.bool).
+	if envOn("CLAUDE_CODE_PLAN_MODE_REQUIRED") {
+		loop.PermMode = "plan"
+		o.permModeSet = true // suppresses the settings.defaultMode override below
+	}
 	loop.AppendSysP = o.appendSys
 	loop.ToolCtx.Session = sessionID
 	email, acct, dev := config.Account()
@@ -869,9 +901,18 @@ func main() {
 		}
 		return true, ""
 	}
-	if st.Model != "" && o.model == "" {
+	// Real precedence (mod_0198.js): flag > ANTHROPIC_MODEL > settings.model.
+	if st.Model != "" && o.model == "" && os.Getenv("ANTHROPIC_MODEL") == "" {
 		loop.Model = resolveModel(st.Model)
 		loop.Wants1m = wants1m
+	}
+	// ANTHROPIC_DEFAULT_MODEL applies when nothing else named a model —
+	// flag, env pin, and settings all win over it (mv() in mod_0137.js).
+	if o.model == "" && st.Model == "" && os.Getenv("ANTHROPIC_MODEL") == "" {
+		if dm := defaultModelEnv(); dm != "" {
+			loop.Model = resolveModel(dm)
+			loop.Wants1m = wants1m
+		}
 	}
 
 	// session transcript
@@ -1761,7 +1802,14 @@ func authLoginSub() {
 // matching real resolution: sonnet/opus/haiku/default + ANTHROPIC_DEFAULT_*.
 func resolveModel(m string) string {
 	switch m {
-	case "default", "":
+	case "default":
+		// ANTHROPIC_DEFAULT_MODEL redefines what "default" resolves to
+		// (mod_0137.js mv(): env default unless sentinel/unavailable).
+		if v := defaultModelEnv(); v != "" {
+			return resolveModel(v)
+		}
+		return ""
+	case "":
 		return ""
 	case "sonnet":
 		if v := os.Getenv("ANTHROPIC_DEFAULT_SONNET_MODEL"); v != "" {
@@ -1797,6 +1845,18 @@ func resolveModel(m string) string {
 	return m // full id passes through
 }
 
+// defaultModelEnv is real's dLe() (mod_0137.js): ANTHROPIC_DEFAULT_MODEL,
+// trimmed; "default"/"inherit"/empty are sentinels meaning "no override".
+// Values that fail real's model registry check are passed through here —
+// the API rejects an unknown id the same way --model does.
+func defaultModelEnv() string {
+	v := strings.TrimSpace(os.Getenv("ANTHROPIC_DEFAULT_MODEL"))
+	if strings.EqualFold(v, "default") || strings.EqualFold(v, "inherit") {
+		return ""
+	}
+	return v
+}
+
 // wants1m is set when the configured model used the [1m] suffix — the
 // request then carries the context-1m beta (client.go).
 var wants1m bool
@@ -1812,6 +1872,9 @@ func startupModel(cwd, flagModel string) string {
 	}
 	if m == "" {
 		m = resolveModel(os.Getenv("ANTHROPIC_MODEL"))
+	}
+	if m == "" {
+		m = resolveModel(defaultModelEnv())
 	}
 	if m == "" {
 		m = "claude-fable-5-1"

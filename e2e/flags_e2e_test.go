@@ -789,3 +789,37 @@ func TestInheritPermissionMode(t *testing.T) {
 	p2.waitFor("plan mode", 30*time.Second)
 	p2.exit()
 }
+
+// TestAllowSkipDoesNotEnableBypass: --allow-dangerously-skip-permissions only
+// makes bypass available (real: allowBypass flag) — the wire-visible init
+// event must not claim bypassPermissions, unlike --dangerously-skip-permissions.
+func TestAllowSkipDoesNotEnableBypass(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p", "hi", "--allow-dangerously-skip-permissions", "--output-format", "stream-json")
+	s.mustOK(t, r)
+	var pm string
+	for _, line := range strings.Split(r.stdout, "\n") {
+		if strings.Contains(line, `"subtype":"init"`) {
+			var ev map[string]any
+			json.Unmarshal([]byte(line), &ev)
+			pm, _ = ev["permissionMode"].(string)
+		}
+	}
+	if pm == "bypassPermissions" {
+		t.Fatalf("--allow-* must not enable bypass; init permissionMode=%q", pm)
+	}
+
+	r = s.run(t, "--mock", "-p", "hi", "--dangerously-skip-permissions", "--output-format", "stream-json")
+	s.mustOK(t, r)
+	pm = ""
+	for _, line := range strings.Split(r.stdout, "\n") {
+		if strings.Contains(line, `"subtype":"init"`) {
+			var ev map[string]any
+			json.Unmarshal([]byte(line), &ev)
+			pm, _ = ev["permissionMode"].(string)
+		}
+	}
+	if pm != "bypassPermissions" {
+		t.Fatalf("--dangerously-skip-permissions should bypass; init permissionMode=%q", pm)
+	}
+}
