@@ -579,7 +579,7 @@ func main() {
 			defer close(auxDone)
 			bg := context.Background()
 			client.StartupTraffic(bg, auxModel)
-			client.QuotaProbe(bg)
+			client.QuotaProbe(bg, auxModel)
 			// real's event batch lands after MCP results settle
 			time.Sleep(1200 * time.Millisecond)
 			client.LogSessionStart(bg, auxModel, !o.printMode, startupFacts(cwd, o))

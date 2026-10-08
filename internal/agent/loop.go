@@ -219,17 +219,15 @@ func (l *Loop) buildRequest() *api.Request {
 		}
 		ocRaw, _ = json.Marshal(oc)
 	}
+	var outFmt json.RawMessage
 	if l.OutputSchema != "" {
-		// --json-schema: structured-output format rides output_config.format
+		// --json-schema → real's outputFormat → wire `output_format` at
+		// the request root (sH, mod_0601) — not output_config.format
 		var sch any
 		if json.Unmarshal([]byte(l.OutputSchema), &sch) == nil {
-			var oc map[string]any
-			json.Unmarshal(ocRaw, &oc)
-			if oc == nil {
-				oc = map[string]any{}
-			}
-			oc["format"] = map[string]any{"type": "json_schema", "schema": sch}
-			ocRaw, _ = json.Marshal(oc)
+			outFmt, _ = json.Marshal(map[string]any{
+				"type": "json_schema", "schema": sch,
+			})
 		}
 	}
 	l.syncDeferredPool()
@@ -309,6 +307,7 @@ func (l *Loop) buildRequest() *api.Request {
 		ContextManagement: DefaultContextManagement(),
 		Safeguards:        safeguards,
 		OutputConfig:      outCfg,
+		OutputFormat:      outFmt,
 		// diagnostics.previous_message_id rides the message-threads beta —
 		// thread-enabled models only (absent on opus/sonnet wire in 294)
 		Diagnostics: l.diagnosticsField(),
