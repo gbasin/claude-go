@@ -128,11 +128,14 @@ Flags:
   --bg, --background            run this session as a background agent
                                 (claude attach <id> rejoins, claude agents lists)
   --attach-serve <target>       (accepted)
-  --init-only                   run onboarding/migrations then exit
+  --init                        run Setup hooks (init trigger), then continue
+  --maintenance                 run Setup hooks (maintenance trigger), then continue
+  --init-only                   run Setup + SessionStart:startup hooks, then exit
   --autocompact <auto|tokens>   auto-compact window (auto, or 100k-1M)
   --advisor <model>             server-side advisor model (alias or full ID)
+  --task-budget <tokens>        API-side token budget (output_config.task_budget)
   --proactivity <level>         (accepted)
-  --prompt-suggestions [mode]   (accepted)
+  --prompt-suggestions [mode]   emit prompt_suggestion lines after each turn (print/stream-json)
   --prefill <text>              seed the input buffer without submitting
   --prefill-b64 <b64>           base64url --prefill (deep-link safe)
   --teammate-mode <mode>        (accepted)
@@ -387,8 +390,27 @@ func main() {
 	go checkForUpdate()
 	maybeOnboard(!o.printMode)
 	if o.initOnly {
+		// real's --init-only: Setup hooks (init trigger) +
+		// SessionStart:startup, then exit (mod_0659)
+		hc := hooks.Load(cwd)
+		hooks.Run(hc, hooks.Setup, map[string]any{
+			"session_id": sessionID, "cwd": cwd,
+			"trigger": "init", "hook_event_name": "Setup",
+		}, cwd)
+		hooks.Run(hc, hooks.SessionStart, map[string]any{
+			"session_id": sessionID, "cwd": cwd,
+			"source": "startup", "hook_event_name": "SessionStart",
+		}, cwd)
 		fmt.Println("claude-go initialized")
 		return
+	}
+	// --init / --maintenance: Setup hooks with the named trigger, then
+	// continue normally (mod_0659 — init continues to the REPL)
+	if o.initHook != "" {
+		hooks.Run(hooks.Load(cwd), hooks.Setup, map[string]any{
+			"session_id": sessionID, "cwd": cwd,
+			"trigger": o.initHook, "hook_event_name": "Setup",
+		}, cwd)
 	}
 	for _, s := range o.stubs {
 		fmt.Fprintf(os.Stderr, "note: %s accepted but not supported in claude-go\n", s)
@@ -1077,7 +1099,7 @@ func main() {
 			}
 		}
 		loop.MaxBudgetUSD = o.maxBudget
-		code := runPrint(loop, strings.Join(o.prompt, " ")+promptAtt, o.outFormat, st2, o.jsonSchema)
+		code := runPrint(loop, strings.Join(o.prompt, " ")+promptAtt, o.outFormat, st2, o.jsonSchema, o.promptSuggestions)
 		if o.maxBudget > 0 {
 			fmt.Fprintf(os.Stderr, "note: --max-budget-usd %.2f enforced at turn end\n", o.maxBudget)
 		}
@@ -1457,7 +1479,7 @@ func runMockServer(port int) {
 	select {}
 }
 
-func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema string) int {
+func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema string, promptSuggestions bool) int {
 	var out strings.Builder
 	sj := format == "stream-json"
 	if sj {
@@ -1573,6 +1595,18 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 			fmt.Fprintln(os.Stderr, "Error:", err)
 		}
 		return 1
+	}
+	if sj && promptSuggestions {
+		// real's prompt_suggestion lane: aux haiku call predicts the next
+		// user prompt; emitted as a line BEFORE the result frame
+		tail := "User's most recent ask: " + prompt + "\n\nAssistant response:\n" + out.String()
+		if s := l.Client.SuggestionCall(ctxb(), agent.AuxBillingLine(string(l.Client.Entrypoint), tail, tail), tail); strings.TrimSpace(s) != "" {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "prompt_suggestion", "suggestion": strings.TrimSpace(s),
+				"uuid": session.NewID(), "session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
 	}
 	switch format {
 	case "json", "stream-json":

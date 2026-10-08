@@ -33,6 +33,9 @@ var auxTitlePrompt string
 //go:embed aux_walkaway_prompt.txt
 var auxWalkAwayPrompt string
 
+//go:embed aux_suggest_prompt.txt
+var auxSuggestPrompt string
+
 const (
 	// auxReqTimeout bounds one auxiliary request (real's axios default is
 	// unbounded, but a hung endpoint must never stall the turn path).
@@ -543,6 +546,14 @@ func (c *Client) auxMessageCallFmt(ctx context.Context, billingLine string, maxT
 		}
 	}
 	return text
+}
+
+// SuggestionCall predicts the user's next prompt — real's
+// prompt_suggestion lane (mod_0589): querySource "prompt_suggestion",
+// haiku, no tools, reply = the bare suggestion text or "".
+func (c *Client) SuggestionCall(ctx context.Context, billingLine, convoTail string) string {
+	return c.auxMessageCallFmt(ctx, billingLine, 200, "disabled", nil,
+		[]string{auxIdentity, auxSuggestPrompt}, convoTail, true)
 }
 
 // TitleCall asks haiku to name the session — real fires it once after the
