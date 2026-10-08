@@ -95,6 +95,7 @@ type Loop struct {
 	compactKept           int
 	turnCount             int
 	turnOpening           bool // fresh user prompt pending its first request
+	EvalWait              func() // awaits the GB flag eval (bounded) before request 1
 	toolCallsTotal        int
 	envIdx                int
 	announcedRemoved      string // deferred removals already announced
@@ -220,10 +221,14 @@ func (l *Loop) buildRequest() *api.Request {
 		msgs = capBreakpoints(msgs, 2) // 2 system breakpoints reserve; API max is 4 total
 	}
 	msgs = sanitizeReplayed(msgs)
+	if l.EvalWait != nil {
+		l.EvalWait()
+		l.EvalWait = nil
+	}
 	var safeguards json.RawMessage
-	// real sends the safeguards classifier_context on a turn's opening
-	// request only — tool-loop continuations omit it (294 capture)
-	if !l.dropSafeguards && l.turnOpening {
+	// safeguards classifier_context rides when the GB flag eval left the
+	// dangerous-tool-use feature enabled — eval-unreachable runs omit it
+	if !l.dropSafeguards && !l.Client.EvalFailed() {
 		safeguards = Safeguards(l.PermMode, l.ToolCtx.CWD, l.PermRules)
 	}
 	var outCfg json.RawMessage
@@ -240,6 +245,7 @@ func (l *Loop) buildRequest() *api.Request {
 	l.Client.Model = l.Model // beta list is model-conditional
 	l.Client.Wants1m = l.Wants1m
 	l.Client.AdvisorModel = l.AdvisorModel
+	l.Client.ThinkingDisplayUpdates = l.thinkingDisplay() == "updates"
 	class_ := ""
 	if l.IsSubagent {
 		class_ = "subagent"
