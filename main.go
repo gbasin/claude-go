@@ -236,8 +236,17 @@ func main() {
 		case "attach":
 			attachSub(args[1:])
 			return
-		case "stop":
+		case "stop", "kill": // real: kill is an alias of stop
 			stopSub(args[1:])
+			return
+		case "logs":
+			logsSub(args[1:])
+			return
+		case "respawn":
+			respawnSub(args[1:])
+			return
+		case "rm":
+			rmSub(args[1:])
 			return
 		case "daemon":
 			daemonSub(args[1:])
@@ -430,6 +439,13 @@ func main() {
 		if strings.HasSuffix(resumeID, ".jsonl") {
 			resumePath = resumeID
 			resumeID = strings.TrimSuffix(filepath.Base(resumeID), ".jsonl")
+		}
+		// real resolves custom/ai titles on the session arg
+		// (exact, then case-insensitive substring) before id lookup fails
+		if resumeID != "" && resumePath == "" {
+			if r := session.ResolveArg(cwd, resumeID); r != "" {
+				resumeID = r
+			}
 		}
 		if !o.forkSess && resumeID != "" {
 			sessionID = resumeID
@@ -974,10 +990,20 @@ func main() {
 				// the wire — real replays only the hook string
 				loop.MarkEnvSent()
 				if o.forkSess && st2 != nil {
-					st2.LogRecord(map[string]any{
-						"type": "system", "subtype": "fork",
-						"forkedFrom": map[string]string{"sessionId": id},
-					})
+					// real copies the session file to <newid>.jsonl with
+					// per-record forkedFrom stamps — the fork keeps its
+					// history so a later -r sees it (audit: high gap).
+					src := loadPath
+					if src == "" {
+						src = filepath.Join(session.ProjectsDir(cwd), id+".jsonl")
+					}
+					if _, ferr := st2.ForkInto(src, id, leaf); ferr != nil {
+						fmt.Fprintf(os.Stderr, "fork copy failed: %v\n", ferr)
+						st2.LogRecord(map[string]any{
+							"type": "system", "subtype": "fork",
+							"forkedFrom": map[string]string{"sessionId": id},
+						})
+					}
 					fmt.Fprintf(os.Stderr, "forked session %s → %s (%d messages)\n", id[:8], sessionID[:8], len(msgs))
 				} else {
 					if st2 != nil && leaf != "" {
@@ -1202,6 +1228,11 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 	_ = httpMCP
 	for name, cfg := range cfgs {
 		if cfg.Command == "" && cfg.URL == "" {
+			continue
+		}
+		// per-server enabled:false gates auto-connect (real's enable/
+		// disable state — "enable before reconnect")
+		if cfg.Enabled != nil && !*cfg.Enabled {
 			continue
 		}
 		wg.Add(1)
@@ -2180,8 +2211,9 @@ func setupTmuxSession(wtPath, wtName, sessionID string) {
 // sessionForPR finds a local session transcript whose records link to the
 // given PR number/URL — mirrors real's --from-pr resolution.
 func sessionForPR(cwd, ref string) string {
-	slug := strings.NewReplacer("/", "-", ".", "-").Replace(filepath.Clean(cwd))
-	dir := filepath.Join(config.ClaudeDir(), "projects", slug)
+	// same slug rule as the session store — EvalSymlinks + /→- (the old
+	// loose replacer also ate dots and missed sessions under dotted dirs)
+	dir := filepath.Join(config.ClaudeDir(), "projects", session.Slug(cwd))
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		return ""

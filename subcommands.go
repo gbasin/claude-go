@@ -1,17 +1,19 @@
 package main
 
 import (
-	"context"
 	"bufio"
 	"claude-go/internal/config"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"claude-go/internal/api"
@@ -23,6 +25,8 @@ import (
 	"claude-go/internal/plugins"
 	"claude-go/internal/session"
 	"claude-go/internal/tools"
+
+	"golang.org/x/term"
 )
 
 // mcpSub implements `claude-go mcp list|add|remove`.
@@ -38,49 +42,133 @@ func mcpSub(args []string) {
 			fmt.Println("no MCP servers configured")
 			return
 		}
+		// real's mcp list probes each server and shows connected status
+		type row struct {
+			name, tgt, typ, status string
+			disabled               bool
+		}
+		var rows []row
+		var wg2 sync.WaitGroup
+		var mu2 sync.Mutex
 		for name, c := range cfgs {
 			tgt := c.Command
 			if c.URL != "" {
 				tgt = c.URL
 			}
-			fmt.Printf("%s: %s %v (%s)\n", name, tgt, c.Args, c.Type)
+			r := row{name: name, tgt: tgt, typ: c.Type}
+			if c.Enabled != nil && !*c.Enabled {
+				r.disabled = true
+				r.status = "disabled"
+				rows = append(rows, r)
+				continue
+			}
+			rows = append(rows, r)
+			wg2.Add(1)
+			go func(name string, c mcp.ServerConfig, i int) {
+				defer wg2.Done()
+				cl, err := mcp.Connect(name, c)
+				mu2.Lock()
+				if err != nil {
+					rows[i].status = "✗ Failed to connect"
+				} else {
+					rows[i].status = fmt.Sprintf("✓ Connected (%d tools)", len(cl.Tools))
+					cl.Close()
+				}
+				mu2.Unlock()
+			}(name, c, len(rows)-1)
+		}
+		wg2.Wait()
+		sort.Slice(rows, func(i, j int) bool { return rows[i].name < rows[j].name })
+		for _, r := range rows {
+			fmt.Printf("%s: %s (%s) — %s\n", r.name, r.tgt, r.typ, r.status)
 		}
 		for name := range pending {
 			fmt.Printf("%s: ⏸ Pending approval\n", name)
 		}
 	case "add":
-		// claude-go mcp add [--transport http|sse|stdio|ws] [--scope user|local|project]
-		//   [-e KEY=VAL]... [--header "K: V"]... <name> <command-or-url> [args...]
+		// claude-go mcp add [-s|--scope user|local|project] [-t|--transport stdio|sse|http|ws]
+		//   [-e KEY=VAL]... [-H|--header "K: V"]... [--client-id id]
+		//   [--client-secret] [--callback-port N] <name> <command-or-url> [args...]
 		transport, scope := "stdio", "local"
 		var env, headers, pos []string
+		var clientID, clientSecret string
+		callbackPort := 0
+		wantSecret := false
 		rest := args[1:]
 		// flags may appear anywhere before `--` (commander semantics);
 		// after `--` every token is part of the command line
-		for len(rest) > 0 && rest[0] != "--" {
-			switch rest[0] {
-			case "--transport":
-				transport = rest[1]
-				rest = rest[2:]
-			case "--scope":
-				scope = rest[1]
-				rest = rest[2:]
-			case "-e", "--env":
-				env = append(env, rest[1])
-				rest = rest[2:]
-			case "--header":
-				headers = append(headers, rest[1])
-				rest = rest[2:]
+		for i := 0; i < len(rest) && rest[i] != "--"; i++ {
+			a := rest[i]
+			val := func() string {
+				if i+1 >= len(rest) {
+					fatal("missing value for " + a)
+				}
+				i++
+				return rest[i]
+			}
+			switch {
+			case a == "-t" || a == "--transport":
+				transport = val()
+			case a == "-s" || a == "--scope":
+				scope = val()
+			case strings.HasPrefix(a, "--transport="):
+				transport = a[len("--transport="):]
+			case strings.HasPrefix(a, "--scope="):
+				scope = a[len("--scope="):]
+			case a == "-e" || a == "--env":
+				env = append(env, val())
+			case a == "-H" || a == "--header":
+				headers = append(headers, val())
+			case a == "--client-id":
+				clientID = val()
+			case a == "--client-secret":
+				wantSecret = true
+			case a == "--callback-port":
+				p, err := strconv.Atoi(val())
+				if err != nil || p <= 0 || p > 65535 {
+					fatal("--callback-port must be a port number")
+				}
+				callbackPort = p
+			case strings.HasPrefix(a, "-") && len(pos) == 0:
+				fatal("unknown flag: " + a)
 			default:
-				pos = append(pos, rest[0])
-				rest = rest[1:]
+				// positionals — and once they start, flag-shaped tokens are
+				// the command's own args (mcp add srv mybin --serve)
+				pos = append(pos, a)
 			}
 		}
-		if len(rest) > 0 && rest[0] == "--" {
-			rest = rest[1:]
+		// keep only the tokens after `--`
+		var tail []string
+		for i, a := range rest {
+			if a == "--" {
+				tail = rest[i+1:]
+				break
+			}
 		}
+		rest = append(pos, tail...)
 		rest = append(pos, rest...)
+		// real validates both enumerations before touching config
+		switch scope {
+		case "local", "user", "project":
+		default:
+			fatal("invalid scope %q — expected local, user, or project", scope)
+		}
+		if transport == "streamable-http" {
+			transport = "http" // real's alias
+		}
+		switch transport {
+		case "stdio", "sse", "http", "ws":
+		default:
+			fatal("invalid transport %q — expected stdio, sse, http, or ws", transport)
+		}
+		if wantSecret {
+			clientSecret = os.Getenv("MCP_CLIENT_SECRET")
+			if clientSecret == "" {
+				clientSecret = promptSecret("OAuth client secret: ")
+			}
+		}
 		if len(rest) < 2 {
-			fatal("usage: claude-go mcp add [--transport t] [--scope s] [-e K=V] [--header 'K: V'] <name> <command|url> [args...]")
+			fatal("usage: claude-go mcp add [-s scope] [-t transport] [-e K=V] [-H 'K: V'] [--client-id id] [--client-secret] [--callback-port N] <name> <command|url> [args...]")
 		}
 		name, tgt := rest[0], rest[1]
 		cfg := map[string]any{}
@@ -107,20 +195,69 @@ func mcpSub(args []string) {
 			}
 			cfg["headers"] = m
 		}
+		if clientID != "" || callbackPort > 0 {
+			o := map[string]any{}
+			if clientID != "" {
+				o["clientId"] = clientID
+			}
+			if callbackPort > 0 {
+				o["callbackPort"] = callbackPort
+			}
+			cfg["oauth"] = o
+		}
 		writeMCPServer(scope, name, cfg)
+		// the secret goes to the credential store's mcpOAuthClientConfig
+		// keyed Hl(name,cfg) — never plaintext into the config file
+		if clientSecret != "" {
+			var sc mcp.ServerConfig
+			if b, e := json.Marshal(cfg); e == nil {
+				_ = json.Unmarshal(b, &sc)
+			}
+			if err := mcp.SaveClientSecret(name, sc, clientSecret); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: client secret not stored: %v\n", err)
+			}
+		}
 		fmt.Printf("added %s (%s) [%s scope]\n", name, transport, scope)
 	case "add-json":
-		if len(args) < 3 {
-			fatal("usage: claude-go mcp add-json [--scope s] <name> <json>")
-		}
+		// real: add-json [-s|--scope s] <name> '<json>' — JSON is validated,
+		// including the transport type enum (stdio|sse|http|ws|sdk|…)
 		scope := "local"
 		rest := args[1:]
-		if rest[0] == "--scope" && len(rest) > 2 {
-			scope, rest = rest[1], rest[2:]
+		for len(rest) > 2 {
+			switch {
+			case rest[0] == "-s" || rest[0] == "--scope":
+				scope, rest = rest[1], rest[2:]
+			case strings.HasPrefix(rest[0], "--scope="):
+				scope, rest = rest[0][len("--scope="):], rest[1:]
+			default:
+				goto parsed
+			}
+		}
+	parsed:
+		switch scope {
+		case "local", "user", "project":
+		default:
+			fatal("invalid scope %q — expected local, user, or project", scope)
+		}
+		if len(rest) < 2 {
+			fatal("usage: claude-go mcp add-json [-s scope] <name> '<json>'")
 		}
 		var cfg map[string]any
 		if err := json.Unmarshal([]byte(rest[1]), &cfg); err != nil {
 			fatal("invalid server json: " + err.Error())
+		}
+		if ty, _ := cfg["type"].(string); ty != "" {
+			switch ty {
+			case "stdio", "sse", "http", "ws", "sdk", "claudeai-proxy", "streamable-http":
+				if ty == "streamable-http" {
+					cfg["type"] = "http"
+				}
+			default:
+				fatal("invalid server type %q — expected stdio, sse, http, or ws", ty)
+			}
+		}
+		if cfg["command"] == nil && cfg["url"] == nil && cfg["type"] != "sdk" {
+			fatal("invalid server json: needs command (stdio) or url (sse/http/ws)")
 		}
 		writeMCPServer(scope, rest[0], cfg)
 		fmt.Printf("added %s [%s scope]\n", rest[0], scope)
@@ -146,20 +283,48 @@ func mcpSub(args []string) {
 		}
 		fatal("no such server: " + args[1])
 	case "remove", "rm":
-		if len(args) < 2 {
-			fatal("usage: claude-go mcp remove <name>")
-		}
-		editClaudeJSON(func(m map[string]any) {
-			if servers, ok := m["mcpServers"].(map[string]any); ok {
-				delete(servers, args[1])
+		// real: remove [-s|--scope s] <name> — without a scope it removes
+		// from whichever scope holds the entry; with one, a scoped miss is
+		// an error naming the scope.
+		scope := ""
+		rest := args[1:]
+		for len(rest) > 1 {
+			switch {
+			case rest[0] == "-s" || rest[0] == "--scope":
+				scope, rest = rest[1], rest[2:]
+			case strings.HasPrefix(rest[0], "--scope="):
+				scope, rest = rest[0][len("--scope="):], rest[1:]
+			default:
+				goto rmParsed
 			}
-		})
-		fmt.Printf("removed %s\n", args[1])
+		}
+	rmParsed:
+		if len(rest) < 1 {
+			fatal("usage: claude-go mcp remove [-s scope] <name>")
+		}
+		name := rest[0]
+		if scope != "" {
+			if !removeMCPServer(scope, name) {
+				fatal("No MCP server named %s in %s scope", name, scope)
+			}
+			fmt.Printf("removed %s\n", name)
+			return
+		}
+		for _, sc := range []string{"local", "user", "project"} {
+			if removeMCPServer(sc, name) {
+				fmt.Printf("removed %s (%s scope)\n", name, sc)
+				return
+			}
+		}
+		fatal("No MCP server named %s", name)
 	case "logout":
 		if len(args) < 2 {
 			fatal("usage: claude-go mcp logout <name>")
 		}
-		if err := mcp.DeleteServerAuth(args[1]); err != nil {
+		cfg := mcp.LoadConfigs(mustGetwd())[args[1]]
+		// real's mcp_oauth_revoke: RFC 7009-revoke the held tokens at the
+		// server's revocation_endpoint, then drop the local record
+		if err := mcp.RevokeServerAuth(ctxb(), args[1], cfg); err != nil {
 			fatal("logout failed: " + err.Error())
 		}
 		fmt.Printf("cleared OAuth credentials for %s\n", args[1])
@@ -172,13 +337,91 @@ func mcpSub(args []string) {
 		if !ok || c.URL == "" {
 			fatal("no such remote server: " + args[1])
 		}
-		if err := mcp.RunOAuthFlow(ctxb(), args[1], c.URL); err != nil {
+		if err := mcp.RunOAuthFlow(ctxb(), args[1], c); err != nil {
 			fatal("login failed: " + err.Error())
 		}
 		fmt.Printf("logged in to %s\n", args[1])
+	case "serve":
+		// real's `claude mcp serve` — expose the tool surface as an MCP
+		// server over stdio
+		var o mcp.ServeOpts
+		for _, a := range args[1:] {
+			switch a {
+			case "-d", "--debug":
+				o.Debug = true
+			case "--verbose":
+				o.Verbose = true
+			}
+		}
+		os.Exit(mcp.Serve(ctxb(), os.Stdin, os.Stdout, os.Stderr, o))
+	case "add-from-claude-desktop":
+		// real imports the Claude Desktop config (macOS / WSL) — the file
+		// maps mcpServers just like .mcp.json
+		scope := "local"
+		rest := args[1:]
+		for len(rest) > 0 {
+			switch {
+			case rest[0] == "-s" || rest[0] == "--scope":
+				if len(rest) < 2 {
+					fatal("missing value for --scope")
+				}
+				scope, rest = rest[1], rest[2:]
+			case strings.HasPrefix(rest[0], "--scope="):
+				scope, rest = rest[0][len("--scope="):], rest[1:]
+			default:
+				rest = rest[1:]
+			}
+		}
+		switch scope {
+		case "local", "user", "project":
+		default:
+			fatal("invalid scope %q — expected local, user, or project", scope)
+		}
+		importClaudeDesktop(scope)
 	default:
-		fatal("unknown mcp subcommand: " + args[0] + " (list|add|add-json|get|remove|login|logout|reset-project-choices)")
+		fatal("unknown mcp subcommand: " + args[0] + " (list|add|add-json|add-from-claude-desktop|get|remove|login|logout|reset-project-choices|serve)")
 	}
+}
+
+// claudeDesktopConfigPath locates Claude Desktop's config — real's
+// darwin path (WSL is handled there too; we do macOS + linux-native).
+func claudeDesktopConfigPath() string {
+	home, _ := os.UserHomeDir()
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json")
+	default:
+		return filepath.Join(home, ".config", "Claude", "claude_desktop_config.json")
+	}
+}
+
+// importClaudeDesktop merges Claude Desktop's mcpServers into the given
+// scope. Existing entries keep precedence (real skips same-name servers).
+func importClaudeDesktop(scope string) {
+	b, err := os.ReadFile(claudeDesktopConfigPath())
+	if err != nil {
+		fatal("no Claude Desktop config found (Mac and WSL only)")
+	}
+	var top struct {
+		Servers map[string]map[string]any `json:"mcpServers"`
+	}
+	if json.Unmarshal(b, &top) != nil || len(top.Servers) == 0 {
+		fatal("no MCP servers found in Claude Desktop config")
+	}
+	added := 0
+	for name, cfg := range top.Servers {
+		if mcpServerExists(scope, name) {
+			fmt.Printf("skipped %s (already configured)\n", name)
+			continue
+		}
+		if cfg["type"] == nil {
+			cfg["type"] = "stdio"
+		}
+		writeMCPServer(scope, name, cfg)
+		fmt.Printf("added %s\n", name)
+		added++
+	}
+	fmt.Printf("imported %d server(s) [%s scope]\n", added, scope)
 }
 
 // pendingMcpjson lists project .mcp.json servers that aren't approved —
@@ -207,11 +450,13 @@ func pendingMcpjson(cwd string) map[string]mcp.ServerConfig {
 	return out
 }
 
-// writeMCPServer persists a server entry at the given scope:
-// user → ~/.claude.json, local → ~/.claude.json (real's local scope),
-// project → <cwd>/.mcp.json.
+// writeMCPServer persists a server entry at the given scope — real's
+// model: local → ~/.claude.json projects["<cwd>"].mcpServers (the default,
+// visible only in this project), user → top-level mcpServers (every
+// project), project → <cwd>/.mcp.json (checked in, needs approval).
 func writeMCPServer(scope, name string, cfg map[string]any) {
-	if scope == "project" {
+	switch scope {
+	case "project":
 		p := filepath.Join(mustGetwd(), ".mcp.json")
 		m := map[string]any{}
 		if b, err := os.ReadFile(p); err == nil {
@@ -227,17 +472,122 @@ func writeMCPServer(scope, name string, cfg map[string]any) {
 		if err := os.WriteFile(p, b, 0o644); err != nil {
 			fatal("write .mcp.json: " + err.Error())
 		}
-		return
+	case "user":
+		editClaudeJSON(func(m map[string]any) {
+			servers, _ := m["mcpServers"].(map[string]any)
+			if servers == nil {
+				servers = map[string]any{}
+			}
+			servers[name] = cfg
+			m["mcpServers"] = servers
+		})
+	default: // local
+		editClaudeJSON(func(m map[string]any) {
+			projects, _ := m["projects"].(map[string]any)
+			if projects == nil {
+				projects = map[string]any{}
+			}
+			cwd := mustGetwd()
+			proj, _ := projects[cwd].(map[string]any)
+			if proj == nil {
+				proj = map[string]any{}
+			}
+			servers, _ := proj["mcpServers"].(map[string]any)
+			if servers == nil {
+				servers = map[string]any{}
+			}
+			servers[name] = cfg
+			proj["mcpServers"] = servers
+			projects[cwd] = proj
+			m["projects"] = projects
+		})
 	}
-	// user + local both persist to ~/.claude.json in our model
-	editClaudeJSON(func(m map[string]any) {
-		servers, _ := m["mcpServers"].(map[string]any)
-		if servers == nil {
-			servers = map[string]any{}
+}
+
+// mcpServerExists reports whether name is configured in the given scope.
+func mcpServerExists(scope, name string) bool {
+	switch scope {
+	case "project":
+		if b, err := os.ReadFile(filepath.Join(mustGetwd(), ".mcp.json")); err == nil {
+			var top struct {
+				Servers map[string]any `json:"mcpServers"`
+			}
+			if json.Unmarshal(b, &top) == nil {
+				_, ok := top.Servers[name]
+				return ok
+			}
 		}
-		servers[name] = cfg
-		m["mcpServers"] = servers
-	})
+		return false
+	case "user":
+		m, _ := config.ReadClaudeJSON()
+		servers, _ := m["mcpServers"].(map[string]any)
+		_, ok := servers[name]
+		return ok
+	default: // local
+		m, _ := config.ReadClaudeJSON()
+		projects, _ := m["projects"].(map[string]any)
+		proj, _ := projects[mustGetwd()].(map[string]any)
+		servers, _ := proj["mcpServers"].(map[string]any)
+		_, ok := servers[name]
+		return ok
+	}
+}
+
+// removeMCPServer deletes name from exactly one scope; false when absent.
+func removeMCPServer(scope, name string) bool {
+	if !mcpServerExists(scope, name) {
+		return false
+	}
+	switch scope {
+	case "project":
+		p := filepath.Join(mustGetwd(), ".mcp.json")
+		m := map[string]any{}
+		if b, err := os.ReadFile(p); err == nil {
+			_ = json.Unmarshal(b, &m)
+		}
+		if servers, _ := m["mcpServers"].(map[string]any); servers != nil {
+			delete(servers, name)
+		}
+		b, _ := json.MarshalIndent(m, "", "  ")
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			fatal("write .mcp.json: " + err.Error())
+		}
+	case "user":
+		editClaudeJSON(func(m map[string]any) {
+			if servers, _ := m["mcpServers"].(map[string]any); servers != nil {
+				delete(servers, name)
+			}
+		})
+	default: // local
+		editClaudeJSON(func(m map[string]any) {
+			projects, _ := m["projects"].(map[string]any)
+			proj, _ := projects[mustGetwd()].(map[string]any)
+			if servers, _ := proj["mcpServers"].(map[string]any); servers != nil {
+				delete(servers, name)
+				proj["mcpServers"] = servers
+			}
+		})
+	}
+	return true
+}
+
+// promptSecret reads a secret without echo (mcp add --client-secret).
+// Non-TTY callers must use MCP_CLIENT_SECRET.
+func promptSecret(prompt string) string {
+	fmt.Fprint(os.Stderr, prompt)
+	fd := int(os.Stdin.Fd())
+	if term.IsTerminal(fd) {
+		b, err := term.ReadPassword(fd)
+		fmt.Fprintln(os.Stderr)
+		if err == nil {
+			return strings.TrimSpace(string(b))
+		}
+	}
+	var line string
+	if _, err := fmt.Fscanln(os.Stdin, &line); err != nil {
+		fatal("no client secret — set MCP_CLIENT_SECRET")
+	}
+	return strings.TrimSpace(line)
 }
 
 // editLocalSettings rewrites <cwd>/.claude/settings.local.json in place.
@@ -629,6 +979,52 @@ func stopSub(args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("session %s stopped\n", short)
+}
+
+// logsSub is `claude logs <id>` — prints the session's recent terminal
+// output (the pty tail the host replays to attachers).
+func logsSub(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: claude logs <session-id|prefix|name>")
+		os.Exit(2)
+	}
+	if err := bg.Logs(args[0], os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+// respawnSub is `claude respawn <id|--all>` — on-demand worker respawn,
+// same as the daemon's dead-worker sweep.
+func respawnSub(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: claude respawn <session-id|prefix|name>|--all")
+		os.Exit(2)
+	}
+	var err error
+	if args[0] == "--all" {
+		err = bg.RespawnAll()
+	} else {
+		err = bg.Respawn(args[0])
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Println("respawned")
+}
+
+// rmSub is `claude rm <id>` — delete a background session's job record.
+func rmSub(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: claude rm <session-id|prefix|name>")
+		os.Exit(2)
+	}
+	if err := bg.RemoveJob(args[0]); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Println("removed")
 }
 
 // daemonSub is `claude daemon` — the background-session supervisor:

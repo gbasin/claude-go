@@ -306,6 +306,22 @@ func TestForkSession(t *testing.T) {
 		t.Fatalf("forked transcript has %d messages < source %d", forkCount, srcCount)
 	}
 	contains(t, mustReadFile(t, forked), "fork-child", "forked transcript")
+
+	// the copied history must be loadable — resuming the fork sees the
+	// seed turn (the old marker-only write lost it; audit finding #1)
+	forkID := strings.TrimSuffix(filepath.Base(forked), ".jsonl")
+	r3 := s.run(t, "--mock", "-r", forkID, "-p", "again")
+	s.mustOK(t, r3)
+	contains(t, r3.stderr, "resumed session "+forkID, "fork resume")
+	var resumed int
+	for _, rec := range readRecords(t, forked) {
+		if typ, _ := rec["type"].(string); typ == "user" || typ == "assistant" {
+			resumed++
+		}
+	}
+	if resumed < srcCount+2 {
+		t.Fatalf("resumed fork has %d message records, want >= %d", resumed, srcCount+2)
+	}
 }
 
 // TestNoSessionPersistence: --no-session-persistence writes nothing.

@@ -297,11 +297,24 @@ func serveAttach(conn net.Conn, master *os.File, job *Job,
 	var hello struct {
 		Cols, Rows int
 		Auth       string `json:"auth"`
+		Mode       string `json:"mode"` // "logs" = tail dump, no attach (claude logs)
 	}
 	_ = json.Unmarshal(payload, &hello)
 	if job.Auth != "" && hello.Auth != job.Auth {
 		// wrong/absent token — a stray process found the socket; refuse
 		_ = writeFrame(conn, opError, []byte("attach rejected: bad pty auth token"))
+		return
+	}
+	if hello.Mode == "logs" {
+		mu.Lock()
+		snap := append([]byte(nil), (*tail)...)
+		mu.Unlock()
+		_ = writeFrame(conn, opReady, mustJSON(map[string]any{
+			"session": job.SessionID, "mode": "logs"}))
+		if len(snap) > 0 {
+			_ = writeFrame(conn, opData, snap)
+		}
+		_ = writeFrame(conn, opExit, nil)
 		return
 	}
 	if hello.Cols > 0 {
