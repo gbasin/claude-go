@@ -58,6 +58,7 @@ var kbContexts = map[string]bool{
 	"MessageSelector": true, "DiffDialog": true, "DiffPanel": true,
 	"ModelPicker": true, "EffortSlider": true, "Select": true,
 	"Plugin": true, "Scroll": true, "Agents": true,
+	"ProactivityMenu": true,
 }
 
 // kbActiveCtxs — the prompt editor's resolution order (real builds
@@ -76,6 +77,23 @@ var kbReserved = map[string]string{
 	"ctrl+h":   "is the Backspace key in terminals",
 	"capslock": "is not a terminal key",
 	"ctrl+z":   "is terminal suspend",
+}
+
+// dispatchKb resolves a canonical chord in ONE context — vimKey uses it
+// to keep Chat/Global bindings live inside normal/visual modes (real's
+// keymap stays active under the vim state machine).
+func (e *editor) dispatchKb(k key, ctx, cs string) (*readResult, bool) {
+	act, ok := e.kb[ctx+"\x00"+cs]
+	if !ok {
+		return nil, false
+	}
+	if strings.HasPrefix(act, "command:") {
+		return &readResult{line: act, ok: true}, true
+	}
+	if f, ok := kbActions[act]; ok {
+		return f(e), true
+	}
+	return nil, true // bound to an unknown/inert action — consumed dead
 }
 
 // kbActions maps action strings to editor behavior.
@@ -98,18 +116,34 @@ var kbActions = map[string]func(*editor) *readResult{
 	"chat:newline":        func(e *editor) *readResult { e.insert('\n'); return nil },
 	"chat:undo":           func(e *editor) *readResult { e.undo(); return nil },
 	"chat:sendNow":        func(e *editor) *readResult { return e.sendNow() },
-	"history:previous":    func(e *editor) *readResult { e.histPrev(); return nil },
-	"history:next":        func(e *editor) *readResult { e.histNext(); return nil },
-	"chat:clearScreen":    func(e *editor) *readResult { fmt.Print("\x1b[2J\x1b[H"); e.redraw(); return nil },
+	// real's mt/ht: up/down move the cursor between the draft's wrapped
+	// rows first; history pages only at the top/bottom row
+	"history:previous": func(e *editor) *readResult {
+		if !e.cursorUp() {
+			e.histPrev()
+		}
+		return nil
+	},
+	"history:next": func(e *editor) *readResult {
+		if !e.cursorDown() {
+			e.histNext()
+		}
+		return nil
+	},
+	"chat:clearScreen": func(e *editor) *readResult { fmt.Print("\x1b[2J\x1b[H"); e.redraw(); return nil },
 	"chat:queueSubmit": func(e *editor) *readResult {
 		return e.queueSubmitKey()
 	},
 	"chat:modelPicker":    func(e *editor) *readResult { return e.modelPickerKey() },
 	"chat:fastMode":       func(e *editor) *readResult { e.toggleFastMode(); return nil },
 	"chat:thinkingToggle": func(e *editor) *readResult { e.toggleThinking(); return nil },
-	"chat:stash":          func(e *editor) *readResult { e.stashLine(); return nil },
-	"chat:yank":           func(e *editor) *readResult { e.yankLine(); return nil },
-	"app:toggleBrief":     func(e *editor) *readResult { toggleBrief(); return nil },
+	"chat:stash":          func(e *editor) *readResult { e.stashOrPop(); return nil },
+	// real: ctrl+y is chat:defaultToNewerModel — it returns false when the
+	// kill-ring is non-empty so the editor's yank still runs (mod_1600
+	// `if(H9e(k.state)!=="")return!1`). The newer-model upsell has no
+	// surface here, so the empty-ring case is a no-op.
+	"chat:defaultToNewerModel": func(e *editor) *readResult { e.yankKill(); return nil },
+	"app:toggleBrief":          func(e *editor) *readResult { toggleBrief(); return nil },
 	// voice:pushToTalk — real binds space in Chat; the space-press path is
 	// handled in insertKey (printable chars aren't keystrokes). This entry
 	// lets users rebind to a modifier combo via keybindings.json.
@@ -141,7 +175,7 @@ var defaultKeybindings = []struct {
 	{"Chat", "ctrl+_", "chat:undo"},
 	{"Chat", "ctrl+-", "chat:undo"},
 	{"Chat", "ctrl+s", "chat:stash"},
-	{"Chat", "ctrl+y", "chat:yank"},
+	{"Chat", "ctrl+y", "chat:defaultToNewerModel"},
 	{"Chat", "meta+p", "chat:modelPicker"},
 	{"Chat", "meta+o", "chat:fastMode"},
 	{"Chat", "meta+t", "chat:thinkingToggle"},
@@ -348,6 +382,33 @@ func (e *editor) loadKeybindings() {
 			e.kbPrefix[ctx+"\x00"+strings.Join(parts[:i], " ")] = true
 		}
 	}
+	// display-resolution map (real's qa()/Y_): action -> the chord the UI
+	// should name in hints. Defaults claim first so user-added extra
+	// bindings don't shadow the canonical label; unbound actions fall
+	// back to the hardcoded name.
+	e.kbResolve = map[string]string{}
+	for _, d := range defaultKeybindings {
+		ck := d.context + "\x00" + d.action
+		if _, ok := e.kbResolve[ck]; !ok {
+			cs, _ := parseChord(d.chord)
+			if _, bound := e.kb[d.context+"\x00"+cs]; bound {
+				e.kbResolve[ck] = cs
+			}
+		}
+	}
+	var extra []string
+	for cs, act := range e.kb {
+		extra = append(extra, cs+"\x00"+act)
+	}
+	sort.Strings(extra)
+	for _, ea := range extra {
+		cs, act, _ := strings.Cut(ea, "\x00")
+		ctx, chord, _ := strings.Cut(cs, "\x00")
+		k := ctx + "\x00" + act
+		if _, ok := e.kbResolve[k]; !ok {
+			e.kbResolve[k] = chord
+		}
+	}
 	if len(warns) > 0 {
 		// one summary line to stderr — real shows a dismissible notice,
 		// not 27 lines of stderr noise. Detail stays behind debug envs.
@@ -408,6 +469,17 @@ func (e *editor) applyKeybindingFile(b []byte) []string {
 		}
 	}
 	return warns
+}
+
+// resolvedChord returns the display chord for an action in a context —
+// real's qa()/Y_ resolver used by footer hints and "(ctrl+o to expand)".
+func (e *editor) resolvedChord(ctx, action, fallback string) string {
+	if e.kbResolve != nil {
+		if c, ok := e.kbResolve[ctx+"\x00"+action]; ok {
+			return c
+		}
+	}
+	return fallback
 }
 
 // bindingKey dispatches a key through the keybinding layer. Returns
