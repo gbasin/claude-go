@@ -70,6 +70,28 @@ func listDir(d string) ([]Info, error) {
 		}
 		id := strings.TrimSuffix(e.Name(), ".jsonl")
 		p := filepath.Join(d, e.Name())
+		// one pass over the transcript for everything the filter needs
+		scan := scanInfo(p)
+		title := ReadTitle(d, id)
+		if title == "" {
+			title = scan.aiTitle
+		}
+		// real's picker needs customTitle‖aiTitle‖messages‖firstPrompt —
+		// init-only and bookkeeping-only transcripts never list
+		if title == "" && scan.preview == "" && !scan.hasConversation {
+			continue
+		}
+		// model-ended sessions (ended-by-model record) are filtered
+		if scan.endedByModel {
+			continue
+		}
+		// continued-in marks this transcript superseded by another
+		// session — hidden when the continuation exists
+		if scan.continuedIn != "" {
+			if _, err := os.Stat(filepath.Join(d, scan.continuedIn+".jsonl")); err == nil {
+				continue
+			}
+		}
 		out = append(out, Info{
 			ID:       id,
 			Dir:      d,
@@ -78,12 +100,77 @@ func listDir(d string) ([]Info, error) {
 			Modified: fi.ModTime(),
 			Size:     fi.Size(),
 			Branch:   gitBranchFor(d),
-			Title:    ReadTitle(d, id),
-			Preview:  firstUserText(p),
+			Title:    title,
+			Preview:  scan.preview,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Modified.After(out[j].Modified) })
 	return out, nil
+}
+
+// infoScan is what listDir extracts from one transcript pass.
+type infoScan struct {
+	preview         string
+	aiTitle         string
+	hasConversation bool
+	endedByModel    bool
+	continuedIn     string
+}
+
+// scanInfo single-passes a transcript: first visible user text, ai-title
+// records, user/assistant presence, ended-by-model, and the tail
+// continued-in marker.
+func scanInfo(path string) infoScan {
+	var out infoScan
+	f, err := os.Open(path)
+	if err != nil {
+		return out
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1<<20), 8<<20)
+	for sc.Scan() {
+		var e struct {
+			Type        string `json:"type"`
+			AITitle     string `json:"aiTitle"`
+			ContinuedIn string `json:"continuedInSessionId"`
+			IsSidechain bool   `json:"isSidechain"`
+			IsMeta      bool   `json:"isMeta"`
+			Message     struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(sc.Bytes(), &e) != nil {
+			continue
+		}
+		switch e.Type {
+		case "ai-title":
+			if e.AITitle != "" {
+				out.aiTitle = e.AITitle
+			}
+			continue
+		case "ended-by-model":
+			out.endedByModel = true
+			continue
+		case "continued-in":
+			out.continuedIn = e.ContinuedIn
+			continue
+		}
+		if e.IsSidechain || e.IsMeta {
+			continue
+		}
+		switch e.Message.Role {
+		case "user", "assistant":
+			out.hasConversation = true
+		}
+		if out.preview == "" && e.Message.Role == "user" {
+			if t := visibleText(e.Message.Content); t != "" {
+				out.preview = trunc(t, 80)
+			}
+		}
+	}
+	return out
 }
 
 // SlugPath renders a project slug back into a path-ish display form
