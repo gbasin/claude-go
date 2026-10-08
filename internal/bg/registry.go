@@ -1,8 +1,12 @@
 package bg
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -23,9 +27,9 @@ type Job struct {
 	ChildPID  int       `json:"childPid"`
 	StartedAt time.Time `json:"startedAt"`
 	Heartbeat time.Time `json:"heartbeat"`
-	Name      string    `json:"name,omitempty"`   // optional session name
-	Prompt    string    `json:"prompt,omitempty"` // first prompt (agents listing)
-	Auth      string    `json:"auth,omitempty"`   // CLAUDE_BG_PTY_AUTH — attach handshake token
+	Name      string    `json:"name,omitempty"`       // optional session name
+	Prompt    string    `json:"prompt,omitempty"`     // first prompt (agents listing)
+	Auth      string    `json:"auth,omitempty"`       // CLAUDE_BG_PTY_AUTH — attach handshake token
 	Version   string    `json:"version,omitempty"`    // cli build that spawned the worker
 	Attached  int       `json:"attached,omitempty"`   // live attach clients — real won't respawn
 	Activity  time.Time `json:"activityAt,omitempty"` // last pty output — idle-stale guard
@@ -158,6 +162,147 @@ func Stop(prefix string) error {
 	}
 	if pidAlive(j.PID) {
 		return fmt.Errorf("worker %s did not stop", j.Short)
+	}
+	j.Remove()
+	os.Remove(j.SocketPath())
+	return nil
+}
+
+// LookupAny resolves a prefix against every job dir — including dead or
+// settled workers (List filters those). `claude rm`/`respawn` need them.
+func LookupAny(prefix string) (*Job, error) {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return nil, nil
+	}
+	var match *Job
+	for _, j := range allJobs() {
+		if j.SessionID == prefix || j.Short == prefix || j.Name == prefix ||
+			strings.HasPrefix(j.SessionID, prefix) {
+			if match != nil {
+				return nil, errAmbiguous
+			}
+			match = j
+		}
+	}
+	return match, nil
+}
+
+// Logs fetches the worker's rolling pty tail — `claude logs <id>` prints
+// the session's recent terminal output without attaching. A live worker
+// answers over the rendezvous socket (hello{mode:"logs"}); a dead one
+// falls back to the last-exit breadcrumb.
+func Logs(prefix string, stdout io.Writer) error {
+	j, err := LookupAny(prefix)
+	if err != nil {
+		return err
+	}
+	if j == nil {
+		return fmt.Errorf("no background session %q", prefix)
+	}
+	if j.Alive() {
+		conn, err := net.Dial("unix", j.SocketPath())
+		if err == nil {
+			defer conn.Close()
+			hello, _ := json.Marshal(map[string]any{"auth": j.Auth, "mode": "logs"})
+			if err := writeFrame(conn, opHello, hello); err != nil {
+				return err
+			}
+			op, payload, err := readFrame(conn)
+			if err == nil && op == opReady {
+				for {
+					op, payload, err = readFrame(conn)
+					if err != nil || op == opExit {
+						return nil
+					}
+					if op == opData {
+						stdout.Write(payload)
+					}
+				}
+			}
+			if err == nil && op == opError {
+				return fmt.Errorf("logs %s: %s", j.Short, payload)
+			}
+		}
+	}
+	// dead/missing socket — replay the exit breadcrumb if one exists
+	if b, err := os.ReadFile(filepath.Join(jobsRoot(), "last-exit.log")); err == nil {
+		stdout.Write(b)
+		return nil
+	}
+	return fmt.Errorf("session %s has no output (worker not running)", j.Short)
+}
+
+// Respawn restarts a session's worker — `claude respawn <id>`: TERM the
+// live host if wedged, then spawn a fresh bg-host that resumes the same
+// session transcript (same flow as the daemon's dead-worker sweep).
+func Respawn(prefix string) error {
+	j, err := LookupAny(prefix)
+	if err != nil {
+		return err
+	}
+	if j == nil {
+		return fmt.Errorf("no background session %q", prefix)
+	}
+	if pidAlive(j.PID) {
+		signalHost(j.PID)
+		for i := 0; i < 40 && pidAlive(j.PID); i++ {
+			time.Sleep(50 * time.Millisecond)
+		}
+		if pidAlive(j.PID) {
+			killHost(j.PID)
+		}
+	}
+	var tok [16]byte
+	newAuth := ""
+	if _, err := rand.Read(tok[:]); err == nil {
+		newAuth = hex.EncodeToString(tok[:])
+	}
+	cmd, err := Spawn(SpawnOpts{
+		SessionID:  j.SessionID,
+		ResumeFrom: j.SessionID,
+		Auth:       newAuth,
+		CWD:        j.CWD,
+		Name:       j.Name,
+		// Prompt intentionally absent — respawn resumes the transcript,
+		// it doesn't re-type the original first prompt (daemon parity)
+	})
+	if err != nil {
+		return err
+	}
+	j.PID, j.ChildPID, j.Heartbeat = cmd.Process.Pid, 0, time.Now()
+	j.Attached = 0
+	return j.Write()
+}
+
+// RespawnAll respawns every registered job (real's `claude respawn --all`).
+func RespawnAll() error {
+	jobs := allJobs()
+	if len(jobs) == 0 {
+		return fmt.Errorf("no background sessions")
+	}
+	var firstErr error
+	for _, j := range jobs {
+		if err := Respawn(j.Short); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// RemoveJob deletes a session's registry record (and stale socket) —
+// `claude rm <id>`. A live worker must be stopped first; the transcript
+// under ~/.claude/projects is left alone (real's rm clears job records).
+func RemoveJob(prefix string) error {
+	j, err := LookupAny(prefix)
+	if err != nil {
+		return err
+	}
+	if j == nil {
+		return fmt.Errorf("no background session %q", prefix)
+	}
+	if j.Alive() {
+		return fmt.Errorf("session %s is still running — `claude stop %s` first", j.Short, j.Short)
 	}
 	j.Remove()
 	os.Remove(j.SocketPath())

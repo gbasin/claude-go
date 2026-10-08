@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // sseEvent is one parsed text/event-stream frame.
@@ -113,7 +114,7 @@ func connectHTTP(name string, cfg ServerConfig) (*Client, error) {
 		headers: cfg.Headers,
 		client:  &http.Client{}, // ctx governs timeouts
 		c:       c,
-		auth:    loadServerAuth(name),
+		auth:    loadServerAuth(name, cfg),
 		done:    make(chan struct{}),
 	}
 	c.tr = t
@@ -208,35 +209,76 @@ func (t *httpTransport) sendOnce(ctx context.Context, msg []byte, retryAuth bool
 
 // openGetStream opens the optional standalone SSE stream that streamable-
 // HTTP servers may provide for server-initiated messages. 405/404 = not
-// supported, silently ignored.
+// supported, silently ignored. When an established stream dies (or the
+// connect fails transiently) real reconnects with a bounded backoff —
+// "SSE GET-stream reconnection exhausted" after the last attempt.
 func (t *httpTransport) openGetStream() {
 	go func() {
-		req, err := http.NewRequest("GET", t.url, nil)
-		if err != nil {
-			return
-		}
-		req.Header.Set("Accept", "text/event-stream")
-		t.applyHeaders(req)
-		resp, err := t.client.Do(req)
-		if err != nil {
-			return
-		}
-		if resp.StatusCode != http.StatusOK ||
-			!strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-			resp.Body.Close()
-			return
-		}
-		t.getOK.Store(true)
-		done := t.done
-		go func() {
+		backoff := 500 * time.Millisecond
+		for attempt := 1; ; attempt++ {
 			select {
-			case <-done:
-				resp.Body.Close()
-			case <-req.Context().Done():
+			case <-t.done:
+				return
+			default:
 			}
-		}()
-		dispatchSSEBody(t.c, resp.Body)
+			if !t.getStreamOnce() {
+				return // server doesn't expose the stream — done
+			}
+			if attempt >= 5 {
+				if t.c != nil && t.c.OnNotification != nil {
+					t.c.OnNotification("notifications/message",
+						json.RawMessage(`{"level":"warning","data":"SSE GET-stream reconnection exhausted"}`))
+				}
+				return
+			}
+			select {
+			case <-t.done:
+				return
+			case <-time.After(backoff):
+			}
+			if backoff < 8*time.Second {
+				backoff *= 2
+			}
+		}
 	}()
+}
+
+// getStreamOnce opens and drains one GET stream. Returns false when the
+// server doesn't offer one (non-200 / non-SSE) — no retry in that case.
+// A stream that was established and later ended returns true so the
+// caller reconnects.
+func (t *httpTransport) getStreamOnce() bool {
+	req, err := http.NewRequest("GET", t.url, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	t.applyHeaders(req)
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return true // transient connect failure — retry
+	}
+	if resp.StatusCode != http.StatusOK ||
+		!strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		resp.Body.Close()
+		return false
+	}
+	t.getOK.Store(true)
+	done := t.done
+	go func() {
+		select {
+		case <-done:
+			resp.Body.Close()
+		case <-req.Context().Done():
+		}
+	}()
+	dispatchSSEBody(t.c, resp.Body)
+	select {
+	case <-t.done:
+		return false // closed by us, not a failure
+	default:
+		return true // stream ended on the server side — reconnect
+	}
 }
 
 func (t *httpTransport) close() error {
