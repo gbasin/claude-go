@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -147,37 +148,6 @@ func Load(cwd string) *Settings {
 	return merged
 }
 
-var deviceIDRe = regexp.MustCompile(`^[a-f0-9]{64}$`)
-
-// DeviceID returns the stable per-install device id — real's sI()
-// (mod_0137): userID in ~/.claude.json when it's 64-hex, else a fresh
-// random 32-byte hex written back to userID.
-func DeviceID() string {
-	home, _ := os.UserHomeDir()
-	p := filepath.Join(home, ".claude.json")
-	var m map[string]any
-	b, _ := os.ReadFile(p)
-	if len(b) > 0 {
-		json.Unmarshal(b, &m)
-	}
-	if m == nil {
-		m = map[string]any{}
-	}
-	if v, ok := m["userID"].(string); ok && deviceIDRe.MatchString(v) {
-		return v
-	}
-	g := make([]byte, 32)
-	if _, err := rand.Read(g); err != nil {
-		return ""
-	}
-	id := hex.EncodeToString(g)
-	m["userID"] = id
-	if out, err := json.Marshal(m); err == nil {
-		os.WriteFile(p, out, 0o644)
-	}
-	return id
-}
-
 // Account reads account info from ~/.claude.json.
 func Account() (email, accountUUID, deviceID string) {
 	home, _ := os.UserHomeDir()
@@ -200,6 +170,44 @@ func Account() (email, accountUUID, deviceID string) {
 		deviceID = v
 	}
 	return email, accountUUID, deviceID
+}
+
+var (
+	userIDRe   = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	userIDMu   sync.Mutex
+	genUserID  string // process-lifetime cache (real's generatedUserID)
+)
+
+// UserID is real's sI() (mod_0137): ~/.claude.json's userID when it's a
+// 64-hex string, else a freshly generated 32-byte-hex id persisted back to
+// the config — the metadata.user_id device_id source.
+func UserID() string {
+	userIDMu.Lock()
+	defer userIDMu.Unlock()
+	home, _ := os.UserHomeDir()
+	p := filepath.Join(home, ".claude.json")
+	var m map[string]any
+	if b, err := os.ReadFile(p); err == nil {
+		_ = json.Unmarshal(b, &m)
+	}
+	if m == nil {
+		m = map[string]any{}
+	}
+	if v, ok := m["userID"].(string); ok && userIDRe.MatchString(v) {
+		return v
+	}
+	if genUserID != "" {
+		return genUserID
+	}
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return ""
+	}
+	id := hex.EncodeToString(raw)
+	genUserID = id
+	m["userID"] = id
+	WriteClaudeJSON(p, m)
+	return id
 }
 
 // OrganizationUUID reads oauthAccount.organizationUuid from ~/.claude.json

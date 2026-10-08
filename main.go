@@ -680,10 +680,8 @@ func main() {
 	}
 	loop.AppendSysP = o.appendSys
 	loop.ToolCtx.Session = sessionID
-	email, acct, dev := config.Account()
-	if dev == "" {
-		dev = config.DeviceID()
-	}
+	email, acct, _ := config.Account()
+	dev := config.UserID()
 	loop.User = agent.UserConfig{Email: email, AccountUUID: acct, DeviceID: dev}
 	// real's first request waits on the GB client init — gate ours the
 	// same bounded way so flag-gated wire surface is decided, not racy
