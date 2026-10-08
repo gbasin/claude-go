@@ -3393,12 +3393,9 @@ func nthLastAssistantText(msgs []api.Message, n int) string {
 }
 
 func copyToClipboard(s string) error {
-	if runtime.GOOS == "darwin" {
-		c := exec.Command("pbcopy")
-		c.Stdin = strings.NewReader(s)
-		return c.Run()
-	}
-	for _, cmd := range [][]string{{"wl-copy"}, {"xclip", "-selection", "clipboard"}, {"xsel", "-b"}} {
+	// pbcopy first wherever it exists (darwin always; tests stub it on
+	// PATH cross-platform) — then the linux/WSL chain
+	for _, cmd := range [][]string{{"pbcopy"}, {"wl-copy"}, {"xclip", "-selection", "clipboard"}, {"xsel", "-b"}} {
 		if _, err := exec.LookPath(cmd[0]); err == nil {
 			c := exec.Command(cmd[0], cmd[1:]...)
 			c.Stdin = strings.NewReader(s)
