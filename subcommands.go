@@ -43,6 +43,10 @@ func mcpSub(args []string) {
 			return
 		}
 		// real's mcp list probes each server and shows connected status
+		if len(cfgs) > 0 {
+			fmt.Println("Checking MCP server health…")
+			fmt.Println()
+		}
 		type row struct {
 			name, tgt, typ, status string
 			disabled               bool
@@ -50,6 +54,7 @@ func mcpSub(args []string) {
 		var rows []row
 		var wg2 sync.WaitGroup
 		var mu2 sync.Mutex
+
 		for name, c := range cfgs {
 			tgt := c.Command
 			if c.URL != "" {
@@ -83,7 +88,7 @@ func mcpSub(args []string) {
 			fmt.Printf("%s: %s (%s) — %s\n", r.name, r.tgt, r.typ, r.status)
 		}
 		for name := range pending {
-			fmt.Printf("%s: ⏸ Pending approval\n", name)
+			fmt.Printf("%s: ⏸ Pending approval (run `claude` to approve)\n", name)
 		}
 	case "add":
 		// claude-go mcp add [-s|--scope user|local|project] [-t|--transport stdio|sse|http|ws]
