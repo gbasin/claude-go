@@ -88,6 +88,12 @@ type Loop struct {
 	AutoCompactWindow     string           // settings autoCompactWindow ("auto"|"500k"|N)
 	AdvisorModel          string           // settings advisorModel — the /advisor pick
 	CorrelationID         string           // --correlation-id → output_config.correlation_id
+	// TaskBudget is --task-budget <tokens> — real's API-side token
+	// budget: output_config.task_budget={type:"tokens",total[,remaining]}
+	// plus the task-budgets-2026-03-13 beta. remaining decrements by the
+	// tokens each request consumed (real's padded-countdown, mod_0595).
+	TaskBudget          int
+	taskBudgetRemaining int64
 	MemoryPaused          bool             // /pause-memory: skip MEMORY.md injection
 	AlwaysThinking        bool             // settings alwaysThinkingEnabled
 	pendingTrigger        string           // last compact trigger for the boundary record
@@ -190,28 +196,47 @@ func (l *Loop) buildRequest() *api.Request {
 	// opus-4-8 rejects it — 'requires a model that supports per-turn
 	// effort'). Real omits the key for those models.
 	var ocRaw json.RawMessage
+	oc := map[string]any{}
+	eb := extraBodyFields()
+	// real's Aa = {...Ji.output_config} — CLAUDE_CODE_EXTRA_BODY's
+	// output_config seeds the map BEFORE the CLI writers run (bWo/wWo
+	// both skip keys the env already provided)
+	if ocEB, ok := eb["output_config"].(map[string]any); ok {
+		for k, v := range ocEB {
+			oc[k] = v
+		}
+		delete(eb, "output_config")
+	}
 	if isXHighModel(l.Model) {
-		oc := map[string]string{"effort": effort}
+		oc["effort"] = effort
 		if l.FastMode {
 			oc["speed"] = "fast"
 		}
 		if l.CorrelationID != "" {
 			oc["correlation_id"] = l.CorrelationID // real sends it inside output_config
 		}
-		ocRaw, _ = json.Marshal(oc)
+	}
+	if l.TaskBudget > 0 {
+		if _, seeded := oc["task_budget"]; !seeded {
+			// {type:"tokens", total, remaining?} — remaining absent on
+			// the first request, then decremented by each turn's usage
+			tb := map[string]any{"type": "tokens", "total": l.TaskBudget}
+			if l.taskBudgetRemaining > 0 {
+				tb["remaining"] = l.taskBudgetRemaining
+			}
+			oc["task_budget"] = tb
+		}
 	}
 	if l.OutputSchema != "" {
 		// --json-schema: structured-output format rides output_config.format
 		var sch any
-		if json.Unmarshal([]byte(l.OutputSchema), &sch) == nil {
-			var oc map[string]any
-			json.Unmarshal(ocRaw, &oc)
-			if oc == nil {
-				oc = map[string]any{}
-			}
+		if _, seeded := oc["format"]; !seeded &&
+			json.Unmarshal([]byte(l.OutputSchema), &sch) == nil {
 			oc["format"] = map[string]any{"type": "json_schema", "schema": sch}
-			ocRaw, _ = json.Marshal(oc)
 		}
+	}
+	if len(oc) > 0 {
+		ocRaw, _ = json.Marshal(oc)
 	}
 	l.syncDeferredPool()
 	msgs := l.withEphemeralBreakpoint(l.wireMessages())
@@ -246,6 +271,9 @@ func (l *Loop) buildRequest() *api.Request {
 	l.Client.Wants1m = l.Wants1m
 	l.Client.AdvisorModel = l.AdvisorModel
 	l.Client.ThinkingDisplayUpdates = l.thinkingDisplay() == "updates"
+	if l.TaskBudget > 0 && !containsStr(l.Client.ExtraBetas, "task-budgets-2026-03-13") {
+		l.Client.ExtraBetas = append(l.Client.ExtraBetas, "task-budgets-2026-03-13")
+	}
 	class_ := ""
 	if l.IsSubagent {
 		class_ = "subagent"
@@ -274,6 +302,7 @@ func (l *Loop) buildRequest() *api.Request {
 		// thread:{type:"create"} — real sends it on haiku-class requests
 		// alongside the message-threads beta (captured on haiku -p turn)
 		Thread: l.threadField(),
+		ExtraBody: extraBodyFields(),
 	}
 }
 
@@ -562,8 +591,18 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 	}
 	l.lastTotal = resp.Usage.InputTokens + resp.Usage.CacheReadInputTokens +
 		resp.Usage.CacheCreationInputTokens
-	l.tokensLeft -= int64(resp.Usage.InputTokens + resp.Usage.OutputTokens +
+	spent := int64(resp.Usage.InputTokens + resp.Usage.OutputTokens +
 		resp.Usage.CacheReadInputTokens + resp.Usage.CacheCreationInputTokens)
+	l.tokensLeft -= spent
+	if l.TaskBudget > 0 {
+		if l.taskBudgetRemaining <= 0 {
+			l.taskBudgetRemaining = int64(l.TaskBudget)
+		}
+		l.taskBudgetRemaining -= spent
+		if l.taskBudgetRemaining < 0 {
+			l.taskBudgetRemaining = 0
+		}
+	}
 	l.costUSD += modelCostUSD(l.Model, resp.Usage)
 	if l.MaxBudgetUSD > 0 && l.costUSD > l.MaxBudgetUSD {
 		l.Messages = append(l.Messages, assistantMessage(resp))
@@ -1075,6 +1114,21 @@ func retryableErr(err error) bool {
 	return strings.Contains(s, "429") || strings.Contains(s, "529") ||
 		strings.Contains(s, "overloaded") || strings.Contains(s, "rate_limit") ||
 		strings.Contains(s, "500") || strings.Contains(s, "502") || strings.Contains(s, "503")
+}
+
+// extraBodyFields parses CLAUDE_CODE_EXTRA_BODY — real's XY(): a JSON
+// object whose keys merge into the request body (output_config seeds
+// ours rather than replacing it).
+func extraBodyFields() map[string]any {
+	raw := os.Getenv("CLAUDE_CODE_EXTRA_BODY")
+	if raw == "" {
+		return nil
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(raw), &m) != nil || m == nil {
+		return nil
+	}
+	return m
 }
 
 // runAdvisor answers an advisor tool_use: a second model call over the
