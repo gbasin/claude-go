@@ -82,7 +82,14 @@ type Loop struct {
 	SessionEndFired       bool             // SessionEnd hook already ran — main skips its duplicate fire
 	FastMode              bool             // fast mode: output_config.speed="fast"
 	ParentSessionID       string           // --parent-session-id lineage marker
-	SysPromptSnapshot     string           // --system-prompt-snapshot digest/label
+	// SysPromptSnapshot records the rendered system prompt on the first
+	// request — real sends the record verbatim on every later request and
+	// resume, until compaction (--system-prompt-snapshot, default on).
+	SysPromptSnapshot    string
+	// SysPromptSnapshotOff is --system-prompt-snapshot off — the prompt
+	// renders fresh every request (prompt-text iteration).
+	SysPromptSnapshotOff bool
+	sysSnapshot          []api.SystemBlock
 	TeammateCtx           *TeammateContext // --agent-id/-name/--team-name triad
 	ProactivityOff        bool             // --proactivity off (gates proactive nudges)
 	AutoCompactWindow     string           // settings autoCompactWindow ("auto"|"500k"|N)
@@ -275,9 +282,19 @@ func (l *Loop) buildRequest() *api.Request {
 	if l.IsSubagent {
 		class_ = "subagent"
 	}
-	sys := SystemBlocks(l.Entrypoint, l.CWD, l.Model, l.AppendSysP, l.ExtraSystem, l.SessionExtras, l.billingMeta(msgs), l.tokensLeft)
+	var sys []api.SystemBlock
 	if l.IsSubagent {
 		sys = l.subagentSystemBlocks(msgs)
+	} else if l.sysSnapshot != nil && !l.SysPromptSnapshotOff {
+		sys = l.sysSnapshot // recorded — verbatim until compaction
+	} else {
+		sys = SystemBlocks(l.Entrypoint, l.CWD, l.Model, l.AppendSysP, l.ExtraSystem, l.SessionExtras, l.billingMeta(msgs), l.tokensLeft)
+		if !l.SysPromptSnapshotOff {
+			l.sysSnapshot = sys
+			if b, err := json.Marshal(sys); err == nil {
+				l.SysPromptSnapshot = string(b) // persisted on the init record
+			}
+		}
 	}
 	l.ToolCtx.AdvisorModel = l.AdvisorModel // advisor wire block follows the configured model
 	return &api.Request{
@@ -1554,6 +1571,22 @@ func (l *Loop) subagentSystemBlocks(msgs []api.Message) []api.SystemBlock {
 			CacheControl: &api.CacheControl{Type: "ephemeral"}})
 	}
 	return out
+}
+
+// RestoreSysPromptSnapshot seeds the snapshot from a resumed
+// conversation's init record — real reuses the recorded prompt verbatim.
+func (l *Loop) RestoreSysPromptSnapshot(raw string) {
+	var blocks []api.SystemBlock
+	if json.Unmarshal([]byte(raw), &blocks) == nil && len(blocks) > 0 {
+		l.sysSnapshot = blocks
+	}
+}
+
+// ReleaseSysPromptSnapshot clears the snapshot — real's boundary is
+// compaction; afterwards the prompt renders fresh again.
+func (l *Loop) ReleaseSysPromptSnapshot() {
+	l.sysSnapshot = nil
+	l.SysPromptSnapshot = ""
 }
 
 // subPromptID: subagent requests carry their own prompt-id (captured —
