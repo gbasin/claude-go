@@ -328,10 +328,6 @@ func mcpSub(args []string) {
 			fatal("logout failed: " + err.Error())
 		}
 		fmt.Printf("cleared OAuth credentials for %s\n", args[1])
-	case "serve":
-		// real's `claude mcp serve` — run as an MCP server over stdio,
-		// exposing the builtin tool registry to MCP clients
-		os.Exit(mcp.ServeStdio(mustGetwd()))
 	case "login":
 		if len(args) < 2 {
 			fatal("usage: claude-go mcp login <name>")
