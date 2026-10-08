@@ -14,6 +14,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -604,6 +605,36 @@ func main() {
 	}
 	// --json-schema → output_config.format on the wire
 	loop.OutputSchema = o.jsonSchema
+	if m := os.Getenv("CLAUDE_GO_ADVISOR"); m != "" {
+		loop.AdvisorModel = m // --advisor <model>
+	}
+	// elicitation/create: hook wiring needs the loop's hook config — wrap
+	// whatever main's default Elicit resolved (HandleElicit form/answer-seam)
+	for _, c := range mcpClients {
+		base := c.Elicit
+		serverName := c.Name
+		c.Elicit = func(raw json.RawMessage) map[string]any {
+			var params map[string]any
+			json.Unmarshal(raw, &params)
+			msg, _ := params["message"].(string)
+			hooks.Run(loop.Hooks, hooks.Elicitation, map[string]any{
+				"session_id": sessionID, "cwd": cwd,
+				"hook_event_name": "Elicitation",
+				"mcp_server_name": serverName, "message": msg,
+			}, cwd)
+			res := map[string]any{"action": "decline"}
+			if base != nil {
+				res = base(raw)
+			}
+			hooks.Run(loop.Hooks, hooks.ElicitationResult, map[string]any{
+				"session_id": sessionID, "cwd": cwd,
+				"hook_event_name": "ElicitationResult",
+				"mcp_server_name": serverName, "action": res["action"],
+				"content": res["content"],
+			}, cwd)
+			return res
+		}
+	}
 	if !o.mockMode {
 	}
 	loop.Entrypoint = "sdk-cli"
@@ -853,7 +884,8 @@ func main() {
 		loop.Transcript = st2.Path
 		if resumeID == "" || o.forkSess {
 			st2.LogInitMeta(loop.Model, loop.ParentSessionID,
-				os.Getenv("CLAUDE_GO_AGENT_TYPE"), loop.SysPromptSnapshot) // system/init
+				os.Getenv("CLAUDE_GO_AGENT_TYPE"), loop.SysPromptSnapshot,
+				o.permMode) // system/init — incl. perm mode for --inherit-permission-mode
 			// resumed transcript already carries its own init record
 		}
 		tools.OnSnapshot = func(path, backup string, ver int) {
@@ -909,10 +941,35 @@ func main() {
 				msgs, err = session.Load(cwd, id)
 				leaf = session.LeafUUID(filepath.Join(session.ProjectsDir(cwd), id+".jsonl"))
 			}
+			// --resume-drops-turn: drop the last N turns from the tail
+			if raw := os.Getenv("CLAUDE_GO_RESUME_DROPS_TURN"); raw != "" {
+				if n, nerr := strconv.Atoi(raw); nerr == nil && n > 0 && len(msgs) > 0 {
+					// a "turn" = user message + following assistant/tool blocks —
+					// walk back n user-boundaries
+					dropFrom := len(msgs)
+					for i := len(msgs) - 1; i >= 0 && n > 0; i-- {
+						if msgs[i].Role == "user" {
+							var blks []api.ContentBlock
+							isTool := json.Unmarshal(msgs[i].Content, &blks) == nil &&
+								len(blks) > 0 && blks[0].Type == "tool_result"
+							if !isTool {
+								dropFrom = i
+								n--
+							}
+						}
+					}
+					msgs = msgs[:dropFrom]
+				}
+			}
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "resume %s: %v\n", id, err)
 			} else if len(msgs) > 0 {
 				loop.Messages = msgs
+				if os.Getenv("CLAUDE_GO_INHERIT_PERMISSION_MODE") != "" && !o.permModeSet {
+					if m := session.InitMode(cwd, id); m != "" {
+						loop.PermMode = m // --inherit-permission-mode
+					}
+				}
 				// resumed history already carried the env composite on
 				// the wire — real replays only the hook string
 				loop.MarkEnvSent()
@@ -1000,9 +1057,10 @@ func main() {
 				return client.SafetyEvalStage2(ctx, billing, sessCtx, md, tr)
 			}
 		}
+		loop.MaxBudgetUSD = o.maxBudget
 		code := runPrint(loop, strings.Join(o.prompt, " ")+promptAtt, o.outFormat, st2, o.jsonSchema)
 		if o.maxBudget > 0 {
-			fmt.Fprintf(os.Stderr, "note: --max-budget-usd %.2f (per-request cost tracking not yet enforced)\n", o.maxBudget)
+			fmt.Fprintf(os.Stderr, "note: --max-budget-usd %.2f enforced at turn end\n", o.maxBudget)
 		}
 		agentCleanup() // os.Exit skips the deferred call above
 		// drain aux traffic briefly — real flushes its telemetry tail
@@ -1273,7 +1331,9 @@ func buildClient(mockMode bool, sessionID string) (*api.Client, func()) {
 		fatal("%v", err)
 	}
 	lastCreds = creds
-	return api.NewClient(creds, sessionID, api.EntrySDKCLI), func() {}
+	cl := api.NewClient(creds, sessionID, api.EntrySDKCLI)
+	cl.ParentSessionID = os.Getenv("CLAUDE_GO_PARENT_SESSION_ID") // --parent-session-id
+	return cl, func() {}
 }
 
 var lastCreds *auth.Credentials

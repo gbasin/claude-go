@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"claude-go/internal/api"
@@ -450,6 +451,7 @@ func (r *Runner) runAgent(c *tools.Context, description, prompt, subagentType, m
 		Client:     r.Client,
 		Model:      m,
 		MaxTokens:  defaultMaxTokens,
+		MaxTurns:   taskBudget(),
 		Effort:     "medium",
 		Entrypoint: r.Entrypoint,
 		PermMode:   r.PermMode,
@@ -643,3 +645,13 @@ var StatuslineSetupPrompt string
 const handbackReminderBlock = `<system-reminder>
 Your final report is delivered through SubagentHandback: when your work is complete, call SubagentHandback({message: <your full report>}). The call ends your run, so make it your last step. Only a SubagentHandback call reaches your caller as your result; plain text you write at the end is not delivered.
 </system-reminder>`
+
+// taskBudget: --task-budget caps a subagent's turn count.
+func taskBudget() int {
+	if v := os.Getenv("CLAUDE_GO_TASK_BUDGET"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 0
+}
