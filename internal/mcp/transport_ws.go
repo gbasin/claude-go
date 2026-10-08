@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -30,15 +32,26 @@ func wsDial(addr, path, authToken string) (*wsConn, error) {
 	if err != nil {
 		return nil, err
 	}
+	var extra []string
+	if authToken != "" {
+		extra = append(extra, "x-claude-code-ide-authorization: "+authToken)
+	}
+	return wsHandshake(c, addr, path, extra)
+}
+
+// wsHandshake writes the upgrade request over an established conn and
+// verifies the 101. extra holds raw "Key: value" header lines.
+func wsHandshake(c net.Conn, addr, path string, extra []string) (*wsConn, error) {
 	key := make([]byte, 16)
 	rand.Read(key)
-	req := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n",
+	var b strings.Builder
+	fmt.Fprintf(&b, "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n",
 		path, addr, base64.StdEncoding.EncodeToString(key))
-	if authToken != "" {
-		req += "x-claude-code-ide-authorization: " + authToken + "\r\n"
+	for _, h := range extra {
+		b.WriteString(h + "\r\n")
 	}
-	req += "\r\n"
-	if _, err := c.Write([]byte(req)); err != nil {
+	b.WriteString("\r\n")
+	if _, err := c.Write([]byte(b.String())); err != nil {
 		c.Close()
 		return nil, err
 	}
@@ -168,6 +181,71 @@ func (t *wsTransport) send(_ context.Context, msg []byte) error {
 func (t *wsTransport) close() error {
 	t.ws.sendControl(0x8, nil)
 	return t.ws.conn.Close()
+}
+
+// wsDialURL dials a ws:// or wss:// MCP endpoint, applying cfg headers.
+func wsDialURL(rawURL string, headers map[string]string) (*wsConn, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	if u.Scheme != "ws" && u.Scheme != "wss" {
+		return nil, fmt.Errorf("ws transport requires ws:// or wss:// url, got %q", rawURL)
+	}
+	addr := u.Host
+	if u.Port() == "" {
+		if u.Scheme == "wss" {
+			addr += ":443"
+		} else {
+			addr += ":80"
+		}
+	}
+	conn, err := net.DialTimeout("tcp", addr, mcpConnectTimeout())
+	if err != nil {
+		return nil, err
+	}
+	if u.Scheme == "wss" {
+		tc := tls.Client(conn, &tls.Config{ServerName: u.Hostname(), MinVersion: tls.VersionTLS12})
+		if err := tc.Handshake(); err != nil {
+			conn.Close()
+			return nil, err
+		}
+		conn = tc
+	}
+	path := u.RequestURI()
+	if path == "" {
+		path = "/"
+	}
+	var extra []string
+	for k, v := range headers {
+		// never let config headers clobber the upgrade handshake
+		lk := strings.ToLower(k)
+		switch lk {
+		case "upgrade", "connection", "sec-websocket-key", "sec-websocket-version", "host":
+			continue
+		}
+		extra = append(extra, k+": "+v)
+	}
+	return wsHandshake(conn, addr, path, extra)
+}
+
+// connectWSTransport opens a `type:"ws"` server config — a plain MCP
+// endpoint over WebSocket (distinct from the IDE lock-file bridge).
+func connectWSTransport(name string, cfg ServerConfig) (*Client, error) {
+	if cfg.URL == "" {
+		return nil, fmt.Errorf("mcp %s: ws transport requires url", name)
+	}
+	ws, err := wsDialURL(cfg.URL, cfg.Headers)
+	if err != nil {
+		return nil, err
+	}
+	c := &Client{
+		Name:    name,
+		tr:      &wsTransport{ws: ws},
+		pending: map[string]chan rpcResp{},
+	}
+	go c.wsReadLoop(ws)
+	return c, nil
 }
 
 // ConnectWS connects to a JSON-RPC-over-WebSocket MCP endpoint (IDE bridge).

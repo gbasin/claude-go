@@ -8,10 +8,13 @@ import (
 	"claude-go/internal/config"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -307,6 +310,112 @@ func (s *Store) LogTitle(title string) error {
 	return writeTitleFile(filepath.Dir(s.Path), s.SessionID, title)
 }
 
+// LogAITitle writes an {type:"ai-title",aiTitle} record — real
+// auto-generates one from the first turn (recordAITitle). Called when a
+// title is produced for the session.
+func (s *Store) LogAITitle(title string) error {
+	return s.LogRecord(map[string]any{
+		"type": "ai-title", "aiTitle": title,
+	})
+}
+
+// LogEndedByModel writes {type:"ended-by-model"} — real marks sessions the
+// model closed via EndConversation (I4r); the picker filters them.
+func (s *Store) LogEndedByModel() error {
+	return s.LogRecord(map[string]any{"type": "ended-by-model"})
+}
+
+// LogPRLink writes {type:"pr-link",prNumber,prUrl,prRepository} — real's
+// linkSessionToPR record when a session is associated with a PR.
+func (s *Store) LogPRLink(number int, url, repo string) error {
+	return s.LogRecord(map[string]any{
+		"type": "pr-link", "prNumber": number,
+		"prUrl": url, "prRepository": repo,
+	})
+}
+
+// LogContinuedIn writes {type:"continued-in",continuedInSessionId} —
+// real's $8o: stamped on the source transcript when a session's work
+// continues in a different session id (bg continuation / handoff).
+// Picker: the superseded transcript is hidden.
+func (s *Store) LogContinuedIn(newSessionID string) error {
+	return s.LogRecord(map[string]any{
+		"type": "continued-in", "continuedInSessionId": newSessionID,
+	})
+}
+
+// LogAgentMeta writes the teammate/agent identity records real persists
+// ("always" merge policy): tag, agent-name, agent-color, agent-setting.
+func (s *Store) LogAgentMeta(tag, agentName, agentColor, agentSetting string) error {
+	rec := map[string]any{}
+	switch {
+	case tag != "":
+		rec["type"] = "tag"
+		rec["tag"] = tag
+	case agentName != "":
+		rec["type"] = "agent-name"
+		rec["agentName"] = agentName
+	case agentColor != "":
+		rec["type"] = "agent-color"
+		rec["agentColor"] = agentColor
+	case agentSetting != "":
+		rec["type"] = "agent-setting"
+		rec["agentSetting"] = agentSetting
+	default:
+		return nil
+	}
+	return s.LogRecord(rec)
+}
+
+// ResolveArg resolves a -r/--resume argument to a session id in cwd's
+// project dir. Accepts a session id directly; otherwise matches custom
+// and ai titles — exact first, then case-insensitive substring (real's
+// title resolution for session args). Returns "" on no match.
+func ResolveArg(cwd, arg string) string {
+	if arg == "" {
+		return ""
+	}
+	d := dir(cwd)
+	if _, err := os.Stat(filepath.Join(d, arg+".jsonl")); err == nil {
+		return arg
+	}
+	type cand struct {
+		id    string
+		title string
+	}
+	var cands []cand
+	ents, err := os.ReadDir(d)
+	if err != nil {
+		return ""
+	}
+	for _, e := range ents {
+		if !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		id := strings.TrimSuffix(e.Name(), ".jsonl")
+		p := filepath.Join(d, e.Name())
+		if t := ReadTitle(d, id); t != "" {
+			cands = append(cands, cand{id, t})
+		}
+		if t := transcriptTitle(p); t != "" {
+			cands = append(cands, cand{id, t})
+		}
+	}
+	// exact match first
+	for _, c := range cands {
+		if c.title == arg {
+			return c.id
+		}
+	}
+	lower := strings.ToLower(arg)
+	for _, c := range cands {
+		if strings.Contains(strings.ToLower(c.title), lower) {
+			return c.id
+		}
+	}
+	return ""
+}
+
 // writeRaw appends an already-complete record verbatim (used by Fork, which
 // controls every field including a nil parentUuid).
 func (s *Store) writeRaw(ev map[string]any) error {
@@ -546,6 +655,52 @@ func Fork(cwd, srcID string) (*Store, []api.Message, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	msgs, err := st.forkCopy(branch, srcID)
+	if err != nil {
+		st.Close()
+		return nil, nil, err
+	}
+	if p := firstPromptText(msgs); p != "" {
+		// best-effort title, matching CC's "<prompt> (Branch N)" naming —
+		// N dedups against existing branch titles of the same prompt
+		_ = st.LogTitle(nextBranchTitle(filepath.Dir(srcPath), trunc(p, 60)))
+	}
+	return st, msgs, nil
+}
+
+// ForkInto copies the active branch of the transcript at srcPath into
+// this (already-open) store — --fork-session's path: real copies the
+// session file to <newid>.jsonl stamping every record
+// forkedFrom:{sessionId:<srcID>,messageUuid:<orig uuid>}, so a later -r
+// of the fork sees the full history. leafUUID, when non-empty, truncates
+// the copy at that record (--fork-session + --resume-session-at forks at
+// the resume point, not the tail). Returns the copied messages.
+func (s *Store) ForkInto(srcPath, srcID, leafUUID string) ([]api.Message, error) {
+	recs, err := readRecords(srcPath)
+	if err != nil {
+		return nil, err
+	}
+	branch := activeBranch(recs)
+	if leafUUID != "" {
+		for i, r := range branch {
+			if u, _ := r["uuid"].(string); u == leafUUID ||
+				(len(leafUUID) < len(u) && strings.HasPrefix(u, leafUUID)) {
+				branch = branch[:i+1]
+				break
+			}
+		}
+	}
+	if len(branch) == 0 {
+		return nil, errors.New("session has no message chain to fork")
+	}
+	return s.forkCopy(branch, srcID)
+}
+
+// forkCopy writes the branch records into s with forkedFrom stamps and a
+// rebuilt parentUuid chain (progress records don't join the chain),
+// leaving s.lastUUID at the copied leaf so subsequent Log calls continue
+// the branch.
+func (s *Store) forkCopy(branch []map[string]any, srcID string) ([]api.Message, error) {
 	parent := ""
 	var msgs []api.Message
 	for _, r := range branch {
@@ -559,7 +714,7 @@ func Fork(cwd, srcID string) (*Store, []api.Message, error) {
 				cp["neutralizedByFork"] = true
 			}
 		}
-		cp["sessionId"] = newID
+		cp["sessionId"] = s.SessionID
 		cp["isSidechain"] = false
 		delete(cp, "sessionKind")
 		cp["forkedFrom"] = map[string]string{
@@ -571,9 +726,8 @@ func Fork(cwd, srcID string) (*Store, []api.Message, error) {
 		} else {
 			cp["parentUuid"] = parent
 		}
-		if err := st.writeRaw(cp); err != nil {
-			st.Close()
-			return nil, nil, err
+		if err := s.writeRaw(cp); err != nil {
+			return nil, err
 		}
 		if t, _ := cp["type"].(string); t != "progress" {
 			parent = origUUID
@@ -582,12 +736,96 @@ func Fork(cwd, srcID string) (*Store, []api.Message, error) {
 			msgs = append(msgs, m)
 		}
 	}
-	st.lastUUID = parent
-	if p := firstPromptText(msgs); p != "" {
-		// best-effort title, matching CC's "<prompt> (Branch)" naming
-		_ = st.LogTitle(trunc(p, 60) + " (Branch)")
+	s.lastUUID = parent
+	return msgs, nil
+}
+
+// nextBranchTitle mirrors real's `re()`: "<prompt> (Branch)", then
+// "(Branch 2)", "(Branch 3)", … deduped against every session title in
+// the project dir (regex /\(Branch(?: (\d+))?\)$/ on custom titles).
+func nextBranchTitle(projectDir, base string) string {
+	plain := base + " (Branch)"
+	taken := map[int]bool{}
+	for _, t := range projectTitles(projectDir) {
+		m := branchTitleRe.FindStringSubmatch(t)
+		if m == nil || !strings.HasPrefix(t, base+" (Branch") {
+			continue
+		}
+		if m[1] == "" {
+			taken[1] = true
+		} else if n, err := strconv.Atoi(m[1]); err == nil {
+			taken[n] = true
+		}
 	}
-	return st, msgs, nil
+	if !taken[1] {
+		return plain
+	}
+	n := 2
+	for taken[n] {
+		n++
+	}
+	return fmt.Sprintf("%s (Branch %d)", base, n)
+}
+
+var branchTitleRe = regexp.MustCompile(` \(Branch(?: (\d+))?\)$`)
+
+// projectTitles returns every custom/ai title recorded in a project dir —
+// real's I4(title) lookup for branch-name dedup.
+func projectTitles(projectDir string) []string {
+	var out []string
+	ents, err := os.ReadDir(projectDir)
+	if err != nil {
+		return nil
+	}
+	for _, e := range ents {
+		if e.IsDir() {
+			if t := ReadTitle(projectDir, e.Name()); t != "" {
+				out = append(out, t)
+			}
+			continue
+		}
+		if !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		p := filepath.Join(projectDir, e.Name())
+		id := strings.TrimSuffix(e.Name(), ".jsonl")
+		if t := ReadTitle(projectDir, id); t != "" {
+			out = append(out, t)
+		}
+		if t := transcriptTitle(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// transcriptTitle scans a transcript for its latest custom-title or
+// ai-title record (the title real's resume surfaces).
+func transcriptTitle(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	title := ""
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1<<20), 8<<20)
+	for sc.Scan() {
+		var e struct {
+			Type        string `json:"type"`
+			CustomTitle string `json:"customTitle"`
+			AITitle     string `json:"aiTitle"`
+		}
+		if json.Unmarshal(sc.Bytes(), &e) != nil {
+			continue
+		}
+		if e.Type == "custom-title" && e.CustomTitle != "" {
+			title = e.CustomTitle
+		} else if e.Type == "ai-title" && e.AITitle != "" && title == "" {
+			title = e.AITitle
+		}
+	}
+	return title
 }
 
 // firstPromptText returns the first real user text in msgs (CC's
