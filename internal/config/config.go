@@ -81,7 +81,7 @@ func Load(cwd string) *Settings {
 			merged.Permissions = &Permissions{DefaultMode: managed.Permissions.DefaultMode}
 		}
 	}
-	for _, p := range []string{
+	for i, p := range []string{
 		filepath.Join(ClaudeDir(), "settings.json"),
 		filepath.Join(cwd, ".claude", "settings.json"),
 		filepath.Join(cwd, ".claude", "settings.local.json"),
@@ -101,7 +101,11 @@ func Load(cwd string) *Settings {
 					merged.Permissions.Deny = append(merged.Permissions.Deny, s.Permissions.Deny...)
 					merged.Permissions.Ask = append(merged.Permissions.Ask, s.Permissions.Ask...)
 					if s.Permissions.DefaultMode != "" && merged.ManagedMode() == "" {
-						merged.Permissions.DefaultMode = s.Permissions.DefaultMode
+						// real: only policy/user/CLI may set defaultMode:"auto"
+						// — repo-level settings can't grant it (mod_1112)
+						if !(i > 0 && s.Permissions.DefaultMode == "auto") {
+							merged.Permissions.DefaultMode = s.Permissions.DefaultMode
+						}
 					}
 				}
 				if s.Model != "" {
@@ -173,9 +177,9 @@ func Account() (email, accountUUID, deviceID string) {
 }
 
 var (
-	userIDRe   = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	userIDMu   sync.Mutex
-	genUserID  string // process-lifetime cache (real's generatedUserID)
+	userIDRe  = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	userIDMu  sync.Mutex
+	genUserID string // process-lifetime cache (real's generatedUserID)
 )
 
 // UserID is real's sI() (mod_0137): ~/.claude.json's userID when it's a
