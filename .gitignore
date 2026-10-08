@@ -8,3 +8,4 @@ reference/
 ../claude-extracted/
 claude-extracted/
 e2e/zz_*_test.go
+.gocache/
