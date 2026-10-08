@@ -74,3 +74,38 @@ func TestSetupHook(t *testing.T) {
 		t.Fatalf("Setup hook did not fire on first run: %s", r.stdout)
 	}
 }
+
+// TaskCreated fires from inside the TaskCreate tool body — and exit 2
+// blocks creation (real semantics).
+func TestTaskCreatedHook(t *testing.T) {
+	s := newSession(t)
+	s.writeFile(".claude/settings.json", `{"tasks":{"enabled":true},"permissions":{"allow":["TaskCreate"]},"hooks":{"TaskCreated":[{"hooks":[{"type":"command","command":"cat >> .hooklog"}]}]}}`)
+	p := startREPL(t, s)
+	p.waitFor("❯", 15*time.Second)
+	p.sendUntilEchoed(t,
+		`calls:[{"name":"ToolSearch","input":{"query":"select:TaskCreate"}},`+
+			`{"name":"TaskCreate","input":{"subject":"s1","description":"d1"}}]`+"\r",
+		"❯ calls:", 8)
+	p.waitFor("· done", 30*time.Second)
+	p.exit()
+	if !waitFileHas(t, s.cwd+"/.hooklog", `"task_subject":"s1"`, 8*time.Second) {
+		t.Fatal("TaskCreated hook did not fire with task fields")
+	}
+}
+
+// PostToolBatch fires once per tool batch with the tool_calls array.
+func TestPostToolBatchHook(t *testing.T) {
+	s := newSession(t)
+	s.writeFile(".claude/settings.json", `{"hooks":{"PostToolBatch":[{"hooks":[{"type":"command","command":"cat >> .hooklog"}]}]}}`)
+	p := startREPL(t, s)
+	p.waitFor("❯", 15*time.Second)
+	p.sendUntilEchoed(t, `calls:[{"name":"Glob","input":{"pattern":"*"}}]`+"\r", "❯ calls:", 8)
+	p.waitFor("· done", 30*time.Second)
+	p.exit()
+	if !waitFileHas(t, s.cwd+"/.hooklog", `"tool_calls"`, 8*time.Second) {
+		t.Fatal("PostToolBatch hook did not fire")
+	}
+	if !waitFileHas(t, s.cwd+"/.hooklog", `"tool_name":"Glob"`, 4*time.Second) {
+		t.Fatal("PostToolBatch payload missing tool entries")
+	}
+}
