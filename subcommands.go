@@ -753,18 +753,41 @@ func pluginSub(args []string) {
 	}
 	switch args[0] {
 	case "marketplace":
-		if len(args) < 3 {
-			fatal("usage: claude plugin marketplace add <repo|url|path> | list")
+		if len(args) < 2 {
+			fatal("usage: claude plugin marketplace add <repo|url|path> [--sparse <paths...>] | list [--json] | remove <name> [--scope s] | update")
+		}
+		if args[1] == "add" && len(args) < 3 {
+			fatal("usage: claude plugin marketplace add <repo|url|path>")
 		}
 		switch args[1] {
 		case "add":
-			name, err := plugins.AddMarketplace(args[2])
+			var sparse []string
+			src := args[2]
+			// --sparse <paths...>: variadic — consumes until the next flag
+			for i := 3; i < len(args); i++ {
+				if args[i] == "--sparse" {
+					for i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+						i++
+						sparse = append(sparse, args[i])
+					}
+				}
+			}
+			name, err := plugins.AddMarketplaceOpts(src, sparse)
 			if err != nil {
 				fatal("marketplace add: %v", err)
 			}
 			fmt.Println("added marketplace", name)
 		case "list":
+			asJSON := false
+			for _, a := range args[2:] {
+				asJSON = asJSON || a == "--json"
+			}
 			mkts := plugins.ListMarketplaces()
+			if asJSON {
+				b, _ := json.MarshalIndent(mkts, "", "  ")
+				fmt.Println(string(b))
+				return
+			}
 			if len(mkts) == 0 {
 				fmt.Println("no marketplaces")
 				return
@@ -772,9 +795,38 @@ func pluginSub(args []string) {
 			for n, p := range mkts {
 				fmt.Printf("%s: %s\n", n, p)
 			}
+		case "remove", "rm":
+			// real: `plugin marketplace remove <name> [--scope <scope>]`
+			// — --scope selects the settings scope, the name is positional
+			name := ""
+			for i := 2; i < len(args); i++ {
+				if args[i] == "--scope" {
+					i++ // consume the scope value
+					continue
+				}
+				if !strings.HasPrefix(args[i], "-") {
+					name = args[i]
+				}
+			}
+			if name == "" {
+				fatal("usage: claude plugin marketplace remove <name> [--scope <scope>]")
+			}
+			if err := plugins.RemoveMarketplace(name); err != nil {
+				fatal("marketplace remove: %v", err)
+			}
+			fmt.Println("removed marketplace", name)
 		case "update":
+			// real: `marketplace update [name]` — all when omitted
+			want := ""
+			if len(args) > 2 {
+				want = args[2]
+			}
 			for n, p := range plugins.ListMarketplaces() {
-				if strings.HasPrefix(p, plugins.SyncedBase()) || strings.Contains(p, "/marketplaces/") {
+				if want != "" && n != want {
+					continue
+				}
+				if strings.HasPrefix(p, plugins.SyncedBase()) || strings.Contains(p, "/marketplaces/") ||
+					func() bool { fi, e := os.Stat(filepath.Join(p, ".git")); return e == nil && fi.IsDir() }() {
 					out, err := exec.Command("git", "-C", p, "pull", "--ff-only").CombinedOutput()
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "%s: pull failed: %s\n", n, out)
@@ -838,6 +890,82 @@ func pluginSub(args []string) {
 			fatal("remove: %v", err)
 		}
 		fmt.Println("removed", args[1])
+	case "update":
+		if len(args) < 2 {
+			fatal("usage: claude plugin update <name[@marketplace]>")
+		}
+		// re-run install against the marketplace clone — pulls latest
+		name := args[1]
+		mkt := ""
+		if i := strings.Index(name, "@"); i > 0 {
+			name, mkt = name[:i], name[i+1:]
+		}
+		if mkt == "" {
+			for n := range plugins.ListMarketplaces() {
+				mkt = n
+				break
+			}
+		}
+		if err := plugins.Install(mkt, name); err != nil {
+			fatal("update: %v", err)
+		}
+		fmt.Println("updated", name)
+	case "validate":
+		if len(args) < 2 {
+			fatal("usage: claude plugin validate <path>")
+		}
+		mf := filepath.Join(args[1], ".claude-plugin", "plugin.json")
+		b, err := os.ReadFile(mf)
+		if err != nil {
+			fatal("validate: %v", err)
+		}
+		var man struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+		}
+		if err := json.Unmarshal(b, &man); err != nil {
+			fatal("validate: %v", err)
+		}
+		if man.Name == "" {
+			fatal("validate: plugin.json missing name")
+		}
+		fmt.Printf("%s %s: valid plugin manifest\n", man.Name, man.Version)
+	case "configure":
+		// real: show the plugin's declared options + which are unset,
+		// or save option values from stdin (json lines key=value)
+		if len(args) < 2 {
+			fatal("usage: claude plugin configure <plugin>")
+		}
+		var inst *plugins.InstalledPlugin
+		for _, p := range plugins.List() {
+			if p.Name == args[1] {
+				cp := p
+				inst = &cp
+				break
+			}
+		}
+		if inst == nil {
+			fatal("plugin %q not installed", args[1])
+		}
+		var man map[string]any
+		b, err := os.ReadFile(filepath.Join(inst.Path, ".claude-plugin", "plugin.json"))
+		if err == nil {
+			json.Unmarshal(b, &man)
+		}
+		opts, _ := man["options"].(map[string]any)
+		if len(opts) == 0 {
+			fmt.Printf("%s declares no configurable options\n", inst.Name)
+			return
+		}
+		settings := config.UserSettings()
+		pref := "plugins." + inst.Name + "."
+		for k, v := range opts {
+			set := "unset"
+			if _, ok := settings[pref+k]; ok {
+				set = fmt.Sprintf("%v", settings[pref+k])
+			}
+			fmt.Printf("  %s: %v (%s)\n", k, v, set)
+		}
 	case "enable", "disable":
 		// real writes the settings enabledPlugins gate ("name@mkt": bool);
 		// the installed-file flag is not the toggle store
@@ -863,20 +991,116 @@ func pluginSub(args []string) {
 			m["enabledPlugins"] = en
 		})
 		fmt.Printf("%s %s\n", args[0]+"d", key)
-	case "details":
+	case "eval", "test":
+		// real gates these behind earlyAccess flags (pluginEval /
+		// hooksModules) — hidden unless the flag's on
+		if os.Getenv("CLAUDE_CODE_PLUGIN_EVAL") == "" {
+			fatal("unknown plugin subcommand: %s", args[0])
+		}
+		fatal("plugin %s: eval suites are not supported in claude-go", args[0])
+	case "init", "new":
 		if len(args) < 2 {
-			fatal("usage: claude plugin details <marketplace>")
+			fatal("usage: claude plugin init <name>")
 		}
-		m, err := plugins.Marketplace(args[1])
+		// real scaffolds under ~/.claude/skills/<name>/ — auto-loaded
+		dir := filepath.Join(config.ClaudeDir(), "skills", args[1])
+		os.MkdirAll(filepath.Join(dir, ".claude-plugin"), 0o755)
+		manifest, _ := json.MarshalIndent(map[string]any{
+			"name": args[1], "version": "0.0.0",
+		}, "", "  ")
+		os.WriteFile(filepath.Join(dir, ".claude-plugin", "plugin.json"), manifest, 0o644)
+		fmt.Println("created plugin skeleton at", dir)
+	case "tag":
+		// real: `plugin tag [path]` — creates {name}--v{version} git tag
+		dir := "."
+		if len(args) > 1 {
+			dir = args[1]
+		}
+		b, err := os.ReadFile(filepath.Join(dir, ".claude-plugin", "plugin.json"))
 		if err != nil {
-			fatal("%v", err)
+			fatal("tag: %v", err)
 		}
-		fmt.Println("marketplace:", m.Name)
-		for _, p := range m.Plugins {
-			fmt.Printf("  %s — %s\n", p.Name, p.Description)
+		var man struct {
+			Name, Version string
 		}
+		json.Unmarshal(b, &man)
+		if man.Name == "" || man.Version == "" {
+			fatal("tag: plugin.json needs name + version")
+		}
+		tag := man.Name + "--v" + man.Version
+		out, err := exec.Command("git", "-C", dir, "tag", tag).CombinedOutput()
+		if err != nil {
+			fatal("tag: %s", out)
+		}
+		fmt.Println("tagged", tag)
+	case "prune", "autoremove":
+		// real removes auto-installed deps no longer needed — ours tracks
+		// no dep graph, so prune removes installs not enabled in settings
+		en, _ := plugins.SettingsPluginGates()
+		var removed []string
+		for _, p := range plugins.List() {
+			key := p.Name + "@" + p.Marketplace
+			if en[key] {
+				continue
+			}
+			if err := plugins.Remove(p.Name); err == nil {
+				removed = append(removed, key)
+			}
+		}
+		if len(removed) == 0 {
+			fmt.Println("nothing to prune")
+		} else {
+			fmt.Println("pruned:", strings.Join(removed, ", "))
+		}
+	case "details":
+		// real: `plugin details <name>` — a PLUGIN's component inventory
+		// + projected token cost (skills/agents/hooks/commands sizes)
+		if len(args) < 2 {
+			fatal("usage: claude plugin details <plugin>")
+		}
+		var inst *plugins.InstalledPlugin
+		for _, p := range plugins.List() {
+			if p.Name == args[1] || p.Name+"@"+p.Marketplace == args[1] {
+				cp := p
+				inst = &cp
+				break
+			}
+		}
+		if inst == nil {
+			fatal("plugin %q not installed", args[1])
+		}
+		fmt.Printf("%s@%s  %s\n", inst.Name, inst.Marketplace, inst.Path)
+		total := 0
+		for _, sub := range []string{"skills", "agents", "commands", "hooks", ".mcp.json"} {
+			fi, err := os.Stat(filepath.Join(inst.Path, sub))
+			if err != nil {
+				continue
+			}
+			if fi.IsDir() {
+				var files []string
+				filepath.Walk(filepath.Join(inst.Path, sub),
+					func(p string, d os.FileInfo, e error) error {
+						if e == nil && !d.IsDir() {
+							files = append(files, p)
+						}
+						return nil
+					})
+				var sz int64
+				for _, f := range files {
+					if st, e := os.Stat(f); e == nil {
+						sz += st.Size()
+					}
+				}
+				total += len(files)
+				fmt.Printf("  %s: %d files (%d bytes)\n", sub, len(files), sz)
+			} else {
+				fmt.Printf("  %s: present\n", sub)
+				total++
+			}
+		}
+		fmt.Printf("  %d components\n", total)
 	default:
-		fatal("unknown plugin subcommand: %s (list|install|remove|marketplace|details|enable|disable)", args[0])
+		fatal("unknown plugin subcommand: %s (list|install|remove|update|validate|configure|marketplace|details|enable|disable)", args[0])
 	}
 }
 

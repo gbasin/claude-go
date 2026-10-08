@@ -92,6 +92,16 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 		}, l.ToolCtx.CWD)
 		switch pr.Permission {
 		case "allow":
+			// real persists the hook's updatedPermissions rules
+			// (hookSpecificOutput.updatedPermissions) into local settings
+			if len(pr.UpdatedPermissions) > 0 {
+				var add []string
+				if json.Unmarshal(pr.UpdatedPermissions, &add) == nil {
+					for _, rule := range add {
+						addLocalPermissionRule(l.ToolCtx.CWD, rule)
+					}
+				}
+			}
 			return true, ""
 		case "deny":
 			return false, pr.Reason
@@ -296,27 +306,38 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 	draw()
 	timeout := time.NewTimer(permAskTimeout)
 	defer timeout.Stop()
-	deny := func() (bool, string) {
-		hooks.Run(l.Hooks, hooks.PermissionDenied, map[string]any{
+	deny := func() (bool, string, bool) {
+		res := hooks.Run(l.Hooks, hooks.PermissionDenied, map[string]any{
 			"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
 			"tool_name": name, "tool_input": json.RawMessage(input),
 			"hook_event_name": "PermissionDenied", "permission_mode": l.PermMode,
 		}, l.ToolCtx.CWD)
-		return false, ""
+		if res.Retry {
+			// real: a retry:true output re-prompts instead of denying
+			draw()
+			timeout.Reset(permAskTimeout)
+			return false, "", false
+		}
+		return false, "", true
 	}
 	denyWith := func(fb string) (bool, string, bool) {
-		hooks.Run(l.Hooks, hooks.PermissionDenied, map[string]any{
+		if res := hooks.Run(l.Hooks, hooks.PermissionDenied, map[string]any{
 			"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
 			"tool_name": name, "tool_input": json.RawMessage(input),
 			"hook_event_name": "PermissionDenied", "permission_mode": l.PermMode,
-		}, l.ToolCtx.CWD)
+		}, l.ToolCtx.CWD); res.Retry {
+			draw()
+			return false, fb, false // not done — stay in the prompt loop
+		}
 		return false, fb, true
 	}
 	for {
 		select {
 		case <-timeout.C:
 			dprintf("\n  %s⏵ auto-denied — unattended for %s%s\n", dim, permAskTimeout, reset)
-			return deny()
+			if a, fb, done := deny(); done {
+				return a, fb
+			}
 		case k, ok := <-dch:
 			if !ok {
 				return false, ""
@@ -336,8 +357,8 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 					if fb != "" {
 						return denyWith(fb)
 					}
-					ok, s := deny()
-					return ok, s, true
+					a, s, done := deny()
+					return a, s, done
 				case "automode":
 					l.PermMode = "auto"
 					dprintln("  switched to auto mode — " + title + " approved")
@@ -403,7 +424,9 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 				continue
 			case k.b == 0x1b || k.b == 3:
 				dprintln("  Esc — denied")
-				return deny()
+				if a, fb, done := deny(); done {
+					return a, fb
+				}
 			case k.b >= '1' && k.b <= '9' && int(k.b-'1') < len(opts):
 				sel = int(k.b - '1')
 				fallthrough
