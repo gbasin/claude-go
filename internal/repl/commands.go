@@ -519,6 +519,51 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 				{"claude-haiku-5-5", "Haiku 5.5", "Fastest for quick answers"},
 				{"claude-fable-5-1", "Fable 5.1", "Most capable for your hardest and longest-running tasks"},
 			}
+			// ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL replaces the
+			// family row (real's sessionPickerChoices): the entry then selects
+			// the env id, labeled by _NAME/_DESCRIPTION when provided.
+			for i, f := range []struct{ env, fam string }{
+				{"OPUS", "Opus"}, {"SONNET", "Sonnet"}, {"HAIKU", "Haiku"}, {"FABLE", "Fable"},
+			} {
+				mid := strings.TrimSpace(os.Getenv("ANTHROPIC_DEFAULT_" + f.env + "_MODEL"))
+				if mid == "" {
+					continue
+				}
+				r := &models[i+1]
+				r.id = mid
+				if n := strings.TrimSpace(os.Getenv("ANTHROPIC_DEFAULT_" + f.env + "_MODEL_NAME")); n != "" {
+					r.label = n
+				} else {
+					r.label = "Custom " + f.fam + " model"
+				}
+				if d := strings.TrimSpace(os.Getenv("ANTHROPIC_DEFAULT_" + f.env + "_MODEL_DESCRIPTION")); d != "" {
+					r.desc = d
+				} else {
+					r.desc = fmt.Sprintf("Custom %s model (%s)", f.fam, mid)
+				}
+			}
+			// ANTHROPIC_CUSTOM_MODEL_OPTION{,_NAME,_DESCRIPTION} appends a
+			// free entry (real: sessionTail; skipped when it duplicates a row).
+			if cid := strings.TrimSpace(os.Getenv("ANTHROPIC_CUSTOM_MODEL_OPTION")); cid != "" {
+				dup := false
+				for _, m := range models {
+					if m.id == cid {
+						dup = true
+						break
+					}
+				}
+				if !dup {
+					label := strings.TrimSpace(os.Getenv("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"))
+					if label == "" {
+						label = cid
+					}
+					desc := strings.TrimSpace(os.Getenv("ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"))
+					if desc == "" {
+						desc = "Custom model (" + cid + ")"
+					}
+					models = append(models, mo{cid, label, desc})
+				}
+			}
 			const extra = 9 // real: "… +9 models" (older/legacy rows)
 			sel := 0
 			for i, m := range models {
