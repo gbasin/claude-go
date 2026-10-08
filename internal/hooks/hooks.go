@@ -304,7 +304,9 @@ func pluginHooks() []struct {
 	}
 	// --plugin-dir: load a dev plugin directory directly (hooks/hooks.json)
 	// without requiring installed_plugins.json registration
-	for _, dir := range strings.Fields(os.Getenv("CLAUDE_GO_PLUGIN_DIR")) {
+	// filepath.SplitList like the plugin loader — a path list, not
+	// whitespace-separated words
+	for _, dir := range filepath.SplitList(os.Getenv("CLAUDE_GO_PLUGIN_DIR")) {
 		if dir == "" {
 			continue
 		}
