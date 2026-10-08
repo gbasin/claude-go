@@ -23,7 +23,7 @@ type rec struct {
 func testClient(srv *httptest.Server) *Client {
 	return &Client{
 		BaseURL:       srv.URL,
-		RunnerVersion: "2.1.292",
+		RunnerVersion: "2.1.294",
 		GetAccessToken: func() string {
 			return "oauth-tok"
 		},
@@ -57,7 +57,7 @@ func TestReconnectSessionShape(t *testing.T) {
 	if got.Headers.Get("anthropic-beta") != betaEnvironments {
 		t.Fatalf("beta: %v", got.Headers.Get("anthropic-beta"))
 	}
-	if got.Headers.Get("x-environment-runner-version") != "2.1.292" {
+	if got.Headers.Get("x-environment-runner-version") != "2.1.294" {
 		t.Fatalf("runner version header missing")
 	}
 	if got.Headers.Get("anthropic-version") != anthropicVersion {
@@ -82,7 +82,7 @@ func TestRegisterBody(t *testing.T) {
 		Directory: "/repo", Branch: "main", GitRepoURL: "git@x:y",
 		MaxSessions: 4,
 		Metadata:    map[string]any{"worker_type": "cli"},
-		Advert:      &ToolHostAdvert{Kind: "advertise", CLIVersion: "2.1.292", Platform: "darwin"},
+		Advert:      &ToolHostAdvert{Kind: "advertise", CLIVersion: "2.1.294", Platform: "darwin"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +91,7 @@ func TestRegisterBody(t *testing.T) {
 		t.Fatalf("result: %+v", res)
 	}
 	md := body["metadata"].(map[string]any)
-	if md["tool_host"] != "2" || md["tool_host_cc_version"] != "2.1.292" || md["tool_host_platform"] != "darwin" {
+	if md["tool_host"] != "2" || md["tool_host_cc_version"] != "2.1.294" || md["tool_host_platform"] != "darwin" {
 		t.Fatalf("advert metadata: %v", md)
 	}
 	if md["worker_type"] != "cli" || md["machine_id"] != "mid" {
@@ -480,18 +480,18 @@ func TestGateOrder(t *testing.T) {
 
 func TestMinVersion(t *testing.T) {
 	cfg := DefaultREPLConfig()
-	if v := CheckMinVersion(cfg, "2.1.292"); v != "" {
+	if v := CheckMinVersion(cfg, "2.1.294"); v != "" {
 		t.Fatalf("default floor should pass: %q", v)
 	}
 	cfg.MinVersion = "9.0.0"
-	v := CheckMinVersion(cfg, "2.1.292")
-	want := "Your version of Claude Code (2.1.292) is too old for Remote Control.\n" +
+	v := CheckMinVersion(cfg, "2.1.294")
+	want := "Your version of Claude Code (2.1.294) is too old for Remote Control.\n" +
 		"Version 9.0.0 or higher is required. Run `claude update` to update."
 	if v != want {
 		t.Fatalf("got %q want %q", v, want)
 	}
 	cfg.MinVersion = "2.1.200"
-	if v := CheckMinVersion(cfg, "2.1.292"); v != "" {
+	if v := CheckMinVersion(cfg, "2.1.294"); v != "" {
 		t.Fatalf("newer should pass: %q", v)
 	}
 }

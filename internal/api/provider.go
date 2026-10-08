@@ -299,10 +299,19 @@ func (c *Client) applyAuth(req *http.Request) error {
 		if err != nil {
 			return err
 		}
+		// real's SDK sets the two auth lanes independently — an oauth
+		// bearer AND an x-api-key both go out when both are configured.
 		if c.Creds.IsAPIKey {
 			req.Header.Set("x-api-key", tok)
 		} else {
 			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		if c.Creds.IsAPIKey {
+			if t := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); t != "" {
+				req.Header.Set("Authorization", "Bearer "+t)
+			}
+		} else if k := os.Getenv("ANTHROPIC_API_KEY"); k != "" {
+			req.Header.Set("x-api-key", k)
 		}
 		return nil
 	}
