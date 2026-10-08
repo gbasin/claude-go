@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 	"runtime"
+	"sync"
 
 	"claude-go/internal/config"
 	"time"

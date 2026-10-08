@@ -638,7 +638,9 @@ func TestSessionEndReasonPayload(t *testing.T) {
 
 	p := startREPL(t, s)
 	p.waitFor("❯", 30*time.Second)
-	p.send("\x04") // ctrl+d on empty buffer — exit path
+	// real's jz gate: first ctrl+d arms "Press Ctrl-D again to exit",
+	// a second inside the window exits
+	p.send("\x04\x04")
 	_ = p.waitExit(15 * time.Second)
 
 	b, _ := os.ReadFile(dump)

@@ -73,10 +73,10 @@ type Client struct {
 	// whenever the request uses thinking display "updates" (cli
 	// entrypoint or --output-format stream-json), not entrypoint alone.
 	ThinkingDisplayUpdates bool
-	RemoteEnv       bool   // eval hasRemoteEnvironment attr
-	evalFailed      bool   // eval returned empty features (fallback state)
-	RetryCount      int    // exposed for x-stainless-retry-count
-	UnixSocket      string // ANTHROPIC_UNIX_SOCKET path, when set
+	RemoteEnv              bool   // eval hasRemoteEnvironment attr
+	evalFailed             bool   // eval returned empty features (fallback state)
+	RetryCount             int    // exposed for x-stainless-retry-count
+	UnixSocket             string // ANTHROPIC_UNIX_SOCKET path, when set
 
 	mu              sync.Mutex
 	RateLimit       *RateLimit // headers from the most recent response
@@ -379,6 +379,16 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 			return nil, err
 		}
 		c.headers(req)
+		if wr, ok := body.(*Request); ok {
+			// real's per-request agent identity headers (mod_0304.js):
+			// subagent requests carry their own agent-id plus the parent's
+			if wr.AgentID != "" {
+				req.Header.Set("x-claude-code-agent-id", wr.AgentID)
+			}
+			if wr.ParentAgentID != "" {
+				req.Header.Set("x-claude-code-parent-agent-id", wr.ParentAgentID)
+			}
+		}
 		if err := c.applyAuth(req); err != nil {
 			return nil, err
 		}
