@@ -112,7 +112,7 @@ var builtinAgentDefs = []AgentDef{
 		Name:   "claude-code-guide",
 		Source: "builtin",
 		Model:  "haiku",
-		Tools:  []string{"Glob", "Grep", "Read", "WebFetch", "WebSearch"},
+		Tools:  []string{"Bash", "Read", "WebFetch", "WebSearch"},
 		Description: `***REMOVED***` +
 			"`client.beta.messages.tool_runner`" + `) for running an agentic loop over your own tools, manual tool-use loops, Managed Agents for server-hosted agents with a managed sandbox, prompt caching, and general Anthropic SDK usage; (4) Claude Tag (Claude in Slack) - what it is, setting it up for a Slack workspace, ` +
 			"`/install-slack-app`" + `; (5) ` + "`claude plugin eval`" + ` (writing and running plugin eval suites, its JSON/report, sandbox, CI) and the ` + "`/skill-doctor`" + ` ***REMOVED***`,

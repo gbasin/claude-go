@@ -64,6 +64,9 @@ type Context struct {
 	// advisorModel / /advisor). Empty → the advisor server block stays
 	// off the wire (real only ships it when configured).
 	AdvisorModel string
+	// Entrypoint selects the cli ("interactive") schema variants — real
+	// ships different Agent/Bash shapes on the interactive wire (294).
+	Entrypoint    string
 	Notes         []string // queued system notes from background tasks
 	Answerer      Answerer // WebFetch page-answer model
 	Searcher      Searcher // WebSearch backend

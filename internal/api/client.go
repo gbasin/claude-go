@@ -155,7 +155,9 @@ func (c *Client) betaHeaderValue() string {
 			b = strings.Replace(b, ","+drop, "", 1)
 			b = strings.Replace(b, drop+",", "", 1)
 		}
-		if c.Entrypoint == EntryCLI {
+		if c.Entrypoint == EntryCLI || c.ThinkingDisplayUpdates {
+			// thinking-display-updates rides the display mode, not the
+			// GB flags — survives eval failure (294 stream-json capture)
 			b = strings.Replace(b,
 				"effort-2025-11-24",
 				"effort-2025-11-24,thinking-display-updates-2026-08-18", 1)
