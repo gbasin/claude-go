@@ -46,7 +46,7 @@ func connectSSE(name string, cfg ServerConfig) (*Client, error) {
 		client:   &http.Client{Timeout: 60 * time.Second},
 		streamHC: &http.Client{},
 		c:        c,
-		auth:     loadServerAuth(name),
+		auth:     loadServerAuth(name, cfg),
 		ready:    make(chan struct{}),
 		done:     make(chan struct{}),
 	}
