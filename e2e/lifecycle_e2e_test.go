@@ -629,14 +629,15 @@ func TestQueuedMessage(t *testing.T) {
 	}
 }
 
-// TestBracketedPaste: a multi-line paste collapses to a [Pasted text #N]
-// placeholder in the editor and expands to <pasted_content> on the wire.
+// TestBracketedPaste: a paste with >2 newlines collapses to a
+// [Pasted text #N] placeholder in the editor (real's threshold) and
+// expands to <pasted_content> on the wire.
 func TestBracketedPaste(t *testing.T) {
 	s := newSession(t)
 	rec := filepath.Join(t.TempDir(), "reqs")
 	p := s.runPTY(t, []string{"CLAUDE_GO_MOCK_RECORD=" + rec}, "--mock")
 	p.waitFor("❯", 30*time.Second)
-	p.send("\x1b[200~paste-one\npaste-two\npaste-three\x1b[201~\r")
+	p.send("\x1b[200~paste-one\npaste-two\npaste-three\npaste-four\x1b[201~\r")
 	p.waitFor("Mock response", 30*time.Second)
 	p.exit()
 

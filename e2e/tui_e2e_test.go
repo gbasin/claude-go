@@ -308,14 +308,19 @@ func TestBgTaskNotification(t *testing.T) {
 	p.exit()
 }
 
-// TestStashDraft: ctrl+s clears the buffer and reports the stash.
+// TestStashDraft: ctrl+s stashes the draft; a second ctrl+s pops it back
+// and it submits (real's single-slot stash/pop toggle).
 func TestStashDraft(t *testing.T) {
 	s := newSession(t)
 	p := startREPL(t, s)
 	p.send("a draft to stash")
 	time.Sleep(400 * time.Millisecond)
-	p.send("\x13") // ctrl+s — chat:stash
-	p.waitFor("stashed draft", 15*time.Second)
+	p.send("\x13") // ctrl+s — chat:stash (buffer clears)
+	time.Sleep(400 * time.Millisecond)
+	p.send("\x13") // ctrl+s again — popStash
+	time.Sleep(400 * time.Millisecond)
+	p.send("\r")
+	p.waitFor("Mock response to: a draft to stash", 30*time.Second)
 	p.exit()
 }
 
@@ -695,16 +700,19 @@ func TestStatusLineCommand(t *testing.T) {
 	p.exit()
 }
 
-// TestStashYank: ctrl+s stashes the draft; ctrl+y yanks it back.
-func TestStashYank(t *testing.T) {
+// TestStashPop: ctrl+s stashes the draft; ctrl+s pops it back (real's
+// single-slot stash — the draft survives the round-trip to submit).
+func TestStashPop(t *testing.T) {
 	s := newSession(t)
 	p := startREPL(t, s)
 	p.send("stash-me")
 	time.Sleep(200 * time.Millisecond)
 	p.send("\x13") // ctrl+s — stash
-	p.waitFor("stashed draft", 15*time.Second)
-	p.send("\x19") // ctrl+y — yank
-	p.waitFor("❯ stash-me", 15*time.Second)
+	time.Sleep(300 * time.Millisecond)
+	p.send("\x13") // ctrl+s — pop (real's popStash, not ctrl+y)
+	time.Sleep(300 * time.Millisecond)
+	p.send("\r")
+	p.waitFor("Mock response to: stash-me", 30*time.Second)
 	p.exit()
 }
 
