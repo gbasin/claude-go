@@ -1573,42 +1573,29 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 		}
 	}
 	turns := 0
-	l.Events.OnToolUse = func(name string, input json.RawMessage) {
-		if sj {
-			ev, _ := json.Marshal(map[string]any{
-				"type": "assistant", "uuid": session.NewID(),
-				"parent_tool_use_id": nil,
-				"message": map[string]any{"role": "assistant", "content": []map[string]any{{
-					"type": "tool_use", "name": name, "id": "toolu_" + session.NewID()[:12],
-					"input": json.RawMessage(input)}}},
-				"session_id": l.Client.SessionID,
-			})
-			fmt.Println(string(ev))
+	// stream-json assistant events (real 294): one per content block, each
+	// carrying the FULL API message (id/model/usage/stop_reason); tool_use
+	// ids are the API-assigned ones, never fabricated.
+	if sj {
+		l.Events.OnAssistantMessage = func(resp *api.Response) {
+			for range resp.Content {
+				ev, _ := json.Marshal(map[string]any{
+					"type": "assistant", "uuid": session.NewID(),
+					"parent_tool_use_id": nil,
+					"message":            resp,
+					"session_id":         l.Client.SessionID,
+				})
+				fmt.Println(string(ev))
+			}
 		}
 	}
-	var lastToolUseID string
-	l.Events.OnToolUse = func(name string, input json.RawMessage) {
-		if sj {
-			id := "toolu_" + session.NewID()[:12]
-			lastToolUseID = id
-			ev, _ := json.Marshal(map[string]any{
-				"type": "assistant", "uuid": session.NewID(),
-				"parent_tool_use_id": nil,
-				"message": map[string]any{"role": "assistant", "content": []map[string]any{{
-					"type": "tool_use", "name": name, "id": id,
-					"input": json.RawMessage(input)}}},
-				"session_id": l.Client.SessionID,
-			})
-			fmt.Println(string(ev))
-		}
-	}
-	l.Events.OnToolResult = func(name string, tr tools.Result) {
+	l.Events.OnToolResult = func(name, toolUseID string, tr tools.Result) {
 		if sj {
 			ev, _ := json.Marshal(map[string]any{
 				"type": "user", "uuid": session.NewID(),
 				"parent_tool_use_id": nil,
 				"message": map[string]any{"role": "user", "content": []map[string]any{{
-					"type": "tool_result", "tool_use_id": lastToolUseID,
+					"type": "tool_result", "tool_use_id": toolUseID,
 					"content": tr.Content, "is_error": tr.IsError}}},
 				"session_id": l.Client.SessionID,
 			})
