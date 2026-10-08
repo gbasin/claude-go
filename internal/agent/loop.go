@@ -150,6 +150,9 @@ type Loop struct {
 	// LoopAgentID/ParentAgentID ride the x-claude-code-agent-id /
 	// -parent-agent-id headers on this loop's requests
 	LoopAgentID, ParentAgentID string
+	// OnSessionTitle wires hookSpecificOutput.sessionTitle → the
+	// transcript's custom-title record.
+	OnSessionTitle func(string)
 	// Depth is the agent nesting level — main loop 0, first subagent 1
 	// (drives subagent_stats max_depth/spawned_by_subagents)
 	Depth            int
@@ -516,12 +519,22 @@ func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
 	if h := l.runHook(hooks.UserPromptSubmit, map[string]any{"prompt": prompt}); h.Block {
 		return nil, fmt.Errorf("prompt blocked by hook: %s", h.Reason)
 	} else {
+		// suppressOriginalPrompt drops the user's text — only hook
+		// context reaches the model (real's hookSpecificOutput handling)
+		if h.SuppressOriginalPrompt {
+			prompt = ""
+		}
 		// plain-text hook stdout becomes additional context (real behavior)
 		if h.PlainText != "" {
 			prompt += "\n\n" + strings.TrimSpace(h.PlainText)
 		}
 		if h.AdditionalContext != "" {
 			prompt += "\n\n" + h.AdditionalContext
+		}
+		prompt = strings.TrimSpace(prompt)
+		// sessionTitle sets the transcript's custom title record
+		if h.SessionTitle != "" && l.OnSessionTitle != nil {
+			l.OnSessionTitle(h.SessionTitle)
 		}
 	}
 	var msg api.Message
