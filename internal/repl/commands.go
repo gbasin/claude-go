@@ -564,7 +564,8 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 					models = append(models, mo{cid, label, desc})
 				}
 			}
-			const extra = 9 // real: "… +9 models" (older/legacy rows)
+			const extra = 9   // real: "… +9 models" (older/legacy rows)
+			var filter []rune // real's "Type to search" narrows the list
 			sel := 0
 			for i, m := range models {
 				if l.Model == m.id {
@@ -573,25 +574,47 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			}
 			cyan := "\x1b[38;5;153m"
 			rows := len(models) + 6 // title+desc+models+overflow+effort+footer
+			shown := func() []int {
+				var idx []int
+				q := strings.ToLower(string(filter))
+				for i, m := range models {
+					if q == "" || strings.Contains(strings.ToLower(m.label+" "+m.id), q) {
+						idx = append(idx, i)
+					}
+				}
+				return idx
+			}
 			draw := func() {
 				var sb strings.Builder
 				sb.WriteString(fmt.Sprintf("\x1b[%dA\r", rows))
 				sb.WriteString(fmt.Sprintf("\x1b[K  %sSelect model%s\r\n", bold, reset))
 				sb.WriteString("\x1b[K  " + dim + "Switch between Claude models. Your pick becomes the default for new" + reset + "\r\n")
 				sb.WriteString("\x1b[K  " + dim + "sessions. For other/previous model names, specify with --model." + reset + "\r\n")
-				for i, m := range models {
-					cur := fmt.Sprintf("%d. ", i+1)
-					pad := "   "
-					if i == sel {
-						cur = menuCyan + "❯" + reset + fmt.Sprintf(" %d. ", i+1)
-						pad = " "
+				sh := shown()
+				if len(sh) == 0 {
+					sb.WriteString(fmt.Sprintf("\x1b[K  %sNo models match \"%s\"%s\r\n", dim, string(filter), reset))
+					for range models[1:] {
+						sb.WriteString("\x1b[K\r\n")
 					}
-					mark := ""
-					if l.Model == m.id || (m.id == "default" && l.Model == "") {
-						mark = " " + cyan + "✔" + reset
+				} else {
+					for i, mi := range sh {
+						m := models[mi]
+						cur := fmt.Sprintf("%d. ", mi+1)
+						pad := "   "
+						if i == sel {
+							cur = menuCyan + "❯" + reset + fmt.Sprintf(" %d. ", mi+1)
+							pad = " "
+						}
+						mark := ""
+						if l.Model == m.id || (m.id == "default" && l.Model == "") {
+							mark = " " + cyan + "✔" + reset
+						}
+						sb.WriteString(fmt.Sprintf("\x1b[K %s %s%s%s %s%s%s\r\n",
+							pad, cur, m.label, mark, dim, m.desc, reset))
 					}
-					sb.WriteString(fmt.Sprintf("\x1b[K %s %s%s%s %s%s%s\r\n",
-						pad, cur, m.label, mark, dim, m.desc, reset))
+					for i := len(sh); i < len(models); i++ {
+						sb.WriteString("\x1b[K\r\n") // keep row count stable
+					}
 				}
 				sb.WriteString(fmt.Sprintf("\x1b[K  %s… +%d models%s\r\n", dim, extra, reset))
 				eff := l.Effort
@@ -599,8 +622,18 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 					eff = "medium"
 				}
 				eff = strings.ToUpper(eff[:1]) + eff[1:]
-				sb.WriteString(fmt.Sprintf("\x1b[K  %s◐ %s effort ←/→ to adjust%s\r\n", dim, eff, reset))
-				sb.WriteString(fmt.Sprintf("\x1b[K  %sEnter to set as default · s to use this session only · Esc to cancel%s\r\n", dim, reset))
+				def := ""
+				if l.Effort == "" || l.Effort == "medium" {
+					def = " (default)" // real tags the default effort
+				}
+				sb.WriteString(fmt.Sprintf("\x1b[K  %s◐ %s effort%s ←/→ to adjust%s\r\n", dim, eff, def, reset))
+				foot := "Enter to set as default · s to use this session only · Esc to cancel"
+				if len(filter) > 0 {
+					foot = "Type to filter · Esc to clear"
+				} else {
+					foot = "Type to search · " + foot
+				}
+				sb.WriteString(fmt.Sprintf("\x1b[K  %s%s%s\r\n", dim, foot, reset))
 				fmt.Print(sb.String())
 			}
 			compSuspend()
@@ -619,6 +652,16 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			dprintln()
 			draw()
 			efforts := []string{"low", "medium", "high", "xhigh", "max"}
+			cur := func() int {
+				sh := shown()
+				if len(sh) == 0 {
+					return -1
+				}
+				if sel >= len(sh) {
+					sel = len(sh) - 1
+				}
+				return sh[sel]
+			}
 			for k := range dch {
 				switch {
 				case k.seq == "[A" || k.b == 'k':
@@ -626,8 +669,8 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 						sel--
 						draw()
 					}
-				case k.seq == "[B":
-					if sel < len(models)-1 {
+				case k.seq == "[B" || k.b == 'j':
+					if sel < len(shown())-1 {
 						sel++
 						draw()
 					}
@@ -647,17 +690,32 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 							break
 						}
 					}
+				case (k.b == 0x7f || k.b == 8) && len(filter) > 0:
+					filter = filter[:len(filter)-1]
+					sel = 0
+					draw()
 				case k.b == 0x1b || k.b == 3:
+					if len(filter) > 0 {
+						filter = filter[:0] // esc clears the search (real)
+						draw()
+						continue
+					}
 					dprintln()
 					return false
-				case k.b == 's':
-					l.Model = models[sel].id
-					sessionOnlyModel = true
-					dprintln()
-					dprintln("  model →", l.Model, "(this session only)")
+				case k.b == 's' && len(filter) == 0:
+					if ci := cur(); ci >= 0 {
+						l.Model = models[ci].id
+						sessionOnlyModel = true
+						dprintln()
+						dprintln("  model →", l.Model, "(this session only)")
+					}
 					return false
 				case k.b == '\r':
-					l.Model = models[sel].id
+					ci := cur()
+					if ci < 0 {
+						continue
+					}
+					l.Model = models[ci].id
 					sessionOnlyModel = false
 					if m, path := config.ReadClaudeJSON(); m != nil {
 						m["model"] = l.Model
@@ -668,6 +726,10 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 					dprintln()
 					dprintln("  model →", l.Model)
 					return false
+				case k.r != 0 && k.r >= 32:
+					filter = append(filter, k.r)
+					sel = 0
+					draw()
 				}
 			}
 		}
