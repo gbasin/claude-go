@@ -141,7 +141,9 @@ func NewLoop(client *api.Client, cwd string) *Loop {
 	l := &Loop{
 		Client:     client,
 		Model:      defaultModel,
-		MaxTokens:  defaultMaxTokens,
+		// resolved per-model in buildRequest (MaxOutputFor) — the
+		// catalog default varies across models
+		MaxTokens:  0,
 		Effort:     "",
 		Entrypoint: "sdk-cli",
 		PermMode:   "auto",
