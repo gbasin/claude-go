@@ -421,6 +421,11 @@ func EnabledPluginDirs() []string {
 	return out
 }
 
+// SettingsPluginGates exports settingsPluginGates for `plugin prune`.
+func SettingsPluginGates() (map[string]bool, map[string]bool) {
+	return settingsPluginGates()
+}
+
 func settingsPluginGates() (map[string]bool, map[string]bool) {
 	en, dis := map[string]bool{}, map[string]bool{}
 	// real ORs enabledPlugins across local+project+user scopes — a true
