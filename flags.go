@@ -27,6 +27,7 @@ type cliOpts struct {
 	maxTurns     int
 	maxTurnsSet  bool // --max-turns given (beats CLAUDE_CODE_MAX_TURNS)
 	allowBypass  bool // bypassPermissions available this session
+	taskBudget   int
 	permMode     string
 	permModeSet  bool
 	appendSys    string
@@ -60,34 +61,37 @@ type cliOpts struct {
 	jsonSchema   string
 	agentName    string
 	// new surface
-	effort        string
-	sessionName   string
-	resumeAt      string
-	dropsTurn     string
-	rewindFiles   string
-	autoCompact   string
-	correlationID string
-	advisor       string
-	planModeInstr string
-	worktreeSet   bool
-	worktreeName  string
-	tmux          string // "" | "auto" | "classic"
-	projectDir    string
-	sdkURL        string
-	betas         string
-	initOnly      bool
-	bgMode        bool
-	noPersist     bool
-	partialMsgs   bool
-	replayUser    bool
-	hookEvents    bool
-	execPrompt    string
-	teleport      bool
-	cloud         bool
-	teleportArg   string
-	stubs         []string // feature flags accepted but not wired
-	fromPR        string   // --from-pr <ref> — session linked to a PR
-	fromPRFlag    bool     // --from-pr passed at all (bare → picker)
+	effort               string
+	sessionName          string
+	resumeAt             string
+	dropsTurn            string
+	rewindFiles          string
+	autoCompact          string
+	correlationID        string
+	advisor              string
+	planModeInstr        string
+	worktreeSet          bool
+	worktreeName         string
+	tmux                 string // "" | "auto" | "classic"
+	projectDir           string
+	sdkURL               string
+	betas                string
+	initOnly             bool
+	initHook             string // --init/--maintenance → Setup-hook trigger
+	promptSuggestions    bool   // --prompt-suggestions → prompt_suggestion emission
+	sysPromptSnapshotOff bool   // --system-prompt-snapshot off
+	bgMode               bool
+	noPersist            bool
+	partialMsgs          bool
+	replayUser           bool
+	hookEvents           bool
+	execPrompt           string
+	teleport             bool
+	cloud                bool
+	teleportArg          string
+	stubs                []string // feature flags accepted but not wired
+	fromPR               string   // --from-pr <ref> — session linked to a PR
+	fromPRFlag           bool     // --from-pr passed at all (bare → picker)
 }
 
 // stubEnv records a parse-only flag as an env var so the value is at least
@@ -118,7 +122,23 @@ func parseCLI(args []string) *cliOpts {
 		"--effort":          func(v string) { o.effort = v },
 		"--permission-mode": func(v string) { o.permMode = v; o.permModeSet = true },
 		"--output-format":   func(v string) { o.outFormat = v },
-		"--input-format":    func(v string) { o.inFormat = v },
+		// real: positive int → output_config.task_budget {type:"tokens"}
+		// real: record the rendered sys prompt once; reuse verbatim on every
+		// request + resume until compaction. off = render fresh each request.
+		"--system-prompt-snapshot": func(v string) {
+			if v != "on" && v != "off" {
+				fatal("--system-prompt-snapshot: allowed choices are on, off.")
+			}
+			o.sysPromptSnapshotOff = v == "off"
+		},
+		"--task-budget": func(v string) {
+			n, err := strconv.Atoi(v)
+			if err != nil || n <= 0 {
+				fatal("--task-budget must be a positive integer")
+			}
+			o.taskBudget = n
+		},
+		"--input-format": func(v string) { o.inFormat = v },
 		"--max-turns": func(v string) {
 			if n, err := strconv.Atoi(v); err == nil {
 				o.maxTurns = n
@@ -198,12 +218,11 @@ func parseCLI(args []string) *cliOpts {
 		"--team-name", "--agent-id", "--agent-name", "--agent-color",
 		"--parent-session-id", "--agent-type", "--routine",
 		"--inherit-permission-mode", "--proactivity",
-		"--system-prompt-snapshot",
 		"--permission-prompt-tool", "--permission-prompts",
 		"--channels", "--dangerously-load-development-channels",
 		"--plugin-dir", "--plugin-dir-no-mcp", "--plugin-url",
 		"--remote-control-session-name-prefix",
-		"--task-budget", "--teammate-mode",
+		"--teammate-mode",
 		"--environment", "--pool", "--ref", "--on-branch",
 		"--project-config-root",
 		"--attach-serve",
@@ -282,10 +301,11 @@ func parseCLI(args []string) *cliOpts {
 		"--no-chrome":                          func() { os.Setenv("CLAUDE_GO_CHROME", "0") },
 		"--tmux":                               func() { o.tmux = "auto" },
 		"--tmux=classic":                       func() { o.tmux = "classic" },
-		"--init":                               func() { o.stubs = append(o.stubs, "--init") },
+		"--init":                               func() { o.initHook = "init" },
+		"--maintenance":                        func() { o.initHook = "maintenance" },
 	}
 	for _, f := range []string{
-		"--safe-mode", "--maintenance", "--forward-subagent-text",
+		"--safe-mode", "--forward-subagent-text",
 		"--session-mirror", "--await-claim", "--await-initialize",
 		"--enable-auth-status", "--restricted",
 		"--exclude-dynamic-system-prompt-sections", "--deep-link-origin",
@@ -319,8 +339,18 @@ func parseCLI(args []string) *cliOpts {
 		"--remote":         func(v string) { o.stubs = append(o.stubs, "--remote") },
 		"--remote-control": func(v string) { o.stubs = append(o.stubs, "--remote-control") },
 		"--rc":             func(v string) { o.stubs = append(o.stubs, "--remote-control") },
+		// real: --prompt-suggestions [true|false|1|0|yes|no|on|off],
+		// preset true — emits a prompt_suggestion after each turn in
+		// print/SDK mode
 		"--prompt-suggestions": func(v string) {
-			o.stubEnv("--prompt-suggestions", "CLAUDE_GO_PROMPT_SUGGESTIONS", v, false)
+			switch strings.ToLower(v) {
+			case "", "true", "1", "yes", "on":
+				o.promptSuggestions = true
+			case "false", "0", "no", "off":
+				o.promptSuggestions = false
+			default:
+				fatal("--prompt-suggestions: allowed choices are true, false, 1, 0, yes, no, on, off.")
+			}
 		},
 	}
 

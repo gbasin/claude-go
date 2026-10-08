@@ -21,6 +21,15 @@ var compactPrompt string
 
 var summaryRe = regexp.MustCompile(`(?s)<summary>(.*)</summary>`)
 
+// analysisRe strips the model's <analysis> preamble — real's jLo
+// removes it before the continuation message is stored.
+var analysisRe = regexp.MustCompile(`(?s)<analysis>.*?</analysis>`)
+
+// blankRunRe is real's /\n\n+/ collapse inside jLo.
+var blankRunRe = regexp.MustCompile(`
+
++`)
+
 // Compact summarizes the conversation and replaces history with the
 // continuation message, matching Claude Code's /compact behavior.
 // Manual trigger (the /compact command).
@@ -106,6 +115,7 @@ func (l *Loop) applySummary(text, transcriptPath string, keepLast int) {
 	contMsg.IsCompactSummary = true
 	msgs := []api.Message{contMsg}
 	l.compactSummaryPending = true // transcript marks it isCompactSummary
+	l.ReleaseSysPromptSnapshot() // real: the snapshot holds until compaction
 	l.compactKept = 0
 	if keepLast > 0 && keepLast < len(l.Messages) {
 		msgs = append(msgs, l.Messages[keepLast:]...)
@@ -174,7 +184,9 @@ func (l *Loop) summarize(ctx context.Context, msgs []api.Message) (string, error
 		}
 	}
 	if m := summaryRe.FindStringSubmatch(text); m != nil {
-		text = strings.TrimSpace(m[1])
+		// real's jLo: <analysis> stripped, <summary> unwrapped with a
+		// "Summary:" label on the stored content
+		text = "Summary:\n" + strings.TrimSpace(m[1])
 	}
 	if text == "" {
 		return "", fmt.Errorf("compaction produced no summary")

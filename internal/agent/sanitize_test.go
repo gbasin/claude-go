@@ -151,11 +151,13 @@ func TestFastModeRequest(t *testing.T) {
 		ToolCtx: &tools.Context{Ctx: context.Background(), CWD: t.TempDir()},
 		Client:  &api.Client{}}
 	req := l.buildRequest()
+	// real spreads {speed:"fast"} at request top level (mod_0386 Fl) —
+	// output_config carries effort only
 	var oc map[string]string
 	json.Unmarshal(req.OutputConfig, &oc)
-	// 294: speed rides the request root, effort stays in output_config
+	// speed rides the request root, effort stays in output_config
 	if req.Speed != "fast" || oc["effort"] != "high" {
-		t.Fatalf("speed=%q output_config = %v", req.Speed, oc)
+		t.Fatalf("speed=%q oc=%v", req.Speed, oc)
 	}
 	l.SetFastMode(false)
 	if l.FastMode {
