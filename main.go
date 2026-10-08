@@ -715,6 +715,7 @@ func main() {
 		loop.AutoCompactWindow = o.autoCompact // --autocompact <auto|tokens>
 	}
 	loop.CorrelationID = o.correlationID // --correlation-id (server-side telemetry)
+	loop.TaskBudget = o.taskBudget         // --task-budget → output_config.task_budget
 	loop.AdvisorModel = st.AdvisorModel
 	if o.advisor != "" {
 		loop.AdvisorModel = o.advisor // --advisor <model> (alias or full ID)
