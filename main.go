@@ -1242,6 +1242,14 @@ func fireHook(l *agent.Loop, ev hooks.Event) {
 	switch ev {
 	case hooks.SessionStart:
 		payload["source"] = l.SessionStartSource
+		// real's stdin: model + agent_type + session_title
+		payload["model"] = l.Model
+		if t := os.Getenv("CLAUDE_GO_AGENT_TYPE"); t != "" {
+			payload["agent_type"] = t
+		}
+		if t := session.ReadTitle(session.ProjectsDir(l.ToolCtx.CWD), l.Client.SessionID); t != "" {
+			payload["session_title"] = t
+		}
 	case hooks.SessionEnd:
 		payload["reason"] = l.SessionEndReason
 	}
@@ -1253,6 +1261,16 @@ func fireHook(l *agent.Loop, ev hooks.Event) {
 		// bare string after) — not into the system prompt
 		if s := res.PlainText + res.AdditionalContext; s != "" {
 			l.SessionHookCtx = strings.TrimSpace(s)
+		}
+		// watchPaths registers additional FileChanged watchers
+		for _, p := range res.WatchPaths {
+			l.WatchPaths = append(l.WatchPaths, p)
+		}
+		if res.SessionTitle != "" && l.OnSessionTitle != nil {
+			l.OnSessionTitle(res.SessionTitle)
+		}
+		if res.InitialUserMessage != "" {
+			l.InitialUserMessage = res.InitialUserMessage
 		}
 	}
 	if res.NonBlockErr != "" {

@@ -383,6 +383,9 @@ type Runner struct {
 	// Parent, when set, is the spawning loop — fork subagents inherit its
 	// messages. Wired by the caller that owns the parent Loop.
 	Parent *Loop
+	// stopHookActive guards SubagentStop recursion — a blocked stop
+	// re-runs the turn but the hook must not fire again on the retry.
+	stopHookActive bool
 }
 
 func (r *Runner) RunAgent(c *tools.Context, description, prompt, subagentType, model, effort string, background bool) tools.Result {
@@ -584,31 +587,50 @@ func (r *Runner) runAgentTurn(sub *Loop, prompt string, c *tools.Context, rec *t
 		}
 	}
 	resp, err := sub.Ask(ctx, prompt+"\n")
+	var out string
+	if err == nil {
+		for _, b := range resp.Content {
+			if b.Type == "text" {
+				out += b.Text
+			}
+		}
+	}
+	if out == "" {
+		out = "(agent produced no text output)"
+	}
+	var subStorePath string
 	if subStore != nil {
+		subStorePath = subStore.Path
 		for _, m := range sub.Messages {
 			subStore.Log(m)
 		}
 		subStore.Close()
 	}
-	if len(r.Hooks) > 0 {
-		hooks.Run(r.Hooks, hooks.SubagentStop, map[string]any{
+	if len(r.Hooks) > 0 && !r.stopHookActive {
+		// SubagentStop: block keeps the agent working — real feeds the
+		// hook's reason back and re-runs the turn (stop_hook_active
+		// guards recursion into the hook itself)
+		h := hooks.Run(r.Hooks, hooks.SubagentStop, map[string]any{
 			"session_id": r.Client.SessionID, "cwd": c.CWD,
 			"hook_event_name": "SubagentStop", "permission_mode": r.PermMode,
 			"agent_type": rec.Type, "agent_id": rec.AgentID,
-			"last_assistant_message": "",
+			"agent_transcript_path":  subStorePath,
+			"last_assistant_message": out,
+			"stop_hook_active":       false,
 		}, c.CWD)
+		if h.Block {
+			reason := h.Reason
+			if reason == "" {
+				reason = "SubagentStop hook blocked the stop"
+			}
+			r.stopHookActive = true
+			res := r.runAgentTurn(sub, reason+"\n\nContinue working.", c, rec)
+			r.stopHookActive = false
+			return res
+		}
 	}
 	if err != nil {
 		return tools.Result{Content: "agent error: " + err.Error(), IsError: true}
-	}
-	var out string
-	for _, b := range resp.Content {
-		if b.Type == "text" {
-			out += b.Text
-		}
-	}
-	if out == "" {
-		out = "(agent produced no text output)"
 	}
 	return tools.Result{Content: out}
 }
