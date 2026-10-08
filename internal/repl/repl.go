@@ -285,7 +285,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 		thinkingSeen = false
 		streamPrint(fmt.Sprintf("%s⏺%s %s%s%s", green, reset, bold+name+reset, summarize(name, input), ""))
 	}
-	l.Events.OnToolResult = func(name string, r tools.Result) {
+	l.Events.OnToolResult = func(name, _ string, r tools.Result) {
 		if focusMode.Load() {
 			return
 		}
