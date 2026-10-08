@@ -473,7 +473,7 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			dprintln("  usage: /fork <directive> — copies this conversation into a background session")
 			return false
 		}
-		forkRes := l.ToolCtx.Agent.RunAgent(l.ToolCtx, "fork", arg, "fork", "", true)
+		forkRes := l.ToolCtx.Agent.RunAgent(l.ToolCtx, "fork", arg, "fork", "", "", true)
 		if forkRes.IsError {
 			dprintln("  fork failed:", forkRes.Content)
 		} else {
