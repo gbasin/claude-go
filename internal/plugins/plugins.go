@@ -68,6 +68,16 @@ func loadInstalled() []InstalledPlugin {
 		_ = root0
 		roots := filepath.SplitList(os.Getenv(spec.env))
 		for _, root := range roots {
+			// real: --plugin-dir's value IS the plugin root — it must
+			// carry .claude-plugin/plugin.json; a bare parent dir of
+			// plugins is not the documented shape (fall back to scanning
+			// for compat)
+			if _, err := os.Stat(filepath.Join(root, ".claude-plugin", "plugin.json")); err == nil {
+				out = append(out, InstalledPlugin{
+					Name: filepath.Base(root), Marketplace: "local-dir",
+					Path: root, Enabled: true, NoMCP: spec.noMCP})
+				continue
+			}
 			ents, err := os.ReadDir(root)
 			if err != nil {
 				continue
@@ -85,15 +95,21 @@ func loadInstalled() []InstalledPlugin {
 			}
 		}
 	}
+	// real's installed_plugins.json is V2 {version:2,plugins}; read v2
+	// first, then the legacy flat/wrapped shapes
 	b, err := os.ReadFile(installedFile())
 	if err != nil {
 		return out
 	}
 	var wrap struct {
+		Version int `json:"version"`
 		Plugins map[string][]struct {
 			Version     string `json:"version"`
 			Scope       string `json:"scope,omitempty"`
 			InstallPath string `json:"installPath,omitempty"`
+			InstalledAt string `json:"installedAt,omitempty"`
+			LastUpdated string `json:"lastUpdated,omitempty"`
+			GitSHA      string `json:"gitCommitSha,omitempty"`
 			Enabled     *bool  `json:"enabled,omitempty"`
 		} `json:"plugins"`
 	}
@@ -120,13 +136,16 @@ func loadInstalled() []InstalledPlugin {
 
 func saveInstalled(p []InstalledPlugin) {
 	os.MkdirAll(pluginsDir(), 0o755)
-	wrap := map[string]any{"plugins": map[string]any{}}
+	// real's V2 record: {version:2, plugins:{"name@mkt":[{scope,
+	// installPath, version, installedAt, lastUpdated, gitCommitSha}]}}
+	wrap := map[string]any{"version": 2, "plugins": map[string]any{}}
 	for _, ip := range p {
 		key := ip.Name + "@" + ip.Marketplace
 		wrap["plugins"].(map[string]any)[key] = []map[string]any{{
 			"version": ip.Version, "scope": "user",
 			"installPath": ip.Path, "installedAt": ip.InstalledAt,
-			"enabled": ip.Enabled,
+			"lastUpdated": ip.InstalledAt,
+			"enabled":     ip.Enabled,
 		}}
 	}
 	b, _ := json.MarshalIndent(wrap, "", "  ")

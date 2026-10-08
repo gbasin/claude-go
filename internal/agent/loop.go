@@ -109,6 +109,8 @@ type Loop struct {
 	firstPrompt           string
 	sessionStarted        time.Time
 	apiNanos              atomic.Int64 // sum of request round-trips
+	startAt               time.Time    // loop start — time_to_request_ms baseline
+	firstRespAt           time.Time    // first response landed — ttft_ms
 	msgID                 string       // current streaming message id (MessageDisplay)
 	streamTextIdx         map[int]bool // content-block indices carrying text
 	LinesAdded            atomic.Int64 // /cost code-change tally
@@ -796,7 +798,13 @@ func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
 			l.Model = m // try the next fallback
 		}
 		reqStart := time.Now()
+		if l.startAt.IsZero() {
+			l.startAt = reqStart
+		}
 		resp, err = l.Client.StreamMessage(ctx, l.buildRequest(), func(ev *api.StreamEvent) error {
+			if l.firstRespAt.IsZero() {
+				l.firstRespAt = time.Now()
+			}
 			if ev.Type == "content_block_delta" && ev.Delta != nil {
 				switch ev.Delta.Type {
 				case "text_delta":
@@ -862,6 +870,26 @@ func (l *Loop) SessionStarted() time.Time { return l.sessionStarted }
 
 // APIDuration returns cumulative API round-trip time.
 func (l *Loop) APIDuration() time.Duration { return time.Duration(l.apiNanos.Load()) }
+
+// procStart is the process start — real's time_to_request_ms measures
+// launch → first request send, not just loop elapsed.
+var procStart = time.Now()
+
+// TimeToRequest is real's time_to_request_ms — process start to first send.
+func (l *Loop) TimeToRequest() time.Duration {
+	if l.startAt.IsZero() {
+		return 0
+	}
+	return l.startAt.Sub(procStart)
+}
+
+// TTFT is real's ttft_ms — loop start to the first streamed event.
+func (l *Loop) TTFT() time.Duration {
+	if l.firstRespAt.IsZero() || l.startAt.IsZero() {
+		return 0
+	}
+	return l.firstRespAt.Sub(l.startAt)
+}
 
 // CostUSD estimates session spend from token usage (displayed by /cost).
 func (l *Loop) CostUSD() float64 {
