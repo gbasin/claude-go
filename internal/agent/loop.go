@@ -281,6 +281,7 @@ func (l *Loop) buildRequest() *api.Request {
 		sys = l.subagentSystemBlocks(msgs)
 	}
 	l.ToolCtx.AdvisorModel = l.AdvisorModel // advisor wire block follows the configured model
+	l.ToolCtx.Entrypoint = l.Entrypoint // cli gets the interactive schema variants
 	return &api.Request{
 		Model:             model,
 		MaxTokens:         mt,

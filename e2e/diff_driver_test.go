@@ -383,6 +383,10 @@ var (
 	// ~/.claude/projects/<slugged-cwd> embeds the run-specific home as a
 	// single-dash-joined token — the plain home replace can't reach it
 	projSlugRe = regexp.MustCompile(`\.claude/projects/[^\s"'\\]+`)
+	// <total_tokens> counts down from the 15M budget by real's tokenizer
+	// accounting — presence/shape compares, the number is content-derived
+	// matches both real's literal form and Go's \u003e-escaped form
+	totalTokRe = regexp.MustCompile(`total_tokens(>|\\u003e)[^<\\"]+`)
 )
 
 // normalizeWire scrubs per-run values out of a raw request body so the
@@ -399,6 +403,7 @@ func normalizeWire(raw []byte, r diffRun) []byte {
 	// .claude.json) — normalize like the other per-install ids
 	s = devidRe.ReplaceAllString(s, "<devid>")
 	s = projSlugRe.ReplaceAllString(s, `.claude/projects/<PROJ>`)
+	s = totalTokRe.ReplaceAllString(s, `total_tokens${1}N`)
 	return []byte(s)
 }
 
