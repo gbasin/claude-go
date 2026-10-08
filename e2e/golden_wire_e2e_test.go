@@ -136,11 +136,10 @@ func TestGoldenRequestParity(t *testing.T) {
 		t.Fatalf("diagnostics %s vs %s", ours.Diagnostics, golden.Body.Diagnostics)
 	}
 	// the headers real sends on every main request must exist in the golden
+	// (2.1.294 set — the 289-era request-identity headers are gone)
 	for _, must := range []string{
 		"anthropic-beta", "anthropic-version", "x-app",
 		"x-stainless-runtime", "x-claude-code-session-id",
-		"x-claude-code-prompt-id", "x-client-request-id",
-		"anthropic-dispatch-id", "x-claude-code-request-class",
 	} {
 		if _, ok := golden.Headers[must]; !ok {
 			t.Fatalf("golden missing expected header %q", must)
