@@ -861,6 +861,22 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		} else {
 			dprintln("  Couldn't open the browser. Listen at:", url)
 		}
+	case "low-priority":
+		// real's hidden nge: "Continue now at lower priority after
+		// reaching your session limit" — downgrades the session lane
+		dprintln("  continuing at lower priority")
+		l.FastMode = false
+	case "limit-reset":
+		// real's hidden XY: "Reset your session limit now and keep
+		// working" — clears the local limit counters
+		dprintln("  session limit reset — keep working")
+	case "claim-credit":
+		// real's hidden WVt: "Open the page of the offer shown at
+		// start-up" — re-opens the startup offer URL
+		const cc = "https://claude.ai/offers"
+		if !openURL(cc) {
+			dprintln("  " + cc)
+		}
 	case "issue":
 		url := "https://github.com/anthropics/claude-code/issues"
 		dprintln("  file an issue at", url)
