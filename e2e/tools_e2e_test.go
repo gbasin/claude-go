@@ -15,6 +15,9 @@
 package e2e
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -375,4 +378,97 @@ func TestPluginInstallAndSkill(t *testing.T) {
 	r = s.run(t, "plugin", "list")
 	s.mustOK(t, r)
 	contains(t, r.stdout, "demoplug", "plugin list")
+}
+
+// TestMarketplaceAddNPM: `plugin marketplace add npm:<pkg>` fetches
+// registry metadata → dist.tarball → extracts the package/ contents as the
+// marketplace dir (real's npm source). NPM_CONFIG_REGISTRY redirects to a
+// local httptest registry.
+func TestMarketplaceAddNPM(t *testing.T) {
+	s := newSession(t)
+	// fake registry: metadata + a tarball carrying a marketplace.json
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	files := map[string]string{
+		"package/.claude-plugin/marketplace.json": `{"name":"npm-mkt","plugins":[]}`,
+		"package/README.md":                       "npm pkg",
+	}
+	for name, content := range files {
+		tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(content))})
+		tw.Write([]byte(content))
+	}
+	tw.Close()
+	gw.Close()
+	tarb := buf.Bytes()
+
+	var reg *httptest.Server
+	reg = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".tgz") {
+			w.Write(tarb)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"dist-tags":{"latest":"1.2.3"},"versions":{"1.2.3":{"dist":{"tarball":%q}}}}`,
+			reg.URL+"/npm-mkt-1.2.3.tgz")
+	}))
+	defer reg.Close()
+
+	s.env = append(s.env, "NPM_CONFIG_REGISTRY="+reg.URL)
+	r := s.run(t, "plugin", "marketplace", "add", "npm:npm-mkt")
+	s.mustOK(t, r)
+	contains(t, r.stdout, "added marketplace", "npm marketplace add")
+	// extracted into the marketplaces dir
+	p := filepath.Join(s.home, ".claude", "plugins", "marketplaces",
+		"npm-mkt", ".claude-plugin", "marketplace.json")
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("npm marketplace not extracted: %v", err)
+	}
+	r = s.run(t, "plugin", "marketplace", "list")
+	contains(t, r.stdout, "npm-mkt", "npm marketplace listed")
+}
+
+// TestInstalledPluginsV1Migration: a V1 installed_plugins.json converts to
+// V2 on load and writes the migrated shape back (real's _Dr migration).
+func TestInstalledPluginsV1Migration(t *testing.T) {
+	s := newSession(t)
+	pdir := filepath.Join(s.home, ".claude", "plugins")
+	os.MkdirAll(pdir, 0o755)
+	os.WriteFile(filepath.Join(pdir, "installed_plugins.json"),
+		[]byte(`{"version":1,"plugins":{"old@mkt":{"version":"1.0","installedAt":"2026-01-01"}}}`), 0o644)
+
+	r := s.run(t, "plugin", "list")
+	s.mustOK(t, r)
+	contains(t, r.stdout, "old@mkt", "V1 record listed after migration")
+	b, _ := os.ReadFile(filepath.Join(pdir, "installed_plugins.json"))
+	var wrap struct {
+		Version int `json:"version"`
+	}
+	json.Unmarshal(b, &wrap)
+	if wrap.Version != 2 {
+		t.Fatalf("file not migrated to V2: %s", truncStr(string(b), 200))
+	}
+}
+
+// TestInstalledPluginsUnreadableGuard: a V2 file with a valid plugin id
+// whose record this build can't parse (keptRaw — e.g. a future build's
+// format) counts as unreadable: no write replaces it (real's b2n/aDr).
+func TestInstalledPluginsUnreadableGuard(t *testing.T) {
+	s := newSession(t)
+	pdir := filepath.Join(s.home, ".claude", "plugins")
+	os.MkdirAll(pdir, 0o755)
+	bad := `{"version":2,"plugins":{"good@mkt":"not-an-array"}}`
+	os.WriteFile(filepath.Join(pdir, "installed_plugins.json"), []byte(bad), 0o644)
+	mkt := t.TempDir()
+	os.MkdirAll(filepath.Join(mkt, ".claude-plugin"), 0o755)
+	os.WriteFile(filepath.Join(mkt, ".claude-plugin", "marketplace.json"),
+		[]byte(`{"name":"m","plugins":[{"name":"x","description":"d","source":"./x"}]}`), 0o644)
+	os.MkdirAll(filepath.Join(mkt, "x"), 0o755)
+	s.run(t, "plugin", "marketplace", "add", mkt)
+	r := s.run(t, "plugin", "install", "x@"+filepath.Base(mkt))
+	s.mustOK(t, r)
+	got, _ := os.ReadFile(filepath.Join(pdir, "installed_plugins.json"))
+	if string(got) != bad {
+		t.Fatalf("unreadable file was overwritten: %s", truncStr(string(got), 200))
+	}
 }
