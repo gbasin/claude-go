@@ -28,7 +28,11 @@ func sharedNetProxy(s *SandboxSettings) (*netproxy.Proxy, string, error) {
 	defer sessionProxy.mu.Unlock()
 	if !sessionProxy.inited {
 		sessionProxy.inited = true
-		ca, caErr := netproxy.LoadOrCreateCA(netproxy.CADir())
+		var extraCAs []string
+		if s.Network != nil {
+			extraCAs = s.Network.ExtraCACertPaths
+		}
+		ca, caErr := netproxy.LoadOrCreateCA(netproxy.CADir(), extraCAs...)
 		if caErr != nil {
 			// no CA → passthrough proxy: CONNECT authority is still
 			// filtered, TLS payloads just aren't inspected.
@@ -36,7 +40,13 @@ func sharedNetProxy(s *SandboxSettings) (*netproxy.Proxy, string, error) {
 				"sandbox CA unavailable (%v); HTTPS runs in CONNECT passthrough mode (Host filtering only)", caErr)
 		}
 		px := netproxy.New(ca)
-		if err := px.Start(); err != nil {
+		// network.httpProxyPort/socksProxyPort pin the listener ports
+		// (real's fixed-port proxy config; 0 = ephemeral)
+		var hp, sp int
+		if s.Network != nil {
+			hp, sp = s.Network.HTTPProxyPort, s.Network.SOCKSProxyPort
+		}
+		if err := px.StartOn(hp, sp); err != nil {
 			sessionProxy.err = err
 		} else {
 			sessionProxy.px = px

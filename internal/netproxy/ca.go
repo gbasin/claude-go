@@ -4,6 +4,7 @@
 package netproxy
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -42,6 +43,9 @@ type CA struct {
 	CertPEM  []byte
 	CertPath string
 	KeyPath  string
+	// ExtraPaths are extra CA bundle files appended to the bundle the
+	// sandboxed command sees (network.extraCaCertPaths).
+	ExtraPaths []string
 
 	mu    sync.Mutex
 	cache map[string]*tls.Certificate
@@ -49,13 +53,21 @@ type CA struct {
 
 // LoadOrCreateCA reads cert.pem/key.pem from dir, generating a fresh ECDSA
 // P-256 root (10y validity) when either is missing or unreadable.
-func LoadOrCreateCA(dir string) (*CA, error) {
+// extraCertPaths are appended to the CA bundle emitted to sandboxed
+// commands (real's network.extraCaCertPaths — corporate/proxy roots the
+// generated CA can't supply).
+func LoadOrCreateCA(dir string, extraCertPaths ...string) (*CA, error) {
 	certPath := filepath.Join(dir, caCertFile)
 	keyPath := filepath.Join(dir, caKeyFile)
 	if ca, err := loadCA(certPath, keyPath); err == nil {
+		ca.ExtraPaths = extraCertPaths
 		return ca, nil
 	}
-	return createCA(dir, certPath, keyPath)
+	ca, err := createCA(dir, certPath, keyPath)
+	if ca != nil {
+		ca.ExtraPaths = extraCertPaths
+	}
+	return ca, err
 }
 
 func loadCA(certPath, keyPath string) (*CA, error) {
@@ -82,6 +94,28 @@ func loadCA(certPath, keyPath string) (*CA, error) {
 	return &CA{Cert: cert, Key: key, CertPEM: certPEM,
 		CertPath: certPath, KeyPath: keyPath,
 		cache: map[string]*tls.Certificate{}}, nil
+}
+
+// BundlePath returns the PEM path a sandboxed command should trust: the
+// generated CA cert alone, or a combined bundle when ExtraPaths are set
+// (written next to cert.pem as bundle.pem).
+func (ca *CA) BundlePath() string {
+	if len(ca.ExtraPaths) == 0 {
+		return ca.CertPath
+	}
+	var out bytes.Buffer
+	out.Write(ca.CertPEM)
+	for _, p := range ca.ExtraPaths {
+		if b, err := os.ReadFile(p); err == nil {
+			out.WriteByte(0x0a)
+			out.Write(b)
+		}
+	}
+	bp := filepath.Join(filepath.Dir(ca.CertPath), "bundle.pem")
+	if err := os.WriteFile(bp, out.Bytes(), 0o600); err != nil {
+		return ca.CertPath
+	}
+	return bp
 }
 
 func createCA(dir, certPath, keyPath string) (*CA, error) {
