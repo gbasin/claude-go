@@ -956,6 +956,8 @@ func main() {
 	// resolves it
 	var st2 *session.Store
 	if !o.noPersist {
+		// real sweeps transcripts past cleanupPeriodDays at session open
+		session.SweepRetention(cwd)
 		st2, _ = session.Open(cwd, sessionID)
 	}
 	if !o.mockMode && !o.printMode {

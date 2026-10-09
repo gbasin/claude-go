@@ -1670,3 +1670,54 @@ func TestCompactBoundaryStreamJSON(t *testing.T) {
 	// when auto-compact triggers (covered by TestAutoCompactPrint's path)
 	s.mustOK(t, r)
 }
+
+// TestCleanupPeriodDays: transcripts older than cleanupPeriodDays get
+// swept at session start (real's retention sweep, default 30).
+func TestCleanupPeriodDays(t *testing.T) {
+	s := newSession(t)
+	s.writeFile(".claude/settings.json", `{"cleanupPeriodDays": 1}`)
+	// plant a 2-day-old transcript under the project slug dir
+	projDir := filepath.Join(s.home, ".claude", "projects")
+	matches, _ := filepath.Glob(filepath.Join(projDir, "*"))
+	var dir string
+	if len(matches) > 0 {
+		dir = matches[0]
+	} else {
+		dir = filepath.Join(projDir, strings.ReplaceAll(s.cwd, "/", "-"))
+	}
+	os.MkdirAll(dir, 0o755)
+	old := filepath.Join(dir, "old-session.jsonl")
+	os.WriteFile(old, []byte(`{"type":"user","message":{"role":"user","content":"old"}}`+"\n"), 0o644)
+	oldT := time.Now().AddDate(0, 0, -2)
+	os.Chtimes(old, oldT, oldT)
+	// a session start sweeps it
+	r := s.run(t, "--mock", "-p", "hi")
+	s.mustOK(t, r)
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatal("old transcript survived cleanupPeriodDays=1 sweep")
+	}
+}
+
+// TestMcpJsonTrustPrompt: a .mcp.json server prompts "approve? [y/N]" at
+// interactive startup; typing y writes enabledMcpjsonServers.
+func TestMcpJsonTrustPrompt(t *testing.T) {
+	s := newSession(t)
+	s.writeFile(".mcp.json", `{"mcpServers":{"srv":{"command":"true"}}}`)
+	p := s.runPTY(t, nil, "--mock")
+	p.waitFor("approve", 30*time.Second)
+	p.send("y")
+	p.waitFor("❯", 30*time.Second)
+	// approved → written to local settings
+	lp := filepath.Join(s.cwd, ".claude", "settings.local.json")
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, _ := os.ReadFile(lp); strings.Contains(string(b), "srv") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	b, _ := os.ReadFile(lp)
+	if !strings.Contains(string(b), "srv") {
+		t.Fatalf("approval not persisted: %s\noutput:\n%s", string(b), p.clean())
+	}
+}

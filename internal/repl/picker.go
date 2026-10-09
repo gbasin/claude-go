@@ -65,6 +65,7 @@ func pickSession(cwd string, ks *keySource, selfID string) string {
 		rbuf       []rune
 		preview    bool
 		allProj    bool
+		curBranch  bool // ctrl-b: sessions on the current git branch only
 		view       []session.Info
 		pcache     = map[string][]string{}
 		lastLines  int
@@ -78,10 +79,15 @@ func pickSession(cwd string, ks *keySource, selfID string) string {
 		running[j.SessionID] = j.Short
 	}
 
+	// real's branch filter matches the session's recorded git branch
+	myBranch := session.CurrentGitBranch(cwd)
 	refilter := func() {
 		view = view[:0]
 		q := strings.ToLower(string(query))
 		for _, in := range infos {
+			if curBranch && in.Branch != "" && in.Branch != myBranch {
+				continue
+			}
 			if q == "" {
 				view = append(view, in)
 				continue
@@ -202,9 +208,18 @@ func pickSession(cwd string, ks *keySource, selfID string) string {
 				emit("    " + dim + meta + reset)
 			}
 		}
-		// real's footer: two hint rows
-		emit(" " + dim + "Ctrl+A to show all projects · Type to search · Esc to cancel" + reset)
-		emit(" " + dim + "Ctrl+B to only show current branch · Space to preview · Ctrl+R to rename" + reset)
+		// real's footer: Ctrl+A toggles all-projects, Ctrl+B toggles the
+		// current-branch filter (mod_1935 picker hints)
+		aLabel := "show all projects"
+		if allProj {
+			aLabel = "only show current repo"
+		}
+		bLabel := "show all branches"
+		if curBranch {
+			bLabel = "only show current branch"
+		}
+		emit(" " + dim + "Ctrl+A to " + aLabel + " · Type to search · Esc to cancel" + reset)
+		emit(" " + dim + "Ctrl+B to " + bLabel + " · Space to preview · Ctrl+R to rename" + reset)
 		if preview && len(view) > 0 && sel < len(view) {
 			p := view[sel].Path
 			block, ok := pcache[p]
@@ -331,9 +346,12 @@ func pickSession(cwd string, ks *keySource, selfID string) string {
 			}
 		case k.b == ' ': // space -> preview pane
 			preview = !preview
-		case k.b == 2: // ctrl-b -> all projects toggle
+		case k.b == 1: // ctrl-a -> all projects (real's binding)
 			allProj = !allProj
 			reload()
+		case k.b == 2: // ctrl-b -> current-branch filter
+			curBranch = !curBranch
+			refilter()
 		}
 		draw()
 	}

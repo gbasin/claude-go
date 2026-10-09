@@ -864,7 +864,18 @@ func pluginSub(args []string) {
 		if i := strings.Index(name, "@"); i > 0 {
 			name, mkt = name[:i], name[i+1:]
 		}
-		if mkt == "" {
+		// real's --marketplace accepts a SOURCE (path/repo/url) — it
+		// registers the marketplace first, then installs
+		if mkt != "" {
+			if _, ok := plugins.ListMarketplaces()[mkt]; !ok {
+				// add the source and use the name it registered under
+				mn, err := plugins.AddMarketplace(mkt)
+				if err != nil {
+					fatal("install: %v", err)
+				}
+				mkt = mn
+			}
+		} else {
 			mkts := plugins.ListMarketplaces()
 			for n := range mkts {
 				mkt = n
