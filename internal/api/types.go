@@ -149,6 +149,10 @@ type Request struct {
 	// AgentID/ParentAgentID ride x-claude-code-agent-id /
 	// x-claude-code-parent-agent-id on subagent requests (mod_0304).
 	AgentID, ParentAgentID string `json:"-"`
+	// PrevToolDurations rides x-claude-code-prev-tool-durations —
+	// "Name=ms;Name=ms" url-encoded pairs, ≤32 tools / ≤4096 chars
+	// (mod_0409 vAt)
+	PrevToolDurations string `json:"-"`
 	// Temperature is set only by aux-class calls (the title call sends 1).
 	Temperature *float64 `json:"temperature,omitempty"`
 

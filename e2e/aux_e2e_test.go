@@ -1498,3 +1498,52 @@ func TestUserPromptExpansionFields(t *testing.T) {
 	}
 	p.exit()
 }
+
+// TestTranscriptLastPrompt: each typed prompt stamps a last-prompt record
+// with the user row's uuid (real's session-picker metadata).
+func TestTranscriptLastPrompt(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p", "hi", "--output-format", "json")
+	s.mustOK(t, r)
+	var recs []map[string]any
+	for _, f := range s.transcriptPaths(t) {
+		b, _ := os.ReadFile(f)
+		for _, ln := range strings.Split(string(b), "\n") {
+			var m map[string]any
+			if json.Unmarshal([]byte(ln), &m) == nil {
+				recs = append(recs, m)
+			}
+		}
+	}
+	var sawLastPrompt bool
+	for _, m := range recs {
+		if m["type"] == "last-prompt" && m["explicit"] == true && m["leafUuid"] != nil {
+			sawLastPrompt = true
+		}
+	}
+	if !sawLastPrompt {
+		t.Fatalf("no last-prompt record in %d records", len(recs))
+	}
+}
+
+// TestTranscriptPRLink: a gh pr create output in a Bash result writes the
+// pr-link record (real's linkSessionToPR).
+func TestTranscriptPRLink(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p",
+		`tool:Bash {"command":"echo https://github.com/octo/repo/pull/99"}`+"\r",
+		"--permission-mode", "bypassPermissions", "--output-format", "json")
+	s.mustOK(t, r)
+	found := false
+	for _, f := range s.transcriptPaths(t) {
+		b, _ := os.ReadFile(f)
+		if strings.Contains(string(b), `"type":"pr-link"`) &&
+			strings.Contains(string(b), `"prNumber":99`) &&
+			strings.Contains(string(b), `octo/repo`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("pr-link record never written")
+	}
+}

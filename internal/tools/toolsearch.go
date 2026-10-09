@@ -165,12 +165,13 @@ func toolSearchEnabled() bool {
 var hiddenInStandard = map[string]bool{
 	"Artifact": true, "ArtifactComments": true, "ArtifactData": true,
 	"DesignSync": true, "EndConversation": true, "Glob": true,
-	"Grep": true, "ListMcpResourcesTool": true,
-	"LSP": true, "Monitor": true,
+	"Grep": true, "ListMcpResourcesTool": true, "LS": true,
+	"LSP": true, "Monitor": true, "MultiEdit": true,
+	"NotebookRead":           true,
 	"PushNotification":       true,
 	"ReadMcpResourceDirTool": true, "ReadMcpResourceTool": true,
 	"ReadNotifications": true, "RemoteTrigger": true,
-	"SendFeedback": true,
+	"SendFeedback": true, "TodoWrite": true,
 }
 
 // IsDeferredTool mirrors h() in mod_0314.js: MCP tools always defer;

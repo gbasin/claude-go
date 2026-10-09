@@ -89,6 +89,13 @@ func RunWithStore(l *agent.Loop, store Store) {
 			}
 		}
 		l.PermMode = order[(idx+1)%len(order)]
+		// real stamps {type:"mode"} on every mode cycle (mod_0409)
+		if currentStore != nil {
+			currentStore.LogRecord(map[string]any{
+				"type": "mode", "mode": l.PermMode,
+				"sessionId": l.Client.SessionID,
+			})
+		}
 		compInline(fmt.Sprintf("\r\n%s⏵⏵ %s mode%s\r\n", yellow, l.PermMode, reset))
 	}
 	var wantQuit atomic.Bool
@@ -553,6 +560,15 @@ func RunWithStore(l *agent.Loop, store Store) {
 										queued = append(queued, string(queueBuf))
 									}
 									queuedPending.Add(1)
+									// real stamps queue-operation on each
+									// mid-turn enqueue (mod_0409 nZr)
+									if currentStore != nil {
+										currentStore.LogRecord(map[string]any{
+											"type": "queue-operation", "operation": "enqueue",
+											"sessionId": l.Client.SessionID,
+											"content":   string(queueBuf),
+										})
+									}
 									printStatus(l, ed) // refresh "N queued" badge
 									queueBuf = nil
 									compQueueDraft("")

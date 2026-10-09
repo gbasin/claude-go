@@ -216,7 +216,7 @@ func parseToolList(s string) []string {
 func agentFileDirs(cwd string) []struct{ dir, source string } {
 	var out []struct{ dir, source string }
 	for _, pat := range []string{
-		filepath.Join(config.ClaudeDir(), "plugins", "synced", "*", "*", "agents"),
+		filepath.Join(config.ClaudeDir(), "plugins", "cache", "*", "*", "*", "agents"),
 		filepath.Join(config.ClaudeDir(), "plugins", "local", "*", "agents"),
 	} {
 		if dirs, _ := filepath.Glob(pat); len(dirs) > 0 {

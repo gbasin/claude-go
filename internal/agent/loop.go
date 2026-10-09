@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -161,8 +163,18 @@ type Loop struct {
 	InitialUserMessage string
 	// Depth is the agent nesting level — main loop 0, first subagent 1
 	// (drives subagent_stats max_depth/spawned_by_subagents)
-	Depth            int
-	subPID           string
+	Depth  int
+	subPID string
+	// prevToolDurations feeds x-claude-code-prev-tool-durations — gated
+	// on the tengu_splendid_sutton GB flag like real's emit site
+	prevToolDurations []struct {
+		name string
+		ms   int64
+	}
+	prLinked bool
+	// OnSessionRecord writes transcript side records (pr-link et al) —
+	// the host binds it to the session store
+	OnSessionRecord  func(map[string]any)
 	handbackTail     bool // append the SubagentHandback reminder to msg[0]
 	noThinking       bool // thinking config dropped after a thinking 400
 	dropSafeguards   bool
@@ -377,9 +389,48 @@ func (l *Loop) buildRequest() *api.Request {
 		Diagnostics: l.diagnosticsField(),
 		// thread:{type:"create"} — real sends it on haiku-class requests
 		// alongside the message-threads beta (captured on haiku -p turn)
-		Thread:    l.threadField(),
-		ExtraBody: eb,
+		Thread:            l.threadField(),
+		ExtraBody:         eb,
+		PrevToolDurations: l.prevToolDurationsHeader(),
 	}
+}
+
+// prevToolDurationsHeader is real's vAt(): "Name=ms;Name=ms" pairs —
+// names url-encode of %,;,=,,space and non-ASCII; ≤32 tools, ≤4096 chars.
+func (l *Loop) prevToolDurationsHeader() string {
+	defer func() { l.prevToolDurations = nil }()
+	if len(l.prevToolDurations) == 0 {
+		return ""
+	}
+	// real's emit site (mod_0198 ANn): CLAUDE_CODE_GATEWAY_HINT_HEADERS
+	// env override wins; else first-party accounts gate on the
+	// tengu_splendid_sutton GB flag
+	if v := os.Getenv("CLAUDE_CODE_GATEWAY_HINT_HEADERS"); v != "" {
+		if v == "0" || v == "false" {
+			return ""
+		}
+	} else if v, _ := config.GBFeature("tengu_splendid_sutton").(bool); !v {
+		return ""
+	}
+	var parts []string
+	total := 0
+	for _, d := range l.prevToolDurations {
+		if len(parts) >= 32 {
+			break
+		}
+		enc := url.QueryEscape(d.name)
+		pair := enc + "=" + strconv.FormatInt(d.ms, 10)
+		sep := 0
+		if len(parts) > 0 {
+			sep = 1
+		}
+		if total+sep+len(pair) > 4096 {
+			break
+		}
+		total += sep + len(pair)
+		parts = append(parts, pair)
+	}
+	return strings.Join(parts, ";")
 }
 
 // threadField emits {"type":"create"} for thread-enabled models.
@@ -804,6 +855,11 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 			r = l.dispatch(b.Name, b.Input)
 		}
 		toolDurMs := time.Since(toolStart).Milliseconds()
+		l.prevToolDurations = append(l.prevToolDurations,
+			struct {
+				name string
+				ms   int64
+			}{b.Name, toolDurMs})
 		post := l.runHook(hooks.PostToolUse, map[string]any{
 			"tool_name": b.Name, "tool_input": json.RawMessage(b.Input),
 			"tool_use_id": b.ID,
@@ -839,6 +895,17 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		}
 		if l.Events.OnToolResult != nil {
 			l.Events.OnToolResult(b.Name, b.ID, r)
+		}
+		// pr-link: a gh PR URL in a Bash result links the session
+		// (real's linkSessionToPR — mod_0409 q2s)
+		if !l.prLinked && b.Name == "Bash" && !r.IsError && l.OnSessionRecord != nil {
+			if n, url, repo, ok := DetectPRLink(r.Content); ok {
+				l.prLinked = true
+				l.OnSessionRecord(map[string]any{
+					"type": "pr-link", "sessionId": l.Client.SessionID,
+					"prNumber": n, "prUrl": url, "prRepository": repo,
+				})
+			}
 		}
 		results = append(results, toolResultBlock(b.ID, r))
 		batchCalls = append(batchCalls, map[string]any{
@@ -1963,4 +2030,17 @@ func serverVerdictFor(rs []api.SafeguardResult, toolUseID string) string {
 		}
 	}
 	return ""
+}
+
+// DetectPRLink extracts a PR number/url/repo from a tool result —
+// gh pr create/checkout output contains https://github.com/<o>/<r>/pull/<n>.
+var prURLRe = regexp.MustCompile(`https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/(\d+)`)
+
+func DetectPRLink(content string) (int, string, string, bool) {
+	m := prURLRe.FindStringSubmatch(content)
+	if m == nil {
+		return 0, "", "", false
+	}
+	n, _ := strconv.Atoi(m[3])
+	return n, m[0], m[1] + "/" + m[2], true
 }
