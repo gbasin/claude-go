@@ -302,6 +302,10 @@ func memoryIndex(cwd string) string {
 	return ""
 }
 
+// MemoryPaths is the exported memory chain (CLAUDE.md + .claude/rules)
+// — the init event's memory_paths field lists the ones that loaded.
+func MemoryPaths(cwd string) []string { return claudeMDPaths(cwd) }
+
 func claudeMDPaths(cwd string) []string {
 	if os.Getenv("CLAUDE_CODE_SIMPLE") != "" {
 		return nil // --bare: no auto-discovery, no CLAUDE.md

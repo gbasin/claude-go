@@ -24,6 +24,11 @@ var schemasJSON []byte
 type Result struct {
 	Content string // text result sent back as tool_result
 	IsError bool
+	// Structured is the tool's full Output object — stream-json's
+	// tool_use_result field carries it (real's per-tool output: Bash
+	// {stdout,stderr,exit_code,duration_ms}, etc.). nil when the tool
+	// produces no structured output.
+	Structured any
 	// Refs, when non-empty, renders the tool_result as a list of
 	// {type:"tool_reference", tool_name} blocks instead of text — real's
 	// mapToolResultToToolResultBlockParam for ToolSearch matches.
