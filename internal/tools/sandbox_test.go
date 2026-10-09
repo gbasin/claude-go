@@ -527,3 +527,63 @@ func containsStr(ss []string, v string) bool {
 	}
 	return false
 }
+
+// TestSandboxEnabledPlatformsGate: enabledPlatforms excludes the running OS
+// → sandbox disabled even when enabled:true (real's platform gate).
+func TestSandboxEnabledPlatformsGate(t *testing.T) {
+	other := "linux"
+	if runtime.GOOS == "linux" {
+		other = "darwin"
+	}
+	s := &SandboxSettings{locked: map[string]bool{}}
+	s.apply(&sandboxFileJSON{Enabled: boolp(true), EnabledPlatforms: []string{other}}, tierUser)
+	if s.enabled() {
+		t.Error("enabledPlatforms excluding this OS should disable the sandbox")
+	}
+	s2 := &SandboxSettings{locked: map[string]bool{}}
+	s2.apply(&sandboxFileJSON{Enabled: boolp(true), EnabledPlatforms: []string{runtime.GOOS}}, tierUser)
+	if !s2.enabled() {
+		t.Error("enabledPlatforms including this OS should keep the sandbox on")
+	}
+}
+
+// TestSandboxTopLevelFieldsParse: the remaining real schema fields parse.
+func TestSandboxTopLevelFieldsParse(t *testing.T) {
+	s := &SandboxSettings{locked: map[string]bool{}}
+	s.apply(&sandboxFileJSON{
+		Enabled:                   boolp(true),
+		AllowPty:                  boolp(true),
+		AllowAppleEvents:          boolp(true),
+		EnableWeakerNestedSandbox: boolp(true),
+		Seccomp:                   boolp(true),
+		SocatPath:                 "/usr/bin/socat",
+		JavaAgentJarPath:          "/opt/agent.jar",
+		Git:                       &sandboxGitJSON{SafeDirectories: []string{"/opt/repo"}},
+		Network: &sandboxNetJSON{
+			AllowLocalBinding: boolp(true),
+			HTTPProxyPort:     8118,
+			SOCKSProxyPort:    1080,
+			AllowMachLookup:   boolp(true),
+			ExtraCACertPaths:  []string{"/etc/ca.pem"},
+			TLSTerminate:      &sandboxTLSJSON{ExcludeDomains: []string{"internal.example.com"}},
+			MITMProxy:         &sandboxMITMJSON{SocketPath: "/tmp/mitm.sock", Domains: []string{"api.example.com"}},
+		},
+	}, tierUser)
+	if !s.AllowPty || !s.AllowAppleEvents || !s.EnableWeakerNestedSandbox || !s.Seccomp {
+		t.Error("top-level flags not parsed")
+	}
+	if s.SocatPath != "/usr/bin/socat" || s.JavaAgentJarPath != "/opt/agent.jar" {
+		t.Error("binary path fields not parsed")
+	}
+	if len(s.GitSafeDirectories) != 1 || s.GitSafeDirectories[0] != "/opt/repo" {
+		t.Error("git.safeDirectories not parsed")
+	}
+	n := s.Network
+	if !n.AllowAllLocal || n.HTTPProxyPort != 8118 || n.SOCKSProxyPort != 1080 || !n.AllowMachLookup {
+		t.Error("network ports/binding/mach fields not parsed")
+	}
+	if len(n.ExtraCACertPaths) != 1 || n.TLSTerminateExcludeDomains[0] != "internal.example.com" ||
+		n.MITMSocketPath != "/tmp/mitm.sock" {
+		t.Error("tlsTerminate/mitmProxy/extraCaCertPaths not parsed")
+	}
+}

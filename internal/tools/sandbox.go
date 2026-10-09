@@ -40,6 +40,20 @@ type SandboxSettings struct {
 	Network                  *SandboxNetwork // nil = no network block in settings
 	Credentials              SandboxCredentials
 	BwrapPath                string // Linux only: absolute path to the bwrap binary
+	// EnabledPlatforms gates sandboxing per-OS ("darwin"|"linux"|"windows")
+	// — real's enabledPlatforms; empty = all platforms.
+	EnabledPlatforms             []string
+	EnableWeakerNestedSandbox    bool
+	EnableWeakerNetworkIsolation bool
+	AllowAppleEvents             bool   // macOS: permit AppleEvent messaging
+	AllowPty                     bool   // permit pty allocation inside the sandbox
+	Seccomp                      bool   // Linux: apply the seccomp profile
+	SocatPath                    string // Linux: socat binary path override
+	JavaAgentJarPath             string // JVM credential-injection agent jar
+	Windows                      *sandboxWinJSON
+	// GitSafeDirectories land in GIT_CONFIG_COUNT/_KEY_/_VALUE_ env for
+	// sandboxed commands (real's sandbox.git.safeDirectories).
+	GitSafeDirectories []string
 
 	locked          map[string]bool // scalar keys pinned by managed/policy settings
 	policyAllowRead []string        // allowRead entries contributed by the policy tier
@@ -68,7 +82,7 @@ type SandboxNetwork struct {
 	DeniedResolvedAddresses []string
 	AllowUnixSockets        []string // macOS only
 	AllowAllUnixSockets     bool
-	AllowAllLocal           bool // claude-go extension: like real's allowLocalBinding
+	AllowAllLocal           bool // real's allowLocalBinding (loopback + binds)
 	// InteractiveHostApproval upgrades "not on the allow list" denials into
 	// an interactive prompt (real's non-strictAllowlist ask callback). Hosts
 	// approved this way land on the proxy's session allowlist.
@@ -81,6 +95,23 @@ type SandboxNetwork struct {
 	// AllowManagedDomainsOnly (policy tier only): only managed-settings
 	// allowedDomains apply; user/project/local entries are ignored.
 	AllowManagedDomainsOnly bool
+	// AllowMachLookup permits Mach service lookups (macOS; real's
+	// allowMachLookup — needed by some GUI apps under seatbelt).
+	AllowMachLookup bool
+	// HTTPProxyPort/SOCKSProxyPort override the proxy listener ports
+	// (real's network.httpProxyPort/socksProxyPort).
+	HTTPProxyPort  int
+	SOCKSProxyPort int
+	// ExtraCACertPaths adds CA files to the proxy's trust chain (real's
+	// network.extraCaCertPaths — joined onto SSL_CERT_FILE).
+	ExtraCACertPaths []string
+	// TLSTerminate domains are intercepted with MITM cert; real's
+	// tlsTerminate.excludeDomains carve-outs.
+	TLSTerminateExcludeDomains []string
+	// MITMProxy socket+domains — real's mitmProxy: a unix-socket MITM
+	// variant for listed domains.
+	MITMSocketPath string
+	MITMDomains    []string
 	// ParentProxy routes upstream traffic through an outer proxy; unset
 	// fields fall back to HTTP(S)_PROXY/NO_PROXY env vars.
 	ParentProxy *netproxy.ParentProxyConfig
@@ -173,6 +204,26 @@ type sandboxFileJSON struct {
 	Network                  *sandboxNetJSON     `json:"network"`
 	Credentials              *sandboxCredJSON    `json:"credentials"`
 	BwrapPath                string              `json:"bwrapPath"`
+	// remaining real top-level fields (mod_1261.js `ne` schema)
+	EnabledPlatforms             []string        `json:"enabledPlatforms"`
+	EnableWeakerNestedSandbox    *bool           `json:"enableWeakerNestedSandbox"`
+	EnableWeakerNetworkIsolation *bool           `json:"enableWeakerNetworkIsolation"`
+	AllowAppleEvents             *bool           `json:"allowAppleEvents"`
+	AllowPty                     *bool           `json:"allowPty"`
+	Seccomp                      *bool           `json:"seccomp"`
+	SocatPath                    string          `json:"socatPath"`
+	JavaAgentJarPath             string          `json:"javaAgentJarPath"`
+	Windows                      *sandboxWinJSON `json:"windows"`
+	Git                          *sandboxGitJSON `json:"git"`
+}
+
+type sandboxWinJSON struct {
+	Wfp        bool  `json:"wfp"` // windows filtering platform
+	AllowChild *bool `json:"allowChildProcesses"`
+}
+
+type sandboxGitJSON struct {
+	SafeDirectories []string `json:"safeDirectories"`
 }
 
 type sandboxFSJSON struct {
@@ -197,6 +248,23 @@ type sandboxNetJSON struct {
 	StrictAllowlist         *bool                       `json:"strictAllowlist"`
 	AllowManagedDomainsOnly *bool                       `json:"allowManagedDomainsOnly"`
 	ParentProxy             *netproxy.ParentProxyConfig `json:"parentProxy"`
+	// real's remaining network fields (mod_1164.js `q`)
+	AllowLocalBinding *bool            `json:"allowLocalBinding"`
+	HTTPProxyPort     int              `json:"httpProxyPort"`
+	SOCKSProxyPort    int              `json:"socksProxyPort"`
+	AllowMachLookup   *bool            `json:"allowMachLookup"`
+	ExtraCACertPaths  []string         `json:"extraCaCertPaths"`
+	TLSTerminate      *sandboxTLSJSON  `json:"tlsTerminate"`
+	MITMProxy         *sandboxMITMJSON `json:"mitmProxy"`
+}
+
+type sandboxTLSJSON struct {
+	ExcludeDomains []string `json:"excludeDomains"`
+}
+
+type sandboxMITMJSON struct {
+	SocketPath string   `json:"socketPath"`
+	Domains    []string `json:"domains"`
 }
 
 type sandboxCredJSON struct {
@@ -251,6 +319,24 @@ func (s *SandboxSettings) apply(f *sandboxFileJSON, tier int) {
 		}
 	}
 	set("enabled", f.Enabled, &s.Enabled)
+	set("enableWeakerNestedSandbox", f.EnableWeakerNestedSandbox, &s.EnableWeakerNestedSandbox)
+	set("enableWeakerNetworkIsolation", f.EnableWeakerNetworkIsolation, &s.EnableWeakerNetworkIsolation)
+	set("allowAppleEvents", f.AllowAppleEvents, &s.AllowAppleEvents)
+	set("allowPty", f.AllowPty, &s.AllowPty)
+	set("seccomp", f.Seccomp, &s.Seccomp)
+	if f.SocatPath != "" {
+		s.SocatPath = f.SocatPath
+	}
+	if f.JavaAgentJarPath != "" {
+		s.JavaAgentJarPath = f.JavaAgentJarPath
+	}
+	if f.Windows != nil {
+		s.Windows = f.Windows
+	}
+	s.EnabledPlatforms = append(s.EnabledPlatforms, f.EnabledPlatforms...)
+	if g := f.Git; g != nil {
+		s.GitSafeDirectories = append(s.GitSafeDirectories, g.SafeDirectories...)
+	}
 	set("failIfUnavailable", f.FailIfUnavailable, &s.FailIfUnavailable)
 	set("autoAllowBashIfSandboxed", f.AutoAllowBashIfSandboxed, &s.AutoAllowBashIfSandboxed)
 	set("allowUnsandboxedCommands", f.AllowUnsandboxedCommands, &s.AllowUnsandboxedCommands)
@@ -306,6 +392,24 @@ func (s *SandboxSettings) apply(f *sandboxFileJSON, tier int) {
 		// allowManagedDomainsOnly takes effect only from managed settings.
 		if n.AllowManagedDomainsOnly != nil && policy {
 			set("network.allowManagedDomainsOnly", n.AllowManagedDomainsOnly, &s.Network.AllowManagedDomainsOnly)
+		}
+		set("network.allowLocalBinding", n.AllowLocalBinding, &s.Network.AllowAllLocal)
+		// network.allowLocalBinding is real's field name; allowAllLocal
+		// remains as the alias for our older config files
+		if n.HTTPProxyPort > 0 {
+			s.Network.HTTPProxyPort = n.HTTPProxyPort
+		}
+		if n.SOCKSProxyPort > 0 {
+			s.Network.SOCKSProxyPort = n.SOCKSProxyPort
+		}
+		set("network.allowMachLookup", n.AllowMachLookup, &s.Network.AllowMachLookup)
+		s.Network.ExtraCACertPaths = append(s.Network.ExtraCACertPaths, n.ExtraCACertPaths...)
+		if n.TLSTerminate != nil {
+			s.Network.TLSTerminateExcludeDomains = append(s.Network.TLSTerminateExcludeDomains, n.TLSTerminate.ExcludeDomains...)
+		}
+		if n.MITMProxy != nil {
+			s.Network.MITMSocketPath = n.MITMProxy.SocketPath
+			s.Network.MITMDomains = append(s.Network.MITMDomains, n.MITMProxy.Domains...)
 		}
 		if n.ParentProxy != nil && !s.locked["network.parentProxy"] {
 			s.Network.ParentProxy = n.ParentProxy
@@ -389,6 +493,20 @@ var SandboxCfg = loadSandboxSettings
 // enabled reports whether Bash sandboxing is on. CLAUDE_GO_SANDBOX=1 is an
 // alias for sandbox.enabled=true unless policy locked the field.
 func (s *SandboxSettings) enabled() bool {
+	// enabledPlatforms restricts the sandbox to listed OSes — a list that
+	// omits the current platform disables it (real's enabledPlatforms)
+	if len(s.EnabledPlatforms) > 0 {
+		ok := false
+		for _, p := range s.EnabledPlatforms {
+			if strings.EqualFold(p, runtime.GOOS) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
 	if !s.locked["enabled"] && os.Getenv("CLAUDE_GO_SANDBOX") == "1" {
 		return true
 	}
@@ -689,6 +807,16 @@ func (c *Context) sandboxedScript(command, script string, s *SandboxSettings, wa
 		}
 	}
 	// sandbox.credentials: deny-mode env vars drop out of the child env,
+	// sandbox.git.safeDirectories → GIT_CONFIG_* env (real emits the
+	// count/key/value triples so git trusts dirs the sandbox exposes)
+	for i, d := range s.GitSafeDirectories {
+		env.Set = append(env.Set,
+			fmt.Sprintf("GIT_CONFIG_KEY_%d=safe.directory", i),
+			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, d))
+	}
+	if len(s.GitSafeDirectories) > 0 {
+		env.Set = append(env.Set, fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(s.GitSafeDirectories)))
+	}
 	// mask-mode vars/files become sentinels the proxy swaps back on egress.
 	var cred *credPlan
 	if len(s.Credentials.Files) > 0 || len(s.Credentials.EnvVars) > 0 {

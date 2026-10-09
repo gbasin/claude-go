@@ -370,12 +370,18 @@ func (p *Proxy) rulesSnapshot() compiledRules {
 // Start binds the HTTP and SOCKS5 listeners on 127.0.0.1:0 and serves both
 // in the background (real's SRT proxy also runs the pair).
 func (p *Proxy) Start() error {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	return p.StartOn(0, 0)
+}
+
+// StartOn binds explicit ports — real's network.httpProxyPort /
+// socksProxyPort settings land here. 0 = ephemeral (the default).
+func (p *Proxy) StartOn(httpPort, socksPort int) error {
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", httpPort))
 	if err != nil {
 		return err
 	}
 	p.ln = ln
-	sln, err := net.Listen("tcp", "127.0.0.1:0")
+	sln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", socksPort))
 	if err != nil {
 		ln.Close()
 		return err
@@ -453,7 +459,7 @@ func (p *Proxy) logf(format string, args ...any) {
 func (p *Proxy) Env(command string) []string {
 	caPath := ""
 	if p.CA != nil {
-		caPath = p.CA.CertPath
+		caPath = p.CA.BundlePath() // extraCaCertPaths merge into the bundle
 	}
 	// real emits TMPDIR when the sandbox has no writeConfig grant for the
 	// system tmpdir. Our seatbelt profile grants /tmp regardless, but we
