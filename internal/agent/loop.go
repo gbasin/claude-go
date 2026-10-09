@@ -781,7 +781,9 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		}
 		var r tools.Result
 		toolStart := time.Now()
-		if len(l.AllowedTools) > 0 && !containsStr(l.AllowedTools, b.Name) {
+		// nil = unrestricted; a non-nil EMPTY slice (real's --tools "")
+		// withholds every tool
+		if l.AllowedTools != nil && !containsStr(l.AllowedTools, b.Name) {
 			r = tools.Result{Content: fmt.Sprintf("tool %s not allowed for this agent", b.Name), IsError: true}
 			results = append(results, toolResultBlock(b.ID, r))
 			continue

@@ -873,7 +873,32 @@ func main() {
 		rules["allow"] = append(rules["allow"], strings.Split(o.allowTools, ",")...)
 	}
 	if o.toolsList != "" {
-		loop.AllowedTools = strings.Split(o.toolsList, ",")
+		// real's --tools grammar: "" disables all, "default"/"all" keeps
+		// the full set; names select; a rule-shaped entry (Bash(git *))
+		// withholds the whole tool with a warning, and a detached spec
+		// ("Bash git*") warns that the arg was read as a rule.
+		if o.toolsList == `""` {
+			loop.AllowedTools = []string{}
+		} else if o.toolsList == "default" || o.toolsList == "all" {
+			// explicit default/all — nil (unrestricted) is the full set
+		} else {
+			var allowed []string
+			for _, t := range strings.Split(o.toolsList, ",") {
+				t = strings.TrimSpace(t)
+				if t == "" {
+					continue
+				}
+				if i := strings.Index(t, "("); i >= 0 && strings.HasSuffix(t, ")") {
+					fmt.Fprintf(os.Stderr,
+						"--tools entry %q names a rule, not a tool; the whole tool is withheld. "+
+							"Write %q to say so.\n", t, t[:i])
+					allowed = append(allowed, t[:i])
+					continue
+				}
+				allowed = append(allowed, t)
+			}
+			loop.AllowedTools = allowed
+		}
 		loop.ToolCtx.AllowedTools = loop.AllowedTools
 	}
 	if o.denyTools != "" {
