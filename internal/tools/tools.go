@@ -59,7 +59,7 @@ type Context struct {
 	PermissionAsk func() bool
 	// Subagent marks Agent-spawned contexts — RequestDefs adds
 	// SubagentHandback to the wire set.
-	Subagent      bool
+	Subagent bool
 	// AdvisorModel is the configured advisor model (--advisor /
 	// advisorModel / /advisor). Empty → the advisor server block stays
 	// off the wire (real only ships it when configured).
@@ -71,6 +71,9 @@ type Context struct {
 	Answerer      Answerer // WebFetch page-answer model
 	Searcher      Searcher // WebSearch backend
 	AskStructured func(header, question string, options []AskOption, multi bool) ([]string, error)
+	// NotifyNeedsInput fires real's Notification{agent_needs_input} when
+	// a question dialog opens (the host binds it to the hooks lane)
+	NotifyNeedsInput func(toolName, message string)
 	// AskStructuredMulti renders real's multi-question wizard (question
 	// tabs + Submit). Falls back to sequential AskStructured when unset.
 	AskStructuredMulti func(questions []AskQuestion) (map[string][]string, error)

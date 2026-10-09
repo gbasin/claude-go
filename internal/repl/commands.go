@@ -387,10 +387,8 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		dprintf("  theme set to %s\n", arg)
 	case "login":
 		loginCmd()
-	case "version":
-		// real prints VERSION + optional " (built <BUILD_TIME>)" — our
-		// const carries the replicated upstream version
-		dprintln("  " + api.Version)
+	// "version" intentionally absent — real 294 ships the registry entry
+	// with isEnabled:()=>!1, so /version falls to "unknown command"
 	case "logout":
 		logoutCmd()
 	case "keybindings":

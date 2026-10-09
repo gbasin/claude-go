@@ -181,6 +181,17 @@ func RunWithStore(l *agent.Loop, store Store) {
 		}
 		compInline("\r\n" + dim + "  ⏵ " + summary + reset + "\r\n")
 	}
+	// NotifyNeedsInput carries the dialog-kind notification type
+	// (elicitation_dialog/url/agent_needs_input) — real's Lee/kie map
+	l.ToolCtx.NotifyNeedsInput = func(ntype, message string) {
+		hooks.Run(l.Hooks, hooks.Notification, map[string]any{
+			"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+			"message":           message,
+			"notification_type": ntype,
+			"hook_event_name":   "Notification",
+			"permission_mode":   l.PermMode,
+		}, l.ToolCtx.CWD)
+	}
 	l.ToolCtx.SetPermMode = func(mode string) {
 		l.PermMode = mode
 		if currentStore != nil {

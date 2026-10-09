@@ -403,6 +403,18 @@ func execAskUser(c *Context, raw json.RawMessage) Result {
 		if c.AskStructured == nil {
 			return Result{Content: "structured questions unavailable (non-interactive mode)", IsError: true}
 		}
+		if c.NotifyNeedsInput != nil {
+			// real's dialog-notification: elicitation_url_dialog for URL
+			// questions, elicitation_dialog otherwise (mod_1595 Lee)
+			ntype := "elicitation_dialog"
+			for _, q := range in.Questions {
+				if strings.Contains(q.Question, "http://") || strings.Contains(q.Question, "https://") {
+					ntype = "elicitation_url_dialog"
+					break
+				}
+			}
+			c.NotifyNeedsInput(ntype, "Claude needs your input to continue")
+		}
 		if c.AskStructuredMulti != nil {
 			// real: all questions in one tabbed wizard with a Submit tab
 			var qs []AskQuestion
