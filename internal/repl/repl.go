@@ -398,10 +398,6 @@ func RunWithStore(l *agent.Loop, store Store) {
 	printAutoModeNotice(l.PermMode)
 	// .mcp.json trust flow — real prompts once per pending server;
 	// "y" writes enabledMcpjsonServers (mod_1441 approve path)
-	if dbg := os.Getenv("CLAUDE_GO_MCPDBG"); dbg != "" {
-		fmt.Fprintf(os.Stderr, "[mcpdbg] pending=%v cwd=%s ks=%v\n",
-			mcp.PendingProjectServers(l.ToolCtx.CWD), l.ToolCtx.CWD, ks != nil)
-	}
 	for _, name := range mcp.PendingProjectServers(l.ToolCtx.CWD) {
 		compInline(fmt.Sprintf("\r\n  %sThis project defines MCP server %q — approve? [y/N]%s ",
 			yellow, name, reset))
