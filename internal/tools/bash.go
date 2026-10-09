@@ -307,6 +307,23 @@ func (c *Context) finishBash(out *bytes.Buffer, command string, err error, timed
 		b.WriteString("\n<persisted-output>" + persisted + "</persisted-output>")
 	}
 	res := Result{Content: b.String()}
+	exitCode := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		exitCode = ee.ExitCode()
+	} else if err != nil {
+		exitCode = 1
+	}
+	// real's tool_use_result carries the tool's Output object — Bash's
+	// {stdout, stderr, exit_code, duration_ms} shape
+	res.Structured = map[string]any{
+		"stdout": text, "stderr": "",
+		"exit_code":   exitCode,
+		"duration_ms": 0, // populated by the loop's dispatch timing
+		"interrupted": timedOut,
+	}
+	if persisted != "" {
+		res.Structured.(map[string]any)["persisted_output"] = persisted
+	}
 	if err != nil || timedOut {
 		res.IsError = true
 	}

@@ -14,6 +14,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1662,6 +1663,19 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 	sj := format == "stream-json"
 	if sj {
 		emitStreamJSONInit(l)
+		// real echoes the -p prompt as a user event after init
+		if prompt != "" {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "user", "uuid": session.NewID(),
+				"parent_tool_use_id": nil,
+				"message": map[string]any{
+					"role": "user",
+					"content": []map[string]any{{
+						"type": "text", "text": prompt}}},
+				"session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
 	}
 	if sj && os.Getenv("CLAUDE_GO_INCLUDE_HOOK_EVENTS") == "1" {
 		l.OnHookEvent = func(rec map[string]any) {
@@ -1728,16 +1742,37 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 			})
 		}
 	}
+	// real emits system/compact_boundary on the stream when the loop
+	// compacts mid-turn (mod_1695 boundary render)
+	if sj {
+		l.Events.OnCompact = func() {
+			_, trig := l.CompactMeta()
+			ev, _ := json.Marshal(map[string]any{
+				"type": "system", "subtype": "compact_boundary",
+				"uuid": session.NewID(), "session_id": l.Client.SessionID,
+				"compact_metadata": map[string]any{
+					"trigger": trig, "pre_tokens": l.LastInputTokens(),
+				},
+			})
+			fmt.Println(string(ev))
+		}
+	}
 	l.Events.OnToolResult = func(name, toolUseID string, tr tools.Result) {
 		if sj {
-			ev, _ := json.Marshal(map[string]any{
+			rec := map[string]any{
 				"type": "user", "uuid": session.NewID(),
 				"parent_tool_use_id": nil,
 				"message": map[string]any{"role": "user", "content": []map[string]any{{
 					"type": "tool_result", "tool_use_id": toolUseID,
 					"content": tr.Content, "is_error": tr.IsError}}},
 				"session_id": l.Client.SessionID,
-			})
+			}
+			// real's user event carries the tool's structured Output at
+			// tool_use_result (mod_0069) — absent when the tool has none
+			if tr.Structured != nil {
+				rec["tool_use_result"] = tr.Structured
+			}
+			ev, _ := json.Marshal(rec)
 			fmt.Println(string(ev))
 		}
 	}
@@ -1972,16 +2007,23 @@ func emitStreamJSONInit(l *agent.Loop) {
 		"type": "system", "subtype": "init",
 		"session_id": l.Client.SessionID, "model": l.Model, "cwd": l.CWD,
 		"tools": toolNames, "mcp_servers": uniq, "permissionMode": l.PermMode,
-		"slash_commands":      repl.SlashCommandNames(),
-		"apiKeySource":        apiKeySource(),
-		"betas":               []string{},
+		"slash_commands": repl.SlashCommandNames(),
+		"apiKeySource":   apiKeySource(),
+		// real ships the live beta list, not []
+		"betas":               betaListForInit(l),
 		"claude_code_version": version,
 		"output_style":        "default",
-		"agents":              []string{"general-purpose", "Explore", "Plan"},
-		"skills":              repl.SlashCommandNames(),
-		"plugins":             []string{},
+		"agents":              agentTypesForInit(),
+		"skills":              skillNamesForInit(),
+		"plugins":             pluginInitRecords(),
 		"fast_mode_state":     l.FastMode,
 		"uuid":                session.NewID(),
+	}
+	if mps := memoryPathsForInit(l); len(mps) > 0 {
+		initFields["memory_paths"] = mps
+	}
+	if errs := mcpServerErrorRows(); len(errs) > 0 {
+		initFields["mcp_server_errors"] = errs
 	}
 	// mod_0659.js: startup payloads carry is_coordinator only when true
 	if tools.IsCoordinatorMode() {
@@ -2628,4 +2670,87 @@ func fireInstructionsLoaded(l *agent.Loop, cwd string) {
 			"file_path":       f,
 		}, cwd)
 	}
+}
+
+// betaListForInit returns the live beta header list for the init event —
+// real ships the same names the request carries.
+func betaListForInit(l *agent.Loop) []string {
+	if c := l.Client; c != nil {
+		return c.BetaNames()
+	}
+	return []string{}
+}
+
+// agentTypesForInit lists the registered subagent type names — real
+// reports the builtin set plus any .claude/agents/*.md discovered types.
+func agentTypesForInit() []string {
+	// real's builtin order is fixed; discovered types append after
+	out := []string{"general-purpose", "Explore", "Plan"}
+	var extra []string
+	g, _ := filepath.Glob(filepath.Join(config.ClaudeDir(), "agents", "*.md"))
+	for _, p := range g {
+		extra = append(extra, strings.TrimSuffix(filepath.Base(p), ".md"))
+	}
+	sort.Strings(extra)
+	return append(out, extra...)
+}
+
+// skillNamesForInit lists invocable skill names — real reports the skill
+// surface, not the slash-command set.
+func skillNamesForInit() []string {
+	var out []string
+	for _, d := range []string{
+		filepath.Join(config.ClaudeDir(), "skills"),
+	} {
+		ents, _ := os.ReadDir(d)
+		for _, e := range ents {
+			if e.IsDir() {
+				out = append(out, e.Name())
+			}
+		}
+	}
+	sort.Strings(out)
+	if out == nil {
+		out = []string{}
+	}
+	return out
+}
+
+// pluginInitRecords emits real's plugins array — {name,path} objects for
+// each installed plugin (not bare names).
+func pluginInitRecords() []map[string]any {
+	var out []map[string]any
+	for _, d := range plugins.EnabledPluginDirs() {
+		out = append(out, map[string]any{
+			"name": filepath.Base(d), "path": d,
+		})
+	}
+	if out == nil {
+		out = []map[string]any{}
+	}
+	return out
+}
+
+// memoryPathsForInit lists the CLAUDE.md/rules paths that actually
+// loaded — real's memory_paths init field.
+func memoryPathsForInit(l *agent.Loop) []string {
+	var out []string
+	for _, p := range agent.MemoryPaths(l.ToolCtx.CWD) {
+		if _, err := os.Stat(p); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// mcpServerErrorRows lists MCP servers that failed to connect — real's
+// mcp_server_errors init field.
+func mcpServerErrorRows() []map[string]any {
+	var out []map[string]any
+	for _, s := range tools.MCPServerStatus() {
+		if s.Err != nil {
+			out = append(out, map[string]any{"name": s.Name, "error": s.Err.Error()})
+		}
+	}
+	return out
 }

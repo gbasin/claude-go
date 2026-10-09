@@ -702,3 +702,13 @@ func gatewayHintHeaders() bool {
 	v, _ := config.GBFeature("tengu_splendid_sutton").(bool)
 	return v
 }
+
+// BetaNames returns the client's live beta list as a slice — the init
+// event carries the same names the header does.
+func (c *Client) BetaNames() []string {
+	v := c.betaHeaderValue()
+	if v == "" {
+		return nil
+	}
+	return strings.Split(v, ",")
+}
