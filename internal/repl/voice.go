@@ -298,6 +298,25 @@ func promptSuggestionsEnabled() bool {
 	return true
 }
 
+// histGhost returns the autosuggest tail for the current buffer — the
+// newest history line that starts with it (fish-style; real's
+// inlineGhostText source). Empty when nothing matches.
+func (e *editor) histGhost() string {
+	if len(e.buf) == 0 || e.pos < len(e.buf) || e.histSearch || e.acOpen {
+		return ""
+	}
+	pfx := string(e.buf)
+	for i := len(e.history) - 1; i >= 0; i-- {
+		h := e.history[i]
+		// single-line ghosts only — a multiline tail would break the
+		// redraw's row accounting
+		if len(h) > len(pfx) && strings.HasPrefix(h, pfx) && !strings.Contains(h, "\n") {
+			return h[len(pfx):]
+		}
+	}
+	return ""
+}
+
 func ghostText() string {
 	if !promptSuggestionsEnabled() {
 		return ""
@@ -306,10 +325,21 @@ func ghostText() string {
 }
 
 func (e *editor) renderedBuf() string {
+	// shift+arrow selection renders reverse-video over the span (real's
+	// selectionAnchor rendering)
+	if a, b, ok := e.selSpan(); ok {
+		return string(e.buf[:a]) + "[7m" + string(e.buf[a:b]) + reset + string(e.buf[b:])
+	}
 	vs := e.voice
 	if vs == nil || vs.interimLen == 0 {
 		if len(e.buf) == 0 && !e.histSearch {
 			return ghostText()
+		}
+		// inlineGhostText — history autosuggestion: a history entry whose
+		// text starts with the buffer renders its tail dimmed after the
+		// cursor (real's inline ghost); → at EOL accepts it
+		if g := e.histGhost(); g != "" {
+			return string(e.buf) + dim + g + reset
 		}
 		return string(e.buf)
 	}

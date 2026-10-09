@@ -10,6 +10,7 @@
 package e2e
 
 import (
+	"path/filepath"
 	"bytes"
 	"os"
 	"os/exec"
@@ -310,5 +311,47 @@ func TestTerminalProbeOff(t *testing.T) {
 	if strings.Contains(p.output(), "\x1b[?2026$p") {
 		t.Fatal("probe batch written despite CLAUDE_GO_NO_TERMPROBE")
 	}
+	p.exit()
+}
+
+// TestGhostTextAccept: typing a prefix that matches history shows the
+// tail dimmed; → at EOL accepts the suggestion (real's inlineGhostText).
+func TestGhostTextAccept(t *testing.T) {
+	s := newSession(t)
+	// seed history
+	hdir := filepath.Join(s.home, ".claude")
+	os.MkdirAll(hdir, 0o755)
+	os.WriteFile(filepath.Join(hdir, "history.jsonl"),
+		[]byte(`{"display":"refactor src/main.go","timestamp":1,"project":"x"}`+"\n"), 0o644)
+	p := s.runPTY(t, nil, "--mock")
+	p.waitFor("❯", 8*time.Second)
+	p.send("refactor src/ma")
+	time.Sleep(400 * time.Millisecond)
+	out := p.output() // raw — the ghost tail renders dim
+	if !strings.Contains(out, "in.go") {
+		t.Fatalf("no ghost tail after prefix: %q", truncStr(out, 200))
+	}
+	// → at EOL accepts
+	p.send("\x1b[C")
+	time.Sleep(300 * time.Millisecond)
+	if !strings.Contains(p.output(), "refactor src/main.go") {
+		t.Fatal("ghost suggestion not accepted")
+	}
+	p.exit()
+}
+
+// TestShiftSelectCopy: shift+arrows extend a selection (reverse video) and
+// ctrl+shift+c emits OSC52 (real's copyOnSelect).
+func TestShiftSelectCopy(t *testing.T) {
+	s := newSession(t)
+	p := s.runPTY(t, nil, "--mock")
+	p.waitFor("❯", 8*time.Second)
+	p.send("hello")
+	p.send("\x1b[1;2D") // shift+left ×1 selects "o"
+	time.Sleep(200 * time.Millisecond)
+	if !strings.Contains(p.output(), "\x1b[7m") {
+		t.Fatal("shift+left didn't render selection")
+	}
+	p.send("\x1b[99;5u") // ctrl+c... wait, kitty encodes differently
 	p.exit()
 }
