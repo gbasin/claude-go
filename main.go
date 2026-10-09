@@ -611,7 +611,7 @@ func main() {
 	// connect MCP servers in background (like CC's async init)
 	mcp.SetSessionID(sessionID)
 	chromeSysP, chromeMCP := chromeSessionSetup(o, lastCreds)
-	mcpClients := startMCP(cwd, o.mcpConfig, o.strictMCP, chromeMCP, o.addDirs)
+	mcpClients := startMCP(cwd, o.mcpConfig, o.strictMCP, chromeMCP, o.addDirs, sessionID)
 	defer func() {
 		for _, c := range mcpClients {
 			c.Close()
@@ -1303,7 +1303,7 @@ func fireHook(l *agent.Loop, ev hooks.Event) {
 // dynamic carries host-side additions (real's scope:"dynamic" entries —
 // gme() puts `claude-in-chrome` there), merged last so a configured server
 // of the same name wins, like real's explicit mcpConfigs beat dynamic.
-func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.ServerConfig, addDirs []string) (clients []*mcp.Client) {
+func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.ServerConfig, addDirs []string, sessionID string) (clients []*mcp.Client) {
 	var cfgs map[string]mcp.ServerConfig
 	if strict {
 		// --strict-mcp-config: only the --mcp-config file's servers load
@@ -1329,6 +1329,32 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 	for name, c := range dynamic {
 		if _, taken := cfgs[name]; !taken {
 			cfgs[name] = c
+		}
+	}
+	// claude-code-remote (mod_0116.js Uct): remote sessions get an
+	// alwaysLoad http MCP server wired to the session's meta endpoint —
+	// it carries the trigger/repo verbs (list_triggers, create_trigger,
+	// update_trigger, delete_trigger, fire_trigger, send_later, add_repo,
+	// check_repo_access, list_repos). The X-Session-UUID header binds the
+	// calls to this session.
+	if os.Getenv("CLAUDE_CODE_REMOTE") != "" {
+		if _, taken := cfgs["claude-code-remote"]; !taken {
+			base := os.Getenv("ANTHROPIC_BASE_URL")
+			if base == "" {
+				base = "https://api.anthropic.com"
+			}
+			// wss://sdk-url downgrades to https like real's jRe()
+			base = strings.ReplaceAll(base, "wss://", "https://")
+			base = strings.ReplaceAll(base, "ws://", "http://")
+			cfgs["claude-code-remote"] = mcp.ServerConfig{
+				Type: "http",
+				URL:  strings.TrimRight(base, "/") + "/v2/ccr-sessions/-/meta/mcp",
+				Headers: map[string]string{
+					"X-MCP-Server-ID":   "bf7c680d-5fdc-5ef4-b4a0-abadb619bf0a",
+					"X-Session-UUID":    sessionID,
+					"anthropic-version": "2023-06-01",
+				},
+			}
 		}
 	}
 	// claude.ai account connectors — real's yke()/SLn() (mod_0386.js):

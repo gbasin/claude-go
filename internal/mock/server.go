@@ -67,6 +67,9 @@ func StartOn(addr string) (*Server, error) {
 	s := &Server{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/messages", s.handle)
+	// claude-code-remote meta MCP endpoint — remote sessions mount it via
+	// the injected claude-code-remote server; answers with real's verb set.
+	mux.HandleFunc("/v2/ccr-sessions/-/meta/mcp", s.handleRemoteMCP)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"type":"error","error":{"type":"not_found_error","message":"unknown path"}}`, 404)
 	})
@@ -373,4 +376,52 @@ func summarizeResults(req *api.Request) string {
 		return out
 	}
 	return ""
+}
+
+// handleRemoteMCP serves the claude-code-remote meta MCP endpoint — the
+// streamable-HTTP handshake + the trigger/repo verb set real exposes in
+// remote sessions (mod_0116.js Uwo/ATs).
+func (s *Server) handleRemoteMCP(w http.ResponseWriter, r *http.Request) {
+	var rpc struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+	}
+	if b, err := io.ReadAll(r.Body); err == nil {
+		json.Unmarshal(b, &rpc)
+	}
+	if len(rpc.ID) == 0 || string(rpc.ID) == "null" {
+		w.WriteHeader(202) // notification
+		return
+	}
+	var result any
+	switch rpc.Method {
+	case "initialize":
+		result = map[string]any{
+			"protocolVersion": "2025-03-26",
+			"capabilities":    map[string]any{"tools": map[string]any{}},
+			"serverInfo":      map[string]any{"name": "Claude Code Remote", "version": "1"},
+		}
+	case "tools/list":
+		var tools []map[string]any
+		for _, v := range []string{
+			"list_triggers", "create_trigger", "update_trigger",
+			"delete_trigger", "fire_trigger", "send_later",
+			"add_repo", "check_repo_access", "list_repos",
+		} {
+			tools = append(tools, map[string]any{
+				"name":        v,
+				"description": "remote trigger/repo verb",
+				"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
+			})
+		}
+		result = map[string]any{"tools": tools}
+	case "tools/call":
+		result = map[string]any{"content": []map[string]any{{
+			"type": "text", "text": `{"ok":true}`}}}
+	default:
+		result = map[string]any{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"jsonrpc": "2.0", "id": json.RawMessage(rpc.ID), "result": result})
 }
