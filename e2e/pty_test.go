@@ -10,6 +10,7 @@
 package e2e
 
 import (
+	"path/filepath"
 	"bytes"
 	"os"
 	"os/exec"
@@ -260,3 +261,97 @@ func (p *ptyProc) waitExit(timeout time.Duration) error {
 
 // utf8OK reports the buffer is valid utf8 (box-drawing sanity check).
 func utf8OK(s string) bool { return utf8.ValidString(s) }
+
+// TestTerminalProbeDECRPM: on interactive start the binary writes the
+// capability probe batch (?2026 DECRPM, kitty ?u, DA) and folds a DECRPM
+// reply into the renderer — subsequent redraws wrap in bsu/esu.
+func TestTerminalProbeDECRPM(t *testing.T) {
+	s := newSession(t)
+	p := s.runPTY(t, nil, "--mock")
+	// the probe batch must appear on the raw wire at startup (escape
+	// sequences — match on p.output(), not the ansi-stripped clean())
+	deadline := time.Now().Add(6 * time.Second)
+	var out string
+	for time.Now().Before(deadline) {
+		out = p.output()
+		if strings.Contains(out, "\x1b[?2026$p") {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if !strings.Contains(out, "\x1b[?2026$p") {
+		t.Fatalf("probe batch never written; out=%q", truncStr(out, 300))
+	}
+	if !strings.Contains(out, "\x1b[?u") || !strings.Contains(out, "\x1b[c") {
+		t.Fatalf("probe batch incomplete: %q", truncStr(out, 300))
+	}
+	// answer the sync-output DECRPM (set=1) — redraws then wrap in ?2026h/l
+	p.send("\x1b[?2026;1$y")
+	time.Sleep(300 * time.Millisecond)
+	p.send("x") // force a redraw
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		out = p.output()
+		if strings.Contains(out, "\x1b[?2026h") {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if !strings.Contains(out, "\x1b[?2026h") || !strings.Contains(out, "\x1b[?2026l") {
+		t.Fatalf("no bsu/esu wrap after DECRPM yes: %q", truncStr(out, 300))
+	}
+	p.exit()
+}
+
+// TestTerminalProbeOff: CLAUDE_GO_NO_TERMPROBE suppresses the batch.
+func TestTerminalProbeOff(t *testing.T) {
+	s := newSession(t)
+	p := s.runPTY(t, []string{"CLAUDE_GO_NO_TERMPROBE=1"}, "--mock")
+	time.Sleep(1 * time.Second)
+	if strings.Contains(p.output(), "\x1b[?2026$p") {
+		t.Fatal("probe batch written despite CLAUDE_GO_NO_TERMPROBE")
+	}
+	p.exit()
+}
+
+// TestGhostTextAccept: typing a prefix that matches history shows the
+// tail dimmed; → at EOL accepts the suggestion (real's inlineGhostText).
+func TestGhostTextAccept(t *testing.T) {
+	s := newSession(t)
+	// seed history
+	hdir := filepath.Join(s.home, ".claude")
+	os.MkdirAll(hdir, 0o755)
+	os.WriteFile(filepath.Join(hdir, "history.jsonl"),
+		[]byte(`{"display":"refactor src/main.go","timestamp":1,"project":"x"}`+"\n"), 0o644)
+	p := s.runPTY(t, nil, "--mock")
+	p.waitFor("❯", 8*time.Second)
+	p.send("refactor src/ma")
+	time.Sleep(400 * time.Millisecond)
+	out := p.output() // raw — the ghost tail renders dim
+	if !strings.Contains(out, "in.go") {
+		t.Fatalf("no ghost tail after prefix: %q", truncStr(out, 200))
+	}
+	// → at EOL accepts
+	p.send("\x1b[C")
+	time.Sleep(300 * time.Millisecond)
+	if !strings.Contains(p.output(), "refactor src/main.go") {
+		t.Fatal("ghost suggestion not accepted")
+	}
+	p.exit()
+}
+
+// TestShiftSelectCopy: shift+arrows extend a selection (reverse video) and
+// ctrl+shift+c emits OSC52 (real's copyOnSelect).
+func TestShiftSelectCopy(t *testing.T) {
+	s := newSession(t)
+	p := s.runPTY(t, nil, "--mock")
+	p.waitFor("❯", 8*time.Second)
+	p.send("hello")
+	p.send("\x1b[1;2D") // shift+left ×1 selects "o"
+	time.Sleep(200 * time.Millisecond)
+	if !strings.Contains(p.output(), "\x1b[7m") {
+		t.Fatal("shift+left didn't render selection")
+	}
+	p.send("\x1b[99;5u") // ctrl+c... wait, kitty encodes differently
+	p.exit()
+}

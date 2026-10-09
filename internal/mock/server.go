@@ -67,6 +67,9 @@ func StartOn(addr string) (*Server, error) {
 	s := &Server{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/messages", s.handle)
+	// claude-code-remote meta MCP endpoint — remote sessions mount it via
+	// the injected claude-code-remote server; answers with real's verb set.
+	mux.HandleFunc("/v2/ccr-sessions/-/meta/mcp", s.handleRemoteMCP)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"type":"error","error":{"type":"not_found_error","message":"unknown path"}}`, 404)
 	})
@@ -304,8 +307,32 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": i})
 	}
 
+	delta := map[string]any{"stop_reason": stopReason}
+	// server-side dangerous_tool_use verdict: when the request carried the
+	// dangerous_tool_use safeguard and the response holds tool_uses, the
+	// verdict rides the final message_delta — the mock takes it from
+	// CLAUDE_GO_MOCK_SGVERDICT (e2e) per tool_use id
+	if v := os.Getenv("CLAUDE_GO_MOCK_SGVERDICT"); v != "" {
+		uses := map[string]any{}
+		for _, blk := range blocks {
+			if blk["type"] == "tool_use" {
+				uses[blk["id"].(string)] = map[string]any{
+					"type": "evaluated", "outcome": v,
+					"explanation": "mock verdict",
+				}
+			}
+		}
+		if len(uses) > 0 {
+			delta["safeguard_results"] = []any{map[string]any{
+				"type": "dangerous_tool_use",
+				"status": map[string]any{
+					"type": "available", "tool_uses": uses,
+				},
+			}}
+		}
+	}
 	emit("message_delta", map[string]any{"type": "message_delta",
-		"delta": map[string]any{"stop_reason": stopReason}, "usage": usage})
+		"delta": delta, "usage": usage})
 	emit("message_stop", map[string]any{"type": "message_stop"})
 }
 
@@ -373,4 +400,52 @@ func summarizeResults(req *api.Request) string {
 		return out
 	}
 	return ""
+}
+
+// handleRemoteMCP serves the claude-code-remote meta MCP endpoint — the
+// streamable-HTTP handshake + the trigger/repo verb set real exposes in
+// remote sessions (mod_0116.js Uwo/ATs).
+func (s *Server) handleRemoteMCP(w http.ResponseWriter, r *http.Request) {
+	var rpc struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+	}
+	if b, err := io.ReadAll(r.Body); err == nil {
+		json.Unmarshal(b, &rpc)
+	}
+	if len(rpc.ID) == 0 || string(rpc.ID) == "null" {
+		w.WriteHeader(202) // notification
+		return
+	}
+	var result any
+	switch rpc.Method {
+	case "initialize":
+		result = map[string]any{
+			"protocolVersion": "2025-03-26",
+			"capabilities":    map[string]any{"tools": map[string]any{}},
+			"serverInfo":      map[string]any{"name": "Claude Code Remote", "version": "1"},
+		}
+	case "tools/list":
+		var tools []map[string]any
+		for _, v := range []string{
+			"list_triggers", "create_trigger", "update_trigger",
+			"delete_trigger", "fire_trigger", "send_later",
+			"add_repo", "check_repo_access", "list_repos",
+		} {
+			tools = append(tools, map[string]any{
+				"name":        v,
+				"description": "remote trigger/repo verb",
+				"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
+			})
+		}
+		result = map[string]any{"tools": tools}
+	case "tools/call":
+		result = map[string]any{"content": []map[string]any{{
+			"type": "text", "text": `{"ok":true}`}}}
+	default:
+		result = map[string]any{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"jsonrpc": "2.0", "id": json.RawMessage(rpc.ID), "result": result})
 }

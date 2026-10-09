@@ -1,9 +1,11 @@
 package repl
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"golang.org/x/term"
@@ -16,10 +18,21 @@ type keySource struct {
 	old    *term.State
 	kitty  bool // kitty keyboard protocol was enabled
 	mok    bool // xterm modifyOtherKeys pushed (non-kitty path)
+	// probe answers settle here — the async replies land on stdin between
+	// keystrokes and get folded into terminalCaps (real's mod_0501 record)
+	caps terminalCaps
 	// dialog, when non-nil, gets every key forwarded — the permission dialog
 	// owns stdin while open so the turn's busy-queue goroutine can't eat
 	// the user's answer.
 	dialog atomic.Pointer[chan key]
+}
+
+// probeCaps is the session-level copy of the last keySource's probe answers
+// — redraw paths that don't hold the keySource read it (real's mod_0501
+// record is likewise a host-level singleton).
+var probeCaps struct {
+	mu   sync.Mutex
+	caps terminalCaps
 }
 
 // modifier bits carried on a key (kitty/CSI-u encoding: param-1).
@@ -45,6 +58,15 @@ func startKeys() (*keySource, error) {
 	}
 	ks := &keySource{ch: make(chan key, 256), old: st, replay: make(chan key, 256)}
 	os.Stdout.WriteString("\x1b[?2004h") // bracketed paste on
+	// capability probe batch (real's DECRPM/XTVersion queries —
+	// mod_0501 records extendedKeys/synchronizedOutput/kittyKeyboard/
+	// kittyGraphics/mousePixels/programStatus from the replies)
+	if os.Getenv("CLAUDE_GO_NO_TERMPROBE") == "" {
+		os.Stdout.WriteString("\x1b[?2026$p") // synchronized output DECRPM
+		os.Stdout.WriteString("\x1b[?u")      // kitty keyboard flags query
+		os.Stdout.WriteString("\x1b[?1016$p") // SGR pixel-mouse DECRPM
+		os.Stdout.WriteString("\x1b[c")       // primary DA (programStatus)
+	}
 	if kittyCapable() {
 		// kitty keyboard protocol: push flags 5 = disambiguate (1) +
 		// report alternate keys (4) — real's `>5u`. Without bit 4 a
@@ -74,6 +96,52 @@ func kittyCapable() bool {
 
 func (ks *keySource) stop() {
 	ks.release()
+}
+
+// terminalCaps holds the DECRPM/DA probe answers (real's mod_0501 record).
+type terminalCaps struct {
+	syncOutput    bool // ?2026 DECRPM — bsu/esu batched repaint support
+	kittyFlags    int  // ?u reply — kitty keyboard flags actually active
+	sgrMousePixel bool // ?1016 DECRPM — pixel-position mouse reporting
+	daAnswered    bool // CSI ?...c answered — terminal is a live terminal
+}
+
+// recordProbeReply recognizes capability-probe replies on the input stream
+// (DECRPM \x1b[?N;M$y, kitty-flags \x1b[?Nu, DA \x1b[?…c). Returns true
+// when the sequence was consumed as a probe answer (not a key).
+func (ks *keySource) recordProbeReply(seq string) bool {
+	if len(seq) < 3 || seq[0] != '[' || seq[1] != '?' {
+		return false
+	}
+	body := seq[2:]
+	switch {
+	case strings.HasSuffix(body, "$y"): // DECRPM \x1b[?Ps;Pv$y
+		var ps, pv int
+		fmt.Sscanf(strings.TrimSuffix(body, "$y"), "%d;%d", &ps, &pv)
+		on := pv == 1 || pv == 3 // 1=set, 3=permanently set (DECTEM states)
+		switch ps {
+		case 2026:
+			ks.caps.syncOutput = on
+		case 1016:
+			ks.caps.sgrMousePixel = on
+		}
+		return true
+	case strings.HasSuffix(body, "u"): // kitty keyboard query \x1b[?flagsu
+		fmt.Sscanf(strings.TrimSuffix(body, "u"), "%d", &ks.caps.kittyFlags)
+		return true
+	case strings.HasSuffix(body, "c"): // primary DA \x1b[?…c
+		ks.caps.daAnswered = true
+		return true
+	}
+	return false
+}
+
+// syncOutput reports whether the terminal answered the ?2026 DECRPM —
+// redraws wrap in bsu/esu markers then (real's synchronizedOutput gate).
+func syncOutputSupported() bool {
+	probeCaps.mu.Lock()
+	defer probeCaps.mu.Unlock()
+	return probeCaps.caps.syncOutput
 }
 
 // release hands the tty back to cooked mode — kitty flags and bracketed
@@ -108,14 +176,54 @@ const (
 	pasteEnd   = "\x1b[201~"
 )
 
+// lastCSIStart returns the index where an unterminated CSI begins, or -1.
+// The CSI probe replies (DECRPM/kitty/DA) can split across reads — hold
+// them for the next buffer instead of mis-dispatching.
+func lastCSIStart(b []byte) int {
+	for i := len(b) - 2; i >= 0; i-- {
+		if b[i] == 0x1b && b[i+1] == '[' {
+			// does a final byte terminate this CSI before buffer end?
+			for j := i + 2; j < len(b); j++ {
+				c := b[j]
+				if c >= 0x40 && c <= 0x7e && j > i+2 {
+					return -1 // terminated
+				}
+				if c >= 0x40 && c <= 0x7e && j == i+2 {
+					return -1 // \x1b[[A-style (F1) — also terminated
+				}
+				if c < 0x20 {
+					return -1
+				}
+				if c > 0x3f && c < 0x60 || c >= 0x7b {
+					return -1 // outside param/intermediate range → malformed
+				}
+			}
+			return i // ran out of buffer mid-CSI
+		}
+	}
+	return -1
+}
+
 func (ks *keySource) read() {
 	var buf [512]byte
 	var pasting []byte
+	var pending []byte // trailing incomplete CSI held for the next read
 	for {
-		n, err := os.Stdin.Read(buf[:])
+		n, err := os.Stdin.Read(buf[len(pending):])
+		if n <= 0 && err == nil {
+			continue
+		}
 		if err != nil {
 			close(ks.ch)
 			return
+		}
+		n += len(pending)
+		copy(buf[:len(pending)], pending)
+		pending = nil
+		// hold a truncated CSI tail for the next read
+		if last := lastCSIStart(buf[:n]); last >= 0 && n-last < 32 {
+			pending = append(pending, buf[last:n]...)
+			n = last
 		}
 		for i := 0; i < n; i++ {
 			c := buf[i]
@@ -141,13 +249,20 @@ func (ks *keySource) read() {
 				continue
 			}
 			if c == 0x1b && i+2 < n && buf[i+1] == '[' {
-				// CSI: scan parameter bytes (0x30-0x3f) then a final byte (0x40-0x7e)
+				// CSI: parameter bytes (0x30-0x3f), intermediate bytes
+				// (0x20-0x2f — DECRPM's $), then a final byte (0x40-0x7e)
 				j := i + 2
-				for j < n && buf[j] >= 0x30 && buf[j] <= 0x3f {
+				for j < n && ((buf[j] >= 0x30 && buf[j] <= 0x3f) || (buf[j] >= 0x20 && buf[j] <= 0x2f)) {
 					j++
 				}
 				if j < n && buf[j] >= 0x40 && buf[j] <= 0x7e {
-					ks.push(decodeCSI(string(buf[i+1 : j+1])))
+					if handled := ks.recordProbeReply(string(buf[i+1 : j+1])); !handled {
+						ks.push(decodeCSI(string(buf[i+1 : j+1])))
+					}
+					// publish caps so redraws see the just-settled probe
+					probeCaps.mu.Lock()
+					probeCaps.caps = ks.caps
+					probeCaps.mu.Unlock()
 					i = j
 					continue
 				}

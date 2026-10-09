@@ -28,6 +28,7 @@ type editor struct {
 	buf             []rune
 	pos             int
 	stashed         []rune // ctrl+s draft stash — real's is single-slot
+	selAnchor       int    // shift+arrow selection anchor+1 (0 = none)
 	busyChord       []string
 	busyChordAt     time.Time
 	prompt          string
@@ -270,11 +271,21 @@ func (e *editor) redraw() {
 	if col > 0 {
 		fmt.Fprintf(&b, "\x1b[%dC", col)
 	}
-	os.Stdout.WriteString(b.String())
+	out := b.String()
+	// ?2026 synchronized output: wrap the repaint in bsu/esu when the
+	// probe answered — real's synchronizedOutput path avoids mid-frame
+	// tear on capable terminals
+	if syncOutputSupported() {
+		out = "\x1b[?2026h" + out + "\x1b[?2026l"
+	}
+	os.Stdout.WriteString(out)
 	compRepaint() // \x1b[J erased to screen bottom — restore the pinned zone
 }
 
 func (e *editor) insert(rs ...rune) {
+	if _, _, ok := e.selSpan(); ok {
+		e.replaceSelection()
+	}
 	e.yankPos = -1
 	e.escArmAt = time.Time{} // typing disarms "Esc again to clear"
 	e.flushCleared()         // typing after a clear commits the held draft to history
@@ -517,14 +528,24 @@ func (e *editor) insertKey(k key) *readResult {
 	case k.paste != "":
 		e.insert([]rune(e.expandPaste(k.paste))...)
 	case k.seq == "[A":
-		// real's mt(): cursor up one wrapped row first; history only
-		// when already on the draft's top row
-		if !e.cursorUp() {
-			e.histPrev()
+		if k.mod&modShift != 0 {
+			e.selExtend(e.lineAbove())
+		} else {
+			// real's mt(): cursor up one wrapped row first; history only
+			// when already on the draft's top row
+			if !e.cursorUp() {
+				e.histPrev()
+			}
+			e.selAnchor = 0
 		}
 	case k.seq == "[B":
-		if !e.cursorDown() {
-			e.histNext()
+		if k.mod&modShift != 0 {
+			e.selExtend(e.lineBelow())
+		} else {
+			if !e.cursorDown() {
+				e.histNext()
+			}
+			e.selAnchor = 0
 		}
 	case c == 16: // ctrl+p — same as Up (real's mt + w at top row)
 		if !e.cursorUp() {
@@ -545,15 +566,26 @@ func (e *editor) insertKey(k key) *readResult {
 			e.redraw()
 		}
 	case k.seq == "[C":
-		if k.mod&modCmd != 0 { // super+right -> logical line end (real)
+		if k.mod&modShift != 0 { // shift+right — extend selection (real)
+			e.selExtend(min(len(e.buf), e.pos+cnt1(e.vimCount)))
+		} else if k.mod&modCmd != 0 { // super+right -> logical line end (real)
 			e.pos = e.lineEnd()
+			e.selAnchor = 0
+			e.redraw()
+		} else if e.pos == len(e.buf) && e.histGhost() != "" {
+			// accept the inline ghost suggestion (real's Right-at-EOL)
+			e.pushUndo()
+			e.buf = append(e.buf, []rune(e.histGhost())...)
+			e.pos = len(e.buf)
 			e.redraw()
 		} else if e.pos < len(e.buf) {
 			e.pos++
 			e.redraw()
 		}
 	case k.seq == "[D":
-		if len(e.buf) == 0 && e.mode == "insert" {
+		if k.mod&modShift != 0 { // shift+left — extend selection (real)
+			e.selExtend(max(0, e.pos-cnt1(e.vimCount)))
+		} else if len(e.buf) == 0 && e.mode == "insert" {
 			// real (captured): ← opens the agents view/badge, ← again
 			// enters prompt history ("History N/100")
 			if e.leftArm {
@@ -638,6 +670,10 @@ func (e *editor) insertKey(k key) *readResult {
 		e.backwardKillWord() // deleteWORDBefore -> kill-ring prepend
 	case c == 25:
 		e.yankKill() // editor-layer ctrl+y (real's Kt["y"]) — kill-ring yank
+	case c == 3 && k.mod&modShift != 0 || k.seq == "[99;5u" && e.selAnchor != 0 || k.seq == "[99;6u" && e.selAnchor != 0:
+		// ctrl+shift+c / cmd+c with a live selection → OSC52 copy (real's
+		// copyOnSelect stack — OSC52 + clipboard fallback)
+		e.copySelection()
 	case k.seq == "[A" && e.acOpen:
 		if e.acSel > 0 {
 			e.acSel--
@@ -3045,4 +3081,83 @@ func (e *editor) footerText() string {
 		mode = "insert"
 	}
 	return "vim:" + mode + " · " + e.footer
+}
+
+// ---- selection model (real's shift+arrows + copy) ----
+
+// cnt1 normalizes a vim count (0 → 1).
+func cnt1(n int) int {
+	if n <= 0 {
+		return 1
+	}
+	return n
+}
+
+// selExtend grows/shrinks the selection to pos — first shift+arrow sets
+// the anchor at the cursor, subsequent ones move the far end. selAnchor
+// stores anchor+1 so the zero value means "no selection".
+func (e *editor) selExtend(pos int) {
+	if e.selAnchor == 0 {
+		e.selAnchor = e.pos + 1
+	}
+	e.pos = pos
+	e.redraw()
+}
+
+// selText is the currently-selected span (anchor..pos ordered).
+func (e *editor) selText() string {
+	s, en, ok := e.selSpan()
+	if !ok {
+		return ""
+	}
+	return string(e.buf[s:en])
+}
+
+// selSpan is the ordered, clamped selection span.
+func (e *editor) selSpan() (int, int, bool) {
+	if e.selAnchor == 0 || e.selAnchor-1 == e.pos {
+		return 0, 0, false
+	}
+	s, en := e.selAnchor-1, e.pos
+	if s > en {
+		s, en = en, s
+	}
+	if s > len(e.buf) {
+		e.selAnchor = 0 // buf shrank out from under the anchor
+		return 0, 0, false
+	}
+	if en > len(e.buf) {
+		en = len(e.buf)
+	}
+	return s, en, true
+}
+
+// replaceSelection deletes the selected span before an insert — the
+// standard "type over selection" behavior.
+func (e *editor) replaceSelection() {
+	s, en, ok := e.selSpan()
+	if !ok {
+		e.selAnchor = 0
+		return
+	}
+	e.pushUndo()
+	e.buf = append(e.buf[:s], e.buf[en:]...)
+	e.pos = s
+	e.selAnchor = 0
+}
+
+// copySelection writes the selected text to the clipboard — OSC52 for
+// terminals that support it (real's copyOnSelect/clipboard stack).
+func (e *editor) copySelection() {
+	if t := e.selText(); t != "" {
+		writeOSC52(t)
+		e.selAnchor = -1
+		e.redraw()
+	}
+}
+
+// writeOSC52 emits the OSC52 clipboard escape — the copy-on-select write
+// real uses before shelling out to pbcopy.
+func writeOSC52(s string) {
+	os.Stdout.WriteString("\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(s)) + "\x07")
 }
