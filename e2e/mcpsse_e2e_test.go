@@ -274,7 +274,8 @@ func TestMCPSSEDeferredRefusal(t *testing.T) {
 // JSON-RPC, responses come back as JSON bodies; Mcp-Session-Id is issued
 // on initialize and must be echoed on later requests.
 type httpMCPServer struct {
-	srv *httptest.Server
+	ccrHeaders [][3]string
+	srv        *httptest.Server
 
 	mu      sync.Mutex
 	methods []string
@@ -286,6 +287,8 @@ func newHTTPMCPServer(t *testing.T) *httpMCPServer {
 	m := &httpMCPServer{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", m.handle)
+	// claude-code-remote injects at <base>/v2/ccr-sessions/-/meta/mcp
+	mux.HandleFunc("/v2/ccr-sessions/-/meta/mcp", m.handle)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404) // GET stream unsupported — client must tolerate
 	})
@@ -303,6 +306,9 @@ func (m *httpMCPServer) handle(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	m.methods = append(m.methods, rpc.Method)
 	m.sidSeen = append(m.sidSeen, r.Header.Get("Mcp-Session-Id"))
+	m.ccrHeaders = append(m.ccrHeaders, [3]string{
+		r.Header.Get("X-MCP-Server-ID"), r.Header.Get("X-Session-UUID"),
+		r.Header.Get("anthropic-version")})
 	m.mu.Unlock()
 	if len(rpc.ID) == 0 || string(rpc.ID) == "null" {
 		w.WriteHeader(202)
@@ -745,5 +751,36 @@ func TestCallbackHook(t *testing.T) {
 	s.mustOK(t, r)
 	if !strings.Contains(r.stderr, "e2e-nosuch") && !strings.Contains(r.stderr, "callback") {
 		t.Fatalf("unknown callbackId warning missing; stderr=%q", r.stderr)
+	}
+}
+
+// TestClaudeCodeRemoteServer: CLAUDE_CODE_REMOTE sessions auto-mount the
+// claude-code-remote http MCP server at <base>/v2/ccr-sessions/-/meta/mcp
+// (mod_0116.js Uct). In --mock mode the base is the mock's addr — the
+// mock serves the meta endpoint, and CLAUDE_GO_MOCK_LOG logs the hits.
+func TestClaudeCodeRemoteServer(t *testing.T) {
+	s := newSession(t)
+	r := s.runEx(t, []string{
+		"CLAUDE_CODE_REMOTE=1",
+		"CLAUDE_GO_MOCK_LOG=1",
+	}, 60*time.Second,
+		"--mock", "-p", "hi", "--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stderr, "/v2/ccr-sessions/-/meta/mcp") {
+		t.Fatalf("claude-code-remote meta endpoint never hit; stderr=%q",
+			truncStr(r.stderr, 800))
+	}
+}
+
+// TestClaudeCodeRemoteAbsent: without CLAUDE_CODE_REMOTE the meta server
+// must NOT be injected (local sessions don't mount it).
+func TestClaudeCodeRemoteAbsent(t *testing.T) {
+	s := newSession(t)
+	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_LOG=1"},
+		60*time.Second, "--mock", "-p", "hi", "--output-format", "stream-json")
+	s.mustOK(t, r)
+	if strings.Contains(r.stderr, "ccr-sessions") {
+		t.Fatalf("claude-code-remote mounted in a non-remote session: %s",
+			truncStr(r.stderr, 400))
 	}
 }
