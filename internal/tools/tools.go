@@ -79,6 +79,9 @@ type Context struct {
 	// NotifyNeedsInput fires real's Notification{agent_needs_input} when
 	// a question dialog opens (the host binds it to the hooks lane)
 	NotifyNeedsInput func(toolName, message string)
+	// OnTaskEvent emits real's task_started/task_notification system
+	// records for background agents (stream-json prints them)
+	OnTaskEvent func(rec map[string]any)
 	// AskStructuredMulti renders real's multi-question wizard (question
 	// tabs + Submit). Falls back to sequential AskStructured when unset.
 	AskStructuredMulti func(questions []AskQuestion) (map[string][]string, error)

@@ -1744,6 +1744,15 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 			})
 		}
 	}
+	l.ToolCtx.OnTaskEvent = func(rec map[string]any) {
+		if sj {
+			rec["type"] = "system"
+			rec["uuid"] = session.NewID()
+			rec["session_id"] = l.Client.SessionID
+			ev, _ := json.Marshal(rec)
+			fmt.Println(string(ev))
+		}
+	}
 	l.Events.OnThinkingTokens = func(n int) {
 		if sj {
 			ev, _ := json.Marshal(map[string]any{
