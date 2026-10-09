@@ -555,9 +555,32 @@ func (res *Result) runOne(c Config, ev Event, m Matcher, h Command, payload map[
 		}
 		h = Command{Type: "command", Command: target}
 	}
+	if h.Type == "mcp_tool" {
+		// real's mcp_tool: calls <server>'s <tool> with the hook payload
+		// as arguments; the tool result parses as hook output
+		res.runMCPToolHook(ev, h, stdin, cwd)
+		return
+	}
+	if h.Type == "callback" || h.Type == "function" {
+		// real's in-proc hooks look up a registered callback by id
+		if fn := registeredHook(h.CallbackID); fn != nil {
+			out, err := fn(stdin)
+			res.Records = append(res.Records, Record{HookID: newHookID(), Event: string(ev), Command: hookLabel(h), ExitCode: -1, Outcome: "success"})
+			if err != nil {
+				res.NonBlockErr += fmt.Sprintf("%s hook: %v\n", h.Type, err)
+				return
+			}
+			var o Output
+			if json.Unmarshal(out, &o) == nil {
+				applyOutput(res, &o, ev)
+			}
+			return
+		}
+		res.NonBlockErr += fmt.Sprintf("%s hook %q: no callback registered\n", h.Type, h.CallbackID)
+		res.Records = append(res.Records, Record{HookID: newHookID(), Event: string(ev), Command: hookLabel(h), ExitCode: -1, Outcome: "skipped"})
+		return
+	}
 	if h.Type != "command" && h.Type != "" {
-		// mcp_tool / callback / function need host machinery the hooks
-		// package doesn't own — warn rather than silently skip.
 		res.NonBlockErr += fmt.Sprintf("%s-type hooks are not supported; use a command-type hook\n", h.Type)
 		res.Records = append(res.Records, Record{HookID: newHookID(), Event: string(ev), Command: hookLabel(h), ExitCode: -1, Outcome: "skipped"})
 		return
@@ -686,6 +709,55 @@ func evalIf(cond string, payload map[string]any, cwd string) bool {
 
 // onceKeys dedupes `once` hooks per session.
 var onceKeys sync.Map
+
+// FunctionHook is a registered in-proc hook body — callback/function
+// types dispatch here by callbackId. Registered by the host (main) for
+// built-in hooks like the artifact emulator's.
+var hookFns sync.Map // callbackId -> func(stdin []byte) (stdout []byte, err error)
+
+// RegisterFunction installs an in-proc hook for callback/function types.
+func RegisterFunction(id string, fn func(stdin []byte) ([]byte, error)) {
+	hookFns.Store(id, fn)
+}
+
+func registeredHook(id string) func([]byte) ([]byte, error) {
+	if fn, ok := hookFns.Load(id); ok {
+		return fn.(func([]byte) ([]byte, error))
+	}
+	return nil
+}
+
+// MCPHookCaller connects to server + calls tool with the hook payload.
+// Set by main so the hooks package doesn't carry the MCP import at init.
+var MCPHookCaller func(server, tool string, args json.RawMessage, cwd string) (string, error)
+
+// runMCPToolHook is type=mcp_tool (mod_1573): the named MCP server's tool
+// receives the hook stdin payload; its text output parses as hook JSON.
+func (res *Result) runMCPToolHook(ev Event, h Command, stdin []byte, cwd string) {
+	rec := Record{HookID: newHookID(), Event: string(ev), Command: hookLabel(h), ExitCode: -1}
+	defer func() { res.Records = append(res.Records, rec) }()
+	if MCPHookCaller == nil || h.Server == "" || h.Tool == "" {
+		res.NonBlockErr += fmt.Sprintf("mcp_tool hook %s.%s: no MCP caller or missing server/tool\n", h.Server, h.Tool)
+		rec.Outcome = "skipped"
+		return
+	}
+	start := time.Now()
+	out, err := MCPHookCaller(h.Server, h.Tool, stdin, cwd)
+	rec.DurationMs = time.Since(start).Milliseconds()
+	if err != nil {
+		rec.Outcome = "non_blocking_error"
+		res.NonBlockErr += fmt.Sprintf("mcp_tool hook: %v\n", err)
+		return
+	}
+	rec.Stdout = out
+	rec.Outcome = "success"
+	var o Output
+	if json.Unmarshal(bytes.TrimSpace([]byte(out)), &o) == nil {
+		applyOutput(res, &o, ev)
+	} else if strings.TrimSpace(out) != "" {
+		res.PlainText += out + "\n"
+	}
+}
 
 func claimOnce(ev Event, matcher string, h Command) bool {
 	key := fmt.Sprintf("%s|%s|%s|%s|%s|%s", ev, matcher, h.Type, h.Command, h.Prompt, h.URL)
