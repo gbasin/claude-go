@@ -111,7 +111,10 @@ func (p *ptyProc) close() {
 	case <-p.done:
 	case <-time.After(2 * time.Second):
 		p.cmd.Process.Kill()
-		<-p.done
+		select {
+		case <-p.done:
+		case <-time.After(5 * time.Second):
+		}
 	}
 }
 

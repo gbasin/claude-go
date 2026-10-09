@@ -18,6 +18,7 @@ import (
 	"claude-go/internal/agent"
 	"claude-go/internal/api"
 	"claude-go/internal/hooks"
+	"claude-go/internal/mcp"
 	"claude-go/internal/perms"
 	"claude-go/internal/tools"
 
@@ -395,6 +396,27 @@ func RunWithStore(l *agent.Loop, store Store) {
 	defer exitAltScreen()
 	compactBanner(api.Version, agent.ModelDisplay(l.Model), "", plan, l.CWD, l.Client.SessionID)
 	printAutoModeNotice(l.PermMode)
+	// .mcp.json trust flow — real prompts once per pending server;
+	// "y" writes enabledMcpjsonServers (mod_1441 approve path)
+	if dbg := os.Getenv("CLAUDE_GO_MCPDBG"); dbg != "" {
+		fmt.Fprintf(os.Stderr, "[mcpdbg] pending=%v cwd=%s ks=%v\n",
+			mcp.PendingProjectServers(l.ToolCtx.CWD), l.ToolCtx.CWD, ks != nil)
+	}
+	for _, name := range mcp.PendingProjectServers(l.ToolCtx.CWD) {
+		compInline(fmt.Sprintf("\r\n  %sThis project defines MCP server %q — approve? [y/N]%s ",
+			yellow, name, reset))
+		select {
+		case k := <-ks.ch:
+			if k.b == 'y' || k.b == 'Y' {
+				mcp.ApproveProjectServer(l.ToolCtx.CWD, name)
+				compInline("approved\r\n")
+			} else {
+				compInline("skipped\r\n")
+			}
+		case <-time.After(30 * time.Second):
+			compInline("skipped\r\n")
+		}
+	}
 
 	// transcript append cursor — session-scoped so each turn logs only
 	// new messages; starts past any resumed/loaded history, which is

@@ -122,7 +122,7 @@ func TestDaemonRespawn(t *testing.T) {
 
 	// kill the host — the job dir survives (no clean exit), the daemon
 	// respawns it on its next sweep
-	jobFile := filepath.Join(s.home, ".claude", "bg", "jobs", short, "job.json")
+	jobFile := filepath.Join(s.home, ".claude", "jobs", short, "job.json")
 	var j struct {
 		PID int `json:"pid"`
 	}
@@ -223,7 +223,7 @@ func TestResumeLiveBgRefused(t *testing.T) {
 	deadline := time.Now().Add(15 * time.Second)
 	for !strings.Contains(s.run(t, "agents").stdout, short) {
 		if time.Now().After(deadline) {
-			jd := filepath.Join(s.home, ".claude", "bg", "jobs")
+			jd := filepath.Join(s.home, ".claude", "jobs")
 			ents, _ := os.ReadDir(jd)
 			var names []string
 			for _, e := range ents {
@@ -246,7 +246,7 @@ func TestResumeLiveBgRefused(t *testing.T) {
 	// also refuses by short id prefix (registry lookup)
 	r = s.run(t, "--mock", "-r", short, "-p", "clobber")
 	if r.code == 0 || !strings.Contains(r.stderr, "running in another terminal") {
-		jobDir := filepath.Join(s.home, ".claude", "bg", "jobs")
+		jobDir := filepath.Join(s.home, ".claude", "jobs")
 		ents, _ := os.ReadDir(jobDir)
 		var names []string
 		for _, e := range ents {
@@ -294,7 +294,7 @@ func TestDaemonRespawnsVersionStale(t *testing.T) {
 	poll(t, 30*time.Second, "worker in agents", func() bool {
 		return strings.Contains(s.run(t, "agents").stdout, short)
 	})
-	jobFile := filepath.Join(s.home, ".claude", "bg", "jobs", short, "job.json")
+	jobFile := filepath.Join(s.home, ".claude", "jobs", short, "job.json")
 	var j0 struct{ PID int }
 	b, _ := os.ReadFile(jobFile)
 	_ = json.Unmarshal(b, &j0)
@@ -318,7 +318,7 @@ func TestDaemonRespawnsVersionStale(t *testing.T) {
 	fail := func() {
 		dl, _ := os.ReadFile(dbg)
 		var dump []string
-		jd := filepath.Join(s.home, ".claude", "bg", "jobs")
+		jd := filepath.Join(s.home, ".claude", "jobs")
 		filepath.Walk(jd, func(p string, i os.FileInfo, e error) error {
 			if i != nil && !i.IsDir() {
 				b, _ := os.ReadFile(p)

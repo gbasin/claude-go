@@ -540,6 +540,9 @@ func ReadTitle(projectDir, sessionID string) string {
 	return v.Title
 }
 
+// CurrentGitBranch is the exported branch probe — the picker filters on it.
+func CurrentGitBranch(cwd string) string { return currentGitBranch(cwd) }
+
 func currentGitBranch(cwd string) string {
 	out, err := execCommand("git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
@@ -1000,4 +1003,51 @@ func OpenSubagent(parentPath, agentID, cwd string) (*Store, error) {
 	os.WriteFile(filepath.Join(dir, agentID+".meta.json"), meta, 0o600)
 	st.sidechain = true
 	return st, nil
+}
+
+// SweepRetention deletes transcripts older than cleanupPeriodDays
+// (default 30 — real's sbn/lS sweep; skipped on settings errors or when
+// userSettings is disabled via --setting-sources).
+func SweepRetention(cwd string) {
+	if os.Getenv("CLAUDE_GO_NO_SWEEP") != "" {
+		return
+	}
+	days := 30
+	for _, p := range []string{
+		filepath.Join(cwd, ".claude", "settings.json"),
+		filepath.Join(config.ClaudeDir(), "settings.json"),
+	} {
+		if b, err := os.ReadFile(p); err == nil {
+			var m map[string]any
+			if json.Unmarshal(b, &m) == nil {
+				if v, ok := m["cleanupPeriodDays"].(float64); ok {
+					days = int(v)
+					break
+				}
+			}
+		}
+	}
+	if days <= 0 {
+		return // 0/negative disables the sweep
+	}
+	cutoff := time.Now().AddDate(0, 0, -days)
+	root := filepath.Join(config.ClaudeDir(), "projects")
+	ents, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, proj := range ents {
+		if !proj.IsDir() {
+			continue
+		}
+		files, _ := os.ReadDir(filepath.Join(root, proj.Name()))
+		for _, f := range files {
+			if !strings.HasSuffix(f.Name(), ".jsonl") {
+				continue
+			}
+			if fi, err := f.Info(); err == nil && fi.ModTime().Before(cutoff) {
+				os.Remove(filepath.Join(root, proj.Name(), f.Name()))
+			}
+		}
+	}
 }
