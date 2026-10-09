@@ -313,6 +313,9 @@ func requestDefs(c *Context) []api.Tool {
 	var out []api.Tool
 	var deferred []string
 	sub := c.Subagent
+	// nil AllowedTools = unrestricted; a non-nil empty slice withholds
+	// every tool (real's --tools "")
+	restricted := c.AllowedTools != nil
 	allowed := map[string]bool{}
 	for _, n := range c.AllowedTools {
 		allowed[n] = true
@@ -321,7 +324,8 @@ func requestDefs(c *Context) []api.Tool {
 		if t.Def.Name == "advisor" && advisorModelFor(c) == "" {
 			continue // wire-gated: server block only when configured
 		}
-		if len(allowed) > 0 && !allowed[t.Def.Name] && t.Def.Name != "ToolSearch" {
+		// real's --tools "" withholds everything — ToolSearch included
+		if restricted && !allowed[t.Def.Name] {
 			continue
 		}
 		if !search && hiddenInStandard[t.Def.Name] {

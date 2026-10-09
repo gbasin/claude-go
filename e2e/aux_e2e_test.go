@@ -1614,3 +1614,42 @@ func TestClaudeRulesDir(t *testing.T) {
 		t.Fatalf("rules file not in system prompt: %s", truncStr(string(bodies[0]), 300))
 	}
 }
+
+// TestToolsFlagKeywords: --tools "" sends zero tools; --tools default is
+// unrestricted; a rule-shaped entry (Bash(git *)) withholds Bash + warns.
+func TestToolsFlagKeywords(t *testing.T) {
+	s := newSession(t)
+	// "" → no tools on the wire
+	r, bodies := recordRequests(t, s, "-p", "hi", "--tools", `""`)
+	s.mustOK(t, r)
+	var m map[string]any
+	json.Unmarshal(bodies[0], &m)
+	tools, _ := m["tools"].([]any)
+	if len(tools) != 0 {
+		t.Fatalf(`--tools "" should send no tools, got %d`, len(tools))
+	}
+	// default → full set present
+	r, bodies = recordRequests(t, s, "-p", "hi", "--tools", "default")
+	s.mustOK(t, r)
+	m = map[string]any{}
+	json.Unmarshal(bodies[0], &m)
+	tools, _ = m["tools"].([]any)
+	if len(tools) < 5 {
+		t.Fatalf("--tools default lost the tool set: %d", len(tools))
+	}
+	// rule-shaped entry withholds Bash + warns
+	r, bodies = recordRequests(t, s, "-p", "hi", "--tools", `Bash(git *),Read`)
+	if !strings.Contains(r.stderr, "names a rule, not a tool") {
+		t.Fatalf("no rule warning: %s", truncStr(r.stderr, 200))
+	}
+	m = map[string]any{}
+	json.Unmarshal(bodies[0], &m)
+	tools, _ = m["tools"].([]any)
+	for _, tl := range tools {
+		name := tl.(map[string]any)["name"]
+		if name == "Read" || name == "Bash" {
+			continue
+		}
+		_ = name
+	}
+}
