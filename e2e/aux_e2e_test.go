@@ -1388,3 +1388,113 @@ func TestServerSafeguardNotFlagged(t *testing.T) {
 		t.Fatalf("not_flagged tool_use didn't run: %s", truncStr(r.stdout, 1500))
 	}
 }
+
+// TestPlanSlashArgs: /plan <description> seeds the session plan file;
+// /plan renders the Current Plan panel; bare /plan while already in plan
+// mode prints "Already in plan mode" (real mod_2070).
+func TestPlanSlashArgs(t *testing.T) {
+	s := newSession(t)
+	p := s.runPTY(t, nil, "--mock")
+	p.waitFor("❯", 8*time.Second)
+	p.send("/plan ship the parser\r")
+	p.waitFor("plan mode", 8*time.Second)
+	// plan file landed in ~/.claude/plans/<session>.md
+	matches, _ := filepath.Glob(filepath.Join(s.home, ".claude", "plans", "*.md"))
+	if len(matches) == 0 {
+		t.Fatal("/plan <desc> wrote no plan file")
+	}
+	b, _ := os.ReadFile(matches[0])
+	if !strings.Contains(string(b), "ship the parser") {
+		t.Fatalf("plan file missing description: %q", truncStr(string(b), 200))
+	}
+	p.send("/plan\r")
+	p.waitFor("Already in plan mode", 8*time.Second)
+	p.waitFor("Current Plan", 8*time.Second)
+	p.exit()
+}
+
+// TestMCPAddValidation: --scope/--transport reject unknown enumerations
+// with real's error text; positional args stop flag parsing and aren't
+// duplicated (the double-append bug).
+func TestMCPAddValidation(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "mcp", "add", "--scope", "bogus", "s1", "/bin/echo")
+	if r.code == 0 || !strings.Contains(r.stderr, `invalid scope "bogus"`) {
+		t.Fatalf("bad scope not rejected: %d %s", r.code, truncStr(r.stderr, 200))
+	}
+	r = s.run(t, "mcp", "add", "-t", "carrier-pigeon", "s2", "/bin/echo")
+	if r.code == 0 || !strings.Contains(r.stderr, `invalid transport "carrier-pigeon"`) {
+		t.Fatalf("bad transport not rejected: %d %s", r.code, truncStr(r.stderr, 200))
+	}
+	// --xaa stores on the server config; command args land once
+	r = s.run(t, "mcp", "add", "--xaa", "s3", "/bin/echo", "a", "b")
+	s.mustOK(t, r)
+	r = s.run(t, "mcp", "get", "s3")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, `"xaa": true`) {
+		t.Fatalf("xaa flag not stored: %s", truncStr(r.stdout, 400))
+	}
+	if strings.Count(r.stdout, `"a"`) > 1 || strings.Count(r.stdout, `"b"`) > 1 {
+		t.Fatalf("command args duplicated: %s", truncStr(r.stdout, 400))
+	}
+}
+
+// TestKeybindingInvalidAction: a binding to an unknown action warns
+// "invalid_action" and is DROPPED — the key keeps its default behavior
+// (real's keybinding validation, not silent dead-key).
+func TestKeybindingInvalidAction(t *testing.T) {
+	s := newSession(t)
+	kb := filepath.Join(s.home, ".claude", "keybindings.json")
+	os.MkdirAll(filepath.Dir(kb), 0o755)
+	os.WriteFile(kb, []byte(`{"bindings":[{"context":"Chat","bindings":{"ctrl+x":"bogus:action","ctrl+k":"app:kill"}}]}`), 0o644)
+	p := s.runPTY(t, []string{"CLAUDE_GO_DEBUG_KB=1"}, "--mock")
+	p.waitFor("❯", 8*time.Second)
+	out := p.output()
+	if !strings.Contains(out, "invalid_action") {
+		t.Fatalf("no invalid_action warning: %q", truncStr(out, 300))
+	}
+	// ctrl+x keeps being a normal chord prefix (not consumed dead)
+	p.send("hi")
+	time.Sleep(200 * time.Millisecond)
+	p.exit()
+}
+
+// TestUserPromptExpansionFields: the hook payload carries real's full
+// field set — expansion_type, command_name, command_args, command_source,
+// prompt.
+func TestUserPromptExpansionFields(t *testing.T) {
+	s := newSession(t)
+	cdir := filepath.Join(s.cwd, ".claude", "commands")
+	os.MkdirAll(cdir, 0o755)
+	os.WriteFile(filepath.Join(cdir, "greet.md"), []byte("say hi to $ARGUMENTS"), 0o644)
+	s.writeFile(".claude/settings.json", `{"hooks":{"UserPromptExpansion":[{"matcher":"","hooks":[{"type":"command","command":"cat > hook-payload.json; echo '{}'"}]}]}}`)
+	p := s.runPTY(t, nil, "--mock")
+	p.waitFor("❯", 8*time.Second)
+	p.send("/greet world\r")
+	// wait for the hook to write its payload — poll the file
+	var b []byte
+	var err error
+	deadline := time.Now().Add(12 * time.Second)
+	for time.Now().Before(deadline) {
+		b, err = os.ReadFile(filepath.Join(s.cwd, "hook-payload.json"))
+		if err == nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("hook payload never written; out=%q", truncStr(p.output(), 300))
+	}
+	var pl map[string]any
+	json.Unmarshal(b, &pl)
+	if pl["expansion_type"] != "slash_command" {
+		t.Fatalf("expansion_type=%v", pl["expansion_type"])
+	}
+	if pl["command_name"] != "greet" || pl["command_args"] != "world" {
+		t.Fatalf("name/args missing: %v %v", pl["command_name"], pl["command_args"])
+	}
+	if pl["command_source"] == "" || pl["prompt"] == "" {
+		t.Fatalf("source/prompt missing: %v %v", pl["command_source"], pl["prompt"])
+	}
+	p.exit()
+}

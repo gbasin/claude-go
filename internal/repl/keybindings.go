@@ -460,12 +460,18 @@ func (e *editor) applyKeybindingFile(b []byte) []string {
 				e.kbUnbound[ck] = true
 				continue
 			}
-			// real accepts unknown action names SILENTLY — the binding is
-			// stored and resolves to no handler, consuming the key (a typo
-			// kills the key rather than warning). command:<name> executes a
-			// slash command. Both paths store the binding as-is.
+			// real rejects unknown action names with invalid_action and
+			// DROPS the binding — the default key behavior survives
+			// (a typo doesn't kill the key). command:<name> executes a
+			// slash command and is always accepted.
+			a := *act
+			if !strings.HasPrefix(a, "command:") && kbActions[a] == nil {
+				warns = append(warns,
+					fmt.Sprintf("%s: invalid_action %q — this binding is ignored", kstr, a))
+				continue
+			}
 			delete(e.kbUnbound, ck)
-			e.kb[ck] = *act
+			e.kb[ck] = a
 		}
 	}
 	return warns

@@ -49,8 +49,32 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "help":
 		printHelp()
 	case "plan":
+		// real (mod_2070 se): [open|<description>] — bare enables plan
+		// mode and renders the current plan panel; "open" edits it in
+		// $EDITOR; a description enables + seeds the plan file
+		if arg == "open" {
+			planOpenInEditor(l, ks)
+			break
+		}
+		already := l.PermMode == "plan"
 		l.PermMode = "plan"
-		dprintln("  ⏸ plan mode — explore read-only, then ExitPlanMode to implement")
+		if already {
+			dprintln("  Already in plan mode.")
+		} else {
+			dprintln("  ⏸ plan mode — explore read-only, then ExitPlanMode to implement")
+		}
+		if arg != "" && arg != "share" {
+			planWrite(l, arg) // the description seeds the plan file
+		}
+		if pc, pp := planCurrent(l); pc != "" {
+			dprintf("  %sCurrent Plan%s %s%s%s\n", bold, reset, dim, pp, reset)
+			for _, ln := range strings.Split(pc, "\n") {
+				dprintln("    " + ln)
+			}
+			if ed := os.Getenv("EDITOR"); ed != "" {
+				dprintf("    %s\"/plan open\" to edit this plan in %s%s\n", dim, ed, reset)
+			}
+		}
 	case "clear", "reset", "new":
 		l.Messages = nil
 		// /clear ends the session before starting the next — real fires
@@ -5058,4 +5082,61 @@ func fireConfigChange(l *agent.Loop, key string) {
 		"file_path":       filepath.Join(config.ClaudeDir(), "settings.json"),
 		"key":             key,
 	}, l.ToolCtx.CWD)
+}
+
+// ---- /plan surface (real mod_2070: plansDirectory default ~/.claude/plans) ----
+
+// planPath returns the session's plan file — ~/.claude/plans/<session>.md,
+// or <plansDirectory> under the project root when configured.
+func planPath(l *agent.Loop) string {
+	if pd, _ := config.UserSetting("plansDirectory").(string); pd != "" {
+		return filepath.Join(l.ToolCtx.CWD, pd, l.Client.SessionID+".md")
+	}
+	return filepath.Join(config.ClaudeDir(), "plans", l.Client.SessionID+".md")
+}
+
+// planCurrent reads the live plan (content + path) for the /plan panel.
+func planCurrent(l *agent.Loop) (content, path string) {
+	p := planPath(l)
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return "", p
+	}
+	return strings.TrimSpace(string(b)), p
+}
+
+// planWrite seeds the plan file with the /plan <description> argument.
+func planWrite(l *agent.Loop, desc string) {
+	p := planPath(l)
+	os.MkdirAll(filepath.Dir(p), 0o755)
+	os.WriteFile(p, []byte(desc+"\n"), 0o600)
+	os.MkdirAll(filepath.Dir(p), 0o755) // ensure dir exists before write
+	os.WriteFile(p, []byte(desc+"\n"), 0o600)
+}
+
+// planOpenInEditor opens the plan file in $EDITOR — real's `/plan open`.
+func planOpenInEditor(l *agent.Loop, ks *keySource) {
+	p := planPath(l)
+	if _, err := os.Stat(p); err != nil {
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, []byte(""), 0o600)
+	}
+	ed := os.Getenv("EDITOR")
+	if ed == "" {
+		ed = os.Getenv("VISUAL")
+	}
+	if ed == "" {
+		dprintln("  no $EDITOR set — plan file:", p)
+		return
+	}
+	compSuspend()
+	defer compResume()
+	if ks != nil {
+		ks.release()
+		defer ks.grab()
+	}
+	cmd := exec.Command("sh", "-c", ed+" "+p)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	cmd.Run()
+	dprintln("  plan saved:", p)
 }

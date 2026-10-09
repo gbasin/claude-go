@@ -1706,13 +1706,23 @@ func expandCustomSlash(l *agent.Loop, line string) string {
 	arg := strings.TrimSpace(strings.TrimPrefix(line, "/"+name))
 	if c.mcp != nil {
 		dprintf("  %s/%s%s\n", dim, name, reset)
+		// MCP prompt expansions fire the same hook (mod_0409 wXr)
+		hooks.Run(l.Hooks, hooks.UserPromptExpansion, map[string]any{
+			"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+			"expansion_type": "mcp_prompt", "command_name": name,
+			"command_args": arg, "command_source": c.Source,
+			"prompt": line, "hook_event_name": "UserPromptExpansion",
+		}, l.ToolCtx.CWD)
 		return expandMCPPrompt(c, arg)
 	}
 	dprintf("  %s/%s%s\n", dim, name, reset)
-	// real fires UserPromptExpansion when a custom command expands
+	// real's UserPromptExpansion payload (mod_0409 wXr):
+	// expansion_type/command_name/command_args/command_source/prompt
 	hooks.Run(l.Hooks, hooks.UserPromptExpansion, map[string]any{
 		"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
-		"command_name": name, "hook_event_name": "UserPromptExpansion",
+		"expansion_type": "slash_command", "command_name": name,
+		"command_args": arg, "command_source": c.Source,
+		"prompt": line, "hook_event_name": "UserPromptExpansion",
 	}, l.ToolCtx.CWD)
 	return expandCustomCommand(c, arg)
 }

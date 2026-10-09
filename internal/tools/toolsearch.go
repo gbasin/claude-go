@@ -64,8 +64,9 @@ var shouldDeferTools = map[string]bool{
 	"PushNotification": true, "DesignSync": true,
 	"CronCreate": true, "CronDelete": true, "CronList": true,
 	"ArtifactComments": true, "ArtifactData": true,
-	"Glob": true, "Grep": true, "LS": true, "MultiEdit": true,
-	"NotebookRead": true, "TodoWrite": true,
+	"Glob": true, "Grep": true,
+	// LS/MultiEdit/NotebookRead exist in 295 only as permission-rule
+	// literals — not registered tools, not ToolSearch-discoverable
 }
 
 // searchHints are the extracted searchHint strings for deferred builtins —
@@ -95,10 +96,6 @@ var searchHints = map[string]string{
 	"EndConversation":  "end the conversation",
 	"Glob":             "find files by name pattern",
 	"Grep":             "search file contents (ripgrep)",
-	"LS":               "list directory contents",
-	"MultiEdit":        "apply multiple edits to one file",
-	"NotebookRead":     "read Jupyter notebook cells",
-	"TodoWrite":        "manage the task checklist",
 }
 
 func init() {
@@ -168,12 +165,12 @@ func toolSearchEnabled() bool {
 var hiddenInStandard = map[string]bool{
 	"Artifact": true, "ArtifactComments": true, "ArtifactData": true,
 	"DesignSync": true, "EndConversation": true, "Glob": true,
-	"Grep": true, "ListMcpResourcesTool": true, "LS": true,
-	"LSP": true, "Monitor": true, "MultiEdit": true,
-	"NotebookRead": true, "PushNotification": true,
+	"Grep": true, "ListMcpResourcesTool": true,
+	"LSP": true, "Monitor": true,
+	"PushNotification":       true,
 	"ReadMcpResourceDirTool": true, "ReadMcpResourceTool": true,
 	"ReadNotifications": true, "RemoteTrigger": true,
-	"SendFeedback": true, "TodoWrite": true,
+	"SendFeedback": true,
 }
 
 // IsDeferredTool mirrors h() in mod_0314.js: MCP tools always defer;
@@ -185,6 +182,11 @@ func IsDeferredTool(t *Tool) bool {
 	if t.IsMCP {
 		return true
 	}
+	if t.Def.Name == "TodoWrite" {
+		// real's gate: TodoWrite is the legacy fallback — deferred iff
+		// the Task* tools are OFF (294 `!HR()&&YW()`)
+		return !taskToolsEnabledFor(ProjectDir())
+	}
 	return shouldDeferTools[t.Def.Name]
 }
 
@@ -194,6 +196,9 @@ func IsDeferredTool(t *Tool) bool {
 func IsDeferredName(name string) bool {
 	if strings.HasPrefix(name, "mcp__") {
 		return true
+	}
+	if name == "TodoWrite" {
+		return !taskToolsEnabledFor(ProjectDir())
 	}
 	return shouldDeferTools[name]
 }
