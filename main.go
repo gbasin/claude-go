@@ -617,6 +617,27 @@ func main() {
 			c.Close()
 		}
 	}()
+	// mcp_tool hooks dispatch onto the live client set (reuse the open
+	// connection); unknown servers connect on demand for the hook call.
+	hooks.MCPHookCaller = func(server, tool string, args json.RawMessage, cwd2 string) (string, error) {
+		for _, c := range mcpClients {
+			if c.Name == server {
+				out, _, err := c.CallTool(context.Background(), tool, args)
+				return out, err
+			}
+		}
+		cfg, ok := mcp.LoadConfigs(cwd2)[server]
+		if !ok {
+			return "", fmt.Errorf("mcp server %q not configured", server)
+		}
+		c, err := mcp.Connect(server, cfg)
+		if err != nil {
+			return "", err
+		}
+		defer c.Close()
+		out, _, err := c.CallTool(context.Background(), tool, args)
+		return out, err
+	}
 
 	if o.bareMode {
 		os.Setenv("CLAUDE_CODE_SIMPLE", "1")
