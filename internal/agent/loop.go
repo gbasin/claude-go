@@ -34,6 +34,12 @@ type Events struct {
 	// OnStreamEvent passes every raw SSE frame through — stream-json's
 	// --include-partial-messages emits them verbatim (real's stream_event).
 	OnStreamEvent func(*api.StreamEvent)
+	// OnModelFallback fires when the retry chain swaps models — stream-json
+	// emits system/model_fallback (mod_0653).
+	OnModelFallback func(from, to string)
+	// OnThinkingTokens emits the thinking block's estimated token count —
+	// real's thinking_tokens system event at content_block_stop.
+	OnThinkingTokens func(n int)
 	// OnToolResult carries the tool_use block id — stream-json user
 	// events reference the real API-assigned id, not a fabricated one
 	OnToolResult func(name, toolUseID string, r tools.Result)
@@ -175,6 +181,7 @@ type Loop struct {
 		ms   int64
 	}
 	prLinked            bool
+	thinkingChars       map[int]int
 	toolBatchForSummary []struct {
 		name, input, output string
 	}
@@ -991,6 +998,11 @@ func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
 	models := append([]string{l.Model}, l.fallbackModels()...)
 	for mi, m := range models {
 		if mi > 0 {
+			// real emits system/model_fallback on the stream when the
+			// retry chain moves to a different model (mod_0653)
+			if l.Events.OnModelFallback != nil {
+				l.Events.OnModelFallback(l.Model, m)
+			}
 			l.Model = m // try the next fallback
 		}
 		reqStart := time.Now()
@@ -1026,10 +1038,20 @@ func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
 						l.Events.OnTextDelta(text)
 					}
 				case "thinking_delta":
+					if l.thinkingChars == nil {
+						l.thinkingChars = map[int]int{}
+					}
+					l.thinkingChars[ev.Index] += len(ev.Delta.Thinking)
 					if l.Events.OnThinking != nil {
 						l.Events.OnThinking(ev.Delta.Thinking)
 					}
 				}
+			}
+			// thinking_tokens: real stamps the thinking block's estimated
+			// token count on a system event at block stop (mod_0653)
+			if ev.Type == "content_block_stop" && l.thinkingChars[ev.Index] > 0 &&
+				l.Events.OnThinkingTokens != nil {
+				l.Events.OnThinkingTokens(l.thinkingChars[ev.Index] / 4)
 			}
 			if ev.Type == "content_block_stop" && l.streamTextIdx[ev.Index] &&
 				len(l.Hooks[string(hooks.MessageDisplay)]) > 0 {

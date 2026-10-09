@@ -1742,6 +1742,26 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 			})
 		}
 	}
+	l.Events.OnThinkingTokens = func(n int) {
+		if sj {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "system", "subtype": "thinking_tokens",
+				"thinking_tokens": n,
+				"uuid":            session.NewID(), "session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
+	}
+	l.Events.OnModelFallback = func(from, to string) {
+		if sj {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "system", "subtype": "model_fallback",
+				"original_model": from, "fallback_model": to,
+				"uuid": session.NewID(), "session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
+	}
 	// real emits system/compact_boundary on the stream when the loop
 	// compacts mid-turn (mod_1695 boundary render)
 	if sj {
