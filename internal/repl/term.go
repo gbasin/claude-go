@@ -270,7 +270,14 @@ func (e *editor) redraw() {
 	if col > 0 {
 		fmt.Fprintf(&b, "\x1b[%dC", col)
 	}
-	os.Stdout.WriteString(b.String())
+	out := b.String()
+	// ?2026 synchronized output: wrap the repaint in bsu/esu when the
+	// probe answered — real's synchronizedOutput path avoids mid-frame
+	// tear on capable terminals
+	if syncOutputSupported() {
+		out = "\x1b[?2026h" + out + "\x1b[?2026l"
+	}
+	os.Stdout.WriteString(out)
 	compRepaint() // \x1b[J erased to screen bottom — restore the pinned zone
 }
 
