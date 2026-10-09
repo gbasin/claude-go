@@ -2631,6 +2631,10 @@ func apiKeySource() string {
 	if os.Getenv("CLAUDE_CODE_API_KEY") != "" {
 		return "CLAUDE_CODE_API_KEY"
 	}
+	// real's source ordering: env keys, then apiKeyHelper, then oauth
+	if _, ok := config.UserSetting("apiKeyHelper").(string); ok {
+		return "apiKeyHelper"
+	}
 	if c, err := auth.Load(); err == nil && c != nil {
 		return "oauth"
 	}

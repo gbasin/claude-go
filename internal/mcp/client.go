@@ -1082,6 +1082,11 @@ func mcpEnvMS(name string, def int) time.Duration {
 // approved (enabledMcpjsonServers) and disabled entries are excluded.
 func PendingProjectServers(cwd string) []string {
 	var out []string
+	// --setting-sources without "project" suppresses .mcp.json entirely —
+	// the same gate the server loader uses
+	if !config.SettingSourceOK(cwd, filepath.Join(cwd, ".claude", "settings.json")) {
+		return nil
+	}
 	b, err := os.ReadFile(filepath.Join(cwd, ".mcp.json"))
 	if err != nil {
 		return nil
