@@ -132,7 +132,40 @@ func (s *Store) LogMessage(m api.Message) error {
 	if m.IsCompactSummary {
 		return s.logMessage(m, true, "Compact summary")
 	}
-	return s.logMessage(m, false, "")
+	err := s.logMessage(m, false, "")
+	// real stamps {type:"last-prompt",leafUuid:<user-uuid>,explicit:true}
+	// after a user row — the session picker reads it as the last-prompt
+	// metadata
+	// last-prompt stamps only on real user prompts — tool_result rows
+	// ride the user role but aren't prompts (real's leafUuid semantic)
+	if err == nil && m.Role == "user" && isPromptContent(m.Content) {
+		_ = s.LogRecord(map[string]any{
+			"type": "last-prompt", "sessionId": s.SessionID,
+			"leafUuid": s.lastUUID, "explicit": true,
+		})
+	}
+	return err
+}
+
+// isPromptContent reports whether a user-role message is a typed prompt
+// (text) rather than a tool_result carrier.
+func isPromptContent(c json.RawMessage) bool {
+	var str string
+	if json.Unmarshal(c, &str) == nil {
+		return true // string content = typed text
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(c, &blocks) != nil {
+		return false
+	}
+	for _, b := range blocks {
+		if b.Type == "tool_result" {
+			return false
+		}
+	}
+	return len(blocks) > 0
 }
 
 // LogCompactSummary appends the user message carrying the post-compact

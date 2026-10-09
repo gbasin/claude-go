@@ -104,7 +104,7 @@ func skillDirs(cwd string) []string {
 		filepath.Join(cwd, ".agents", "skills"),
 	}
 	for _, pat := range []string{
-		filepath.Join(config.ClaudeDir(), "plugins", "synced", "*", "*", "skills"),
+		filepath.Join(config.ClaudeDir(), "plugins", "cache", "*", "*", "*", "skills"),
 		filepath.Join(config.ClaudeDir(), "plugins", "local", "*", "skills"),
 	} {
 		dirs = append(dirs, globAll(pat)...)

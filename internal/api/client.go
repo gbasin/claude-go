@@ -397,6 +397,19 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 			if wr.ParentAgentID != "" {
 				req.Header.Set("x-claude-code-parent-agent-id", wr.ParentAgentID)
 			}
+			if wr.PrevToolDurations != "" {
+				req.Header.Set("x-claude-code-prev-tool-durations", wr.PrevToolDurations)
+			}
+			// compaction requests carry real's marker headers
+			// (mod_0409 yAt/_At/kAt/SAt)
+			// compaction markers ride two flags: x-cc-* on sl() (a
+			// debug/internal lane) and x-claude-code-* on ANn (env or
+			// tengu_splendid_sutton GB) — both off by default
+			if wr.Class == "compaction" {
+				if gatewayHintHeaders() {
+					req.Header.Set("x-claude-code-compaction", "true")
+				}
+			}
 		}
 		if err := c.applyAuth(req); err != nil {
 			return nil, err
@@ -667,4 +680,14 @@ func (r routingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			req.Method, req.URL.String(), resp.StatusCode)
 	}
 	return resp, err
+}
+
+// gatewayHintHeaders mirrors real's ANn() — CLAUDE_CODE_GATEWAY_HINT_HEADERS
+// env override, else the tengu_splendid_sutton GB feature flag.
+func gatewayHintHeaders() bool {
+	if v := os.Getenv("CLAUDE_CODE_GATEWAY_HINT_HEADERS"); v != "" {
+		return v != "0" && v != "false"
+	}
+	v, _ := config.GBFeature("tengu_splendid_sutton").(bool)
+	return v
 }

@@ -926,6 +926,12 @@ func main() {
 	tools.RegisterSession(sessionID, cwd, "")
 	// interactive cli only — real's -p wire shows no title/walk-away
 	// calls (verified against captures)
+	// session transcript — opened before OnTurnEnd so the ai-title write
+	// resolves it
+	var st2 *session.Store
+	if !o.noPersist {
+		st2, _ = session.Open(cwd, sessionID)
+	}
 	if !o.mockMode && !o.printMode {
 		var titled atomic.Bool
 		loop.Events.OnTurnEnd = func(ask string, toolCalls int, tail string, elapsed time.Duration) {
@@ -933,7 +939,11 @@ func main() {
 				bg := context.Background()
 				ep := string(loop.Client.Entrypoint)
 				if !titled.Swap(true) && ask != "" {
-					_ = client.TitleCall(bg, agent.AuxBillingLine(ep, ask, ask), ask)
+					if t := client.TitleCall(bg, agent.AuxBillingLine(ep, ask, ask), ask); t != "" && st2 != nil {
+						// real's saveAiGeneratedTitle writes the ai-title
+						// record (mod_0409 fle)
+						_ = st2.LogAITitle(t)
+					}
 				}
 				state := fmt.Sprintf("Current state: working (for %dm)\nTool calls so far: %s\nUser's most recent ask: %q\n\nAssistant message tail (last 30 chars):\n%s",
 					int(elapsed.Minutes()), auxToolCallCount(toolCalls), ask, last30(tail))
@@ -998,11 +1008,6 @@ func main() {
 		}
 	}
 
-	// session transcript
-	var st2 *session.Store
-	if !o.noPersist {
-		st2, _ = session.Open(cwd, sessionID)
-	}
 	if st2 != nil {
 		defer st2.Close()
 		loop.Transcript = st2.Path
@@ -1046,6 +1051,9 @@ func main() {
 		if o.sessionName != "" {
 			st2.LogRecord(map[string]any{"type": "summary", "summary": o.sessionName})
 		}
+		// pr-link: real writes the record when a gh PR URL lands in a
+		// Bash result — the loop detects, we persist (mod_0409 q2s)
+		loop.OnSessionRecord = func(rec map[string]any) { _ = st2.LogRecord(rec) }
 	}
 
 	if o.cont || o.resume != "" {

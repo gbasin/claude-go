@@ -47,7 +47,7 @@ func loadCustomCommands(cwd string) {
 	}
 	// plugin commands
 	for _, pat := range []string{
-		filepath.Join(config.ClaudeDir(), "plugins", "synced", "*", "*", "commands"),
+		filepath.Join(config.ClaudeDir(), "plugins", "cache", "*", "*", "*", "commands"),
 		filepath.Join(config.ClaudeDir(), "plugins", "local", "*", "commands"),
 	} {
 		matches, _ := filepath.Glob(pat)

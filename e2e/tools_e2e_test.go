@@ -355,7 +355,7 @@ func TestPluginInstallAndSkill(t *testing.T) {
 	contains(t, r.stdout, "installed demoplug", "plugin install")
 
 	// installed tree materialized under test HOME
-	glob := filepath.Join(s.home, ".claude", "plugins", "synced", "*", "demoplug",
+	glob := filepath.Join(s.home, ".claude", "plugins", "cache", "*", "demoplug", "*",
 		"skills", "tskill", "SKILL.md")
 	if m, _ := filepath.Glob(glob); len(m) == 0 {
 		t.Fatalf("installed skill missing, glob %s found nothing", glob)

@@ -4380,7 +4380,7 @@ func pluginSkillCounts() []pluginSkillRow {
 // countPluginSkills counts SKILL.md files under a plugin's synced dir and
 // approximates their token weight (~len/4 like real's estimator).
 func countPluginSkills(plugin string) (n, toks int) {
-	root := filepath.Join(config.ClaudeDir(), "plugins", "synced")
+	root := filepath.Join(config.ClaudeDir(), "plugins", "cache")
 	filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil

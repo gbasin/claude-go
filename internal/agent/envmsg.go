@@ -295,7 +295,7 @@ func skillRoots(cwd string) []string {
 		filepath.Join(cwd, ".agents", "skills"),
 	}
 	for _, base := range []string{
-		filepath.Join(config.ClaudeDir(), "plugins", "synced"),
+		filepath.Join(config.ClaudeDir(), "plugins", "cache"),
 		filepath.Join(config.ClaudeDir(), "plugins", "local"),
 	} {
 		machines, _ := filepath.Glob(filepath.Join(base, "*", "*", "skills"))

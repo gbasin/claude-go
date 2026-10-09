@@ -325,14 +325,21 @@ func jq(s string) string {
 	return string(b)
 }
 
-// Metadata builds metadata.user_id: a JSON string holding device/account/session.
+// Metadata builds metadata.user_id — real's kNe (mod_0198):
+// {agentContext?.., EXTRA_METADATA.., ti?, device_id, account_uuid,
+// session_id, parent_session_id?, tk?} — env keys merge BEFORE the device
+// fields so a collision is won by the device triple.
 func Metadata(sessionID string, cfg UserConfig) json.RawMessage {
-	// field order matters on the wire: real emits device_id, account_uuid,
-	// session_id — a struct keeps it (map marshal would sort keys).
 	var b strings.Builder
-	b.WriteString(`{"device_id":` + jq(cfg.DeviceID) +
-		`,"account_uuid":` + jq(cfg.AccountUUID) +
-		`,"session_id":` + jq(sessionID))
+	b.WriteString("{")
+	first := true
+	add := func(k, v string) {
+		if !first {
+			b.WriteString(",")
+		}
+		first = false
+		b.WriteString(jq(k) + ":" + v)
+	}
 	if extra := os.Getenv("CLAUDE_CODE_EXTRA_METADATA"); extra != "" {
 		var em map[string]any
 		if json.Unmarshal([]byte(extra), &em) == nil {
@@ -343,9 +350,15 @@ func Metadata(sessionID string, cfg UserConfig) json.RawMessage {
 			sort.Strings(keys)
 			for _, k := range keys {
 				v, _ := json.Marshal(em[k])
-				b.WriteString("," + jq(k) + ":" + string(v))
+				add(k, string(v))
 			}
 		}
+	}
+	add("device_id", jq(cfg.DeviceID))
+	add("account_uuid", jq(cfg.AccountUUID))
+	add("session_id", jq(sessionID))
+	if p := os.Getenv("CLAUDE_CODE_PARENT_SESSION_ID"); p != "" {
+		add("parent_session_id", jq(p))
 	}
 	b.WriteString("}")
 	inner := []byte(b.String())
