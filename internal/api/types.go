@@ -201,6 +201,25 @@ type Delta struct {
 	Signature    string `json:"signature,omitempty"`
 	StopReason   string `json:"stop_reason,omitempty"`
 	StopSequence string `json:"stop_sequence,omitempty"`
+	// SafeguardResults carries the server-side classifier verdicts when
+	// the request named the dangerous_tool_use safeguard (auto mode).
+	SafeguardResults []SafeguardResult `json:"safeguard_results,omitempty"`
+}
+
+// SafeguardResult is one server verdict frame — real's schema:
+// {type:"dangerous_tool_use", status:{type:"available",
+// tool_uses:{<toolUseID>:{type:"evaluated",outcome,explanation}}}}.
+type SafeguardResult struct {
+	Type   string `json:"type"`
+	Status struct {
+		Type     string `json:"type"`
+		ToolUses map[string]struct {
+			Type        string `json:"type"`
+			Outcome     string `json:"outcome"`
+			Explanation string `json:"explanation"`
+		} `json:"tool_uses"`
+		Reason string `json:"reason,omitempty"`
+	} `json:"status,omitempty"`
 }
 
 type Response struct {
@@ -212,6 +231,9 @@ type Response struct {
 	StopReason   string         `json:"stop_reason"`
 	StopSequence string         `json:"stop_sequence"`
 	Usage        Usage          `json:"usage"`
+	// SafeguardResults are the server-side auto-mode classifier verdicts
+	// (delta.safeguard_results on the final message_delta frame).
+	SafeguardResults []SafeguardResult `json:"-"`
 }
 
 type Usage struct {

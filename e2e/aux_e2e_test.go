@@ -47,6 +47,10 @@ type recReq struct {
 type auxRecorder struct {
 	srv           *httptest.Server
 	nonStreamText string
+	// sgVerdict, when non-empty, injects a dangerous_tool_use
+	// safeguard_results frame on streamed tool_use replies (the
+	// server-side classifier verdict real returns in message_delta).
+	sgVerdict string
 	// nonStreamByModel overrides nonStreamText keyed on the request's model
 	// field — lets the two eval stages answer differently.
 	nonStreamByModel map[string]string
@@ -94,7 +98,7 @@ func newAuxRecorder(t *testing.T) *auxRecorder {
 			json.Unmarshal(body, &req)
 			if req.Stream {
 				if calls := auxToolDirective(req.Messages); calls != nil {
-					writeToolUseSSE(w, calls)
+					writeToolUseSSE(w, calls, r.sgVerdict)
 				} else {
 					writeSSE(w, "aux-server reply")
 				}
@@ -188,7 +192,7 @@ func auxToolDirective(msgs []struct {
 
 // writeToolUseSSE emits tool_use blocks (stop_reason tool_use) in the SSE
 // shape the client parser expects.
-func writeToolUseSSE(w http.ResponseWriter, calls []auxCall) {
+func writeToolUseSSE(w http.ResponseWriter, calls []auxCall, sgVerdict string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(200)
 	fl, _ := w.(http.Flusher)
@@ -213,8 +217,21 @@ func writeToolUseSSE(w http.ResponseWriter, calls []auxCall) {
 				"type": "input_json_delta", "partial_json": string(c.input)}})
 		emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": i})
 	}
+	delta := map[string]any{"stop_reason": "tool_use"}
+	if sgVerdict != "" {
+		uses := map[string]any{}
+		for i := range calls {
+			uses[fmt.Sprintf("toolu_aux_%d", i)] = map[string]any{
+				"type": "evaluated", "outcome": sgVerdict,
+			}
+		}
+		delta["safeguard_results"] = []any{map[string]any{
+			"type":   "dangerous_tool_use",
+			"status": map[string]any{"type": "available", "tool_uses": uses},
+		}}
+	}
 	emit("message_delta", map[string]any{"type": "message_delta",
-		"delta": map[string]any{"stop_reason": "tool_use"}, "usage": usage})
+		"delta": delta, "usage": usage})
 	emit("message_stop", map[string]any{"type": "message_stop"})
 }
 
@@ -1324,5 +1341,50 @@ func TestParentSessionID(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("parentSessionId missing from init record")
+	}
+}
+
+// TestServerSafeguardFlagged: when the streamed response carries
+// safeguard_results with an "evaluated/flagged" verdict for the tool_use,
+// auto mode blocks it WITHOUT the local two-call safety eval — real's
+// server-side dangerous_tool_use transport.
+func TestServerSafeguardFlagged(t *testing.T) {
+	rec := newAuxRecorder(t)
+	rec.sgVerdict = "flagged"
+	s := newSession(t)
+	r := s.runAux(t, rec, nil, "-p",
+		`tool:Bash {"command":"echo SHOULD-NOT-RUN-SG"}`,
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if _, ok := rec.sawSafetyEval(); ok {
+		t.Fatal("local safety eval fired despite a server verdict")
+	}
+	if !strings.Contains(r.stdout, "Auto mode blocked this action") {
+		t.Fatalf("expected the flagged block: %s", truncStr(r.stdout, 1500))
+	}
+	// the command string itself appears in the tool_use input echo — the
+	// execution signal is a tool_result carrying the echo's output
+	if strings.Contains(r.stdout, "SHOULD-NOT-RUN-SG\n") ||
+		strings.Contains(r.stdout, `"result":"SHOULD-NOT-RUN-SG`) {
+		t.Fatal("flagged tool_use still executed")
+	}
+}
+
+// TestServerSafeguardNotFlagged: an evaluated/not_flagged verdict runs the
+// call with no local eval round-trip.
+func TestServerSafeguardNotFlagged(t *testing.T) {
+	rec := newAuxRecorder(t)
+	rec.sgVerdict = "not_flagged"
+	s := newSession(t)
+	marker := "sg-ok-" + t.Name()[15:20]
+	r := s.runAux(t, rec, nil, "-p",
+		`tool:Bash {"command":"echo `+marker+`"}`,
+		"--output-format", "stream-json")
+	s.mustOK(t, r)
+	if _, ok := rec.sawSafetyEval(); ok {
+		t.Fatal("local safety eval fired despite a server verdict")
+	}
+	if !strings.Contains(r.stdout, marker) {
+		t.Fatalf("not_flagged tool_use didn't run: %s", truncStr(r.stdout, 1500))
 	}
 }

@@ -307,8 +307,32 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": i})
 	}
 
+	delta := map[string]any{"stop_reason": stopReason}
+	// server-side dangerous_tool_use verdict: when the request carried the
+	// dangerous_tool_use safeguard and the response holds tool_uses, the
+	// verdict rides the final message_delta — the mock takes it from
+	// CLAUDE_GO_MOCK_SGVERDICT (e2e) per tool_use id
+	if v := os.Getenv("CLAUDE_GO_MOCK_SGVERDICT"); v != "" {
+		uses := map[string]any{}
+		for _, blk := range blocks {
+			if blk["type"] == "tool_use" {
+				uses[blk["id"].(string)] = map[string]any{
+					"type": "evaluated", "outcome": v,
+					"explanation": "mock verdict",
+				}
+			}
+		}
+		if len(uses) > 0 {
+			delta["safeguard_results"] = []any{map[string]any{
+				"type": "dangerous_tool_use",
+				"status": map[string]any{
+					"type": "available", "tool_uses": uses,
+				},
+			}}
+		}
+	}
 	emit("message_delta", map[string]any{"type": "message_delta",
-		"delta": map[string]any{"stop_reason": stopReason}, "usage": usage})
+		"delta": delta, "usage": usage})
 	emit("message_stop", map[string]any{"type": "message_stop"})
 }
 

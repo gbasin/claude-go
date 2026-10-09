@@ -759,9 +759,18 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		} else if pre.Permission == "allow" && !needsReview {
 			r = l.dispatch(b.Name, b.Input) // hook approved — skip the prompt
 		} else if needsReview || !permOK {
-			// unresolvable permission goes to real's auto-mode security
-			// monitor — eval failure blocks with real's exact error text.
-			if l.SafetyEval != nil && l.ToolCtx.PermissionAsk != nil && l.ToolCtx.PermissionAsk() {
+			// server-side verdict first (real's safeguard_results on the
+			// message_delta frame) — an evaluated outcome for this call
+			// decides without a second round-trip
+			sv := serverVerdictFor(resp.SafeguardResults, b.ID)
+			if sv == "not_flagged" {
+				r = l.dispatch(b.Name, b.Input)
+			} else if sv == "flagged" {
+				r = tools.Result{
+					Content: "Auto mode blocked this action. The security monitor flagged it — try a different approach or report the limitation.",
+					IsError: true,
+				}
+			} else if l.SafetyEval != nil && l.ToolCtx.PermissionAsk != nil && l.ToolCtx.PermissionAsk() {
 				sev, cat, err := l.SafetyEval(ctx, b.Name, b.Input)
 				switch {
 				case err != nil:
@@ -1939,4 +1948,19 @@ func readOnlyTool(name string) bool {
 		return true
 	}
 	return false
+}
+
+// serverVerdictFor pulls this tool_use's outcome out of the response's
+// safeguard_results frames — the server-side dangerous_tool_use verdict
+// (real's QWe/JGt shape): evaluated → "flagged"|"not_flagged".
+func serverVerdictFor(rs []api.SafeguardResult, toolUseID string) string {
+	for _, sr := range rs {
+		if sr.Type != "dangerous_tool_use" || sr.Status.Type != "available" {
+			continue
+		}
+		if tu, ok := sr.Status.ToolUses[toolUseID]; ok && tu.Type == "evaluated" {
+			return tu.Outcome
+		}
+	}
+	return ""
 }
