@@ -16,6 +16,8 @@ import (
 // Seatbelt path lists from mod_0386.js (_jn / kjn / Sct): the mandatory
 // deny-read set, the read-allow exceptions inside it, and the device nodes
 // that stay accessible.
+const nl = "\n"
+
 var seatbeltDenyRead = []string{
 	"/etc", "/var/root", "/var/db", "/var/log",
 	"/opt/homebrew/etc", "/opt/homebrew/var",
@@ -158,6 +160,11 @@ func buildSeatbeltProfile(s *SandboxSettings, cwd string, px *netproxy.Proxy, cr
 		if caPath != "" {
 			allowRead = append(allowRead, caPath) // MITM CA readable for SSL_CERT_FILE
 		}
+		if s.AllowPty {
+			// real's allowPty: pty master/slave nodes stay reachable past
+			// the /dev deny-read; the seatbelt ops below permit pty ops
+			allowRead = append(allowRead, "/dev/pty", "/dev/ptmx", "/dev/tty")
+		}
 
 		// Traversal grant: a file-read* deny on a dir also denies
 		// file-read-metadata on it, which blocks reaching any allowed leaf
@@ -248,6 +255,18 @@ func buildSeatbeltProfile(s *SandboxSettings, cwd string, px *netproxy.Proxy, cr
 		// start — fall back to a blunt deny rather than open egress.
 		b.WriteString("(deny network*)\n")
 		emitUnixSocketRules(&b, s.Network)
+	}
+	// sandbox.allowPty / allowAppleEvents / allowMachLookup: real's seatbelt
+	// emits these grants only when the fields are set — under our
+	// allow-default profile they re-assert what other rules could deny.
+	if s.AllowPty {
+		b.WriteString("(allow pseudo-tty)" + nl)
+	}
+	if s.AllowAppleEvents {
+		b.WriteString("(allow appleevent-send)" + nl)
+	}
+	if s.Network != nil && s.Network.AllowMachLookup {
+		b.WriteString("(allow mach-lookup)" + nl)
 	}
 	return b.String()
 }

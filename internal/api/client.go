@@ -585,6 +585,11 @@ func (c *Client) StreamMessage(ctx context.Context, req *Request, onEvent func(*
 			if ev.Delta != nil {
 				out.StopReason = ev.Delta.StopReason
 				out.StopSequence = ev.Delta.StopSequence
+				// server-side dangerous_tool_use verdicts ride the delta
+				// (real: safeguard_results in the final frame)
+				if len(ev.Delta.SafeguardResults) > 0 {
+					out.SafeguardResults = ev.Delta.SafeguardResults
+				}
 			}
 			if ev.Usage != nil {
 				out.Usage.OutputTokens = ev.Usage.OutputTokens
