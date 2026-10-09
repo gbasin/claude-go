@@ -99,6 +99,7 @@ func mcpSub(args []string) {
 		var clientID, clientSecret string
 		callbackPort := 0
 		wantSecret := false
+		xaaEnabled := false
 		rest := args[1:]
 		// flags may appear anywhere before `--` (commander semantics);
 		// after `--` every token is part of the command line
@@ -134,6 +135,8 @@ func mcpSub(args []string) {
 					fatal("--callback-port must be a port number")
 				}
 				callbackPort = p
+			case a == "--xaa": // claude-code extended auth flag
+				xaaEnabled = true
 			case strings.HasPrefix(a, "-") && len(pos) == 0:
 				fatal("unknown flag: " + a)
 			default:
@@ -151,7 +154,6 @@ func mcpSub(args []string) {
 			}
 		}
 		rest = append(pos, tail...)
-		rest = append(pos, rest...)
 		// real validates both enumerations before touching config
 		switch scope {
 		case "local", "user", "project":
@@ -177,6 +179,7 @@ func mcpSub(args []string) {
 		}
 		name, tgt := rest[0], rest[1]
 		cfg := map[string]any{}
+
 		if transport == "stdio" {
 			cfg = map[string]any{"type": "stdio", "command": tgt, "args": rest[2:]}
 		} else {
@@ -200,13 +203,16 @@ func mcpSub(args []string) {
 			}
 			cfg["headers"] = m
 		}
-		if clientID != "" || callbackPort > 0 {
+		if clientID != "" || callbackPort > 0 || xaaEnabled || clientSecret != "" {
 			o := map[string]any{}
 			if clientID != "" {
 				o["clientId"] = clientID
 			}
 			if callbackPort > 0 {
 				o["callbackPort"] = callbackPort
+			}
+			if xaaEnabled {
+				o["xaa"] = true
 			}
 			cfg["oauth"] = o
 		}

@@ -22,6 +22,7 @@ type customCmd struct {
 	Context     string // "fork" → run in a subagent
 	Agent       string
 	WhenToUse   string
+	Source      string // "command"|"plugin:<name>"|mcp server name — hook payload
 }
 
 var customCommands map[string]customCmd
@@ -81,6 +82,7 @@ func loadCustomCommands(cwd string) {
 			}
 			cmd := customCmd{
 				Name:        name,
+				Source:      dir, // command_source in the expansion hook
 				Description: fm["description"],
 				Body:        body,
 				ArgHint:     fm["argument-hint"],
