@@ -704,3 +704,46 @@ func TestPluginDirHooks(t *testing.T) {
 		t.Fatalf("plugin-dir hook never fired:\n%s", b)
 	}
 }
+
+// TestMCPToolHook: a UserPromptSubmit hook of type "mcp_tool" calls the
+// named MCP server's tool with the hook payload; its text lands as
+// prompt context (real's mcp_tool dispatch).
+func TestMCPToolHook(t *testing.T) {
+	srv := newSSEMCPServer(t)
+	s := newSession(t)
+	s.writeSettings(fmt.Sprintf(`{
+		"enableAllProjectMcpServers":true,
+		"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"mcp_tool",
+			"server":"ssetest","tool":"ping"}]}]}}`))
+	s.writeFile(".mcp.json", fmt.Sprintf(
+		`{"mcpServers":{"ssetest":{"type":"sse","url":%q}}}`, srv.srv.URL+"/sse"))
+
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	// wait for the async MCP handshake before prompting so the hook's
+	// caller sees the connected client
+	p.sendUntil("/mcp\r", "● ", 20)
+	p.sendUntil("hello-hook\r", "PONG-E2E", 40) // tool result surfaces as context
+	p.exit()
+
+	// the hook's tools/call actually crossed the wire
+	for _, mth := range srv.sawMethods() {
+		if mth == "tools/call" {
+			return
+		}
+	}
+	t.Fatalf("mcp_tool hook never called tools/call; saw %v", srv.sawMethods())
+}
+
+// TestCallbackHook: a callback-type hook dispatches to a registered
+// in-proc function; an unknown callbackId warns + skips.
+func TestCallbackHook(t *testing.T) {
+	s := newSession(t)
+	s.writeSettings(`{"hooks":{"UserPromptSubmit":[{"hooks":[
+		{"type":"callback","callbackId":"e2e-nosuch"}]}]}}`)
+	r := s.runEx(t, nil, 60*time.Second,
+		"--mock", "-p", "hi", "--output-format", "stream-json")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stderr, "e2e-nosuch") && !strings.Contains(r.stderr, "callback") {
+		t.Fatalf("unknown callbackId warning missing; stderr=%q", r.stderr)
+	}
+}
