@@ -48,6 +48,9 @@ type ServerConfig struct {
 	// OAuth carries the server's client-registration pins
 	// (--client-id/--client-secret/--callback-port/--xaa on mcp add).
 	OAuth *OAuthConfig `json:"oauth,omitempty"`
+	// DisableAutoBackground is real's sdk-server field — prevents the
+	// server process from auto-backgrounding on slow startup.
+	DisableAutoBackground bool `json:"disableAutoBackground,omitempty"`
 
 	// --- claude.ai connector fields (mod_0386.js SLn) ---
 	// Populated by FetchClaudeAIConfigs for Type "claudeai-proxy"; never
