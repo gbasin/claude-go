@@ -37,6 +37,9 @@ type Events struct {
 	// OnModelFallback fires when the retry chain swaps models — stream-json
 	// emits system/model_fallback (mod_0653).
 	OnModelFallback func(from, to string)
+	// OnPermissionCheck emits real's permission_check_status events —
+	// "checking" ~4s into a classifier wait, "done" at the verdict.
+	OnPermissionCheck func(toolUseID, status string)
 	// OnThinkingTokens emits the thinking block's estimated token count —
 	// real's thinking_tokens system event at content_block_stop.
 	OnThinkingTokens func(n int)
@@ -840,7 +843,24 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 					IsError: true,
 				}
 			} else if l.SafetyEval != nil && l.ToolCtx.PermissionAsk != nil && l.ToolCtx.PermissionAsk() {
+				// permission_check_status: real's announce/settle pair —
+				// "checking" fires only if the wait crosses ~4s, and
+				// "done" emits only when "checking" did
+				var announced atomic.Bool
+				var check *time.Timer
+				if l.Events.OnPermissionCheck != nil {
+					check = time.AfterFunc(4*time.Second, func() {
+						announced.Store(true)
+						l.Events.OnPermissionCheck(b.ID, "checking")
+					})
+				}
 				sev, cat, err := l.SafetyEval(ctx, b.Name, b.Input)
+				if check != nil {
+					check.Stop()
+					if announced.Load() {
+						l.Events.OnPermissionCheck(b.ID, "done")
+					}
+				}
 				switch {
 				case err != nil:
 					r = tools.Result{

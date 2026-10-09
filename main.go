@@ -1753,6 +1753,16 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 			fmt.Println(string(ev))
 		}
 	}
+	l.Events.OnPermissionCheck = func(tuID, status string) {
+		if sj {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "system", "subtype": "permission_check_status",
+				"tool_use_id": tuID, "status": status,
+				"uuid": session.NewID(), "session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
+	}
 	l.Events.OnThinkingTokens = func(n int) {
 		if sj {
 			ev, _ := json.Marshal(map[string]any{

@@ -538,10 +538,11 @@ func (r *Runner) runAgentRaw(c *tools.Context, description, prompt, subagentType
 	}
 	if background {
 		done := make(chan tools.Result, 1)
+		runID := api.NewUUID() // real stamps run_id on both bookends
 		go func() {
 			res := finish(r.runAgentTurn(sub, prompt, c, rec))
 			// real's task_notification edge on bg completion
-			// (mod_0069: {task_id, status, summary})
+			// (mod_0069: {task_id, run_id, status, summary})
 			if l2 := c.OnTaskEvent; l2 != nil {
 				status := "completed"
 				if res.IsError {
@@ -549,7 +550,8 @@ func (r *Runner) runAgentRaw(c *tools.Context, description, prompt, subagentType
 				}
 				l2(map[string]any{
 					"subtype": "task_notification", "task_id": rec.AgentID,
-					"status": status, "summary": firstLine(res.Content),
+					"run_id": runID, "status": status,
+					"summary": firstLine(res.Content),
 				})
 			}
 			done <- res
@@ -558,7 +560,8 @@ func (r *Runner) runAgentRaw(c *tools.Context, description, prompt, subagentType
 		if l2 := c.OnTaskEvent; l2 != nil {
 			l2(map[string]any{
 				"subtype": "task_started", "task_id": rec.AgentID,
-				"description": description, "subagent_type": def.Name,
+				"run_id": runID, "description": description,
+				"subagent_type":   def.Name,
 				"is_backgrounded": true,
 			})
 		}
