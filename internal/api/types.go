@@ -188,6 +188,9 @@ func (r *Request) MarshalJSON() ([]byte, error) {
 
 // SSE event types from stream=true
 type StreamEvent struct {
+	// Raw is the verbatim SSE data payload — stream-json's stream_event
+	// wraps it unchanged (real's partial-event emit).
+	Raw          json.RawMessage `json:"-"`
 	Type         string        `json:"type"`
 	Index        int           `json:"index,omitempty"`
 	ContentBlock *ContentBlock `json:"content_block,omitempty"`

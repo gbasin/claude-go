@@ -117,6 +117,15 @@ func nonessentialDisabled() bool {
 		envTruthy("DISABLE_NON_ESSENTIAL_MODEL_CALLS")
 }
 
+// AuxLaneAvail reports whether auxiliary traffic is permitted at all —
+// first-party lane, oauth creds, nonessential calls not disabled.
+func (c *Client) AuxLaneAvail() bool {
+	if os.Getenv("CLAUDE_GO_MOCK") != "" {
+		return true // mock creds stand in for oauth
+	}
+	return !nonessentialDisabled() && c.auxLane() && c.Creds != nil && !c.Creds.IsAPIKey
+}
+
 // auxLane reports whether auxiliary traffic targets the first-party
 // api.anthropic.com shape (bedrock/vertex deployments don't send it).
 func (c *Client) auxLane() bool {
@@ -515,7 +524,7 @@ func (c *Client) auxMessageCall(ctx context.Context, billingLine string, maxTok 
 // string user message; the title call sends a text block array.
 func (c *Client) auxMessageCallFmt(ctx context.Context, billingLine string, maxTok int,
 	thinking string, temp *float64, sysText []string, userText string, bareStr bool) string {
-	if nonessentialDisabled() || !c.auxLane() || c.Creds == nil || c.Creds.IsAPIKey {
+	if !c.AuxLaneAvail() {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(ctx, auxReqTimeout)
@@ -856,4 +865,33 @@ func safetyTag(s, name string) string {
 		return ""
 	}
 	return s[i+len(open) : i+len(open)+j]
+}
+
+// auxToolSummaryPrompt is real's Lu (mod_0641) — the mobile-app label
+// prompt for a completed tool batch.
+const auxToolSummaryPrompt = `Write a short summary label describing what these tool calls accomplished. It appears as a single-line row in a mobile app and truncates around 30 characters, so think git-commit-subject, not sentence.
+
+Keep the verb in past tense and the most distinctive noun. Drop articles, connectors, and long location context first.
+
+Examples:
+- Searched in auth/
+- Fixed NPE in UserService
+- Created signup endpoint
+- Read config.json
+- Ran failing tests`
+
+// ToolSummaryCall labels a completed tool batch — real's Gi in
+// mod_0641 (querySource "tool_use_summary_generation", haiku,
+// no caching). Returns the single-line label or "".
+func (c *Client) ToolSummaryCall(ctx context.Context, billingLine, intent, batch string) string {
+	user := ""
+	if intent != "" {
+		if len(intent) > 200 {
+			intent = intent[:200]
+		}
+		user = "User's intent (from assistant's last message): " + intent + "\n\n"
+	}
+	user += "Tools completed:\n\n" + batch + "\n\nLabel:"
+	return c.auxMessageCallFmt(ctx, billingLine, 200, "disabled", nil,
+		[]string{auxToolSummaryPrompt}, user, false)
 }

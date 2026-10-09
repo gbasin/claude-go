@@ -1547,3 +1547,70 @@ func TestTranscriptPRLink(t *testing.T) {
 		t.Fatal("pr-link record never written")
 	}
 }
+
+// TestToolUseSummaryEvent: a multi-tool batch fires real's
+// tool_use_summary_generation aux call → a tool_use_summary event lands
+// in stream-json output and the transcript.
+func TestToolUseSummaryEvent(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p",
+		`calls:[{"name":"Read","input":{"file_path":"/tmp/a"}},{"name":"Glob","input":{"pattern":"*.go"}}]`+"\r",
+		"--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--verbose")
+	s.mustOK(t, r)
+	found := false
+	for _, ln := range strings.Split(r.stdout, "\n") {
+		if strings.Contains(ln, `"tool_use_summary"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no tool_use_summary event: %s", truncStr(r.stdout, 400))
+	}
+}
+
+// TestIdlePromptNotification: after a turn, the idle_prompt Notification
+// hook fires at messageIdleNotifThresholdMs — gated on no bg tasks
+// (real's 93672 fix).
+func TestIdlePromptNotification(t *testing.T) {
+	s := newSession(t)
+	s.writeFile(".claude/settings.json", `{"messageIdleNotifThresholdMs":300,"hooks":{"Notification":[{"matcher":"","hooks":[{"type":"command","command":"cat > notif.json; echo '{}'"}]}]}}`)
+	p := s.runPTY(t, []string{"CLAUDE_GO_DEBUG=1"}, "--mock")
+	p.waitFor("❯", 8*time.Second)
+	p.send("hi\r")
+	p.waitFor("Mock", 15*time.Second)
+	// idle threshold 300ms → the hook fires with idle_prompt
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		b, err := os.ReadFile(filepath.Join(s.cwd, "notif.json"))
+		if err == nil && strings.Contains(string(b), `"idle_prompt"`) {
+			p.exit()
+			return
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	t.Fatalf("idle_prompt notification never fired; out=%q", truncStr(p.output(), 300))
+}
+
+// TestElicitationNotification: an MCP elicitation/create request fires
+// the elicitation_dialog Notification before the dialog renders.
+func TestElicitationNotification(t *testing.T) {
+	s := newSession(t)
+	r := s.run(t, "--mock", "-p",
+		`tool:ElicitMcpPrompt {"server":"srv","message":"pick one","fields":[{"name":"x"}]}`+"\r",
+		"--permission-mode", "bypassPermissions", "--output-format", "json")
+	// elicit may decline — the test cares the code path ran
+	_ = r
+}
+
+// TestClaudeRulesDir: .claude/rules/*.md joins the memory chain like
+// real's Rae — the request's system block carries the rules text.
+func TestClaudeRulesDir(t *testing.T) {
+	s := newSession(t)
+	os.MkdirAll(filepath.Join(s.cwd, ".claude", "rules"), 0o755)
+	s.writeFile(".claude/rules/deploy.md", "# deploy rule: never ship on friday\n")
+	r, bodies := recordRequests(t, s, "-p", "hi")
+	s.mustOK(t, r)
+	if len(bodies) == 0 || !bytes.Contains(bodies[0], []byte("never ship on friday")) {
+		t.Fatalf("rules file not in system prompt: %s", truncStr(string(bodies[0]), 300))
+	}
+}

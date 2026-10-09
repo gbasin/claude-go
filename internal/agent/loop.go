@@ -31,6 +31,9 @@ type Events struct {
 	OnTextDelta func(text string)
 	OnThinking  func(text string)
 	OnToolUse   func(name string, input json.RawMessage)
+	// OnStreamEvent passes every raw SSE frame through — stream-json's
+	// --include-partial-messages emits them verbatim (real's stream_event).
+	OnStreamEvent func(*api.StreamEvent)
 	// OnToolResult carries the tool_use block id — stream-json user
 	// events reference the real API-assigned id, not a fabricated one
 	OnToolResult func(name, toolUseID string, r tools.Result)
@@ -171,7 +174,13 @@ type Loop struct {
 		name string
 		ms   int64
 	}
-	prLinked bool
+	prLinked            bool
+	toolBatchForSummary []struct {
+		name, input, output string
+	}
+	// OnToolUseSummary emits real's tool_use_summary event — the loop
+	// fires it after the aux label call resolves for a completed batch.
+	OnToolUseSummary func(summary string, toolUseIDs []string)
 	// OnSessionRecord writes transcript side records (pr-link et al) —
 	// the host binds it to the session store
 	OnSessionRecord  func(map[string]any)
@@ -896,6 +905,9 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		if l.Events.OnToolResult != nil {
 			l.Events.OnToolResult(b.Name, b.ID, r)
 		}
+		l.toolBatchForSummary = append(l.toolBatchForSummary, struct {
+			name, input, output string
+		}{b.Name, string(b.Input), truncAt(r.Content, 300)})
 		// pr-link: a gh PR URL in a Bash result links the session
 		// (real's linkSessionToPR — mod_0409 q2s)
 		if !l.prLinked && b.Name == "Bash" && !r.IsError && l.OnSessionRecord != nil {
@@ -943,6 +955,29 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		return resp, nil
 	}
 	l.PushUser(results)
+	// tool_use_summary: real labels a completed multi-tool batch via the
+	// aux haiku lane (mod_0641 Gi) — the label lands as a stream event
+	// + transcript record
+	// the label only runs when the loop will actually continue — a
+	// max-turns abort exits before the aux call fires (real's guard order)
+	if l.OnToolUseSummary != nil && len(l.toolBatchForSummary) >= 2 &&
+		!l.IsSubagent && l.Client.AuxLaneAvail() &&
+		(l.MaxTurns == 0 || depth+1 < l.MaxTurns) {
+		batch := l.toolBatchForSummary
+		l.toolBatchForSummary = nil
+		var ids []string
+		var sb strings.Builder
+		for _, c := range batch {
+			ids = append(ids, c.name)
+			sb.WriteString("Tool: " + c.name + "\nInput: " + truncAt(c.input, 300) +
+				"\nOutput: " + truncAt(c.output, 300) + "\n\n")
+		}
+		if label := l.Client.ToolSummaryCall(ctx,
+			billingLine(string(l.Entrypoint), l.billingMeta(l.Messages)),
+			"", sb.String()); label != "" {
+			l.OnToolUseSummary(label, ids)
+		}
+	}
 	return l.run(ctx, depth+1)
 }
 
@@ -961,6 +996,9 @@ func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
 			l.startAt = reqStart
 		}
 		resp, err = l.Client.StreamMessage(ctx, l.buildRequest(), func(ev *api.StreamEvent) error {
+			if l.Events.OnStreamEvent != nil {
+				l.Events.OnStreamEvent(ev)
+			}
 			if l.firstRespAt.IsZero() {
 				l.firstRespAt = time.Now()
 			}
@@ -2043,4 +2081,11 @@ func DetectPRLink(content string) (int, string, string, bool) {
 	}
 	n, _ := strconv.Atoi(m[3])
 	return n, m[0], m[1] + "/" + m[2], true
+}
+
+func truncAt(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }

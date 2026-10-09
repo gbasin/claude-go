@@ -307,11 +307,18 @@ func claudeMDPaths(cwd string) []string {
 		return nil // --bare: no auto-discovery, no CLAUDE.md
 	}
 	paths := []string{filepath.Join(config.ClaudeDir(), "CLAUDE.md")}
-	// walk cwd up to root collecting CLAUDE.md (project files prepend later)
+	// walk cwd up to root collecting CLAUDE.md (project files prepend
+	// later) — plus each dir's .claude/rules/**/*.md (real's Rae: rules
+	// files join the memory chain)
 	var chain []string
 	home, _ := os.UserHomeDir()
 	for d := filepath.Clean(cwd); ; d = filepath.Dir(d) {
-		chain = append([]string{filepath.Join(d, "CLAUDE.md")}, chain...)
+		var lvl []string
+		lvl = append(lvl, filepath.Join(d, "CLAUDE.md"))
+		rules, _ := filepath.Glob(filepath.Join(d, ".claude", "rules", "*.md"))
+		sort.Strings(rules)
+		lvl = append(lvl, rules...)
+		chain = append(lvl, chain...)
 		if d == "/" || d == "." || d == home {
 			break
 		}

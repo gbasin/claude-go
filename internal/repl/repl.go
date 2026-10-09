@@ -168,6 +168,19 @@ func RunWithStore(l *agent.Loop, store Store) {
 	if l.SessionEndReason == "" {
 		l.SessionEndReason = "other"
 	}
+	// tool_use_summary — the aux label event lands as a transcript
+	// record + a dim line under the completed batch (real renders it
+	// as a summary row)
+	l.OnToolUseSummary = func(summary string, ids []string) {
+		if currentStore != nil {
+			currentStore.LogRecord(map[string]any{
+				"type": "tool_use_summary", "summary": summary,
+				"preceding_tool_use_ids": ids,
+				"sessionId":              l.Client.SessionID,
+			})
+		}
+		compInline("\r\n" + dim + "  ⏵ " + summary + reset + "\r\n")
+	}
 	l.ToolCtx.SetPermMode = func(mode string) {
 		l.PermMode = mode
 		if currentStore != nil {
@@ -709,6 +722,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 		}
 		for {
 			runTurn(line)
+			armIdleNotify(l)
 			// drain session-injected prompts (cron, wakeup, monitor events)
 			for {
 				select {
@@ -2397,6 +2411,15 @@ func elicitDialog(l *agent.Loop, ks *keySource, req *tools.ElicitRequest) tools.
 		_ = json.Unmarshal(res.ElicitContent, &content)
 		return tools.ElicitAnswer{Action: res.ElicitAction, Content: content}
 	}
+	// real fires Notification{elicitation_dialog} when the dialog opens
+	// (the elicitation category row in K8)
+	hooks.Run(l.Hooks, hooks.Notification, map[string]any{
+		"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+		"message":           "Claude needs your input to continue",
+		"notification_type": "elicitation_dialog",
+		"hook_event_name":   "Notification",
+		"permission_mode":   l.PermMode,
+	}, l.ToolCtx.CWD)
 	compInline("\r\n" + "\x1b[38;5;246m" + "┌ MCP " + req.Server + " is asking:\x1b[39m\r\n")
 	compInline("  " + req.Message + "\r\n")
 	// requestedSchema fields → prompt for each string property
@@ -2456,4 +2479,61 @@ func elicitDialog(l *agent.Loop, ks *keySource, req *tools.ElicitRequest) tools.
 		"action": action,
 	}, l.ToolCtx.CWD)
 	return tools.ElicitAnswer{Action: action, Content: content}
+}
+
+// armIdleNotify schedules real's idle_prompt Notification hook — fires
+// after messageIdleNotifThresholdMs (default 60s) of prompt idle, only
+// when no background tasks are running (real's 93672 fix) and no dialog
+// is up.
+var idleNotifSeq atomic.Int64
+
+func armIdleNotify(l *agent.Loop) {
+	idleNotifSeq.Add(1)
+	if os.Getenv("CLAUDE_GO_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "[idle] armed hooks=%v\n", len(l.Hooks[string(hooks.Notification)]))
+	}
+	if l.Hooks == nil || len(l.Hooks[string(hooks.Notification)]) == 0 {
+		return
+	}
+	ms := float64(60000)
+	for _, p := range []string{
+		filepath.Join(l.ToolCtx.CWD, ".claude", "settings.json"),
+		filepath.Join(config.ClaudeDir(), "settings.json"),
+	} {
+		if b, err := os.ReadFile(p); err == nil {
+			var m map[string]any
+			if json.Unmarshal(b, &m) == nil {
+				if v, ok := m["messageIdleNotifThresholdMs"].(float64); ok && v > 0 {
+					ms = v
+					break
+				}
+			}
+		}
+	}
+	seq := idleNotifSeq.Load()
+	time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
+		if idleNotifSeq.Load() != seq {
+			return // a newer turn/prompt superseded this arming
+		}
+		if os.Getenv("CLAUDE_GO_DEBUG") != "" {
+			fmt.Fprintln(os.Stderr, "[idle] firing")
+		}
+		if l.ToolCtx.BgTasks == nil {
+			l.ToolCtx.BgTasks = tools.NewBackground()
+		}
+		for _, t := range l.ToolCtx.BgTasks.List() {
+			select {
+			case <-t.Done:
+			default:
+				return // bg task still running — real suppresses idle_prompt
+			}
+		}
+		hooks.Run(l.Hooks, hooks.Notification, map[string]any{
+			"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+			"message":           "Claude is waiting for your input",
+			"notification_type": "idle_prompt",
+			"hook_event_name":   "Notification",
+			"permission_mode":   l.PermMode,
+		}, l.ToolCtx.CWD)
+	})
 }

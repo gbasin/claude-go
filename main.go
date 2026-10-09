@@ -1651,29 +1651,20 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 		default:
 			out.WriteString(t)
 		}
-		if sj && flagPartial {
-			ev, _ := json.Marshal(map[string]any{
-				"type": "stream_event",
-				"event": map[string]any{
-					"type":  "content_block_delta",
-					"index": 0,
-					"delta": map[string]any{"type": "text_delta", "text": t},
-				},
-				"session_id": l.Client.SessionID,
-			})
-			fmt.Println(string(ev))
-		}
 	}
-	l.Events.OnThinking = func(t string) {
-		if sj && flagPartial {
+	if sj && flagPartial {
+		// real's stream_event: the raw SSE frame verbatim + session_id /
+		// parent_tool_use_id stamps (mod_0653 qVo)
+		l.Events.OnStreamEvent = func(se *api.StreamEvent) {
+			var raw json.RawMessage = se.Raw
+			if len(raw) == 0 {
+				raw, _ = json.Marshal(se)
+			}
 			ev, _ := json.Marshal(map[string]any{
-				"type": "stream_event",
-				"event": map[string]any{
-					"type":  "content_block_delta",
-					"index": 0,
-					"delta": map[string]any{"type": "thinking_delta", "thinking": t},
-				},
-				"session_id": l.Client.SessionID,
+				"type": "stream_event", "uuid": session.NewID(),
+				"parent_tool_use_id": nil,
+				"event":              json.RawMessage(raw),
+				"session_id":         l.Client.SessionID,
 			})
 			fmt.Println(string(ev))
 		}
@@ -1693,6 +1684,23 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 				})
 				fmt.Println(string(ev))
 			}
+		}
+	}
+	l.OnToolUseSummary = func(summary string, ids []string) {
+		if sj {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "tool_use_summary", "summary": summary,
+				"preceding_tool_use_ids": ids,
+				"uuid":                   session.NewID(),
+				"session_id":             l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
+		if st != nil {
+			st.LogRecord(map[string]any{
+				"type": "tool_use_summary", "summary": summary,
+				"preceding_tool_use_ids": ids,
+			})
 		}
 	}
 	l.Events.OnToolResult = func(name, toolUseID string, tr tools.Result) {
@@ -1970,6 +1978,15 @@ func authLoginSub() {
 		fatal("login failed: %v", err)
 	}
 	auth.SaveOwnCreds(creds)
+	// real fires the auth_success Notification hook after login
+	if hc := hooks.Load(mustGetwd()); hc != nil {
+		hooks.Run(hc, hooks.Notification, map[string]any{
+			"session_id": "", "cwd": mustGetwd(),
+			"message":           "Login successful",
+			"notification_type": "auth_success",
+			"hook_event_name":   "Notification",
+		}, mustGetwd())
+	}
 	fmt.Println("logged in")
 }
 
