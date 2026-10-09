@@ -539,8 +539,29 @@ func (r *Runner) runAgentRaw(c *tools.Context, description, prompt, subagentType
 	if background {
 		done := make(chan tools.Result, 1)
 		go func() {
-			done <- finish(r.runAgentTurn(sub, prompt, c, rec))
+			res := finish(r.runAgentTurn(sub, prompt, c, rec))
+			// real's task_notification edge on bg completion
+			// (mod_0069: {task_id, status, summary})
+			if l2 := c.OnTaskEvent; l2 != nil {
+				status := "completed"
+				if res.IsError {
+					status = "failed"
+				}
+				l2(map[string]any{
+					"subtype": "task_notification", "task_id": rec.AgentID,
+					"status": status, "summary": firstLine(res.Content),
+				})
+			}
+			done <- res
 		}()
+		// real emits system/task_started when the bg agent joins the set
+		if l2 := c.OnTaskEvent; l2 != nil {
+			l2(map[string]any{
+				"subtype": "task_started", "task_id": rec.AgentID,
+				"description": description, "subagent_type": def.Name,
+				"is_backgrounded": true,
+			})
+		}
 		select {
 		case res := <-done:
 			return res
