@@ -522,6 +522,18 @@ func (r *Runner) runAgentRaw(c *tools.Context, description, prompt, subagentType
 			_ = tools.NotifyOnIdle(c.Session,
 				fmt.Sprintf("[agent %q completed] %s", rec.Name, firstLine(res.Content)))
 		}
+		// real's agent_completed Notification fires on bg-agent finish
+		// (K8 notification categories, mod_0071)
+		if background && len(r.Hooks) > 0 {
+			hooks.Run(r.Hooks, hooks.Notification, map[string]any{
+				"session_id": r.Client.SessionID, "cwd": c.CWD,
+				"message":           fmt.Sprintf("Agent %q completed", rec.Name),
+				"notification_type": "agent_completed",
+				"hook_event_name":   "Notification",
+				"permission_mode":   r.PermMode,
+				"agent_type":        rec.Type, "agent_id": rec.AgentID,
+			}, c.CWD)
+		}
 		return res
 	}
 	if background {
