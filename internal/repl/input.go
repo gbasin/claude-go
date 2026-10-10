@@ -35,6 +35,12 @@ var probeCaps struct {
 	caps terminalCaps
 }
 
+// anyProbed reports whether any DECRPM reply landed — compositor tests
+// that never ran a probe keep their own stored capability flag.
+func (c terminalCaps) anyProbed() bool {
+	return c.daAnswered || c.syncOutput || c.sgrMousePixel || c.kittyFlags != 0
+}
+
 // modifier bits carried on a key (kitty/CSI-u encoding: param-1).
 const (
 	modShift = 1
@@ -136,7 +142,6 @@ func (ks *keySource) recordProbeReply(seq string) bool {
 	return false
 }
 
-// syncOutput reports whether the terminal answered the ?2026 DECRPM —
 // redraws wrap in bsu/esu markers then (real's synchronizedOutput gate).
 func syncOutputSupported() bool {
 	probeCaps.mu.Lock()

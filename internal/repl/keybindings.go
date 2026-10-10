@@ -148,6 +148,10 @@ var kbActions = map[string]func(*editor) *readResult{
 	// handled in insertKey (printable chars aren't keystrokes). This entry
 	// lets users rebind to a modifier combo via keybindings.json.
 	"voice:pushToTalk": func(e *editor) *readResult { e.voiceToggle(); return nil },
+	// abovePrompt — real's collapsed-activity band above the composer:
+	// ctrl+x ctrl+a expands/collapses it, ctrl+x tab moves focus there
+	"abovePrompt:toggle": func(e *editor) *readResult { e.abovePromptToggle(); return nil },
+	"abovePrompt:focus":  func(e *editor) *readResult { e.abovePromptFocus(); return nil },
 }
 
 // defaultKeybindings mirrors the relevant rows of the CC binding table.
@@ -165,6 +169,8 @@ var defaultKeybindings = []struct {
 	{"Chat", "ctrl+l", "chat:clearInput"},
 	{"Chat", "ctrl+x ctrl+k", "chat:killAgents"},
 	{"Chat", "ctrl+x ctrl+e", "chat:externalEditor"},
+	{"Chat", "ctrl+x ctrl+a", "abovePrompt:toggle"},
+	{"Chat", "ctrl+x tab", "abovePrompt:focus"},
 	{"Chat", "shift+tab", "chat:cycleMode"},
 	{"Chat", "ctrl+g", "chat:externalEditor"},
 	{"Chat", "ctrl+v", "chat:imagePaste"},
