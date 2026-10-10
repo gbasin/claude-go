@@ -149,7 +149,7 @@ func lowerASCII(s string) string {
 }
 
 func strings_TrimSuffix(s, suf string) string {
-	for len(s) > 0 && len(s) >= len(suf) && s[len(s)-len(suf):] == suf {
+	for len(suf) > 0 && len(s) >= len(suf) && s[len(s)-len(suf):] == suf {
 		s = s[:len(s)-len(suf)]
 	}
 	return s
