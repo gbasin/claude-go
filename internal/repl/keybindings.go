@@ -213,6 +213,8 @@ var defaultKeybindings = []struct {
 	{"Transcript", "k", "scroll:lineUp"},
 	{"Transcript", "up", "scroll:lineUp"},
 	{"Transcript", "down", "scroll:lineDown"},
+	{"Transcript", "home", "scroll:top"},
+	{"Transcript", "end", "scroll:bottom"},
 	{"Transcript", "space", "scroll:fullPageDown"},
 	{"Transcript", "b", "scroll:fullPageUp"},
 	// Select context (real's pickers) — up/down/j/k/ctrl+n/p/home/end
