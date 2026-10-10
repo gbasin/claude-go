@@ -23,12 +23,6 @@ type ElicitAnswer struct {
 	Content map[string]any `json:"content,omitempty"`
 }
 
-// elicitWaiters is the fallback path for non-REPL contexts (headless
-// declines immediately — real's behavior without a dialog host).
-func DeclineElicit() map[string]any {
-	return map[string]any{"action": "decline"}
-}
-
 // RegisterElicitHandler installs the prompt-side dialog handler.
 var elicitMu sync.Mutex
 var elicitFn func(*ElicitRequest) ElicitAnswer

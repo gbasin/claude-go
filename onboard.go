@@ -75,8 +75,9 @@ func onboardThemePicker() string {
 
 	// raw mode for arrow-key nav
 	fd := int(os.Stdin.Fd())
-	oldState, _ := term.MakeRaw(fd)
-	defer term.Restore(fd, oldState)
+	if oldState, err := term.MakeRaw(fd); err == nil {
+		defer term.Restore(fd, oldState)
+	}
 	hideCursor := "\x1b[?25l"
 	showCursor := "\x1b[?25h"
 	fmt.Print(hideCursor)

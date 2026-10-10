@@ -251,14 +251,6 @@ func (c *Context) DeferredNames() []string {
 	return names
 }
 
-// DeferredReminder renders the deferred_tools_delta announcement (MTr).
-func DeferredReminder(names []string) string {
-	return "The following deferred tools are now available via ToolSearch. " +
-		"Their schemas are NOT loaded — calling them directly will fail with InputValidationError. " +
-		"Use ToolSearch with query \"select:<name>[,<name>...]\" to load tool schemas before calling them:\n" +
-		strings.Join(names, "\n")
-}
-
 // RequestDefs is the wire tools array: non-deferred defs, plus the
 // DeferredToolPlaceholder stub (second-to-last, real's splice point) and the
 // ToolSearch def while undiscovered deferred tools remain.

@@ -196,17 +196,6 @@ func matchCronPart(p string, v, fieldIdx int) bool {
 		fmt.Sscanf(p[i+1:], "%d", &step)
 		p = p[:i]
 	}
-	lo, hi := 0, 59
-	switch fieldIdx {
-	case 1:
-		hi = 23
-	case 2:
-		lo, hi = 1, 31
-	case 3:
-		lo, hi = 1, 12
-	case 4:
-		hi = 6
-	}
 	if p == "*" {
 		return v%step == 0
 	}
@@ -222,8 +211,6 @@ func matchCronPart(p string, v, fieldIdx int) bool {
 		}
 		return v == n
 	}
-	_ = lo
-	_ = hi
 	return false
 }
 
@@ -668,8 +655,6 @@ func readRegistry() []sessionEntry {
 func sessionFile(pid int) string {
 	return filepath.Join(registryPath(), fmt.Sprint(pid)+".json")
 }
-
-func writeRegistry(_ []sessionEntry) error { return nil } // per-file writes now
 
 // RegisterSession publishes this session so other local claude-go sessions
 // (and real CC peers, which read the same fields) can SendMessage to it.
@@ -2251,9 +2236,11 @@ const (
 var selfPeerInfo atomic.Value // struct{Name, SessionID string}
 
 // wrapPeerOutbound builds real's cross-session envelope:
-//   <cross-session-message from="uds:..." from-session="<uuid>"
-//     hop-chain="<64-hex>" from-name="<name>" from-mode="prompting">
-//     body </cross-session-message>
+//
+//	<cross-session-message from="uds:..." from-session="<uuid>"
+//	  hop-chain="<64-hex>" from-name="<name>" from-mode="prompting">
+//	  body </cross-session-message>
+//
 // Live-verified: without it real renders the body but drops all sender
 // attribution, so the receiving session can't reply to the sender.
 func wrapPeerOutbound(body string) string {

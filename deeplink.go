@@ -111,7 +111,7 @@ func checkMarketplace(m string) error {
 	ref := ""
 	if i := strings.Index(m, "#"); i >= 0 {
 		src, ref = m[:i], m[i+1:]
-	} else if i := strings.Index(m, "@"); i > 0 && !strings.Contains(m[:i], ":") {
+	} else if i := strings.LastIndex(m, "@"); i > 0 && !strings.Contains(m[:i], ":") && !strings.HasPrefix(m, "git@") {
 		src, ref = m[:i], m[i+1:]
 	}
 	if strings.Contains(src, "%") {
