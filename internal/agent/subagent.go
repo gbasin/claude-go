@@ -60,10 +60,9 @@ var builtinAgentDefs = []AgentDef{
 		Name:   "general-purpose",
 		Source: "builtin",
 		Tools:  []string{"*"},
-		Description: "General-purpose agent for researching complex questions, searching for code, " +
-			"***REMOVED***" +
-			"***REMOVED***" +
-			"perform the search for you.",
+		Description: "General-purpose agent for research and multi-step tasks — searching for code, " +
+			"answering open questions, running cross-file work. Reach for it when you're not confident " +
+			"a single search nails the target.",
 		SystemPrompt: generalPurposePrompt,
 	},
 	{
@@ -71,11 +70,10 @@ var builtinAgentDefs = []AgentDef{
 		Source:          "builtin",
 		Model:           "inherit",
 		DisallowedTools: readOnlyDeny,
-		Description: "***REMOVED***" +
-			"***REMOVED***" +
-			"***REMOVED***" +
-			"***REMOVED***" +
-			"\"very thorough\" for multiple locations and naming conventions.",
+		Description: "Read-only search agent for broad fan-out searches — when an answer needs sweeping " +
+			"many files, directories, or naming conventions and you want the conclusion, not the file " +
+			"dumps. Specify breadth: \"medium\" for moderate exploration, \"very thorough\" for many " +
+			"locations and naming conventions.",
 		SystemPrompt: "You are a read-only search agent. Locate code and report conclusions — " +
 			"never modify files, run mutating commands, or write anything.",
 	},
@@ -84,9 +82,9 @@ var builtinAgentDefs = []AgentDef{
 		Source:          "builtin",
 		Model:           "inherit",
 		DisallowedTools: readOnlyDeny,
-		Description: "Software architect agent for designing implementation plans. Use this when you " +
-			"***REMOVED***" +
-			"identifies critical files, and considers architectural trade-offs.",
+		Description: "Software-architect agent for implementation planning — use when a task needs its " +
+			"strategy planned first. Returns step-by-step plans, identifies critical files, weighs " +
+			"architectural trade-offs.",
 		SystemPrompt: "You are a software architect agent. Explore the codebase read-only and " +
 			"return a concrete, step-by-step implementation plan. Do not modify files.",
 	},
@@ -110,9 +108,7 @@ var builtinAgentDefs = []AgentDef{
 		Source: "builtin",
 		Model:  "haiku",
 		Tools:  []string{"Bash", "Read", "WebFetch", "WebSearch"},
-		Description: `***REMOVED***` +
-			"`client.beta.messages.tool_runner`" + `) for running an agentic loop over your own tools, manual tool-use loops, Managed Agents for server-hosted agents with a managed sandbox, prompt caching, and general Anthropic SDK usage; (4) Claude Tag (Claude in Slack) - what it is, setting it up for a Slack workspace, ` +
-			"`/install-slack-app`" + `; (5) ` + "`claude plugin eval`" + ` (writing and running plugin eval suites, its JSON/report, sandbox, CI) and the ` + "`/skill-doctor`" + ` ***REMOVED***`,
+		Description: `Use this agent for questions about Claude Code and the Claude ecosystem — "Can Claude...", "Does Claude...", "How do I..." — covering: (1) the CLI: features, hooks, slash commands, MCP servers, settings, IDE integrations, keybindings; (2) the Agent SDK: building custom agents; (3) the API: messages, tool use loops, tool_runner, managed agents, prompt caching, SDK usage; (4) Claude in Slack; (5) plugin eval suites and the /skill-doctor report. Before spawning, reuse a running or recently completed claude-code-guide agent via SendMessage if one exists.`,
 	},
 	{
 		Name:        "statusline-setup",
@@ -733,5 +729,5 @@ var StatuslineSetupPrompt string
 // handbackReminder is real's msg[0] tail block for spawned agents —
 // the final report only reaches the caller through SubagentHandback.
 const handbackReminderBlock = `<system-reminder>
-***REMOVED***
+Your final report is delivered through SubagentHandback: when your work is complete, call SubagentHandback({message: <your full report>}) — the call ends your run, so make it your last step. Only a SubagentHandback call reaches your caller; trailing plain text is not delivered.
 </system-reminder>`

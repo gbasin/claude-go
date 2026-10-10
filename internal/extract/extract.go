@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -222,6 +223,26 @@ func Harvest(ctx context.Context, bin string, logf func(string, ...any)) (*Harve
 	if _, rawBody, headers, _, err := capture(ctx, bin, "", logf); err == nil {
 		writeWireCapture(dir, "default", rawBody, headers)
 	}
+
+	// interactive (PTY) run — the cli entrypoint's wire differs: CLI tool
+	// schema variants and a session block with interactive-only lines
+	if body, rawBody, headers, cliMain, err := captureInteractive(ctx, bin, logf); err == nil {
+		if cliMain != "" {
+			os.WriteFile(filepath.Join(dir,
+				"system_main_cli_"+cliModelClass(body.Model)+".txt"),
+				[]byte(cliMain), 0o644)
+		}
+		if len(body.Tools) > 0 {
+			writeJSONLines(filepath.Join(dir, "tools_cli.json"), body.Tools)
+		}
+		if idx := envSectionText(body, agentsMarker); idx != "" {
+			os.WriteFile(filepath.Join(dir, "agents_index_cli.txt"),
+				[]byte(idx), 0o644)
+		}
+		writeWireCapture(dir, "interactive", rawBody, headers)
+	} else {
+		logf("  interactive: capture skipped: %v", err)
+	}
 	if len(res.Models) == 0 {
 		return nil, fmt.Errorf("no captures succeeded")
 	}
@@ -244,40 +265,13 @@ func capture(ctx context.Context, bin, model string, logf func(string, ...any)) 
 	}
 	defer srv.Shutdown(ctx)
 
-	home, err := os.MkdirTemp("", "claude-go-extract-home")
+	home, cwd, env, err := seedSandbox(srv.Addr)
 	if err != nil {
 		return nil, nil, nil, "", err
 	}
 	defer os.RemoveAll(home)
-	home, _ = filepath.EvalSymlinks(home)
-	cwd, err := os.MkdirTemp("", "claude-go-extract-cwd")
-	if err != nil {
-		return nil, nil, nil, "", err
-	}
 	defer os.RemoveAll(cwd)
-	cwd, _ = filepath.EvalSymlinks(cwd)
 
-	// seed onboarding + project trust so real claude doesn't prompt
-	claudeJSON := map[string]any{
-		"hasCompletedOnboarding": true,
-		"projects":               map[string]any{cwd: map[string]any{"hasTrustDialogAccepted": true}},
-	}
-	if b, err := json.Marshal(claudeJSON); err == nil {
-		os.WriteFile(filepath.Join(home, ".claude.json"), b, 0o644)
-	}
-	os.MkdirAll(filepath.Join(home, ".claude"), 0o755)
-
-	tmp := filepath.Join(home, ".tmp")
-	os.MkdirAll(tmp, 0o755)
-	env := []string{
-		"HOME=" + home, "SHELL=/bin/bash", "TERM=xterm-256color",
-		"LANG=en_US.UTF-8", "TMPDIR=" + tmp, "USER=" + os.Getenv("USER"),
-		"PATH=" + os.Getenv("PATH"),
-		"ANTHROPIC_BASE_URL=" + srv.Addr,
-		"ANTHROPIC_AUTH_TOKEN=test", "ANTHROPIC_API_KEY=test",
-		"CLAUDE_CODE_OAUTH_TOKEN=test",
-		"DISABLE_TELEMETRY=1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
-	}
 	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	argv := []string{"-p", "ping"}
@@ -300,8 +294,110 @@ func capture(ctx context.Context, bin, model string, logf func(string, ...any)) 
 	return &b, raw, srv.Headers[len(srv.Bodies)-1], tokenize(mainSystemText(b.System), cwd, home), nil
 }
 
-// mainSystemText returns the last text block of the system array — real's
-// layout puts the assembled main prompt last among the static blocks.
+// seedSandbox makes the isolated HOME/cwd + env real claude runs under.
+func seedSandbox(mockAddr string) (home, cwd string, env []string, err error) {
+	home, err = os.MkdirTemp("", "claude-go-extract-home")
+	if err != nil {
+		return "", "", nil, err
+	}
+	home, _ = filepath.EvalSymlinks(home)
+	cwd, err = os.MkdirTemp("", "claude-go-extract-cwd")
+	if err != nil {
+		return "", "", nil, err
+	}
+	cwd, _ = filepath.EvalSymlinks(cwd)
+
+	// seed onboarding + project trust so real claude doesn't prompt
+	claudeJSON := map[string]any{
+		"hasCompletedOnboarding": true,
+		"projects":               map[string]any{cwd: map[string]any{"hasTrustDialogAccepted": true}},
+	}
+	if b, err := json.Marshal(claudeJSON); err == nil {
+		os.WriteFile(filepath.Join(home, ".claude.json"), b, 0o644)
+	}
+	os.MkdirAll(filepath.Join(home, ".claude"), 0o755)
+	os.MkdirAll(filepath.Join(home, ".tmp"), 0o755)
+
+	env = []string{
+		"HOME=" + home, "SHELL=/bin/bash", "TERM=xterm-256color",
+		"LANG=en_US.UTF-8", "TMPDIR=" + filepath.Join(home, ".tmp"),
+		"USER=" + os.Getenv("USER"), "PATH=" + os.Getenv("PATH"),
+		"ANTHROPIC_BASE_URL=" + mockAddr,
+		"ANTHROPIC_AUTH_TOKEN=test", "ANTHROPIC_API_KEY=test",
+		"CLAUDE_CODE_OAUTH_TOKEN=test",
+		"DISABLE_TELEMETRY=1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+	}
+	return home, cwd, env, nil
+}
+
+// captureInteractive runs real claude on a PTY (interactive/cli
+// entrypoint — different tool schemas than -p) and types one turn.
+func captureInteractive(ctx context.Context, bin string, logf func(string, ...any)) (*wireBody, []byte, http.Header, string, error) {
+	srv, err := mock.Start()
+	if err != nil {
+		return nil, nil, nil, "", err
+	}
+	defer srv.Shutdown(ctx)
+
+	home, cwd, env, err := seedSandbox(srv.Addr)
+	if err != nil {
+		return nil, nil, nil, "", err
+	}
+	defer os.RemoveAll(home)
+	defer os.RemoveAll(cwd)
+
+	master, slave, err := ptyAlloc(120, 40)
+	if err != nil {
+		return nil, nil, nil, "", err
+	}
+	defer master.Close()
+
+	cctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, bin)
+	cmd.Env = env
+	cmd.Dir = cwd
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+	cmd.SysProcAttr = ptyProcAttr()
+	if err := cmd.Start(); err != nil {
+		slave.Close()
+		return nil, nil, nil, "", fmt.Errorf("start: %w", err)
+	}
+	slave.Close()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	go io.Copy(io.Discard, master) // drain TUI output
+
+	// type a turn once the REPL is up — a couple of retries covers slow boots
+	go func() {
+		for i := 0; i < 12; i++ {
+			time.Sleep(2 * time.Second)
+			master.Write([]byte("ping\r"))
+		}
+	}()
+
+	deadline := time.Now().Add(60 * time.Second)
+	for len(srv.Bodies) == 0 && time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			return nil, nil, nil, "", fmt.Errorf("real claude exited before any request: %v", err)
+		default:
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	cmd.Process.Kill()
+	<-done
+	if len(srv.Bodies) == 0 {
+		return nil, nil, nil, "", fmt.Errorf("no request captured in interactive run")
+	}
+	raw := srv.Bodies[len(srv.Bodies)-1]
+	var b wireBody
+	if err := json.Unmarshal(raw, &b); err != nil {
+		return nil, nil, nil, "", fmt.Errorf("interactive body unmarshal: %w", err)
+	}
+	return &b, raw, srv.Headers[len(srv.Bodies)-1], tokenize(mainSystemText(b.System), cwd, home), nil
+}
+
 func mainSystemText(system []json.RawMessage) string {
 	var out string
 	for _, raw := range system {
@@ -333,6 +429,7 @@ func tokenize(text, cwd, home string) string {
 	return out
 }
 
+// system text with run-known dynamic values tokenized.
 func writeJSONLines(path string, items []json.RawMessage) error {
 	var b strings.Builder
 	b.WriteString("[\n")
@@ -371,11 +468,14 @@ func writeWireCapture(dir, class string, raw []byte, headers http.Header) {
 }
 
 const skillsMarker = "The following skills are available for use with the Skill tool:"
+const agentsMarker = "Available agent types for the Agent tool:"
 
-// skillsIndexText returns the builtin "- name: desc" skill index from the
-// first user/env message — the contiguous run of dash lines after the
-// marker heading.
-func skillsIndexText(b *wireBody) string {
+func skillsIndexText(b *wireBody) string { return envSectionText(b, skillsMarker) }
+
+// envSectionText returns the "- name: desc" index under marker in the
+// env message — entries plus their non-dash continuation lines; the index
+// ends at a blank line followed by a non-dash line (the next section).
+func envSectionText(b *wireBody, marker string) string {
 	for _, m := range b.Messages {
 		var msg struct {
 			Content []struct {
@@ -387,11 +487,11 @@ func skillsIndexText(b *wireBody) string {
 			continue
 		}
 		for _, c := range msg.Content {
-			i := strings.Index(c.Text, skillsMarker)
+			i := strings.Index(c.Text, marker)
 			if i < 0 {
 				continue
 			}
-			rest := c.Text[i+len(skillsMarker):]
+			rest := c.Text[i+len(marker):]
 			// entries are "- name: desc" plus non-dash continuation
 			// lines; the index ends at a blank line followed by a
 			// non-dash line (the next section starts there)
@@ -432,4 +532,16 @@ func skillsIndexText(b *wireBody) string {
 		}
 	}
 	return ""
+}
+
+// cliModelClass buckets a model id for the interactive capture filename.
+func cliModelClass(model string) string {
+	switch {
+	case strings.Contains(model, "fable"):
+		return "fable"
+	case strings.Contains(model, "opus"), strings.Contains(model, "sonnet"):
+		return "opus"
+	default:
+		return "haiku"
+	}
 }

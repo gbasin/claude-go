@@ -62,7 +62,7 @@ func TestSystemBlocksExtracted(t *testing.T) {
 
 func TestExtractedSystemMainMissing(t *testing.T) {
 	t.Setenv("CLAUDE_GO_EXTRACTED_DIR", t.TempDir())
-	if _, ok := extractedSystemMain("claude-fable-5-1", "/x"); ok {
+	if _, ok := extractedSystemMain("claude-fable-5-1", "/x", "cli"); ok {
 		t.Fatal("missing extraction should miss")
 	}
 }

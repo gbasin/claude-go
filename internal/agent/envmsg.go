@@ -162,6 +162,7 @@ func EnvMessage(cwd, model string, addDirs []string, permMode, entrypoint, sessi
 	sort.Slice(agents, func(i, j int) bool {
 		return strings.ToLower(agents[i].Name) < strings.ToLower(agents[j].Name)
 	})
+	harvested := extractedAgentsIndex(entrypoint)
 	for _, a := range agents {
 		if a.Unlisted {
 			continue
@@ -170,6 +171,12 @@ func EnvMessage(cwd, model string, addDirs []string, permMode, entrypoint, sessi
 		// SDK family (mod_0416 uOe: skipped for sdk-ts/sdk-py/sdk-cli)
 		if a.Name == "claude-code-guide" && strings.HasPrefix(entrypoint, "sdk") {
 			continue
+		}
+		if a.Source == "builtin" {
+			if line, ok := harvested[strings.ToLower(a.Name)]; ok {
+				b.WriteString(line + "\n")
+				continue
+			}
 		}
 		fmt.Fprintf(&b, "- %s: %s (Tools: %s)\n", a.Name, a.Description, toolSpecString(a))
 	}
@@ -474,6 +481,32 @@ func SkillFacts(cwd string) []struct {
 				Chars      int
 			}{name, dir, len(fb)})
 		}
+	}
+	return out
+}
+
+// extractedAgentsIndex returns builtin agent listing lines harvested by
+// `extract` (keyed by lowercase name), chosen per entrypoint family —
+// the sdk capture differs from cli (no claude-code-guide).
+func extractedAgentsIndex(entrypoint string) map[string]string {
+	fn := "agents_index_sdk.txt"
+	if !strings.HasPrefix(entrypoint, "sdk") {
+		fn = "agents_index_cli.txt"
+	}
+	t, ok := extract.Text(fn)
+	if !ok {
+		return nil
+	}
+	out := map[string]string{}
+	for _, ln := range strings.Split(t, "\n") {
+		if !strings.HasPrefix(ln, "- ") {
+			continue
+		}
+		name := strings.TrimPrefix(ln, "- ")
+		if i := strings.Index(name, ":"); i > 0 {
+			name = name[:i]
+		}
+		out[strings.ToLower(strings.TrimSpace(name))] = ln
 	}
 	return out
 }

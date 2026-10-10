@@ -14,7 +14,13 @@ import (
 // extractedSystemMain returns the harvested main+session block for the
 // model class, tokens re-rendered for the live environment, when an
 // extraction exists.
-func extractedSystemMain(model, cwd string) (string, bool) {
+func extractedSystemMain(model, cwd, entrypoint string) (string, bool) {
+	if entrypoint == "cli" {
+		// the interactive capture carries the cli-only session lines
+		if t, ok := extract.Text("system_main_cli_" + modelClass(model) + ".txt"); ok {
+			return extract.Render(t, cwd), true
+		}
+	}
 	t, ok := extract.Text("system_main_" + modelClass(model) + ".txt")
 	if !ok {
 		return "", false

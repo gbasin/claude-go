@@ -702,7 +702,7 @@ func init() {
 		IsHidden: true,
 		Def: api.Tool{
 			Name:        "SubagentHandback",
-			Description: "***REMOVED***",
+			Description: "Deliver your final report to the agent that spawned you. Call it once, when your work is complete: SubagentHandback({message: <your full report>}) ends your run, so do everything else first and put everything your caller needs into that one report. It is not a messaging channel — no progress updates, no questions.\n\nOnly a report sent via SubagentHandback reaches your caller; trailing plain text is not delivered. There is no recipient parameter — it can only go to your caller.",
 			InputSchema: json.RawMessage(`{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"message":{"description":"Your full report for your caller","type":"string"}},"required":["message"],"additionalProperties":false}`),
 		},
 		Exec: func(c *Context, input json.RawMessage) Result {

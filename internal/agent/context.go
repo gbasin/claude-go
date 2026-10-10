@@ -91,7 +91,7 @@ func SystemBlocks(entrypoint string, cwd, model, appendPrompt string, extra, ses
 	}
 
 	var main string
-	if ext, ok := extractedSystemMain(model, cwd); ok {
+	if ext, ok := extractedSystemMain(model, cwd, entrypoint); ok {
 		// extracted wire text already merges harness head + session block
 		main = strings.TrimRight(ext, "\n") + mcpb.String()
 	} else {
@@ -218,13 +218,11 @@ func FirstUserMessage(prompt, cwd, email, model string, memoryPaused bool) api.M
 			"relevant memories may be useful to the task.\n\n" + m + "\n</system-reminder>"})
 	}
 	if email != "" {
-		blocks = append(blocks, api.ContentBlock{Type: "text", Text: "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n" +
-			"# userEmail\nThe user's email address is " + email + ". Use it only to identify the user, " +
-			"***REMOVED***" +
-			"***REMOVED***" +
-			"***REMOVED***" +
-			"***REMOVED***" +
-			"need it reported back.\n</system-reminder>\n"})
+		blocks = append(blocks, api.ContentBlock{Type: "text", Text: "<system-reminder>\nContext you may use while answering:\n" +
+			"# userEmail\nThe user's email address is " + email + ". Use it only to identify the user " +
+			"(authorship, attribution, filtering their own work); never send it to an unrelated " +
+			"service — headers, URLs, or payloads — unless the user explicitly asks.\n\n" +
+			"This context was attached automatically; it isn't part of the user's message.\n</system-reminder>\n"})
 	}
 	blocks = append(blocks, expandUserImages(prompt)...)
 	return api.BlocksMessage("user", blocks)

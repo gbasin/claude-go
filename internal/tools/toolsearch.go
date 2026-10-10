@@ -123,10 +123,10 @@ func init() {
 // unconditionally) + the query-forms tail (p).
 func toolSearchDescription() string {
 	return "Fetches full schema definitions for deferred tools so they can be called.\n\n" +
-		"Deferred tools appear by name in <system-reminder> messages." +
-		"***REMOVED***" +
-		"***REMOVED***" +
-		"***REMOVED***" +
+		"Deferred tools show up by name in <system-reminder> messages." +
+		" Until fetched, only the name is known — there is no parameter schema, so a direct call fails with InputValidationError. When any instruction, reminder, or other tool description names a deferred tool, fetch it first with query \"select:<name>\"." +
+		" The query is matched against the deferred list and the matched tools' complete JSONSchema definitions come back inside a <functions> block; after that they call exactly like top-level tools.\n\n" +
+		"Result format: one <function>{\"description\": \"...\", \"name\": \"...\", \"parameters\": {...}}</function> line per matched tool inside the <functions> block — the same encoding as the tool list above.\n\n" +
 		"Query forms:\n" +
 		"- \"select:Read,Edit,Grep\" — fetch these exact tools by name\n" +
 		"- \"notebook jupyter\" — keyword search, up to max_results best matches\n" +
