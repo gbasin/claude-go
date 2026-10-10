@@ -48,6 +48,9 @@ type ServerConfig struct {
 	// OAuth carries the server's client-registration pins
 	// (--client-id/--client-secret/--callback-port/--xaa on mcp add).
 	OAuth *OAuthConfig `json:"oauth,omitempty"`
+	// DisableAutoBackground is real's sdk-server field — prevents the
+	// server process from auto-backgrounding on slow startup.
+	DisableAutoBackground bool `json:"disableAutoBackground,omitempty"`
 
 	// --- claude.ai connector fields (mod_0386.js SLn) ---
 	// Populated by FetchClaudeAIConfigs for Type "claudeai-proxy"; never
@@ -473,7 +476,7 @@ func (c *Client) handshake() error {
 				},
 			},
 		},
-		"clientInfo": map[string]string{"name": "claude-go", "version": "2.1.295"},
+		"clientInfo": map[string]string{"name": "claude-go", "version": "2.1.296"},
 	}, &initRes)
 	if err != nil {
 		return fmt.Errorf("mcp %s initialize: %w", c.Name, err)
@@ -1073,4 +1076,60 @@ func mcpEnvMS(name string, def int) time.Duration {
 		}
 	}
 	return time.Duration(def) * time.Millisecond
+}
+
+// PendingProjectServers returns .mcp.json servers awaiting trust —
+// approved (enabledMcpjsonServers) and disabled entries are excluded.
+func PendingProjectServers(cwd string) []string {
+	var out []string
+	// --setting-sources without "project" suppresses .mcp.json entirely —
+	// the same gate the server loader uses
+	if !config.SettingSourceOK(cwd, filepath.Join(cwd, ".claude", "settings.json")) {
+		return nil
+	}
+	b, err := os.ReadFile(filepath.Join(cwd, ".mcp.json"))
+	if err != nil {
+		return nil
+	}
+	var top struct {
+		Servers map[string]ServerConfig `json:"mcpServers"`
+	}
+	if json.Unmarshal(b, &top) != nil {
+		return nil
+	}
+	st := config.Load(cwd)
+	for n := range top.Servers {
+		if st.EnableAllProjectMcpServers ||
+			sliceHas(st.EnabledMcpjsonServers, n) ||
+			sliceHas(st.DisabledMcpjsonServers, n) {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// ApproveProjectServer writes the name into local settings'
+// enabledMcpjsonServers — real's approve-path (mod_1441).
+func ApproveProjectServer(cwd, name string) {
+	p := filepath.Join(cwd, ".claude", "settings.local.json")
+	_ = os.MkdirAll(filepath.Dir(p), 0o755)
+	b, _ := os.ReadFile(p)
+	var m map[string]any
+	json.Unmarshal(b, &m)
+	if m == nil {
+		m = map[string]any{}
+	}
+	var en []string
+	if arr, ok := m["enabledMcpjsonServers"].([]any); ok {
+		for _, v := range arr {
+			if s, ok := v.(string); ok {
+				en = append(en, s)
+			}
+		}
+	}
+	en = append(en, name)
+	m["enabledMcpjsonServers"] = en
+	nb, _ := json.MarshalIndent(m, "", "  ")
+	_ = os.WriteFile(p, nb, 0o644)
 }

@@ -1,9 +1,9 @@
 package tools
 
 import (
-	"claude-go/internal/hooks"
 	"bufio"
 	"claude-go/internal/config"
+	"claude-go/internal/hooks"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -104,7 +104,7 @@ func skillDirs(cwd string) []string {
 		filepath.Join(cwd, ".agents", "skills"),
 	}
 	for _, pat := range []string{
-		filepath.Join(config.ClaudeDir(), "plugins", "synced", "*", "*", "skills"),
+		filepath.Join(config.ClaudeDir(), "plugins", "cache", "*", "*", "*", "skills"),
 		filepath.Join(config.ClaudeDir(), "plugins", "local", "*", "skills"),
 	} {
 		dirs = append(dirs, globAll(pat)...)

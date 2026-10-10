@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -20,7 +21,7 @@ import (
 	"claude-go/internal/config"
 )
 
-const Version = "2.1.295"
+const Version = "2.1.296"
 
 // betaFlags — real 2.1.294's base anthropic-beta list (captured through
 // the mock harness: the 289-era oauth/advisor-tool/advanced-tool-use/
@@ -350,7 +351,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 	if body != nil {
 		raw, err = json.Marshal(body)
 		if os.Getenv("CLAUDE_GO_DEBUG_REQ") != "" {
-			if f, ferr := os.OpenFile("/tmp/reqs.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); ferr == nil {
+			if f, ferr := os.OpenFile(filepath.Join(os.TempDir(), "claude-go-reqs.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); ferr == nil {
 				f.WriteString("=== " + path + "\n" + string(raw) + "\n")
 				f.Close()
 			}
@@ -397,6 +398,19 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 			if wr.ParentAgentID != "" {
 				req.Header.Set("x-claude-code-parent-agent-id", wr.ParentAgentID)
 			}
+			if wr.PrevToolDurations != "" {
+				req.Header.Set("x-claude-code-prev-tool-durations", wr.PrevToolDurations)
+			}
+			// compaction requests carry real's marker headers
+			// (mod_0409 yAt/_At/kAt/SAt)
+			// compaction markers ride two flags: x-cc-* on sl() (a
+			// debug/internal lane) and x-claude-code-* on ANn (env or
+			// tengu_splendid_sutton GB) — both off by default
+			if wr.Class == "compaction" {
+				if gatewayHintHeaders() {
+					req.Header.Set("x-claude-code-compaction", "true")
+				}
+			}
 		}
 		if err := c.applyAuth(req); err != nil {
 			return nil, err
@@ -411,7 +425,6 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 		// (anthropic-dispatch-id, x-claude-code-request-class,
 		// x-claude-code-prompt-id, x-client-request-id) on main requests —
 		// verified against a fresh wire capture.
-		_ = newUUID // keep helper referenced
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
 			lastErr = err
@@ -483,6 +496,24 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 // floors rate-limit waits near 30s (lower-priority requeue).
 func statusRetryDelay(resp *http.Response) time.Duration {
 	d, _ := retryAfterDelay(resp.Header, time.Now())
+	if resp.StatusCode == 529 {
+		// CLAUDE_CODE_OVERLOADED_RETRY_{BASE,MAX}_DELAY_MS — real's 529
+		// backoff bounds (mod_0416 PB/U$): base floors, max caps
+		if v := os.Getenv("CLAUDE_CODE_OVERLOADED_RETRY_BASE_DELAY_MS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				if base := time.Duration(n) * time.Millisecond; d < base {
+					d = base
+				}
+			}
+		}
+		if v := os.Getenv("CLAUDE_CODE_OVERLOADED_RETRY_MAX_DELAY_MS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				if mx := time.Duration(n) * time.Millisecond; d > mx {
+					d = mx
+				}
+			}
+		}
+	}
 	if resp.StatusCode == 429 {
 		if d < 30*time.Second {
 			return 30 * time.Second
@@ -667,4 +698,24 @@ func (r routingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			req.Method, req.URL.String(), resp.StatusCode)
 	}
 	return resp, err
+}
+
+// gatewayHintHeaders mirrors real's ANn() — CLAUDE_CODE_GATEWAY_HINT_HEADERS
+// env override, else the tengu_splendid_sutton GB feature flag.
+func gatewayHintHeaders() bool {
+	if v := os.Getenv("CLAUDE_CODE_GATEWAY_HINT_HEADERS"); v != "" {
+		return v != "0" && v != "false"
+	}
+	v, _ := config.GBFeature("tengu_splendid_sutton").(bool)
+	return v
+}
+
+// BetaNames returns the client's live beta list as a slice — the init
+// event carries the same names the header does.
+func (c *Client) BetaNames() []string {
+	v := c.betaHeaderValue()
+	if v == "" {
+		return nil
+	}
+	return strings.Split(v, ",")
 }

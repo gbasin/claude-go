@@ -35,6 +35,12 @@ var probeCaps struct {
 	caps terminalCaps
 }
 
+// anyProbed reports whether any DECRPM reply landed — compositor tests
+// that never ran a probe keep their own stored capability flag.
+func (c terminalCaps) anyProbed() bool {
+	return c.daAnswered || c.syncOutput || c.sgrMousePixel || c.kittyFlags != 0
+}
+
 // modifier bits carried on a key (kitty/CSI-u encoding: param-1).
 const (
 	modShift = 1
@@ -62,10 +68,12 @@ func startKeys() (*keySource, error) {
 	// mod_0501 records extendedKeys/synchronizedOutput/kittyKeyboard/
 	// kittyGraphics/mousePixels/programStatus from the replies)
 	if os.Getenv("CLAUDE_GO_NO_TERMPROBE") == "" {
-		os.Stdout.WriteString("\x1b[?2026$p") // synchronized output DECRPM
-		os.Stdout.WriteString("\x1b[?u")      // kitty keyboard flags query
-		os.Stdout.WriteString("\x1b[?1016$p") // SGR pixel-mouse DECRPM
-		os.Stdout.WriteString("\x1b[c")       // primary DA (programStatus)
+		os.Stdout.WriteString("\x1b[?2026$p")                               // synchronized output DECRPM
+		os.Stdout.WriteString("\x1b[?u")                                    // kitty keyboard flags query
+		os.Stdout.WriteString("\x1b[?1016$p")                               // SGR pixel-mouse DECRPM
+		os.Stdout.WriteString("\x1b[c")                                     // primary DA (programStatus)
+		os.Stdout.WriteString("\x1b[>q")                                    // XTVERSION — terminal name/ver
+		os.Stdout.WriteString("\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\") // kitty graphics query
 	}
 	if kittyCapable() {
 		// kitty keyboard protocol: push flags 5 = disambiguate (1) +
@@ -100,10 +108,12 @@ func (ks *keySource) stop() {
 
 // terminalCaps holds the DECRPM/DA probe answers (real's mod_0501 record).
 type terminalCaps struct {
-	syncOutput    bool // ?2026 DECRPM — bsu/esu batched repaint support
-	kittyFlags    int  // ?u reply — kitty keyboard flags actually active
-	sgrMousePixel bool // ?1016 DECRPM — pixel-position mouse reporting
-	daAnswered    bool // CSI ?...c answered — terminal is a live terminal
+	syncOutput    bool   // ?2026 DECRPM — bsu/esu batched repaint support
+	kittyFlags    int    // ?u reply — kitty keyboard flags actually active
+	sgrMousePixel bool   // ?1016 DECRPM — pixel-position mouse reporting
+	daAnswered    bool   // CSI ?...c answered — terminal is a live terminal
+	xtVersion     string // >q reply — terminal name (xtversion)
+	kittyGraphics bool   // Gi= query got a graphics-protocol reply
 }
 
 // recordProbeReply recognizes capability-probe replies on the input stream
@@ -136,7 +146,16 @@ func (ks *keySource) recordProbeReply(seq string) bool {
 	return false
 }
 
-// syncOutput reports whether the terminal answered the ?2026 DECRPM —
+// handleOSCReply parses an OSC-structured reply — the kitty graphics
+// probe answers ESC _Gi=...;OK ESC \ (or NG on no-graphics).
+func (ks *keySource) handleOSCReply(body string) bool {
+	if strings.HasPrefix(body, "_Gi=") {
+		ks.caps.kittyGraphics = strings.Contains(body, ";OK")
+		return true
+	}
+	return false
+}
+
 // redraws wrap in bsu/esu markers then (real's synchronizedOutput gate).
 func syncOutputSupported() bool {
 	probeCaps.mu.Lock()
@@ -248,6 +267,31 @@ func (ks *keySource) read() {
 				i++
 				continue
 			}
+			if c == 0x1b && i+2 < n && (buf[i+1] == 'P' || buf[i+1] == '_') {
+				// DCS/APC reply — terminates on ESC \\ (or raw \\)
+				j := i + 2
+				for j+1 < n && !(buf[j] == 0x1b && buf[j+1] == '\\') {
+					j++
+				}
+				if j+1 >= n {
+					// incomplete — hold the tail for the next read
+					pending = append(pending, buf[i:n]...)
+					n = i
+					break
+				}
+				body := string(buf[i+1 : j])
+				if buf[i+1] == 'P' && strings.HasPrefix(body[1:], ">") {
+					ks.caps.xtVersion = strings.TrimPrefix(body[1:], ">")
+				} else if buf[i+1] == '_' && strings.HasPrefix(body[1:], "Gi=") {
+					ks.caps.kittyGraphics = strings.Contains(body, ";OK") ||
+						!strings.Contains(body, "NG")
+				}
+				probeCaps.mu.Lock()
+				probeCaps.caps = ks.caps
+				probeCaps.mu.Unlock()
+				i = j + 2
+				continue
+			}
 			if c == 0x1b && i+2 < n && buf[i+1] == '[' {
 				// CSI: parameter bytes (0x30-0x3f), intermediate bytes
 				// (0x20-0x2f — DECRPM's $), then a final byte (0x40-0x7e)
@@ -303,6 +347,27 @@ func (ks *keySource) read() {
 func decodeCSI(s string) key {
 	final := s[len(s)-1]
 	params := s[1 : len(s)-1]
+	// SGR mouse ([<btn;x;yM/m): button 64/65 = wheel up/down.
+	// Press (M) and release (m) both arrive; only press scrolls.
+	if strings.HasPrefix(params, "<") && (final == 'M' || final == 'm') {
+		btn := 0
+		for _, ch := range params[1:] {
+			if ch >= '0' && ch <= '9' {
+				btn = btn*10 + int(ch-'0')
+			} else {
+				break
+			}
+		}
+		if final == 'M' {
+			switch btn & 0x43 { // ignore modifier bits (4/8/16/32)
+			case 64:
+				return key{seq: "[<wheel-up"}
+			case 65:
+				return key{seq: "[<wheel-down"}
+			}
+		}
+		return key{seq: "[<mouse"}
+	}
 	nums := strings.Split(params, ";")
 	pnum := func(idx int) int {
 		if idx >= len(nums) {
@@ -365,6 +430,12 @@ func decodeCSI(s string) key {
 		} else {
 			k.seq = s
 		}
+		return k
+	}
+	// focus events: ?1004h reports "[I" focus-in, "[O" focus-out —
+	// real's ui_focus system event rides these
+	if final == 'I' || final == 'O' {
+		k.seq = "[" + string(final)
 		return k
 	}
 	// letter final: arrows/home/end/shift-tab ("[A", "[Z", "[1;5A" -> "[A"+mod)

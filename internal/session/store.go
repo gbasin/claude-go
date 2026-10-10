@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"claude-go/internal/config"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"claude-go/internal/api"
@@ -26,6 +28,7 @@ type Store struct {
 	SessionID string
 	CWD       string
 	f         *os.File
+	mu        sync.Mutex // serializes writers (OnTurnEnd goroutine, etc)
 	lastUUID  string
 	sidechain bool // subagent transcript — records get isSidechain:true
 }
@@ -100,9 +103,7 @@ func NewID() string { return newUUID() }
 
 func newUUID() string {
 	var b [16]byte
-	f, _ := os.Open("/dev/urandom")
-	f.Read(b[:])
-	f.Close()
+	rand.Read(b[:])
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return formatUUID(b)
@@ -132,7 +133,43 @@ func (s *Store) LogMessage(m api.Message) error {
 	if m.IsCompactSummary {
 		return s.logMessage(m, true, "Compact summary")
 	}
-	return s.logMessage(m, false, "")
+	err := s.logMessage(m, false, "")
+	// real stamps {type:"last-prompt",leafUuid:<user-uuid>,explicit:true}
+	// after a user row — the session picker reads it as the last-prompt
+	// metadata
+	// last-prompt stamps only on real user prompts — tool_result rows
+	// ride the user role but aren't prompts (real's leafUuid semantic)
+	if err == nil && m.Role == "user" && isPromptContent(m.Content) {
+		s.mu.Lock()
+		leaf := s.lastUUID
+		s.mu.Unlock()
+		_ = s.LogRecord(map[string]any{
+			"type": "last-prompt", "sessionId": s.SessionID,
+			"leafUuid": leaf, "explicit": true,
+		})
+	}
+	return err
+}
+
+// isPromptContent reports whether a user-role message is a typed prompt
+// (text) rather than a tool_result carrier.
+func isPromptContent(c json.RawMessage) bool {
+	var str string
+	if json.Unmarshal(c, &str) == nil {
+		return true // string content = typed text
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(c, &blocks) != nil {
+		return false
+	}
+	for _, b := range blocks {
+		if b.Type == "tool_result" {
+			return false
+		}
+	}
+	return len(blocks) > 0
 }
 
 // LogCompactSummary appends the user message carrying the post-compact
@@ -142,6 +179,8 @@ func (s *Store) LogCompactSummary(m api.Message, modelOnlyText string) error {
 }
 
 func (s *Store) logMessage(m api.Message, compact bool, modelOnlyText string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var raw json.RawMessage
 	role := m.Role
 	if role == "assistant" && len(m.Raw) > 0 {
@@ -161,7 +200,7 @@ func (s *Store) logMessage(m api.Message, compact bool, modelOnlyText string) er
 		Type: role, UUID: uuid, ParentUUID: s.lastUUID,
 		SessionID: s.SessionID, CWD: s.CWD,
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
-		Message:   raw, Version: "2.1.295",
+		Message:   raw, Version: "2.1.296",
 		UserType:         "external",
 		GitBranch:        currentGitBranch(s.CWD),
 		Entrypoint:       "cli",
@@ -177,6 +216,8 @@ func (s *Store) logMessage(m api.Message, compact bool, modelOnlyText string) er
 
 // LogRecord writes an arbitrary transcript record (summary/system/etc).
 func (s *Store) LogRecord(ev map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if ev["uuid"] == nil {
 		ev["uuid"] = newUUID()
 	}
@@ -232,7 +273,7 @@ func (s *Store) LogInitMeta(model, parentSessionID, agentType, sysSnap, permMode
 	rec := map[string]any{
 		"type": "system", "subtype": "init",
 		"model": model, "cwd": s.CWD,
-		"version": "2.1.295", "userType": "external",
+		"version": "2.1.296", "userType": "external",
 		"gitBranch": currentGitBranch(s.CWD), "entrypoint": "cli",
 	}
 	if parentSessionID != "" {
@@ -442,6 +483,8 @@ func ResolveArg(cwd, arg string) string {
 // writeRaw appends an already-complete record verbatim (used by Fork, which
 // controls every field including a nil parentUuid).
 func (s *Store) writeRaw(ev map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	b, _ := json.Marshal(ev)
 	_, err := s.f.Write(append(b, '\n'))
 	return err
@@ -507,6 +550,9 @@ func ReadTitle(projectDir, sessionID string) string {
 	return v.Title
 }
 
+// CurrentGitBranch is the exported branch probe — the picker filters on it.
+func CurrentGitBranch(cwd string) string { return currentGitBranch(cwd) }
+
 func currentGitBranch(cwd string) string {
 	out, err := execCommand("git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
@@ -515,12 +561,20 @@ func currentGitBranch(cwd string) string {
 	return strings.TrimSpace(out)
 }
 
-func (s *Store) Close() { s.f.Close() }
+func (s *Store) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.f.Close()
+}
 
 // SeedParent primes the parentUuid chain — on same-transcript resume the
 // next logged record must link to the loaded branch's leaf, not start a
 // new root.
-func (s *Store) SeedParent(uuid string) { s.lastUUID = uuid }
+func (s *Store) SeedParent(uuid string) {
+	s.mu.Lock()
+	s.lastUUID = uuid
+	s.mu.Unlock()
+}
 
 // LeafUUID returns the uuid at the active branch's leaf in a transcript —
 // the parentUuid anchor a same-transcript resume continues from.
@@ -759,7 +813,9 @@ func (s *Store) forkCopy(branch []map[string]any, srcID string) ([]api.Message, 
 			msgs = append(msgs, m)
 		}
 	}
+	s.mu.Lock()
 	s.lastUUID = parent
+	s.mu.Unlock()
 	return msgs, nil
 }
 
@@ -967,4 +1023,51 @@ func OpenSubagent(parentPath, agentID, cwd string) (*Store, error) {
 	os.WriteFile(filepath.Join(dir, agentID+".meta.json"), meta, 0o600)
 	st.sidechain = true
 	return st, nil
+}
+
+// SweepRetention deletes transcripts older than cleanupPeriodDays
+// (default 30 — real's sbn/lS sweep; skipped on settings errors or when
+// userSettings is disabled via --setting-sources).
+func SweepRetention(cwd string) {
+	if os.Getenv("CLAUDE_GO_NO_SWEEP") != "" {
+		return
+	}
+	days := 30
+	for _, p := range []string{
+		filepath.Join(cwd, ".claude", "settings.json"),
+		filepath.Join(config.ClaudeDir(), "settings.json"),
+	} {
+		if b, err := os.ReadFile(p); err == nil {
+			var m map[string]any
+			if json.Unmarshal(b, &m) == nil {
+				if v, ok := m["cleanupPeriodDays"].(float64); ok {
+					days = int(v)
+					break
+				}
+			}
+		}
+	}
+	if days <= 0 {
+		return // 0/negative disables the sweep
+	}
+	cutoff := time.Now().AddDate(0, 0, -days)
+	root := filepath.Join(config.ClaudeDir(), "projects")
+	ents, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, proj := range ents {
+		if !proj.IsDir() {
+			continue
+		}
+		files, _ := os.ReadDir(filepath.Join(root, proj.Name()))
+		for _, f := range files {
+			if !strings.HasSuffix(f.Name(), ".jsonl") {
+				continue
+			}
+			if fi, err := f.Info(); err == nil && fi.ModTime().Before(cutoff) {
+				os.Remove(filepath.Join(root, proj.Name(), f.Name()))
+			}
+		}
+	}
 }

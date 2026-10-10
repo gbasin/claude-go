@@ -402,40 +402,6 @@ func persistTasks(c *Context) {
 	os.WriteFile(filepath.Join(dir, "tasks.json"), b, 0o644)
 }
 
-// LoadTasks restores the session task list (session resume). Reads the
-// per-task files first (real layout), then the merged tasks.json index.
-func LoadTasks(c *Context) {
-	dir := filepath.Join(config.ClaudeDir(), "tasks", c.Session)
-	ents, _ := filepath.Glob(filepath.Join(dir, "*.json"))
-	var list []SessionTask
-	for _, p := range ents {
-		if filepath.Base(p) == "tasks.json" {
-			continue
-		}
-		var t SessionTask
-		if b, err := os.ReadFile(p); err == nil && json.Unmarshal(b, &t) == nil && t.ID != "" {
-			list = append(list, t)
-		}
-	}
-	if len(list) == 0 {
-		b, err := os.ReadFile(filepath.Join(dir, "tasks.json"))
-		if err != nil {
-			return
-		}
-		json.Unmarshal(b, &list)
-	}
-	tasksMu.Lock()
-	defer tasksMu.Unlock()
-	tasksList = list
-	for _, t := range list {
-		var n int
-		fmt.Sscanf(t.ID, "%d", &n)
-		if n > taskSeq {
-			taskSeq = n
-		}
-	}
-}
-
 func strSliceHas(l []string, s string) bool {
 	for _, v := range l {
 		if v == s {

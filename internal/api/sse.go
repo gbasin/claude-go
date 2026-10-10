@@ -79,6 +79,7 @@ func StreamEvents(body io.Reader, yield func(*StreamEvent) error) error {
 		if err := json.Unmarshal(ev.Data, &se); err != nil {
 			continue // tolerate unknown event shapes
 		}
+		se.Raw = ev.Data
 		if se.Type == "error" {
 			if se.Error != nil {
 				return &ErrAPI{E: se.Error}

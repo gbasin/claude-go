@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -58,6 +59,8 @@ type editor struct {
 	searchIdx       int                          // ctrl+r: index of current match in e.history
 	completer       func(prefix string) []string // slash command completion
 	acOpen          bool                         // autocomplete menu visible
+	abovePrompt     bool                         // ctrl+x ctrl+a — the collapsed-activity band
+	abovePromptSel  bool                         // ctrl+x tab — navigation focus lives in the band
 	acDesc          func(name string) string     // per-item description
 	acItems         []string                     // filtered matches
 	acSel           int                          // selected index
@@ -76,6 +79,7 @@ type editor struct {
 	onFastMode      func()
 	runningAgents   func() int // ← agents-pane gate (real needs running tasks)
 	insertRemaps    []string   // vimInsertModeRemaps: 2-char sequences -> <Esc>
+	lastInsAt       time.Time  // when lastIns was typed — real's 1s remap window
 	lastIns         rune
 	insGroup        bool // mid insert-group — push undo once per burst
 	vimOp           rune
@@ -164,7 +168,8 @@ func (e *editor) boxFrame() (box []string, curRow, curCol int) {
 	// lay out: top border, soft-wrapped input rows, voice hint, bottom
 	// border — tracking which box row each logical line starts on
 	rule := "\x1b[38;5;244m" + strings.Repeat("─", w) + "\x1b[39m"
-	all := make([]string, 0, len(lines)+5)
+	all := make([]string, 0, len(lines)+8)
+	all = append(all, e.abovePromptRows()...)
 	// real renders the effort pill right-aligned on the row above the
 	// top rule: "◐ medium · /effort"
 	if eff := effortLabel(); eff != "" {
@@ -232,6 +237,9 @@ func (e *editor) redraw() {
 	}
 	var b strings.Builder
 	b.WriteString("\r\x1b[J") // col0, clear to screen bottom
+	for _, row := range e.abovePromptRows() {
+		b.WriteString(row + "\r\n")
+	}
 	hint := e.voiceHint()
 	b.WriteString(e.prompt + e.renderedBuf())
 	extra := 0 // rows drawn below the input line
@@ -340,6 +348,17 @@ func (e *editor) expandPaste(pasted string) string {
 	pasted = strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(pasted)
 	pasted = strings.ReplaceAll(pasted, "\t", "    ")
 	nl := strings.Count(pasted, "\n")
+	// dragged file path: a single-line paste naming an existing image
+	// file collapses to [Image #N] (real's R() sniff path, mod_0263)
+	if nl == 0 {
+		if p := sniffImagePath(pasted); p != "" {
+			e.imgN++
+			b, _ := os.ReadFile(p)
+			ph := fmt.Sprintf("[Image #%d]", e.imgN)
+			e.pastes[ph] = fmt.Sprintf("\x00IMAGE\x00%s\x00%d", p, len(b))
+			return ph
+		}
+	}
 	if len(pasted) <= 800 && nl <= 2 {
 		return pasted
 	}
@@ -457,7 +476,7 @@ func (e *editor) insertKey(k key) *readResult {
 		e.exitArm = false // an unrelated key press disarms the exit gate
 		e.exitArmKey = ""
 	}
-	if os.Getenv("CG_DBGKEY") != "" {
+	if os.Getenv("CLAUDE_GO_DEBUG_KEYS") != "" {
 		fmt.Fprintf(os.Stderr, "[dbgkey b=%d seq=%q] ", c, k.seq)
 	}
 	if k.mod&modCtrl != 0 && k.r >= 'a' && k.r <= 'z' {
@@ -707,8 +726,10 @@ func (e *editor) insertKey(k key) *readResult {
 		e.showShortcuts() // real: '?' on empty input opens the shortcuts overlay
 		return nil
 	case k.r != 0 && k.mod&^modShift == 0: // shift alone still inserts text
-		// vimInsertModeRemaps: 2-char sequence mapped to <Esc>
-		if e.vim && len(e.insertRemaps) > 0 && e.lastIns != 0 {
+		// vimInsertModeRemaps: 2-char sequence mapped to <Esc> — real
+		// gates the pair on a 1000ms window (mod_0819 Po)
+		if e.vim && len(e.insertRemaps) > 0 && e.lastIns != 0 &&
+			time.Since(e.lastInsAt) <= time.Second {
 			pair := string([]rune{e.lastIns, k.r})
 			for _, seq := range e.insertRemaps {
 				if seq == pair {
@@ -728,6 +749,7 @@ func (e *editor) insertKey(k key) *readResult {
 			}
 		}
 		e.lastIns = k.r
+		e.lastInsAt = time.Now()
 		if !wasInsert {
 			e.pushUndo()
 		}
@@ -1852,6 +1874,29 @@ func (e *editor) toggleTodos() {
 	if e.onToggleTodos != nil {
 		e.onToggleTodos()
 	}
+}
+
+// abovePromptToggle/abovePromptFocus drive real's AbovePrompt band —
+// the collapsed recent-activity row above the composer. ctrl+x ctrl+a
+// toggles it expanded; ctrl+x tab moves focus there for navigation.
+func (e *editor) abovePromptToggle() {
+	// real: toggle collapses an expanded band, expands an opened one;
+	// the band itself appears on the first toggle
+	if !e.abovePrompt {
+		e.abovePrompt = true
+		abovePromptExpanded = true
+	} else {
+		abovePromptExpanded = !abovePromptExpanded
+	}
+	e.redraw()
+}
+
+func (e *editor) abovePromptFocus() {
+	if !e.abovePrompt {
+		e.abovePrompt = true // focusing implies expanding
+	}
+	e.abovePromptSel = true
+	e.redraw()
 }
 
 func (e *editor) cyclePermMode() {
@@ -3046,6 +3091,9 @@ const altScreenExit = "[?1004l[?2031l" +
 var altScreenOn atomic.Bool
 
 func enterAltScreen() {
+	if envOn("CLAUDE_CODE_NO_FLICKER") {
+		return // real: NO_FLICKER pins the inline renderer — no alt screen
+	}
 	if altScreenOn.Swap(true) {
 		return
 	}
@@ -3160,4 +3208,91 @@ func (e *editor) copySelection() {
 // real uses before shelling out to pbcopy.
 func writeOSC52(s string) {
 	os.Stdout.WriteString("\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(s)) + "\x07")
+}
+
+// abovePrompt feed — the loop pushes recent activity lines in; the band
+// renders the last few when expanded, a count row when collapsed.
+var (
+	abovePromptRows     []string
+	abovePromptExpanded bool
+)
+
+func abovePromptPush(line string) {
+	if len(abovePromptRows) >= 50 {
+		abovePromptRows = abovePromptRows[1:]
+	}
+	abovePromptRows = append(abovePromptRows, line)
+}
+
+func abovePromptCount() int { return len(abovePromptRows) }
+
+func abovePromptLines() []string {
+	n := len(abovePromptRows)
+	if n > 6 {
+		n = 6
+	}
+	out := abovePromptRows[len(abovePromptRows)-n:]
+	return out
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// abovePromptRows renders real's AbovePrompt band — the collapsed
+// recent-activity rows above the composer box.
+func (e *editor) abovePromptRows() []string {
+	if !e.abovePrompt {
+		return nil
+	}
+	var out []string
+	arrow := "❯"
+	if e.abovePromptSel {
+		arrow = cyan + "❯" + reset
+	}
+	n := abovePromptCount()
+	if abovePromptExpanded {
+		lines2 := abovePromptLines()
+		if len(lines2) == 0 {
+			out = append(out, "   "+dim+"no recent activity"+reset)
+		} else {
+			for _, ln := range lines2 {
+				out = append(out, "   "+ln)
+			}
+		}
+	} else {
+		out = append(out, " "+arrow+dim+" collapsed "+
+			strconv.Itoa(n)+" recent "+plural(n, "message", "messages")+
+			" · ctrl+x ctrl+a to collapse"+reset)
+	}
+	return out
+}
+
+// sniffImagePath — a pasted path that names an existing image file
+// returns its absolute path (else ""). Real sniffs a handful of image
+// extensions on the dropped-path paste.
+func sniffImagePath(pasted string) string {
+	p := strings.TrimSpace(pasted)
+	p = strings.Trim(p, "'\"")            // drag drops arrive quoted
+	p = strings.ReplaceAll(p, "\\ ", " ") // escaped spaces
+	if strings.HasPrefix(p, "~/") {
+		if h, err := os.UserHomeDir(); err == nil {
+			p = filepath.Join(h, p[2:])
+		}
+	}
+	if !filepath.IsAbs(p) {
+		return ""
+	}
+	switch strings.ToLower(filepath.Ext(p)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".bmp", ".tiff", ".tif":
+	default:
+		return ""
+	}
+	if fi, err := os.Stat(p); err != nil || fi.IsDir() {
+		return ""
+	}
+	return p
 }

@@ -99,6 +99,7 @@ func mcpSub(args []string) {
 		var clientID, clientSecret string
 		callbackPort := 0
 		wantSecret := false
+		xaaEnabled := false
 		rest := args[1:]
 		// flags may appear anywhere before `--` (commander semantics);
 		// after `--` every token is part of the command line
@@ -134,6 +135,8 @@ func mcpSub(args []string) {
 					fatal("--callback-port must be a port number")
 				}
 				callbackPort = p
+			case a == "--xaa": // claude-code extended auth flag
+				xaaEnabled = true
 			case strings.HasPrefix(a, "-") && len(pos) == 0:
 				fatal("unknown flag: " + a)
 			default:
@@ -151,7 +154,6 @@ func mcpSub(args []string) {
 			}
 		}
 		rest = append(pos, tail...)
-		rest = append(pos, rest...)
 		// real validates both enumerations before touching config
 		switch scope {
 		case "local", "user", "project":
@@ -177,6 +179,7 @@ func mcpSub(args []string) {
 		}
 		name, tgt := rest[0], rest[1]
 		cfg := map[string]any{}
+
 		if transport == "stdio" {
 			cfg = map[string]any{"type": "stdio", "command": tgt, "args": rest[2:]}
 		} else {
@@ -200,13 +203,16 @@ func mcpSub(args []string) {
 			}
 			cfg["headers"] = m
 		}
-		if clientID != "" || callbackPort > 0 {
+		if clientID != "" || callbackPort > 0 || xaaEnabled || clientSecret != "" {
 			o := map[string]any{}
 			if clientID != "" {
 				o["clientId"] = clientID
 			}
 			if callbackPort > 0 {
 				o["callbackPort"] = callbackPort
+			}
+			if xaaEnabled {
+				o["xaa"] = true
 			}
 			cfg["oauth"] = o
 		}
@@ -618,7 +624,7 @@ func doctorSub() {
 	cwd := mustGetwd()
 	fmt.Println("cwd:", cwd)
 	if out, err := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel").Output(); err == nil {
-		fmt.Println("git root:", string(out[:len(out)-1]))
+		fmt.Println("git root:", strings.TrimSpace(string(out)))
 	}
 	for _, p := range []string{
 		filepath.Join(config.Home(), ".claude.json"),
@@ -691,8 +697,14 @@ func authSub(args []string) {
 		authLoginSub()
 	case "logout":
 		if runtime.GOOS == "darwin" {
-			exec.Command("security", "delete-generic-password",
-				"-s", "Claude Code-credentials", "-a", os.Getenv("USER")).Run()
+			if err := exec.Command("security", "delete-generic-password",
+				"-s", "Claude Code-credentials", "-a", os.Getenv("USER")).Run(); err != nil {
+				fmt.Fprintln(os.Stderr, "logout: couldn't delete keychain entry:", err)
+			}
+		}
+		// our own credentials file (~/.claude-go/.credentials.json)
+		if err := os.Remove(auth.OwnCredentialsPath()); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintln(os.Stderr, "logout: couldn't remove credentials file:", err)
 		}
 		fmt.Println("logged out")
 	case "status":
@@ -858,7 +870,18 @@ func pluginSub(args []string) {
 		if i := strings.Index(name, "@"); i > 0 {
 			name, mkt = name[:i], name[i+1:]
 		}
-		if mkt == "" {
+		// real's --marketplace accepts a SOURCE (path/repo/url) — it
+		// registers the marketplace first, then installs
+		if mkt != "" {
+			if _, ok := plugins.ListMarketplaces()[mkt]; !ok {
+				// add the source and use the name it registered under
+				mn, err := plugins.AddMarketplace(mkt)
+				if err != nil {
+					fatal("install: %v", err)
+				}
+				mkt = mn
+			}
+		} else {
 			mkts := plugins.ListMarketplaces()
 			for n := range mkts {
 				mkt = n
@@ -1003,12 +1026,20 @@ func pluginSub(args []string) {
 			fatal("usage: claude plugin init <name>")
 		}
 		// real scaffolds under ~/.claude/skills/<name>/ — auto-loaded
-		dir := filepath.Join(config.ClaudeDir(), "skills", args[1])
-		os.MkdirAll(filepath.Join(dir, ".claude-plugin"), 0o755)
+		name := args[1]
+		if !dlPluginRe.MatchString(name) {
+			fatal("invalid plugin name: %s", name)
+		}
+		dir := filepath.Join(config.ClaudeDir(), "skills", name)
+		if err := os.MkdirAll(filepath.Join(dir, ".claude-plugin"), 0o755); err != nil {
+			fatal("plugin init: %v", err)
+		}
 		manifest, _ := json.MarshalIndent(map[string]any{
-			"name": args[1], "version": "0.0.0",
+			"name": name, "version": "0.0.0",
 		}, "", "  ")
-		os.WriteFile(filepath.Join(dir, ".claude-plugin", "plugin.json"), manifest, 0o644)
+		if err := os.WriteFile(filepath.Join(dir, ".claude-plugin", "plugin.json"), manifest, 0o644); err != nil {
+			fatal("plugin init: %v", err)
+		}
 		fmt.Println("created plugin skeleton at", dir)
 	case "tag":
 		// real: `plugin tag [path]` — creates {name}--v{version} git tag
@@ -1199,23 +1230,26 @@ func agentsSub(args []string) {
 // never invoked by hand. Owns the session's pty + rendezvous socket.
 func bgHostSub(args []string) {
 	var o bg.HostOpts
+	next := func(i *int) string {
+		*i++
+		if *i >= len(args) {
+			fmt.Fprintf(os.Stderr, "bg-host: %s requires a value\n", args[*i-1])
+			os.Exit(2)
+		}
+		return args[*i]
+	}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--session":
-			i++
-			o.SessionID = args[i]
+			o.SessionID = next(&i)
 		case "--cwd":
-			i++
-			o.CWD = args[i]
+			o.CWD = next(&i)
 		case "--resume-from":
-			i++
-			o.ResumeFrom = args[i]
+			o.ResumeFrom = next(&i)
 		case "--prompt":
-			i++
-			o.Prompt = args[i]
+			o.Prompt = next(&i)
 		case "--name":
-			i++
-			o.Name = args[i]
+			o.Name = next(&i)
 		}
 	}
 	if o.SessionID == "" {
@@ -1433,6 +1467,9 @@ func importSub(args []string) {
 		}
 		valid++
 	}
+	if err := sc.Err(); err != nil {
+		fatal("import: %v", err)
+	}
 	if valid == 0 {
 		fatal("import: empty or unrecognized file")
 	}
@@ -1458,6 +1495,9 @@ func importSub(args []string) {
 			out.WriteByte('\n')
 		}
 	}
+	if err := sc.Err(); err != nil {
+		fatal("import: %v", err)
+	}
 	if err := os.WriteFile(st.Path, []byte(out.String()), 0o644); err != nil {
 		fatal("import: %v", err)
 	}
@@ -1470,10 +1510,7 @@ func setupTokenSub() {
 	fmt.Println("Set up a long-lived token for claude-go.")
 	fmt.Println("  • API key: create one at https://console.anthropic.com/settings/keys")
 	fmt.Println("  • OAuth token: paste an existing claude setup-token / CLAUDE_CODE_OAUTH_TOKEN value")
-	fmt.Print("\nPaste token: ")
-	var tok string
-	fmt.Scanln(&tok)
-	tok = strings.TrimSpace(tok)
+	tok := strings.TrimSpace(promptSecret("Paste token: "))
 	if tok == "" {
 		fatal("no token entered")
 	}

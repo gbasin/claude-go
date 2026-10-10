@@ -103,6 +103,11 @@ type Tool struct {
 	// DeferLoading marks the DeferredToolPlaceholder stub
 	// (mod_0386.js CWt): {defer_loading:true}.
 	DeferLoading bool `json:"defer_loading,omitempty"`
+	// Citations rides WebSearch's wire — {enabled:true} when
+	// CLAUDE_CODE_WEBSEARCH_CITATIONS_DECLARED is on (296 Qpr).
+	Citations *struct {
+		Enabled bool `json:"enabled"`
+	} `json:"citations,omitempty"`
 	// Raw, when set, is the complete wire object (server-side tools like
 	// web_search_20250305 have no input_schema and carry "type").
 	Raw json.RawMessage `json:"-"`
@@ -149,6 +154,10 @@ type Request struct {
 	// AgentID/ParentAgentID ride x-claude-code-agent-id /
 	// x-claude-code-parent-agent-id on subagent requests (mod_0304).
 	AgentID, ParentAgentID string `json:"-"`
+	// PrevToolDurations rides x-claude-code-prev-tool-durations —
+	// "Name=ms;Name=ms" url-encoded pairs, ≤32 tools / ≤4096 chars
+	// (mod_0409 vAt)
+	PrevToolDurations string `json:"-"`
 	// Temperature is set only by aux-class calls (the title call sends 1).
 	Temperature *float64 `json:"temperature,omitempty"`
 
@@ -184,13 +193,16 @@ func (r *Request) MarshalJSON() ([]byte, error) {
 
 // SSE event types from stream=true
 type StreamEvent struct {
-	Type         string        `json:"type"`
-	Index        int           `json:"index,omitempty"`
-	ContentBlock *ContentBlock `json:"content_block,omitempty"`
-	Delta        *Delta        `json:"delta,omitempty"`
-	Message      *Response     `json:"message,omitempty"`
-	Usage        *Usage        `json:"usage,omitempty"`
-	Error        *APIError     `json:"error,omitempty"`
+	// Raw is the verbatim SSE data payload — stream-json's stream_event
+	// wraps it unchanged (real's partial-event emit).
+	Raw          json.RawMessage `json:"-"`
+	Type         string          `json:"type"`
+	Index        int             `json:"index,omitempty"`
+	ContentBlock *ContentBlock   `json:"content_block,omitempty"`
+	Delta        *Delta          `json:"delta,omitempty"`
+	Message      *Response       `json:"message,omitempty"`
+	Usage        *Usage          `json:"usage,omitempty"`
+	Error        *APIError       `json:"error,omitempty"`
 }
 
 type Delta struct {

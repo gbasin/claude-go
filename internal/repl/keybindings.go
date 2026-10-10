@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -148,6 +149,10 @@ var kbActions = map[string]func(*editor) *readResult{
 	// handled in insertKey (printable chars aren't keystrokes). This entry
 	// lets users rebind to a modifier combo via keybindings.json.
 	"voice:pushToTalk": func(e *editor) *readResult { e.voiceToggle(); return nil },
+	// abovePrompt — real's collapsed-activity band above the composer:
+	// ctrl+x ctrl+a expands/collapses it, ctrl+x tab moves focus there
+	"abovePrompt:toggle": func(e *editor) *readResult { e.abovePromptToggle(); return nil },
+	"abovePrompt:focus":  func(e *editor) *readResult { e.abovePromptFocus(); return nil },
 }
 
 // defaultKeybindings mirrors the relevant rows of the CC binding table.
@@ -165,6 +170,8 @@ var defaultKeybindings = []struct {
 	{"Chat", "ctrl+l", "chat:clearInput"},
 	{"Chat", "ctrl+x ctrl+k", "chat:killAgents"},
 	{"Chat", "ctrl+x ctrl+e", "chat:externalEditor"},
+	{"Chat", "ctrl+x ctrl+a", "abovePrompt:toggle"},
+	{"Chat", "ctrl+x tab", "abovePrompt:focus"},
 	{"Chat", "shift+tab", "chat:cycleMode"},
 	{"Chat", "ctrl+g", "chat:externalEditor"},
 	{"Chat", "ctrl+v", "chat:imagePaste"},
@@ -188,8 +195,43 @@ var defaultKeybindings = []struct {
 	{"Chat", "cmd+k", "chat:clearScreen"},
 	{"Chat", "meta+w", "chat:workflowKeywordToggle"}, // bound, inert for us
 	{"Global", "ctrl+]", "app:openArtifact"},         // bound, inert for us
-	{"Global", "ctrl+up", "app:diffFileListUp"},      // bound, inert for us
-	{"Global", "ctrl+down", "app:diffFileListDown"},  // bound, inert for us
+	// Transcript context defaults (real's mod_0266 table) — user remaps
+	// resolve through dialogAction; the dialog switch stays the fallback
+	{"Transcript", "ctrl+e", "transcript:toggleShowAll"},
+	{"Transcript", "ctrl+c", "transcript:exit"},
+	{"Transcript", "escape", "transcript:exit"},
+	{"Transcript", "q", "transcript:exit"},
+	{"Transcript", "ctrl+u", "scroll:halfPageUp"},
+	{"Transcript", "ctrl+d", "scroll:halfPageDown"},
+	{"Transcript", "ctrl+b", "scroll:fullPageUp"},
+	{"Transcript", "ctrl+f", "scroll:fullPageDown"},
+	{"Transcript", "ctrl+n", "scroll:lineDown"},
+	{"Transcript", "ctrl+p", "scroll:lineUp"},
+	{"Transcript", "g", "scroll:top"},
+	{"Transcript", "shift+g", "scroll:bottom"},
+	{"Transcript", "j", "scroll:lineDown"},
+	{"Transcript", "k", "scroll:lineUp"},
+	{"Transcript", "up", "scroll:lineUp"},
+	{"Transcript", "down", "scroll:lineDown"},
+	{"Transcript", "home", "scroll:top"},
+	{"Transcript", "end", "scroll:bottom"},
+	{"Transcript", "space", "scroll:fullPageDown"},
+	{"Transcript", "b", "scroll:fullPageUp"},
+	// Select context (real's pickers) — up/down/j/k/ctrl+n/p/home/end
+	{"Select", "up", "select:previous"},
+	{"Select", "down", "select:next"},
+	{"Select", "j", "select:next"},
+	{"Select", "k", "select:previous"},
+	{"Select", "ctrl+n", "select:next"},
+	{"Select", "ctrl+p", "select:previous"},
+	{"Select", "pageup", "select:pageUp"},
+	{"Select", "pagedown", "select:pageDown"},
+	{"Select", "home", "select:first"},
+	{"Select", "end", "select:last"},
+	{"Select", "enter", "select:accept"},
+	{"Select", "escape", "select:cancel"},
+	{"Global", "ctrl+up", "app:diffFileListUp"},     // bound, inert for us
+	{"Global", "ctrl+down", "app:diffFileListDown"}, // bound, inert for us
 	{"Global", "meta+up", "app:diffFileListUp"},
 	{"Global", "meta+down", "app:diffFileListDown"},
 }
@@ -382,6 +424,10 @@ func (e *editor) loadKeybindings() {
 			e.kbPrefix[ctx+"\x00"+strings.Join(parts[:i], " ")] = true
 		}
 	}
+	// session mirror — dialogs/pickers without an editor reference resolve
+	// user remaps through this (real's dialogs read the same keymap)
+	sessionKB.Store(map[string]string(e.kb))
+	e.kbResolve = map[string]string{}
 	// display-resolution map (real's qa()/Y_): action -> the chord the UI
 	// should name in hints. Defaults claim first so user-added extra
 	// bindings don't shadow the canonical label; unbound actions fall
@@ -460,12 +506,18 @@ func (e *editor) applyKeybindingFile(b []byte) []string {
 				e.kbUnbound[ck] = true
 				continue
 			}
-			// real accepts unknown action names SILENTLY — the binding is
-			// stored and resolves to no handler, consuming the key (a typo
-			// kills the key rather than warning). command:<name> executes a
-			// slash command. Both paths store the binding as-is.
+			// real rejects unknown action names with invalid_action and
+			// DROPS the binding — the default key behavior survives
+			// (a typo doesn't kill the key). command:<name> executes a
+			// slash command and is always accepted.
+			a := *act
+			if !strings.HasPrefix(a, "command:") && kbActions[a] == nil {
+				warns = append(warns,
+					fmt.Sprintf("%s: invalid_action %q — this binding is ignored", kstr, a))
+				continue
+			}
 			delete(e.kbUnbound, ck)
-			e.kb[ck] = *act
+			e.kb[ck] = a
 		}
 	}
 	return warns
@@ -587,4 +639,26 @@ func (e *editor) bindingKey(k key) (*readResult, bool) {
 		return e.bindingKey(k) // chord missed: retry stroke standalone
 	}
 	return nil, false
+}
+
+// sessionKB is the process-level copy of the loaded keymap — modal
+// surfaces (transcript view, pickers) resolve remaps through it without
+// holding the editor.
+var sessionKB atomic.Value // map[string]string
+
+// dialogAction resolves a key in a named context — first the context's
+// table, then Global. Returns the action name or "".
+func dialogAction(ctx string, k key) string {
+	kb, _ := sessionKB.Load().(map[string]string)
+	if kb == nil {
+		return ""
+	}
+	s := keystroke(k)
+	if s == "" {
+		return ""
+	}
+	if a, ok := kb[ctx+"\x00"+s]; ok {
+		return a
+	}
+	return kb["Global\x00"+s]
 }

@@ -216,7 +216,7 @@ func parseToolList(s string) []string {
 func agentFileDirs(cwd string) []struct{ dir, source string } {
 	var out []struct{ dir, source string }
 	for _, pat := range []string{
-		filepath.Join(config.ClaudeDir(), "plugins", "synced", "*", "*", "agents"),
+		filepath.Join(config.ClaudeDir(), "plugins", "cache", "*", "*", "*", "agents"),
 		filepath.Join(config.ClaudeDir(), "plugins", "local", "*", "agents"),
 	} {
 		if dirs, _ := filepath.Glob(pat); len(dirs) > 0 {
@@ -522,13 +522,49 @@ func (r *Runner) runAgentRaw(c *tools.Context, description, prompt, subagentType
 			_ = tools.NotifyOnIdle(c.Session,
 				fmt.Sprintf("[agent %q completed] %s", rec.Name, firstLine(res.Content)))
 		}
+		// real's agent_completed Notification fires on bg-agent finish
+		// (K8 notification categories, mod_0071)
+		if background && len(r.Hooks) > 0 {
+			hooks.Run(r.Hooks, hooks.Notification, map[string]any{
+				"session_id": r.Client.SessionID, "cwd": c.CWD,
+				"message":           fmt.Sprintf("Agent %q completed", rec.Name),
+				"notification_type": "agent_completed",
+				"hook_event_name":   "Notification",
+				"permission_mode":   r.PermMode,
+				"agent_type":        rec.Type, "agent_id": rec.AgentID,
+			}, c.CWD)
+		}
 		return res
 	}
 	if background {
 		done := make(chan tools.Result, 1)
+		runID := api.NewUUID() // real stamps run_id on both bookends
 		go func() {
-			done <- finish(r.runAgentTurn(sub, prompt, c, rec))
+			res := finish(r.runAgentTurn(sub, prompt, c, rec))
+			// real's task_notification edge on bg completion
+			// (mod_0069: {task_id, run_id, status, summary})
+			if l2 := c.OnTaskEvent; l2 != nil {
+				status := "completed"
+				if res.IsError {
+					status = "failed"
+				}
+				l2(map[string]any{
+					"subtype": "task_notification", "task_id": rec.AgentID,
+					"run_id": runID, "status": status,
+					"summary": firstLine(res.Content),
+				})
+			}
+			done <- res
 		}()
+		// real emits system/task_started when the bg agent joins the set
+		if l2 := c.OnTaskEvent; l2 != nil {
+			l2(map[string]any{
+				"subtype": "task_started", "task_id": rec.AgentID,
+				"run_id": runID, "description": description,
+				"subagent_type":   def.Name,
+				"is_backgrounded": true,
+			})
+		}
 		select {
 		case res := <-done:
 			return res

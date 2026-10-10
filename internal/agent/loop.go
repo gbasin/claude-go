@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,6 +31,36 @@ type Events struct {
 	OnTextDelta func(text string)
 	OnThinking  func(text string)
 	OnToolUse   func(name string, input json.RawMessage)
+	// OnStreamEvent passes every raw SSE frame through — stream-json's
+	// --include-partial-messages emits them verbatim (real's stream_event).
+	OnStreamEvent func(*api.StreamEvent)
+	// OnModelFallback fires when the retry chain swaps models — stream-json
+	// emits system/model_fallback (mod_0653).
+	OnModelFallback func(from, to string)
+	// OnPermissionCheck emits real's permission_check_status events —
+	// "checking" ~4s into a classifier wait, "done" at the verdict.
+	OnPermissionCheck func(toolUseID, status string)
+	// OnFileMissing fires when an attachment (pasted image) vanished
+	// before send — real's system/file_attachments_missing.
+	OnFileMissing func(path string)
+	// OnVCSChange emits system/vcs_state_changed — a successful git
+	// mutation Bash call (commit/push/merge/rebase).
+	OnVCSChange func(kind, branch string)
+	// OnPerTurnEffort emits system/per_turn_effort_changed — a false
+	// means a refusal dropped output_config mid-session (mod_0069).
+	OnPerTurnEffort func(active bool)
+	// OnDevIntent emits system/dev_intent — an Apple/Android toolchain
+	// Bash command marks the session's dev intent (mod_0069 Dkr).
+	OnDevIntent func(kind string)
+	// OnThinkingTokens emits the thinking block's estimated token count —
+	// real's thinking_tokens system event at content_block_stop.
+	OnThinkingTokens func(n int)
+	// OnToolProgress emits real's tool_progress — a heartbeat while a
+	// tool runs long (mod_0656 tool_heartbeat / bash_progress).
+	OnToolProgress func(name, toolUseID string, elapsedSec int, heartbeat bool)
+	// OnRateLimit emits real's rate_limit_event when the unified status
+	// changes (mod_0069 v0).
+	OnRateLimit func(status string, info map[string]any)
 	// OnToolResult carries the tool_use block id — stream-json user
 	// events reference the real API-assigned id, not a fabricated one
 	OnToolResult func(name, toolUseID string, r tools.Result)
@@ -161,15 +193,34 @@ type Loop struct {
 	InitialUserMessage string
 	// Depth is the agent nesting level — main loop 0, first subagent 1
 	// (drives subagent_stats max_depth/spawned_by_subagents)
-	Depth            int
-	subPID           string
+	Depth  int
+	subPID string
+	// prevToolDurations feeds x-claude-code-prev-tool-durations — gated
+	// on the tengu_splendid_sutton GB flag like real's emit site
+	prevToolDurations []struct {
+		name string
+		ms   int64
+	}
+	prLinked            bool
+	thinkingChars       map[int]int
+	toolBatchForSummary []struct {
+		name, input, output string
+	}
+	// OnToolUseSummary emits real's tool_use_summary event — the loop
+	// fires it after the aux label call resolves for a completed batch.
+	OnToolUseSummary func(summary string, toolUseIDs []string)
+	// OnSessionRecord writes transcript side records (pr-link et al) —
+	// the host binds it to the session store
+	OnSessionRecord  func(map[string]any)
 	handbackTail     bool // append the SubagentHandback reminder to msg[0]
 	noThinking       bool // thinking config dropped after a thinking 400
 	dropSafeguards   bool
+	dropEffort       bool // output_config dropped after a per-turn-effort 400
 	dropOutputConfig bool
 	dropBetas        bool
 	maxTokensClamp   bool
-	lastTotal        int // last request's total input tokens (incl. cache)
+	lastRLStatus     string // last emitted rate-limit status
+	lastTotal        int    // last request's total input tokens (incl. cache)
 }
 
 func NewLoop(client *api.Client, cwd string) *Loop {
@@ -237,7 +288,8 @@ func (l *Loop) buildRequest() *api.Request {
 	// effort'). Real omits the key for those models.
 	// CLAUDE_CODE_ALWAYS_ENABLE_EFFORT forces effort emission for models
 	// lacking declared effort support (real QE(), mod_0198.js).
-	effortCapable := isXHighModel(model) || envOn("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT")
+	effortCapable := (isXHighModel(model) || envOn("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT")) &&
+		!l.dropEffort
 	var ocRaw json.RawMessage
 	oc := map[string]any{}
 	eb := extraBodyFields()
@@ -377,9 +429,48 @@ func (l *Loop) buildRequest() *api.Request {
 		Diagnostics: l.diagnosticsField(),
 		// thread:{type:"create"} — real sends it on haiku-class requests
 		// alongside the message-threads beta (captured on haiku -p turn)
-		Thread:    l.threadField(),
-		ExtraBody: eb,
+		Thread:            l.threadField(),
+		ExtraBody:         eb,
+		PrevToolDurations: l.prevToolDurationsHeader(),
 	}
+}
+
+// prevToolDurationsHeader is real's vAt(): "Name=ms;Name=ms" pairs —
+// names url-encode of %,;,=,,space and non-ASCII; ≤32 tools, ≤4096 chars.
+func (l *Loop) prevToolDurationsHeader() string {
+	defer func() { l.prevToolDurations = nil }()
+	if len(l.prevToolDurations) == 0 {
+		return ""
+	}
+	// real's emit site (mod_0198 ANn): CLAUDE_CODE_GATEWAY_HINT_HEADERS
+	// env override wins; else first-party accounts gate on the
+	// tengu_splendid_sutton GB flag
+	if v := os.Getenv("CLAUDE_CODE_GATEWAY_HINT_HEADERS"); v != "" {
+		if v == "0" || v == "false" {
+			return ""
+		}
+	} else if v, _ := config.GBFeature("tengu_splendid_sutton").(bool); !v {
+		return ""
+	}
+	var parts []string
+	total := 0
+	for _, d := range l.prevToolDurations {
+		if len(parts) >= 32 {
+			break
+		}
+		enc := url.QueryEscape(d.name)
+		pair := enc + "=" + strconv.FormatInt(d.ms, 10)
+		sep := 0
+		if len(parts) > 0 {
+			sep = 1
+		}
+		if total+sep+len(pair) > 4096 {
+			break
+		}
+		total += sep + len(pair)
+		parts = append(parts, pair)
+	}
+	return strings.Join(parts, ";")
 }
 
 // threadField emits {"type":"create"} for thread-enabled models.
@@ -721,8 +812,30 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		}
 		var r tools.Result
 		toolStart := time.Now()
-		if len(l.AllowedTools) > 0 && !containsStr(l.AllowedTools, b.Name) {
+		hbDone := make(chan struct{})
+		// real emits tool_progress heartbeats while a tool runs long
+		// (mod_0656 tool_heartbeat) — armed once permission gates pass
+		armHeartbeat := func() {
+			if l.Events.OnToolProgress == nil {
+				return
+			}
+			name, id := b.Name, b.ID
+			go func() {
+				t := time.NewTimer(30 * time.Second)
+				defer t.Stop()
+				select {
+				case <-t.C:
+					l.Events.OnToolProgress(name, id, 30, true)
+				case <-hbDone:
+				}
+			}()
+		}
+		// nil = unrestricted; a non-nil EMPTY slice (real's --tools "")
+		// withholds every tool
+		if l.AllowedTools != nil && !containsStr(l.AllowedTools, b.Name) {
+			close(hbDone)
 			r = tools.Result{Content: fmt.Sprintf("tool %s not allowed for this agent", b.Name), IsError: true}
+			l.reportMissingAttachment(r)
 			results = append(results, toolResultBlock(b.ID, r))
 			continue
 		}
@@ -771,7 +884,24 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 					IsError: true,
 				}
 			} else if l.SafetyEval != nil && l.ToolCtx.PermissionAsk != nil && l.ToolCtx.PermissionAsk() {
+				// permission_check_status: real's announce/settle pair —
+				// "checking" fires only if the wait crosses ~4s, and
+				// "done" emits only when "checking" did
+				var announced atomic.Bool
+				var check *time.Timer
+				if l.Events.OnPermissionCheck != nil {
+					check = time.AfterFunc(4*time.Second, func() {
+						announced.Store(true)
+						l.Events.OnPermissionCheck(b.ID, "checking")
+					})
+				}
 				sev, cat, err := l.SafetyEval(ctx, b.Name, b.Input)
+				if check != nil {
+					check.Stop()
+					if announced.Load() {
+						l.Events.OnPermissionCheck(b.ID, "done")
+					}
+				}
 				switch {
 				case err != nil:
 					r = tools.Result{
@@ -779,6 +909,7 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 						IsError: true,
 					}
 				case sev < 50:
+					armHeartbeat()
 					r = l.dispatch(b.Name, b.Input)
 				default:
 					if cat != "" {
@@ -801,9 +932,16 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 				}
 			}
 		} else {
+			armHeartbeat()
 			r = l.dispatch(b.Name, b.Input)
 		}
+		close(hbDone)
 		toolDurMs := time.Since(toolStart).Milliseconds()
+		l.prevToolDurations = append(l.prevToolDurations,
+			struct {
+				name string
+				ms   int64
+			}{b.Name, toolDurMs})
 		post := l.runHook(hooks.PostToolUse, map[string]any{
 			"tool_name": b.Name, "tool_input": json.RawMessage(b.Input),
 			"tool_use_id": b.ID,
@@ -840,6 +978,35 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		if l.Events.OnToolResult != nil {
 			l.Events.OnToolResult(b.Name, b.ID, r)
 		}
+		// vcs_state_changed: a successful git mutation Bash call emits
+		// real's system event (mod_0295 — commit/push/merge/rebase)
+		if !r.IsError && b.Name == "Bash" && l.Events.OnVCSChange != nil {
+			if kind, branch, ok := vcsMutation(r.Content, string(b.Input)); ok {
+				l.Events.OnVCSChange(kind, branch)
+			}
+		}
+		// dev_intent: Apple/Android toolchain commands mark the intent
+		// (mod_0069 Dkr/Dw — ios_command / android_command evidence)
+		if b.Name == "Bash" && l.Events.OnDevIntent != nil {
+			if kind := devIntentKind(string(b.Input)); kind != "" {
+				l.Events.OnDevIntent(kind)
+			}
+		}
+		l.toolBatchForSummary = append(l.toolBatchForSummary, struct {
+			name, input, output string
+		}{b.Name, string(b.Input), truncAt(r.Content, 300)})
+		// pr-link: a gh PR URL in a Bash result links the session
+		// (real's linkSessionToPR — mod_0409 q2s)
+		if !l.prLinked && b.Name == "Bash" && !r.IsError && l.OnSessionRecord != nil {
+			if n, url, repo, ok := DetectPRLink(r.Content); ok {
+				l.prLinked = true
+				l.OnSessionRecord(map[string]any{
+					"type": "pr-link", "sessionId": l.Client.SessionID,
+					"prNumber": n, "prUrl": url, "prRepository": repo,
+				})
+			}
+		}
+		l.reportMissingAttachment(r)
 		results = append(results, toolResultBlock(b.ID, r))
 		batchCalls = append(batchCalls, map[string]any{
 			"tool_name": b.Name, "tool_input": json.RawMessage(b.Input),
@@ -876,6 +1043,29 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		return resp, nil
 	}
 	l.PushUser(results)
+	// tool_use_summary: real labels a completed multi-tool batch via the
+	// aux haiku lane (mod_0641 Gi) — the label lands as a stream event
+	// + transcript record
+	// the label only runs when the loop will actually continue — a
+	// max-turns abort exits before the aux call fires (real's guard order)
+	if l.OnToolUseSummary != nil && len(l.toolBatchForSummary) >= 2 &&
+		!l.IsSubagent && l.Client.AuxLaneAvail() &&
+		(l.MaxTurns == 0 || depth+1 < l.MaxTurns) {
+		batch := l.toolBatchForSummary
+		l.toolBatchForSummary = nil
+		var ids []string
+		var sb strings.Builder
+		for _, c := range batch {
+			ids = append(ids, c.name)
+			sb.WriteString("Tool: " + c.name + "\nInput: " + truncAt(c.input, 300) +
+				"\nOutput: " + truncAt(c.output, 300) + "\n\n")
+		}
+		if label := l.Client.ToolSummaryCall(ctx,
+			billingLine(string(l.Entrypoint), l.billingMeta(l.Messages)),
+			"", sb.String()); label != "" {
+			l.OnToolUseSummary(label, ids)
+		}
+	}
 	return l.run(ctx, depth+1)
 }
 
@@ -885,8 +1075,14 @@ func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
 	var resp *api.Response
 	var err error
 	models := append([]string{l.Model}, l.fallbackModels()...)
-	for mi, m := range models {
+	for mi := 0; mi < len(models); mi++ {
+		m := models[mi]
 		if mi > 0 {
+			// real emits system/model_fallback on the stream when the
+			// retry chain moves to a different model (mod_0653)
+			if l.Events.OnModelFallback != nil {
+				l.Events.OnModelFallback(l.Model, m)
+			}
 			l.Model = m // try the next fallback
 		}
 		reqStart := time.Now()
@@ -894,6 +1090,9 @@ func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
 			l.startAt = reqStart
 		}
 		resp, err = l.Client.StreamMessage(ctx, l.buildRequest(), func(ev *api.StreamEvent) error {
+			if l.Events.OnStreamEvent != nil {
+				l.Events.OnStreamEvent(ev)
+			}
 			if l.firstRespAt.IsZero() {
 				l.firstRespAt = time.Now()
 			}
@@ -919,10 +1118,20 @@ func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
 						l.Events.OnTextDelta(text)
 					}
 				case "thinking_delta":
+					if l.thinkingChars == nil {
+						l.thinkingChars = map[int]int{}
+					}
+					l.thinkingChars[ev.Index] += len(ev.Delta.Thinking)
 					if l.Events.OnThinking != nil {
 						l.Events.OnThinking(ev.Delta.Thinking)
 					}
 				}
+			}
+			// thinking_tokens: real stamps the thinking block's estimated
+			// token count on a system event at block stop (mod_0653)
+			if ev.Type == "content_block_stop" && l.thinkingChars[ev.Index] > 0 &&
+				l.Events.OnThinkingTokens != nil {
+				l.Events.OnThinkingTokens(l.thinkingChars[ev.Index] / 4)
 			}
 			if ev.Type == "content_block_stop" && l.streamTextIdx[ev.Index] &&
 				len(l.Hooks[string(hooks.MessageDisplay)]) > 0 {
@@ -948,13 +1157,64 @@ func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
 		})
 		l.apiNanos.Add(int64(time.Since(reqStart)))
 		if err == nil {
+			// rate_limit_event: real emits when the unified status header
+			// flips (mod_0069 v0 — emitted on change only)
+			if l.Events.OnRateLimit != nil {
+				if rl := l.Client.LastRateLimit(); rl != nil && rl.Status != l.lastRLStatus {
+					l.lastRLStatus = rl.Status
+					info := map[string]any{"status": rl.Status}
+					if rl.RepresentativeClaim != "" {
+						info["claim"] = rl.RepresentativeClaim
+					}
+					if !rl.ResetsAt.IsZero() {
+						info["resets_at"] = rl.ResetsAt.Unix()
+					}
+					l.Events.OnRateLimit(rl.Status, info)
+				}
+			}
 			break
+		}
+		// refusal ladder: a 400 naming a request feature drops it and
+		// retries on the same model — real's thinking / output_config /
+		// safeguards drops (mod_0198). output_config's drop emits
+		// system/per_turn_effort_changed before the retry.
+		if l.dropRefusedFeature(err) {
+			mi-- // retry this model with the feature dropped
+			err = nil
+			continue
 		}
 		if !retryableErr(err) || mi == len(models)-1 {
 			break
 		}
 	}
 	return resp, err
+}
+
+// dropRefusedFeature inspects a 400's error text: a refusal that names
+// thinking, output_config, or safeguards drops that feature and asks for
+// a retry (returns true). per_turn_effort's drop emits real's
+// system/per_turn_effort_changed.
+func (l *Loop) dropRefusedFeature(err error) bool {
+	s := err.Error()
+	if !strings.Contains(s, "400") && !strings.Contains(s, "invalid_request") {
+		return false
+	}
+	switch {
+	case strings.Contains(s, "thinking") && !l.noThinking:
+		l.noThinking = true
+		return true
+	case (strings.Contains(s, "output_config") || strings.Contains(s, "per-turn") ||
+		strings.Contains(s, "per_turn")) && !l.dropEffort:
+		l.dropEffort = true
+		if l.Events.OnPerTurnEffort != nil {
+			l.Events.OnPerTurnEffort(false)
+		}
+		return true
+	case strings.Contains(s, "safeguards") && !l.dropSafeguards:
+		l.dropSafeguards = true
+		return true
+	}
+	return false
 }
 
 // SessionStarted returns the session's wall-clock start.
@@ -1348,6 +1608,12 @@ func (l *Loop) subagentModel() string {
 	}
 	pin := strings.TrimSpace(os.Getenv("CLAUDE_CODE_SUBAGENT_MODEL"))
 	pinned := pin != "" && !strings.EqualFold(pin, "inherit")
+	// CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL (296 mod_1008): when set, a
+	// workflow-spawned agent's declared model is ignored — resolution
+	// falls back to the parent model like SUBAGENT_MODEL_FORCE.
+	if os.Getenv("CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL") != "" {
+		return parent
+	}
 	if envOn("CLAUDE_CODE_SUBAGENT_MODEL_FORCE") {
 		if pinned {
 			return resolveSubagentAlias(pin)
@@ -1960,6 +2226,92 @@ func serverVerdictFor(rs []api.SafeguardResult, toolUseID string) string {
 		}
 		if tu, ok := sr.Status.ToolUses[toolUseID]; ok && tu.Type == "evaluated" {
 			return tu.Outcome
+		}
+	}
+	return ""
+}
+
+// DetectPRLink extracts a PR number/url/repo from a tool result —
+// gh pr create/checkout output contains https://github.com/<o>/<r>/pull/<n>.
+var prURLRe = regexp.MustCompile(`https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/(\d+)`)
+
+func DetectPRLink(content string) (int, string, string, bool) {
+	m := prURLRe.FindStringSubmatch(content)
+	if m == nil {
+		return 0, "", "", false
+	}
+	n, _ := strconv.Atoi(m[3])
+	return n, m[0], m[1] + "/" + m[2], true
+}
+
+func truncAt(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}
+
+// reportMissingAttachment emits real's system/file_attachments_missing
+// when an image marker's file vanished before the result went out.
+func (l *Loop) reportMissingAttachment(r tools.Result) {
+	if l.Events.OnFileMissing == nil || !strings.HasPrefix(r.Content, "\x00IMAGE\x00") {
+		return
+	}
+	path, _, _ := strings.Cut(strings.TrimPrefix(r.Content, "\x00IMAGE\x00"), "\x00")
+	if _, err := os.Stat(path); err != nil {
+		l.Events.OnFileMissing(path)
+	}
+}
+
+// vcsMutation matches real's git-mutation detector (mod_0295 bg): the
+// Bash command's git verb + branch named in the result/output.
+func vcsMutation(output, input string) (kind, branch string, ok bool) {
+	var in struct {
+		Command string `json:"command"`
+	}
+	_ = json.Unmarshal([]byte(input), &in)
+	cmd := in.Command
+	if cmd == "" {
+		cmd = input
+	}
+	for _, verb := range []string{"commit", "push", "merge", "rebase"} {
+		if strings.Contains(cmd, "git "+verb) || strings.Contains(cmd, "git "+verb+"-") ||
+			strings.Contains(cmd, "git "+verb+" ") {
+			kind = verb
+			break
+		}
+	}
+	if kind == "" {
+		return "", "", false
+	}
+	if m := regexp.MustCompile(`\[(\S+)`).FindStringSubmatch(output); len(m) > 1 {
+		branch = strings.TrimRight(m[1], "]")
+	} else if m := regexp.MustCompile(`branch '([^']+)'`).FindStringSubmatch(output); len(m) > 1 {
+		branch = m[1]
+	}
+	return kind, branch, true
+}
+
+// devIntentKind returns real's dev-intent kind for an Apple/Android
+// toolchain command — ios_command for xcodebuild/simctl/swift/xcrun,
+// android_command for adb/fastlane/gradle.
+func devIntentKind(input string) string {
+	var in struct {
+		Command string `json:"command"`
+	}
+	_ = json.Unmarshal([]byte(input), &in)
+	cmd := in.Command
+	if cmd == "" {
+		return ""
+	}
+	for _, t := range []string{"xcodebuild", "simctl", "devicectl", "swift build", "swift run", "xcrun"} {
+		if strings.Contains(cmd, t) {
+			return "ios_app"
+		}
+	}
+	for _, t := range []string{"adb ", "fastlane", "./gradlew", "gradle "} {
+		if strings.Contains(cmd, t) {
+			return "android_app"
 		}
 	}
 	return ""

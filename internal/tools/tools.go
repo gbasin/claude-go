@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -24,6 +23,11 @@ var schemasJSON []byte
 type Result struct {
 	Content string // text result sent back as tool_result
 	IsError bool
+	// Structured is the tool's full Output object — stream-json's
+	// tool_use_result field carries it (real's per-tool output: Bash
+	// {stdout,stderr,exit_code,duration_ms}, etc.). nil when the tool
+	// produces no structured output.
+	Structured any
 	// Refs, when non-empty, renders the tool_result as a list of
 	// {type:"tool_reference", tool_name} blocks instead of text — real's
 	// mapToolResultToToolResultBlockParam for ToolSearch matches.
@@ -59,7 +63,7 @@ type Context struct {
 	PermissionAsk func() bool
 	// Subagent marks Agent-spawned contexts — RequestDefs adds
 	// SubagentHandback to the wire set.
-	Subagent      bool
+	Subagent bool
 	// AdvisorModel is the configured advisor model (--advisor /
 	// advisorModel / /advisor). Empty → the advisor server block stays
 	// off the wire (real only ships it when configured).
@@ -71,6 +75,12 @@ type Context struct {
 	Answerer      Answerer // WebFetch page-answer model
 	Searcher      Searcher // WebSearch backend
 	AskStructured func(header, question string, options []AskOption, multi bool) ([]string, error)
+	// NotifyNeedsInput fires real's Notification{agent_needs_input} when
+	// a question dialog opens (the host binds it to the hooks lane)
+	NotifyNeedsInput func(toolName, message string)
+	// OnTaskEvent emits real's task_started/task_notification system
+	// records for background agents (stream-json prints them)
+	OnTaskEvent func(rec map[string]any)
 	// AskStructuredMulti renders real's multi-question wizard (question
 	// tabs + Submit). Falls back to sequential AskStructured when unset.
 	AskStructuredMulti func(questions []AskQuestion) (map[string][]string, error)
@@ -232,15 +242,6 @@ func Dispatch(ctx *Context, name string, input json.RawMessage) Result {
 	return t.Exec(ctx, input)
 }
 
-// Defs returns the wire tool definitions.
-func Defs() []api.Tool {
-	var out []api.Tool
-	for _, t := range All() {
-		out = append(out, t.Def)
-	}
-	return out
-}
-
 // loadSchema pulls one tool def from the embedded schemas file.
 func loadSchema(name string) api.Tool {
 	var all []api.Tool
@@ -322,24 +323,6 @@ func Names() []string {
 // ExtraAllowedDirs widens the writable workspace (settings
 // permissions.additionalDirectories). File tools treat these like the cwd.
 var ExtraAllowedDirs []string
-
-// DirAllowed reports whether p is inside the working dir or an additional dir.
-func DirAllowed(c *Context, p string) bool {
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return false
-	}
-	abs = filepath.Clean(abs)
-	if strings.HasPrefix(abs, filepath.Clean(c.CWD)+string(filepath.Separator)) || abs == filepath.Clean(c.CWD) {
-		return true
-	}
-	for _, d := range ExtraAllowedDirs {
-		if abs == d || strings.HasPrefix(abs, d+string(filepath.Separator)) {
-			return true
-		}
-	}
-	return false
-}
 
 // isTaskTool reports whether n is one of the tasks.enabled-gated tools.
 func isTaskTool(n string) bool {

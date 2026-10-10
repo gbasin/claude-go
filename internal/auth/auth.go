@@ -157,20 +157,6 @@ func credentialsFilePath() string {
 	return filepath.Join(config.ClaudeDir(), ".credentials.json")
 }
 
-// LoadDesignOAuth mirrors xhe(): the designOauth slot of the credentials
-// file, or nil.
-func LoadDesignOAuth() (*Credentials, error) {
-	b, err := os.ReadFile(credentialsFilePath())
-	if err != nil {
-		return nil, err
-	}
-	var cf credFile
-	if err := json.Unmarshal(b, &cf); err != nil {
-		return nil, err
-	}
-	return cf.DesignOauth, nil
-}
-
 // SaveDesignOAuth mirrors gZt(): read-modify-write of the credentials file,
 // setting only the designOauth slot.
 func SaveDesignOAuth(creds *Credentials) error {
@@ -188,11 +174,6 @@ func SaveDesignOAuth(creds *Credentials) error {
 		return err
 	}
 	return os.WriteFile(p, b, 0o600)
-}
-
-// ClearDesignOAuth drops the designOauth slot (T() in mod_1033.js).
-func ClearDesignOAuth() error {
-	return SaveDesignOAuth(nil)
 }
 
 // Token returns a usable bearer token, refreshing if expired.
@@ -317,6 +298,9 @@ func ownCredsPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".claude-go", ".credentials.json")
 }
+
+// OwnCredentialsPath exposes ownCredsPath for `auth logout`.
+func OwnCredentialsPath() string { return ownCredsPath() }
 
 func writeOwnCreds(c *Credentials) {
 	p := ownCredsPath()

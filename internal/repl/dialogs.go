@@ -215,41 +215,61 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 		suffix      string // static text after the field (e.g. " in <dir>")
 	}
 	var opts []opt
-	opts = append(opts, opt{label: "Yes", action: "yes", input: "feedback",
-		placeholder: "and tell Claude what to do next"})
 	// the project dir shown in "in <dir>" — ~-abbreviated like real's Hn()
 	dirDisp := l.ToolCtx.CWD
 	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(dirDisp, home) {
 		dirDisp = "~" + dirDisp[len(home):]
 	}
 	outside := outsideDir(name, input, l.ToolCtx.CWD)
-	if isFileTool(name) && l.PermMode != "acceptEdits" {
-		// captured: "accept edits (...) commands)" + "(shift+tab)" bold
+	if name == "ExitPlanMode" {
+		// real's plan-exit rows (mod_1596): the clear-context row plus a
+		// keep-context variant per enabled lane — bypass / resume-auto /
+		// accept-edits / default
 		opts = append(opts, opt{
-			label:  "Yes, and switch to " + bold + "accept edits (auto-approve file edits and common file \n      commands)" + unbold + " for this session " + bold + "(shift+tab)" + unbold,
-			action: "acceptedits"})
-	} else if !isFileTool(name) {
-		if outside != "" {
+			label:  "Yes, clear context and auto-accept edits",
+			action: "yes"})
+		if l.PermMode != "acceptEdits" {
 			opts = append(opts, opt{
-				label:  "Yes, and always allow access to " + outside + " from this project",
-				action: "always"})
-		} else if alwaysSpec != "" {
-			// real: editable-prefix input row — the seed is the suggested
-			// prefix; editing it rewrites the persisted rule
+				label:  "Yes, and auto-accept edits " + dim + "(keep context)" + reset,
+				action: "acceptedits"})
+		} else {
 			opts = append(opts, opt{
-				label:  "Yes, and don't ask again for ",
-				action: "always",
-				input:  "prefix",
-				// real's input placeholder
-				placeholder: "command prefix (e.g., npm run *)",
-				suffix:      bold + " in " + dirDisp + unbold})
+				label:  "Yes " + dim + "(keep context)" + reset,
+				action: "yes"})
 		}
-		if l.PermMode != "auto" {
-			opts = append(opts, opt{label: "Yes, and switch to auto mode" + gray246 + " · auto mode handles these prompts for you" + "\x1b[39m", action: "automode"})
+		opts = append(opts, opt{label: "No, refine the plan", action: "no",
+			input: "feedback", placeholder: "and tell Claude what to change"})
+	} else {
+		opts = append(opts, opt{label: "Yes", action: "yes", input: "feedback",
+			placeholder: "and tell Claude what to do next"})
+		if isFileTool(name) && l.PermMode != "acceptEdits" {
+			// captured: "accept edits (...) commands)" + "(shift+tab)" bold
+			opts = append(opts, opt{
+				label:  "Yes, and switch to " + bold + "accept edits (auto-approve file edits and common file \n      commands)" + unbold + " for this session " + bold + "(shift+tab)" + unbold,
+				action: "acceptedits"})
+		} else if !isFileTool(name) {
+			if outside != "" {
+				opts = append(opts, opt{
+					label:  "Yes, and always allow access to " + outside + " from this project",
+					action: "always"})
+			} else if alwaysSpec != "" {
+				// real: editable-prefix input row — the seed is the suggested
+				// prefix; editing it rewrites the persisted rule
+				opts = append(opts, opt{
+					label:  "Yes, and don't ask again for ",
+					action: "always",
+					input:  "prefix",
+					// real's input placeholder
+					placeholder: "command prefix (e.g., npm run *)",
+					suffix:      bold + " in " + dirDisp + unbold})
+			}
+			if l.PermMode != "auto" {
+				opts = append(opts, opt{label: "Yes, and switch to auto mode" + gray246 + " · auto mode handles these prompts for you" + "\x1b[39m", action: "automode"})
+			}
 		}
+		opts = append(opts, opt{label: "No", action: "no", input: "feedback",
+			placeholder: "and tell Claude what to do differently"})
 	}
-	opts = append(opts, opt{label: "No", action: "no", input: "feedback",
-		placeholder: "and tell Claude what to do differently"})
 	// per-option input text (feedback / edited prefix)
 	inputs := make([][]rune, len(opts))
 	for i := range opts {
@@ -272,6 +292,9 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 		}
 		put(rule)
 		put(" " + bold + title + unbold + "\x1b[39m")
+		if name == "ExitPlanMode" {
+			put(" Claude wants to exit plan mode")
+		}
 		if tip != "" {
 			put(" " + tip)
 		}

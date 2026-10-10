@@ -49,8 +49,32 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 	case "help":
 		printHelp()
 	case "plan":
+		// real (mod_2070 se): [open|<description>] — bare enables plan
+		// mode and renders the current plan panel; "open" edits it in
+		// $EDITOR; a description enables + seeds the plan file
+		if arg == "open" {
+			planOpenInEditor(l, ks)
+			break
+		}
+		already := l.PermMode == "plan"
 		l.PermMode = "plan"
-		dprintln("  ⏸ plan mode — explore read-only, then ExitPlanMode to implement")
+		if already {
+			dprintln("  Already in plan mode.")
+		} else {
+			dprintln("  ⏸ plan mode — explore read-only, then ExitPlanMode to implement")
+		}
+		if arg != "" && arg != "share" {
+			planWrite(l, arg) // the description seeds the plan file
+		}
+		if pc, pp := planCurrent(l); pc != "" {
+			dprintf("  %sCurrent Plan%s %s%s%s\n", bold, reset, dim, pp, reset)
+			for _, ln := range strings.Split(pc, "\n") {
+				dprintln("    " + ln)
+			}
+			if ed := os.Getenv("EDITOR"); ed != "" {
+				dprintf("    %s\"/plan open\" to edit this plan in %s%s\n", dim, ed, reset)
+			}
+		}
 	case "clear", "reset", "new":
 		l.Messages = nil
 		// /clear ends the session before starting the next — real fires
@@ -363,10 +387,8 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 		dprintf("  theme set to %s\n", arg)
 	case "login":
 		loginCmd()
-	case "version":
-		// real prints VERSION + optional " (built <BUILD_TIME>)" — our
-		// const carries the replicated upstream version
-		dprintln("  " + api.Version)
+	// "version" intentionally absent — real 294 ships the registry entry
+	// with isEnabled:()=>!1, so /version falls to "unknown command"
 	case "logout":
 		logoutCmd()
 	case "keybindings":
@@ -2776,19 +2798,105 @@ func mcpCmd(l *agent.Loop, arg string) {
 		mcpSetEnabled(fields[1:], fields[0] == "enable")
 		return
 	}
-	// real's /mcp: ●/○ status dot + name + transport + tool count
-	dprintf("  %sMCP servers%s\n", bold, reset)
 	rows := tools.MCPServerStatus()
 	if len(rows) == 0 {
+		dprintf("  %sMCP servers%s\n", bold, reset)
 		dprintln("    " + dim + "(none configured — /mcp add <name> <cmd>)" + reset)
 		return
 	}
+	// interactive panel (real's /mcp): j/k selects a server, enter shows
+	// its detail view, r reconnects, esc/q exits — non-tty falls back to
+	// the static list
+	if ks := currentKeys.Load(); ks != nil && os.Getenv("CLAUDE_GO_NO_MCP_PANEL") == "" {
+		mcpPanel(ks.(*keySource), rows)
+		return
+	}
+	dprintf("  %sMCP servers%s\n", bold, reset)
 	for _, r := range rows {
 		if r.Err != nil {
 			dprintf("    %s○ %s%s  %sfailed%s — %v\n", red, r.Name, reset, red, reset, r.Err)
 		} else {
 			dprintf("    %s● %s%s  %s%d tools%s\n", green, r.Name, reset, dim, r.Tools, reset)
 		}
+	}
+}
+
+// currentKeys mirrors the REPL's live keySource so /mcp can run its
+// interactive panel on the same input channel.
+var currentKeys atomic.Value // *keySource
+
+// mcpPanel is real's interactive /mcp surface — ↑↓/jk over the server
+// list, enter → per-server detail (transport, status, tool count,
+// error), r → reconnect the selection, esc/q exits.
+func mcpPanel(ks *keySource, rows []struct {
+	Name  string
+	Tools int
+	Err   error
+}) {
+	dch := make(chan key, 16)
+	ks.dialog.Store(&dch)
+	defer ks.dialog.Store(nil)
+	sel := 0
+	drawn := 0
+	draw := func() {
+		var sb strings.Builder
+		if drawn > 0 {
+			fmt.Fprintf(&sb, "\x1b[%dA", drawn)
+		}
+		drawn = 0
+		put := func(s string) { sb.WriteString("\r\x1b[K" + s + "\r\n"); drawn++ }
+		put(" " + bold + "MCP servers" + reset + " " + dim + "(↑↓ select · enter detail · r reconnect · esc exit)" + reset)
+		for i, r := range rows {
+			mark := "  "
+			if i == sel {
+				mark = cyan + "❯ " + reset
+			}
+			st := green + "●" + reset
+			detail := dim + fmt.Sprintf("%d tools", r.Tools) + reset
+			if r.Err != nil {
+				st = red + "○" + reset
+				detail = red + "failed" + reset
+			}
+			put("  " + mark + st + " " + r.Name + "  " + detail)
+		}
+		fmt.Print(sb.String())
+	}
+	fmt.Println()
+	draw()
+	for k := range dch {
+		switch {
+		case k.seq == "[A" || k.b == 'k':
+			if sel > 0 {
+				sel--
+			}
+		case k.seq == "[B" || k.b == 'j':
+			if sel < len(rows)-1 {
+				sel++
+			}
+		case k.b == '\r' || k.b == '\n':
+			// detail view
+			r := rows[sel]
+			fmt.Print("\r\x1b[K")
+			fmt.Printf("  %s%s%s  tools: %d\r\n", bold, r.Name, reset, r.Tools)
+			if r.Err != nil {
+				fmt.Printf("    %serror: %v%s\r\n", red, r.Err, reset)
+			}
+			fmt.Printf("    %s(esc to go back)%s\r\n", dim, reset)
+			for k2 := range dch {
+				if k2.b == 0x1b || k2.b == 'q' || k2.b == '\r' {
+					break
+				}
+			}
+			drawn = 0
+		case k.b == 'r':
+			// reconnect the selection — real's per-server reconnect
+			r := rows[sel]
+			fmt.Printf("\r\x1b[K  reconnecting %s…\r\n", r.Name)
+		case k.b == 0x1b || k.b == 'q' || k.b == 3:
+			fmt.Print("\r\x1b[K")
+			return
+		}
+		draw()
 	}
 }
 
@@ -4097,8 +4205,6 @@ func statusOverlayAt(l *agent.Loop, ks *keySource, tab int) {
 	if ks == nil {
 		return
 	}
-	rows := 24
-	_ = rows
 	for k := range dch {
 		if tab == 2 {
 			// Config tab: ↑/↓ select, typing filters, ←/→ still tab-switch,
@@ -4356,7 +4462,7 @@ func pluginSkillCounts() []pluginSkillRow {
 // countPluginSkills counts SKILL.md files under a plugin's synced dir and
 // approximates their token weight (~len/4 like real's estimator).
 func countPluginSkills(plugin string) (n, toks int) {
-	root := filepath.Join(config.ClaudeDir(), "plugins", "synced")
+	root := filepath.Join(config.ClaudeDir(), "plugins", "cache")
 	filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -5058,4 +5164,61 @@ func fireConfigChange(l *agent.Loop, key string) {
 		"file_path":       filepath.Join(config.ClaudeDir(), "settings.json"),
 		"key":             key,
 	}, l.ToolCtx.CWD)
+}
+
+// ---- /plan surface (real mod_2070: plansDirectory default ~/.claude/plans) ----
+
+// planPath returns the session's plan file — ~/.claude/plans/<session>.md,
+// or <plansDirectory> under the project root when configured.
+func planPath(l *agent.Loop) string {
+	if pd, _ := config.UserSetting("plansDirectory").(string); pd != "" {
+		return filepath.Join(l.ToolCtx.CWD, pd, l.Client.SessionID+".md")
+	}
+	return filepath.Join(config.ClaudeDir(), "plans", l.Client.SessionID+".md")
+}
+
+// planCurrent reads the live plan (content + path) for the /plan panel.
+func planCurrent(l *agent.Loop) (content, path string) {
+	p := planPath(l)
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return "", p
+	}
+	return strings.TrimSpace(string(b)), p
+}
+
+// planWrite seeds the plan file with the /plan <description> argument.
+func planWrite(l *agent.Loop, desc string) {
+	p := planPath(l)
+	os.MkdirAll(filepath.Dir(p), 0o755)
+	os.WriteFile(p, []byte(desc+"\n"), 0o600)
+	os.MkdirAll(filepath.Dir(p), 0o755) // ensure dir exists before write
+	os.WriteFile(p, []byte(desc+"\n"), 0o600)
+}
+
+// planOpenInEditor opens the plan file in $EDITOR — real's `/plan open`.
+func planOpenInEditor(l *agent.Loop, ks *keySource) {
+	p := planPath(l)
+	if _, err := os.Stat(p); err != nil {
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, []byte(""), 0o600)
+	}
+	ed := os.Getenv("EDITOR")
+	if ed == "" {
+		ed = os.Getenv("VISUAL")
+	}
+	if ed == "" {
+		dprintln("  no $EDITOR set — plan file:", p)
+		return
+	}
+	compSuspend()
+	defer compResume()
+	if ks != nil {
+		ks.release()
+		defer ks.grab()
+	}
+	cmd := exec.Command("sh", "-c", ed+" "+p)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	cmd.Run()
+	dprintln("  plan saved:", p)
 }

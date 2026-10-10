@@ -214,6 +214,17 @@ func TestMCPSSEToolCall(t *testing.T) {
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
 	// handshake is async — /mcp shows connected once initialize+tools/list done
 	p.sendUntil("/mcp\r", "● ", 20)
+	// esc exits the /mcp panel — real keeps focus until q/esc; send
+	// repeatedly until the prompt returns (the first esc can race the
+	// panel's dialog install)
+	for i := 0; i < 20; i++ {
+		p.send("\x1b")
+		time.Sleep(150 * time.Millisecond)
+		if strings.Count(p.clean(), "❯") > 0 && !strings.Contains(p.clean()[:], "enter detail") {
+			break
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
 
 	// ToolSearch discovers the deferred schema, then the call dispatches
 	// over SSE. Both tool_use blocks run in one turn. Send-once semantics:
@@ -257,6 +268,17 @@ func TestMCPSSEDeferredRefusal(t *testing.T) {
 
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
 	p.sendUntil("/mcp\r", "● ", 20)
+	// esc exits the /mcp panel — real keeps focus until q/esc; send
+	// repeatedly until the prompt returns (the first esc can race the
+	// panel's dialog install)
+	for i := 0; i < 20; i++ {
+		p.send("\x1b")
+		time.Sleep(150 * time.Millisecond)
+		if strings.Count(p.clean(), "❯") > 0 && !strings.Contains(p.clean()[:], "enter detail") {
+			break
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
 
 	p.sendUntilEchoed(t, `tool:mcp__ssetest__ping {}`+"\r", "❯ tool:mcp__ssetest__ping", 8)
 	p.waitFor("InputValidationError", 30*time.Second)
@@ -353,6 +375,17 @@ func TestMCPHTTPToolCall(t *testing.T) {
 
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
 	p.sendUntil("/mcp\r", "● ", 20)
+	// esc exits the /mcp panel — real keeps focus until q/esc; send
+	// repeatedly until the prompt returns (the first esc can race the
+	// panel's dialog install)
+	for i := 0; i < 20; i++ {
+		p.send("\x1b")
+		time.Sleep(150 * time.Millisecond)
+		if strings.Count(p.clean(), "❯") > 0 && !strings.Contains(p.clean()[:], "enter detail") {
+			break
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
 
 	p.sendUntilEchoed(t,
 		`calls:[{"name":"ToolSearch","input":{"query":"select:mcp__httptest__ping"}},`+
@@ -397,6 +430,17 @@ func TestMCPResources(t *testing.T) {
 
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
 	p.sendUntil("/mcp\r", "● ", 20)
+	// esc exits the /mcp panel — real keeps focus until q/esc; send
+	// repeatedly until the prompt returns (the first esc can race the
+	// panel's dialog install)
+	for i := 0; i < 20; i++ {
+		p.send("\x1b")
+		time.Sleep(150 * time.Millisecond)
+		if strings.Count(p.clean(), "❯") > 0 && !strings.Contains(p.clean()[:], "enter detail") {
+			break
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
 
 	p.sendUntilEchoed(t,
 		`calls:[{"name":"ToolSearch","input":{"query":"select:ListMcpResourcesTool,ReadMcpResourceTool"}},`+
@@ -455,6 +499,17 @@ func TestMCPListChanged(t *testing.T) {
 
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
 	p.sendUntil("/mcp\r", "● ", 20)
+	// esc exits the /mcp panel — real keeps focus until q/esc; send
+	// repeatedly until the prompt returns (the first esc can race the
+	// panel's dialog install)
+	for i := 0; i < 20; i++ {
+		p.send("\x1b")
+		time.Sleep(150 * time.Millisecond)
+		if strings.Count(p.clean(), "❯") > 0 && !strings.Contains(p.clean()[:], "enter detail") {
+			break
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
 	p.send("\x1b") // close status
 	time.Sleep(300 * time.Millisecond)
 
@@ -494,6 +549,17 @@ func TestMCPPromptSlash(t *testing.T) {
 
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
 	p.sendUntil("/mcp\r", "● ", 20)
+	// esc exits the /mcp panel — real keeps focus until q/esc; send
+	// repeatedly until the prompt returns (the first esc can race the
+	// panel's dialog install)
+	for i := 0; i < 20; i++ {
+		p.send("\x1b")
+		time.Sleep(150 * time.Millisecond)
+		if strings.Count(p.clean(), "❯") > 0 && !strings.Contains(p.clean()[:], "enter detail") {
+			break
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
 	p.send("\x1b")
 	time.Sleep(300 * time.Millisecond)
 
@@ -515,6 +581,17 @@ func TestMCPRootsList(t *testing.T) {
 		"--add-dir", "/tmp")
 	p.waitFor("❯", 30*time.Second)
 	p.sendUntil("/mcp\r", "● ", 20)
+	// esc exits the /mcp panel — real keeps focus until q/esc; send
+	// repeatedly until the prompt returns (the first esc can race the
+	// panel's dialog install)
+	for i := 0; i < 20; i++ {
+		p.send("\x1b")
+		time.Sleep(150 * time.Millisecond)
+		if strings.Count(p.clean(), "❯") > 0 && !strings.Contains(p.clean()[:], "enter detail") {
+			break
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
 	p.send("\x1b")
 	time.Sleep(300 * time.Millisecond)
 
@@ -549,6 +626,17 @@ func TestMCPNotificationMessage(t *testing.T) {
 
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
 	p.sendUntil("/mcp\r", "● ", 20)
+	// esc exits the /mcp panel — real keeps focus until q/esc; send
+	// repeatedly until the prompt returns (the first esc can race the
+	// panel's dialog install)
+	for i := 0; i < 20; i++ {
+		p.send("\x1b")
+		time.Sleep(150 * time.Millisecond)
+		if strings.Count(p.clean(), "❯") > 0 && !strings.Contains(p.clean()[:], "enter detail") {
+			break
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
 	p.send("\x1b")
 	time.Sleep(300 * time.Millisecond)
 
@@ -571,6 +659,17 @@ func TestMCPToolError(t *testing.T) {
 
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
 	p.sendUntil("/mcp\r", "● ", 20)
+	// esc exits the /mcp panel — real keeps focus until q/esc; send
+	// repeatedly until the prompt returns (the first esc can race the
+	// panel's dialog install)
+	for i := 0; i < 20; i++ {
+		p.send("\x1b")
+		time.Sleep(150 * time.Millisecond)
+		if strings.Count(p.clean(), "❯") > 0 && !strings.Contains(p.clean()[:], "enter detail") {
+			break
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
 	p.send("\x1b")
 	time.Sleep(300 * time.Millisecond)
 
@@ -615,6 +714,17 @@ func TestPermPromptTool(t *testing.T) {
 	p.waitFor("❯", 30*time.Second)
 	// wait for the async MCP connect before the Write prompt
 	p.sendUntil("/mcp\r", "● ", 20)
+	// esc exits the /mcp panel — real keeps focus until q/esc; send
+	// repeatedly until the prompt returns (the first esc can race the
+	// panel's dialog install)
+	for i := 0; i < 20; i++ {
+		p.send("\x1b")
+		time.Sleep(150 * time.Millisecond)
+		if strings.Count(p.clean(), "❯") > 0 && !strings.Contains(p.clean()[:], "enter detail") {
+			break
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
 	p.send("\x1b")
 	time.Sleep(300 * time.Millisecond)
 	p.sendUntilEchoed(t,
@@ -646,6 +756,17 @@ func TestMCPElicitation(t *testing.T) {
 	}, "--mock", "--permission-mode", "bypassPermissions")
 	p.waitFor("❯", 30*time.Second)
 	p.sendUntil("/mcp\r", "● ", 20)
+	// esc exits the /mcp panel — real keeps focus until q/esc; send
+	// repeatedly until the prompt returns (the first esc can race the
+	// panel's dialog install)
+	for i := 0; i < 20; i++ {
+		p.send("\x1b")
+		time.Sleep(150 * time.Millisecond)
+		if strings.Count(p.clean(), "❯") > 0 && !strings.Contains(p.clean()[:], "enter detail") {
+			break
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
 	p.send("\x1b")
 	time.Sleep(300 * time.Millisecond)
 
@@ -728,6 +849,17 @@ func TestMCPToolHook(t *testing.T) {
 	// wait for the async MCP handshake before prompting so the hook's
 	// caller sees the connected client
 	p.sendUntil("/mcp\r", "● ", 20)
+	// esc exits the /mcp panel — real keeps focus until q/esc; send
+	// repeatedly until the prompt returns (the first esc can race the
+	// panel's dialog install)
+	for i := 0; i < 20; i++ {
+		p.send("\x1b")
+		time.Sleep(150 * time.Millisecond)
+		if strings.Count(p.clean(), "❯") > 0 && !strings.Contains(p.clean()[:], "enter detail") {
+			break
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
 	p.sendUntil("hello-hook\r", "PONG-E2E", 40) // tool result surfaces as context
 	p.exit()
 

@@ -235,14 +235,6 @@ func loadCredFile() map[string]*serverAuth {
 	return out
 }
 
-// LoadMCPCredentials returns every stored MCP OAuth record, keyed
-// "<name>|<hash16>" (plus any unmigrated bare-name legacy entries).
-func LoadMCPCredentials() map[string]*serverAuth {
-	credMu.Lock()
-	defer credMu.Unlock()
-	return loadCredFile()
-}
-
 func loadServerAuth(name string, cfg ServerConfig) *serverAuth {
 	credMu.Lock()
 	defer credMu.Unlock()

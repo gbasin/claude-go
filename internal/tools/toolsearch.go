@@ -64,8 +64,9 @@ var shouldDeferTools = map[string]bool{
 	"PushNotification": true, "DesignSync": true,
 	"CronCreate": true, "CronDelete": true, "CronList": true,
 	"ArtifactComments": true, "ArtifactData": true,
-	"Glob": true, "Grep": true, "LS": true, "MultiEdit": true,
-	"NotebookRead": true, "TodoWrite": true,
+	"Glob": true, "Grep": true,
+	// LS/MultiEdit/NotebookRead exist in 295 only as permission-rule
+	// literals — not registered tools, not ToolSearch-discoverable
 }
 
 // searchHints are the extracted searchHint strings for deferred builtins —
@@ -95,10 +96,6 @@ var searchHints = map[string]string{
 	"EndConversation":  "end the conversation",
 	"Glob":             "find files by name pattern",
 	"Grep":             "search file contents (ripgrep)",
-	"LS":               "list directory contents",
-	"MultiEdit":        "apply multiple edits to one file",
-	"NotebookRead":     "read Jupyter notebook cells",
-	"TodoWrite":        "manage the task checklist",
 }
 
 func init() {
@@ -170,7 +167,8 @@ var hiddenInStandard = map[string]bool{
 	"DesignSync": true, "EndConversation": true, "Glob": true,
 	"Grep": true, "ListMcpResourcesTool": true, "LS": true,
 	"LSP": true, "Monitor": true, "MultiEdit": true,
-	"NotebookRead": true, "PushNotification": true,
+	"NotebookRead":           true,
+	"PushNotification":       true,
 	"ReadMcpResourceDirTool": true, "ReadMcpResourceTool": true,
 	"ReadNotifications": true, "RemoteTrigger": true,
 	"SendFeedback": true, "TodoWrite": true,
@@ -185,6 +183,11 @@ func IsDeferredTool(t *Tool) bool {
 	if t.IsMCP {
 		return true
 	}
+	if t.Def.Name == "TodoWrite" {
+		// real's gate: TodoWrite is the legacy fallback — deferred iff
+		// the Task* tools are OFF (294 `!HR()&&YW()`)
+		return !taskToolsEnabledFor(ProjectDir())
+	}
 	return shouldDeferTools[t.Def.Name]
 }
 
@@ -194,6 +197,9 @@ func IsDeferredTool(t *Tool) bool {
 func IsDeferredName(name string) bool {
 	if strings.HasPrefix(name, "mcp__") {
 		return true
+	}
+	if name == "TodoWrite" {
+		return !taskToolsEnabledFor(ProjectDir())
 	}
 	return shouldDeferTools[name]
 }
@@ -243,14 +249,6 @@ func (c *Context) DeferredNames() []string {
 		names = append(names, t.Def.Name)
 	}
 	return names
-}
-
-// DeferredReminder renders the deferred_tools_delta announcement (MTr).
-func DeferredReminder(names []string) string {
-	return "The following deferred tools are now available via ToolSearch. " +
-		"Their schemas are NOT loaded — calling them directly will fail with InputValidationError. " +
-		"Use ToolSearch with query \"select:<name>[,<name>...]\" to load tool schemas before calling them:\n" +
-		strings.Join(names, "\n")
 }
 
 // RequestDefs is the wire tools array: non-deferred defs, plus the
@@ -307,6 +305,9 @@ func requestDefs(c *Context) []api.Tool {
 	var out []api.Tool
 	var deferred []string
 	sub := c.Subagent
+	// nil AllowedTools = unrestricted; a non-nil empty slice withholds
+	// every tool (real's --tools "")
+	restricted := c.AllowedTools != nil
 	allowed := map[string]bool{}
 	for _, n := range c.AllowedTools {
 		allowed[n] = true
@@ -315,7 +316,8 @@ func requestDefs(c *Context) []api.Tool {
 		if t.Def.Name == "advisor" && advisorModelFor(c) == "" {
 			continue // wire-gated: server block only when configured
 		}
-		if len(allowed) > 0 && !allowed[t.Def.Name] && t.Def.Name != "ToolSearch" {
+		// real's --tools "" withholds everything — ToolSearch included
+		if restricted && !allowed[t.Def.Name] {
 			continue
 		}
 		if !search && hiddenInStandard[t.Def.Name] {
@@ -331,7 +333,13 @@ func requestDefs(c *Context) []api.Tool {
 			out = append(out, d)
 			continue
 		}
-		out = append(out, t.Def)
+		def := t.Def
+		if def.Name == "WebSearch" && webSearchCitationsDeclared(c) {
+			def.Citations = &struct {
+				Enabled bool `json:"enabled"`
+			}{Enabled: true}
+		}
+		out = append(out, def)
 	}
 	// subagents get real's trimmed surface with SubagentHandback —
 	// independent of the deferral lane (captured in real's subagent wire)
@@ -380,6 +388,17 @@ func subagentDefs(c *Context, parent []api.Tool, deferred []string) []api.Tool {
 		case "advisor":
 			if m := advisorModelFor(c); m != "" {
 				sOut = append(sOut, api.Tool{Raw: advisorRaw(m)})
+			}
+		case "WebSearch":
+			if t, ok := registry[n]; ok {
+				def := t.Def
+				if webSearchCitationsDeclared(c) {
+					def.Citations = &struct {
+						Enabled bool `json:"enabled"`
+					}{Enabled: true}
+				}
+				sOut = append(sOut, def)
+				seen[n] = true
 			}
 		case "ToolSearch":
 			if toolSearchEnabled() {
@@ -653,4 +672,19 @@ func anyContains(parts []string, term string) bool {
 		}
 	}
 	return false
+}
+
+// webSearchCitationsDeclared is real's Qpr (296 mod_0345): the env flag
+// plus a first-party lane puts citations:{enabled:true} on WebSearch's
+// wire schema.
+func webSearchCitationsDeclared(c *Context) bool {
+	if !envTruthy(os.Getenv("CLAUDE_CODE_WEBSEARCH_CITATIONS_DECLARED")) {
+		return false
+	}
+	// first-party lane check — non-first-party providers skip the field
+	if p := os.Getenv("CLAUDE_CODE_API_PROVIDER"); p != "" &&
+		p != "firstParty" && p != "first-party" {
+		return false
+	}
+	return true
 }

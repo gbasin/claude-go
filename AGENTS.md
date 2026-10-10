@@ -1,4 +1,12 @@
 
+## Project layout
+
+Wire- and UI-compatible reimplementation of the Claude Code CLI, targeting
+claude 2.1.296. See README.md for build/run/test and the internal/ package
+map. `audits/*.md` hold parity audit notes (written against 2.1.294 —
+treat version-specific numbers as historical). Real-wire captures and
+extracted reference source stay local per .gitignore (Anthropic IP).
+
 ## Version retarget runbook (294→295, proven)
 
 When the installed `claude` self-updates, the diff harness goes red with

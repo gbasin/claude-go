@@ -18,7 +18,8 @@ import (
 
 // Job is the registry record for one background session — real's jobDir
 // record flattened to what our transient-spawn spine needs. One dir per
-// session under <config>/bg/jobs/<sid8>/ holding job.json + rv.sock.
+// session under <config>/jobs/<sid8>/ holding job.json + rv.sock —
+// real's job root is ~/.claude/jobs (mod_0240, mod_0533 error strings).
 type Job struct {
 	SessionID string    `json:"sessionId"`
 	Short     string    `json:"short"` // sid8 — attach/agents key
@@ -38,7 +39,17 @@ type Job struct {
 const heartbeatStale = 15 * time.Second // real heartbeat is 5s; triple it
 
 func jobsRoot() string {
-	return filepath.Join(config.ClaudeDir(), "bg", "jobs")
+	// real's root: ~/.claude/jobs — migrate any old bg/jobs entries
+	dir := filepath.Join(config.ClaudeDir(), "jobs")
+	old := filepath.Join(config.ClaudeDir(), "bg", "jobs")
+	if ents, err := os.ReadDir(old); err == nil && len(ents) > 0 {
+		if _, err2 := os.Stat(dir); os.IsNotExist(err2) {
+			if err3 := os.Rename(old, dir); err3 == nil {
+				os.Remove(filepath.Join(config.ClaudeDir(), "bg"))
+			}
+		}
+	}
+	return dir
 }
 
 func (j *Job) dir() string { return filepath.Join(jobsRoot(), j.Short) }

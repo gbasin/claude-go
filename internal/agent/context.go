@@ -40,7 +40,7 @@ const (
 
 var (
 	// 294 wire shape: every cache_control is plain {"type":"ephemeral"}
-	// — no ttl, no scope (captured real-body0/1)
+	// — no ttl, no scope (captured wire)
 	ephemeralPlain = &api.CacheControl{Type: "ephemeral"}
 )
 
@@ -302,16 +302,27 @@ func memoryIndex(cwd string) string {
 	return ""
 }
 
+// MemoryPaths is the exported memory chain (CLAUDE.md + .claude/rules)
+// — the init event's memory_paths field lists the ones that loaded.
+func MemoryPaths(cwd string) []string { return claudeMDPaths(cwd) }
+
 func claudeMDPaths(cwd string) []string {
 	if os.Getenv("CLAUDE_CODE_SIMPLE") != "" {
 		return nil // --bare: no auto-discovery, no CLAUDE.md
 	}
 	paths := []string{filepath.Join(config.ClaudeDir(), "CLAUDE.md")}
-	// walk cwd up to root collecting CLAUDE.md (project files prepend later)
+	// walk cwd up to root collecting CLAUDE.md (project files prepend
+	// later) — plus each dir's .claude/rules/**/*.md (real's Rae: rules
+	// files join the memory chain)
 	var chain []string
 	home, _ := os.UserHomeDir()
 	for d := filepath.Clean(cwd); ; d = filepath.Dir(d) {
-		chain = append([]string{filepath.Join(d, "CLAUDE.md")}, chain...)
+		var lvl []string
+		lvl = append(lvl, filepath.Join(d, "CLAUDE.md"))
+		rules, _ := filepath.Glob(filepath.Join(d, ".claude", "rules", "*.md"))
+		sort.Strings(rules)
+		lvl = append(lvl, rules...)
+		chain = append(lvl, chain...)
 		if d == "/" || d == "." || d == home {
 			break
 		}
@@ -325,14 +336,21 @@ func jq(s string) string {
 	return string(b)
 }
 
-// Metadata builds metadata.user_id: a JSON string holding device/account/session.
+// Metadata builds metadata.user_id — real's kNe (mod_0198):
+// {agentContext?.., EXTRA_METADATA.., ti?, device_id, account_uuid,
+// session_id, parent_session_id?, tk?} — env keys merge BEFORE the device
+// fields so a collision is won by the device triple.
 func Metadata(sessionID string, cfg UserConfig) json.RawMessage {
-	// field order matters on the wire: real emits device_id, account_uuid,
-	// session_id — a struct keeps it (map marshal would sort keys).
 	var b strings.Builder
-	b.WriteString(`{"device_id":` + jq(cfg.DeviceID) +
-		`,"account_uuid":` + jq(cfg.AccountUUID) +
-		`,"session_id":` + jq(sessionID))
+	b.WriteString("{")
+	first := true
+	add := func(k, v string) {
+		if !first {
+			b.WriteString(",")
+		}
+		first = false
+		b.WriteString(jq(k) + ":" + v)
+	}
 	if extra := os.Getenv("CLAUDE_CODE_EXTRA_METADATA"); extra != "" {
 		var em map[string]any
 		if json.Unmarshal([]byte(extra), &em) == nil {
@@ -343,9 +361,15 @@ func Metadata(sessionID string, cfg UserConfig) json.RawMessage {
 			sort.Strings(keys)
 			for _, k := range keys {
 				v, _ := json.Marshal(em[k])
-				b.WriteString("," + jq(k) + ":" + string(v))
+				add(k, string(v))
 			}
 		}
+	}
+	add("device_id", jq(cfg.DeviceID))
+	add("account_uuid", jq(cfg.AccountUUID))
+	add("session_id", jq(sessionID))
+	if p := os.Getenv("CLAUDE_CODE_PARENT_SESSION_ID"); p != "" {
+		add("parent_session_id", jq(p))
 	}
 	b.WriteString("}")
 	inner := []byte(b.String())
@@ -419,7 +443,7 @@ func platformName() string {
 	return runtime.GOOS
 }
 
-func version() string { return "2.1.295" }
+func version() string { return "2.1.296" }
 
 // BillingMeta carries the per-turn values the billing sys[0] needs.
 type BillingMeta struct {
@@ -627,4 +651,22 @@ func billingLine(entrypoint string, bill BillingMeta) string {
 		}
 	}
 	return b.String()
+}
+
+// InstructionSizeStats sums the memory chain's file sizes — real's
+// instruction_size_warning input (mod_0409 Dvt): total over a 120k-char
+// floor, the per-file count, and the largest single file.
+func InstructionSizeStats(cwd string) (total, fileCount, largest int) {
+	for _, p := range claudeMDPaths(cwd) {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		fileCount++
+		total += len(b)
+		if len(b) > largest {
+			largest = len(b)
+		}
+	}
+	return
 }

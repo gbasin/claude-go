@@ -4,16 +4,17 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,7 +71,7 @@ Flags:
   --task-budget <n>             (accepted)
   --permission-mode <mode>      default|acceptEdits|plan|bypassPermissions|auto
   --dangerously-skip-permissions  bypass all permission checks
-  --allow-dangerously-skip-permissions  same
+  --allow-dangerously-skip-permissions  enable bypass mode availability
   --enable-auto-mode            start in auto permission mode
   --plan-mode-required          start in plan mode
   --permission-prompt-tool <t>  (accepted)
@@ -102,7 +103,7 @@ Flags:
   -w, --worktree [name]         create .claude/worktrees/<name> and cd into it
   --project <dir>               run in a different project directory
   --from-pr <ref>               (accepted)
-  --tmux                        (accepted; tmux integration not supported)
+  --tmux[=classic]              run the session in a detached tmux session for the worktree (requires -w)
   --ide, --desktop              IDE integration hints (bridge auto-connects via ~/.claude/ide/*.lock)
   --chrome, --no-chrome         chrome tool toggle (env)
   --claude-in-chrome-mcp        run the Claude in Chrome stdio MCP server (no REPL)
@@ -167,18 +168,24 @@ Subcommands:
   daemon run|start|status|stop  background-session supervisor (respawns dead workers)
                                 install|uninstall register as a service (launchd/systemd)
   stop <id>                     stop a running background session
+  kill <id>                     kill a running background session
+  logs <id>                     stream a background session's output
+  rm <id>                       remove a stopped background session's state
+  respawn <id>                  respawn a dead background worker
   auth login|status|logout      credential management
   config get|set|list           settings.json
   doctor                        diagnostics
   import <file>                 import a transcript into this project
-  install, update               version info (built from source)
+  install, update               rebuild from source (git pull + go build)
   login                         OAuth login
-  mcp list|add|get|remove       manage MCP servers
+  mcp list|add|add-json|add-from-claude-desktop|get|remove
+      login|logout|reset-project-choices|serve  manage MCP servers / run claude-go as one
   plugin list|install|remove|marketplace
   purge [--dry-run] [--all]     delete local project state
   sandbox trust                 trust the sandbox MITM CA (macOS keychain)
   setup-token                   store a long-lived token
   remote-control, rc            Remote Control server (control-plane skeleton)
+  bg-host                       (internal) background-session pty host
   gateway, ssh, connect, self-hosted-runner  (stubs; not supported)
 `, version)
 }
@@ -368,6 +375,9 @@ func main() {
 	}
 	sessionID := newUUID()
 	if o.sessID != "" {
+		if len(o.sessID) > 64 {
+			fatal("Error: --session-id is too long")
+		}
 		sessionID = o.sessID
 	}
 	if o.bgMode {
@@ -386,7 +396,7 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("background session %s started\n", sessionID)
-		fmt.Printf("  attach:   claude attach %s\n", sessionID[:8])
+		fmt.Printf("  attach:   claude attach %s\n", sid8(sessionID))
 		fmt.Println("  monitor:  claude agents")
 		os.Exit(0)
 	}
@@ -718,8 +728,6 @@ func main() {
 			return res
 		}
 	}
-	if !o.mockMode {
-	}
 	loop.Entrypoint = "sdk-cli"
 	if o.model != "" {
 		loop.Model = resolveModel(o.model)
@@ -873,7 +881,32 @@ func main() {
 		rules["allow"] = append(rules["allow"], strings.Split(o.allowTools, ",")...)
 	}
 	if o.toolsList != "" {
-		loop.AllowedTools = strings.Split(o.toolsList, ",")
+		// real's --tools grammar: "" disables all, "default"/"all" keeps
+		// the full set; names select; a rule-shaped entry (Bash(git *))
+		// withholds the whole tool with a warning, and a detached spec
+		// ("Bash git*") warns that the arg was read as a rule.
+		if o.toolsList == `""` {
+			loop.AllowedTools = []string{}
+		} else if o.toolsList == "default" || o.toolsList == "all" {
+			// explicit default/all — nil (unrestricted) is the full set
+		} else {
+			var allowed []string
+			for _, t := range strings.Split(o.toolsList, ",") {
+				t = strings.TrimSpace(t)
+				if t == "" {
+					continue
+				}
+				if i := strings.Index(t, "("); i >= 0 && strings.HasSuffix(t, ")") {
+					fmt.Fprintf(os.Stderr,
+						"--tools entry %q names a rule, not a tool; the whole tool is withheld. "+
+							"Write %q to say so.\n", t, t[:i])
+					allowed = append(allowed, t[:i])
+					continue
+				}
+				allowed = append(allowed, t)
+			}
+			loop.AllowedTools = allowed
+		}
 		loop.ToolCtx.AllowedTools = loop.AllowedTools
 	}
 	if o.denyTools != "" {
@@ -885,7 +918,11 @@ func main() {
 		if strings.HasPrefix(strings.TrimSpace(o.settingsF), "{") {
 			sb = []byte(o.settingsF) // --settings accepts a JSON string too
 		} else {
-			sb, _ = os.ReadFile(o.settingsF)
+			var err error
+			sb, err = os.ReadFile(o.settingsF)
+			if err != nil {
+				fatal("Error: Settings file not found: %s", o.settingsF)
+			}
 		}
 		sb2 = sb
 		if len(sb) > 0 {
@@ -926,6 +963,14 @@ func main() {
 	tools.RegisterSession(sessionID, cwd, "")
 	// interactive cli only — real's -p wire shows no title/walk-away
 	// calls (verified against captures)
+	// session transcript — opened before OnTurnEnd so the ai-title write
+	// resolves it
+	var st2 *session.Store
+	if !o.noPersist {
+		// real sweeps transcripts past cleanupPeriodDays at session open
+		session.SweepRetention(cwd)
+		st2, _ = session.Open(cwd, sessionID)
+	}
 	if !o.mockMode && !o.printMode {
 		var titled atomic.Bool
 		loop.Events.OnTurnEnd = func(ask string, toolCalls int, tail string, elapsed time.Duration) {
@@ -933,7 +978,11 @@ func main() {
 				bg := context.Background()
 				ep := string(loop.Client.Entrypoint)
 				if !titled.Swap(true) && ask != "" {
-					_ = client.TitleCall(bg, agent.AuxBillingLine(ep, ask, ask), ask)
+					if t := client.TitleCall(bg, agent.AuxBillingLine(ep, ask, ask), ask); t != "" && st2 != nil {
+						// real's saveAiGeneratedTitle writes the ai-title
+						// record (mod_0409 fle)
+						_ = st2.LogAITitle(t)
+					}
 				}
 				state := fmt.Sprintf("Current state: working (for %dm)\nTool calls so far: %s\nUser's most recent ask: %q\n\nAssistant message tail (last 30 chars):\n%s",
 					int(elapsed.Minutes()), auxToolCallCount(toolCalls), ask, last30(tail))
@@ -998,11 +1047,6 @@ func main() {
 		}
 	}
 
-	// session transcript
-	var st2 *session.Store
-	if !o.noPersist {
-		st2, _ = session.Open(cwd, sessionID)
-	}
 	if st2 != nil {
 		defer st2.Close()
 		loop.Transcript = st2.Path
@@ -1046,6 +1090,9 @@ func main() {
 		if o.sessionName != "" {
 			st2.LogRecord(map[string]any{"type": "summary", "summary": o.sessionName})
 		}
+		// pr-link: real writes the record when a gh PR URL lands in a
+		// Bash result — the loop detects, we persist (mod_0409 q2s)
+		loop.OnSessionRecord = func(rec map[string]any) { _ = st2.LogRecord(rec) }
 	}
 
 	if o.cont || o.resume != "" {
@@ -1151,7 +1198,27 @@ func main() {
 			os.Stderr = f
 		}
 	}
-	fireHook(loop, hooks.SessionStart)
+	// real's resume path: SessionStart hooks run in flight, and the
+	// session waits up to CLAUDE_CODE_RESUME_SESSIONSTART_HOOKS_WAIT_MS
+	// for them before continuing (default: run to completion inline)
+	if o.cont || o.resume != "" {
+		wait := 0
+		if v := os.Getenv("CLAUDE_CODE_RESUME_SESSIONSTART_HOOKS_WAIT_MS"); v != "" {
+			wait, _ = strconv.Atoi(v)
+		}
+		if wait > 0 {
+			done := make(chan struct{})
+			go func() { fireHook(loop, hooks.SessionStart); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(time.Duration(wait) * time.Millisecond):
+			}
+		} else {
+			fireHook(loop, hooks.SessionStart)
+		}
+	} else {
+		fireHook(loop, hooks.SessionStart)
+	}
 	if o.printMode {
 		tools.Interactive = false
 		if o.inFormat == "stream-json" {
@@ -1183,7 +1250,7 @@ func main() {
 					uname = u.Username
 				}
 				sessCtx := fmt.Sprintf("- **User identity**: `%s`. The `$USER/...` pattern in the rules above resolves to `%s/...`. Branches whose first path segment is a different person's name (`<other-user>/...`) are NOT this user's personal branches.", uname, uname)
-				tr := safetyTranscript(loop, name, input)
+				tr := safetyTranscript(loop)
 				md := agent.ClaudeMDContext(cwd)
 				sev, cat, err := client.SafetyEvalCall(ctx, billing, sessCtx, md, tr)
 				if err != nil || sev >= 50 {
@@ -1312,14 +1379,16 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 		cfgs = mcp.LoadConfigs(cwd)
 	}
 	if configFile != "" {
-		if b, err := os.ReadFile(configFile); err == nil {
-			var top struct {
-				McpServers map[string]mcp.ServerConfig `json:"mcpServers"`
-			}
-			if json.Unmarshal(b, &top) == nil {
-				for n, c := range top.McpServers {
-					cfgs[n] = c
-				}
+		b, err := os.ReadFile(configFile)
+		if err != nil {
+			fatal("Error: MCP config file not found: %s", configFile)
+		}
+		var top struct {
+			McpServers map[string]mcp.ServerConfig `json:"mcpServers"`
+		}
+		if json.Unmarshal(b, &top) == nil {
+			for n, c := range top.McpServers {
+				cfgs[n] = c
 			}
 		}
 	}
@@ -1379,8 +1448,6 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 	}
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	httpMCP := map[string]*mcp.HTTPClient{}
-	_ = httpMCP
 	for name, cfg := range cfgs {
 		if cfg.Command == "" && cfg.URL == "" {
 			continue
@@ -1463,19 +1530,10 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 				return out
 			}
 			c.OnToolsChanged = func() {
-				var ents []tools.MCPToolEntry
-				for _, t := range c.ListTools() {
-					ents = append(ents, tools.MCPToolEntry{
-						Name: t.Name, Description: t.Description,
-						InputSchema: t.InputSchema})
-				}
-			}
-			c.OnToolsChanged = func() {
 				tools.UnregisterMCPServer(prefix)
 				for _, t := range c.Tools {
 					tools.RegisterMCP(prefix, c, t.Name, t.Description, t.InputSchema)
 				}
-				_ = tools.MCPToolEntry{} // SyncMCPTools is the additive variant
 			}
 			tools.RegisterMCPServer(name, c)
 			mu.Lock()
@@ -1596,8 +1654,8 @@ func teleportPick(l *agent.Loop) string {
 		}
 		fmt.Printf("  %d. %s  %s  %s\n", i+1, title, s.ID, s.UpdatedAt)
 	}
-	st, _ := os.Stdin.Stat()
-	if st.Mode()&os.ModeCharDevice == 0 {
+	st, stErr := os.Stdin.Stat()
+	if stErr == nil && st.Mode()&os.ModeCharDevice == 0 {
 		fmt.Println("run `claude --teleport <session-id>` to resume one")
 		return ""
 	}
@@ -1629,6 +1687,20 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 	sj := format == "stream-json"
 	if sj {
 		emitStreamJSONInit(l)
+		emitInstructionSizeWarning(l)
+		// real echoes the -p prompt as a user event after init
+		if prompt != "" {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "user", "uuid": session.NewID(),
+				"parent_tool_use_id": nil,
+				"message": map[string]any{
+					"role": "user",
+					"content": []map[string]any{{
+						"type": "text", "text": prompt}}},
+				"session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
 	}
 	if sj && os.Getenv("CLAUDE_GO_INCLUDE_HOOK_EVENTS") == "1" {
 		l.OnHookEvent = func(rec map[string]any) {
@@ -1643,29 +1715,20 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 		default:
 			out.WriteString(t)
 		}
-		if sj && flagPartial {
-			ev, _ := json.Marshal(map[string]any{
-				"type": "stream_event",
-				"event": map[string]any{
-					"type":  "content_block_delta",
-					"index": 0,
-					"delta": map[string]any{"type": "text_delta", "text": t},
-				},
-				"session_id": l.Client.SessionID,
-			})
-			fmt.Println(string(ev))
-		}
 	}
-	l.Events.OnThinking = func(t string) {
-		if sj && flagPartial {
+	if sj && flagPartial {
+		// real's stream_event: the raw SSE frame verbatim + session_id /
+		// parent_tool_use_id stamps (mod_0653 qVo)
+		l.Events.OnStreamEvent = func(se *api.StreamEvent) {
+			var raw json.RawMessage = se.Raw
+			if len(raw) == 0 {
+				raw, _ = json.Marshal(se)
+			}
 			ev, _ := json.Marshal(map[string]any{
-				"type": "stream_event",
-				"event": map[string]any{
-					"type":  "content_block_delta",
-					"index": 0,
-					"delta": map[string]any{"type": "thinking_delta", "thinking": t},
-				},
-				"session_id": l.Client.SessionID,
+				"type": "stream_event", "uuid": session.NewID(),
+				"parent_tool_use_id": nil,
+				"event":              json.RawMessage(raw),
+				"session_id":         l.Client.SessionID,
 			})
 			fmt.Println(string(ev))
 		}
@@ -1687,16 +1750,165 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 			}
 		}
 	}
-	l.Events.OnToolResult = func(name, toolUseID string, tr tools.Result) {
+	l.OnToolUseSummary = func(summary string, ids []string) {
 		if sj {
 			ev, _ := json.Marshal(map[string]any{
+				"type": "tool_use_summary", "summary": summary,
+				"preceding_tool_use_ids": ids,
+				"uuid":                   session.NewID(),
+				"session_id":             l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
+		if st != nil {
+			st.LogRecord(map[string]any{
+				"type": "tool_use_summary", "summary": summary,
+				"preceding_tool_use_ids": ids,
+			})
+		}
+	}
+	l.ToolCtx.OnTaskEvent = func(rec map[string]any) {
+		if sj {
+			rec["type"] = "system"
+			rec["uuid"] = session.NewID()
+			rec["session_id"] = l.Client.SessionID
+			ev, _ := json.Marshal(rec)
+			fmt.Println(string(ev))
+		}
+	}
+	// real's system/file_attachments_missing — a bridge-shape event
+	// ({message_uuid, sent_count, missing:[{file_uuid,reason}]}); our
+	// attachments are path markers so the missing entries carry the path
+	l.Events.OnFileMissing = func(path string) {
+		if sj {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "system", "subtype": "file_attachments_missing",
+				"sent_count": 1,
+				"missing": []map[string]any{{
+					"file_uuid": path, "reason": "file missing",
+				}},
+				"uuid": session.NewID(), "session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
+	}
+	l.Events.OnVCSChange = func(kind, branch string) {
+		if sj {
+			ev := map[string]any{
+				"type": "system", "subtype": "vcs_state_changed",
+				"kind": kind, "cwd": l.ToolCtx.CWD,
+				"uuid": session.NewID(), "session_id": l.Client.SessionID,
+			}
+			if branch != "" {
+				ev["branch"] = branch
+			}
+			b, _ := json.Marshal(ev)
+			fmt.Println(string(b))
+		}
+	}
+	l.Events.OnDevIntent = func(kind string) {
+		if sj {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "system", "subtype": "dev_intent",
+				"kind": kind,
+				"uuid": session.NewID(), "session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
+	}
+	l.Events.OnPerTurnEffort = func(active bool) {
+		if sj {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "system", "subtype": "per_turn_effort_changed",
+				"per_turn_effort_active": active,
+				"uuid":                   session.NewID(), "session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
+	}
+	l.Events.OnRateLimit = func(status string, info map[string]any) {
+		if sj {
+			info["status"] = status
+			ev, _ := json.Marshal(map[string]any{
+				"type": "rate_limit_event", "rate_limit_info": info,
+				"uuid": session.NewID(), "session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
+	}
+	l.Events.OnToolProgress = func(name, id string, sec int, hb bool) {
+		if sj {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "tool_progress", "tool_use_id": id, "tool_name": name,
+				"parent_tool_use_id":   nil,
+				"elapsed_time_seconds": sec,
+				"uuid":                 session.NewID(), "session_id": l.Client.SessionID,
+				"heartbeat": hb,
+			})
+			fmt.Println(string(ev))
+		}
+	}
+	l.Events.OnPermissionCheck = func(tuID, status string) {
+		if sj {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "system", "subtype": "permission_check_status",
+				"tool_use_id": tuID, "status": status,
+				"uuid": session.NewID(), "session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
+	}
+	l.Events.OnThinkingTokens = func(n int) {
+		if sj {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "system", "subtype": "thinking_tokens",
+				"thinking_tokens": n,
+				"uuid":            session.NewID(), "session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
+	}
+	l.Events.OnModelFallback = func(from, to string) {
+		if sj {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "system", "subtype": "model_fallback",
+				"original_model": from, "fallback_model": to,
+				"uuid": session.NewID(), "session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
+	}
+	// real emits system/compact_boundary on the stream when the loop
+	// compacts mid-turn (mod_1695 boundary render)
+	if sj {
+		l.Events.OnCompact = func() {
+			_, trig := l.CompactMeta()
+			ev, _ := json.Marshal(map[string]any{
+				"type": "system", "subtype": "compact_boundary",
+				"uuid": session.NewID(), "session_id": l.Client.SessionID,
+				"compact_metadata": map[string]any{
+					"trigger": trig, "pre_tokens": l.LastInputTokens(),
+				},
+			})
+			fmt.Println(string(ev))
+		}
+	}
+	l.Events.OnToolResult = func(name, toolUseID string, tr tools.Result) {
+		if sj {
+			rec := map[string]any{
 				"type": "user", "uuid": session.NewID(),
 				"parent_tool_use_id": nil,
 				"message": map[string]any{"role": "user", "content": []map[string]any{{
 					"type": "tool_result", "tool_use_id": toolUseID,
 					"content": tr.Content, "is_error": tr.IsError}}},
 				"session_id": l.Client.SessionID,
-			})
+			}
+			// real's user event carries the tool's structured Output at
+			// tool_use_result (mod_0069) — absent when the tool has none
+			if tr.Structured != nil {
+				rec["tool_use_result"] = tr.Structured
+			}
+			ev, _ := json.Marshal(rec)
 			fmt.Println(string(ev))
 		}
 	}
@@ -1746,8 +1958,9 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 			// real wraps the result in structured output when a schema is given
 			var v any
 			if json.Unmarshal([]byte(out.String()), &v) != nil {
+				raw := out.String()
 				out.Reset()
-				b2, _ := json.Marshal(map[string]any{"result": out.String()})
+				b2, _ := json.Marshal(map[string]any{"result": raw})
 				out.Write(b2)
 			}
 		}
@@ -1810,13 +2023,20 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 }
 
 func newUUID() string {
-	f, _ := os.Open("/dev/urandom")
 	var b [16]byte
-	io.ReadFull(f, b[:])
-	f.Close()
+	rand.Read(b[:])
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// sid8 clips a session id for display names without panicking on a
+// short --session-id (real rejects non-UUIDs; we degrade to the id).
+func sid8(s string) string {
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
 }
 
 // runPrintStreamJSON implements --input-format stream-json: reads
@@ -1877,7 +2097,25 @@ func runPrintStreamJSON(l *agent.Loop) {
 			}
 		}
 		turns++
-		if _, err := l.Ask(context.Background(), text); err != nil {
+		var askErr error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// a recovered fault surfaces as real's ui_client_fault
+					// event (mod_1744 dQe) before the error result
+					ev, _ := json.Marshal(map[string]any{
+						"type": "system", "subtype": "ui_client_fault",
+						"error":      fmt.Sprint(r),
+						"component":  "turn",
+						"session_id": l.Client.SessionID, "uuid": session.NewID(),
+					})
+					fmt.Println(string(ev))
+					askErr = fmt.Errorf("internal fault: %v", r)
+				}
+			}()
+			_, askErr = l.Ask(context.Background(), text)
+		}()
+		if err := askErr; err != nil {
 			ev, _ := json.Marshal(map[string]any{
 				"type": "result", "subtype": "error_during_execution",
 				"is_error": true, "errors": []string{err.Error()},
@@ -1903,6 +2141,29 @@ func runPrintStreamJSON(l *agent.Loop) {
 
 // emitStreamJSONInit writes the system/init event real emits first on
 // --output-format stream-json.
+func emitInstructionSizeWarning(l *agent.Loop) {
+	total, fileCount, largest := agent.InstructionSizeStats(l.ToolCtx.CWD)
+	if total <= 120000 {
+		return
+	}
+	// real gates the emit on tengu_jolly_aurora (mod_1760 II)
+	if v, _ := config.GBFeature("tengu_jolly_aurora").(bool); !v &&
+		os.Getenv("CLAUDE_CODE_INSTRUCTION_SIZE_WARNING") == "" {
+		return
+	}
+	ev := map[string]any{
+		"type": "system", "subtype": "instruction_size_warning",
+		"total_chars": total, "total_limit_chars": 120000,
+		"file_count": fileCount,
+		"uuid":       session.NewID(), "session_id": l.Client.SessionID,
+	}
+	if fileCount > 1 && largest > 120000 {
+		ev["largest_chars"] = largest
+	}
+	b, _ := json.Marshal(ev)
+	fmt.Println(string(b))
+}
+
 func emitStreamJSONInit(l *agent.Loop) {
 	toolNames := tools.Names()
 	// mcp_servers as [{name,status}] objects (real's shape)
@@ -1931,16 +2192,23 @@ func emitStreamJSONInit(l *agent.Loop) {
 		"type": "system", "subtype": "init",
 		"session_id": l.Client.SessionID, "model": l.Model, "cwd": l.CWD,
 		"tools": toolNames, "mcp_servers": uniq, "permissionMode": l.PermMode,
-		"slash_commands":      repl.SlashCommandNames(),
-		"apiKeySource":        apiKeySource(),
-		"betas":               []string{},
+		"slash_commands": repl.SlashCommandNames(),
+		"apiKeySource":   apiKeySource(),
+		// real ships the live beta list, not []
+		"betas":               betaListForInit(l),
 		"claude_code_version": version,
 		"output_style":        "default",
-		"agents":              []string{"general-purpose", "Explore", "Plan"},
-		"skills":              repl.SlashCommandNames(),
-		"plugins":             []string{},
+		"agents":              agentTypesForInit(),
+		"skills":              skillNamesForInit(),
+		"plugins":             pluginInitRecords(),
 		"fast_mode_state":     l.FastMode,
 		"uuid":                session.NewID(),
+	}
+	if mps := memoryPathsForInit(l); len(mps) > 0 {
+		initFields["memory_paths"] = mps
+	}
+	if errs := mcpServerErrorRows(); len(errs) > 0 {
+		initFields["mcp_server_errors"] = errs
 	}
 	// mod_0659.js: startup payloads carry is_coordinator only when true
 	if tools.IsCoordinatorMode() {
@@ -1962,6 +2230,15 @@ func authLoginSub() {
 		fatal("login failed: %v", err)
 	}
 	auth.SaveOwnCreds(creds)
+	// real fires the auth_success Notification hook after login
+	if hc := hooks.Load(mustGetwd()); hc != nil {
+		hooks.Run(hc, hooks.Notification, map[string]any{
+			"session_id": "", "cwd": mustGetwd(),
+			"message":           "Login successful",
+			"notification_type": "auth_success",
+			"hook_event_name":   "Notification",
+		}, mustGetwd())
+	}
 	fmt.Println("logged in")
 }
 
@@ -2118,7 +2395,7 @@ func selfUpdate() {
 		}
 	}
 	if repo == "" {
-		fmt.Println("update: binary isn't inside a claude-go source checkout — rebuild with `go install github.com/gbasin/claude-go@latest`")
+		fmt.Println("update: binary isn't inside a claude-go source checkout — rebuild with `go build -o claude-go .` in a clone of github.com/gbasin/claude-go")
 		return
 	}
 	out, err := exec.Command("git", "-C", repo, "pull", "--ff-only").CombinedOutput()
@@ -2319,7 +2596,7 @@ func startupFacts(cwd string, o *cliOpts) api.SessionFacts {
 // safetyTranscript builds real's compact {"role":"summary"} JSON lines
 // the auto-mode eval sees — user prompts verbatim, tool calls as
 // {"Name":"<summary>"}, then the pending call itself.
-func safetyTranscript(l *agent.Loop, name string, input json.RawMessage) []string {
+func safetyTranscript(l *agent.Loop) []string {
 	var lines []string
 	for _, m := range l.Messages {
 		var blocks []api.ContentBlock
@@ -2359,8 +2636,6 @@ func safetyTranscript(l *agent.Loop, name string, input json.RawMessage) []strin
 	}
 	// the proposed call is already the last assistant tool_use in
 	// l.Messages — no extra line needed
-	_ = name
-	_ = input
 	return lines
 }
 
@@ -2390,7 +2665,7 @@ func safetyInputSummary(input json.RawMessage) string {
 // session bound to the worktree with CLAUDE_CODE_TMUX_SESSION advertised to
 // the UI ("tmux session: <name>"); --tmux=classic forces traditional tmux.
 func setupTmuxSession(wtPath, wtName, sessionID string) {
-	name := "claude-" + sessionID[:8]
+	name := "claude-" + sid8(sessionID)
 	if wtName != "" {
 		name = "claude-" + wtName
 	}
@@ -2427,7 +2702,17 @@ func sessionForPR(cwd, ref string) string {
 			continue
 		}
 		for _, ln := range strings.Split(string(b), "\n") {
-			if strings.Contains(ln, "pull/"+want) || strings.Contains(ln, "#"+want) {
+			var rec struct {
+				PrNumber int    `json:"prNumber"`
+				PrURL    string `json:"prUrl"`
+			}
+			if json.Unmarshal([]byte(ln), &rec) != nil {
+				continue
+			}
+			if rec.PrURL == want || strings.HasSuffix(rec.PrURL, "/pull/"+want) {
+				return strings.TrimSuffix(e.Name(), ".jsonl")
+			}
+			if n, err := strconv.Atoi(want); err == nil && rec.PrNumber == n && n != 0 {
 				return strings.TrimSuffix(e.Name(), ".jsonl")
 			}
 		}
@@ -2508,6 +2793,10 @@ func apiKeySource() string {
 	if os.Getenv("CLAUDE_CODE_API_KEY") != "" {
 		return "CLAUDE_CODE_API_KEY"
 	}
+	// real's source ordering: env keys, then apiKeyHelper, then oauth
+	if _, ok := config.UserSetting("apiKeyHelper").(string); ok {
+		return "apiKeyHelper"
+	}
 	if c, err := auth.Load(); err == nil && c != nil {
 		return "oauth"
 	}
@@ -2554,7 +2843,6 @@ func fireInstructionsLoaded(l *agent.Loop, cwd string) {
 	if len(l.Hooks["InstructionsLoaded"]) == 0 {
 		return
 	}
-	home, _ := os.UserHomeDir()
 	var files []string
 	for _, p := range []string{
 		filepath.Join(config.ClaudeDir(), "CLAUDE.md"),
@@ -2568,7 +2856,6 @@ func fireInstructionsLoaded(l *agent.Loop, cwd string) {
 			files = append(files, p)
 		}
 	}
-	_ = home
 	for _, f := range files {
 		hooks.Run(l.Hooks, hooks.InstructionsLoaded, map[string]any{
 			"session_id": l.Client.SessionID, "cwd": cwd,
@@ -2578,4 +2865,87 @@ func fireInstructionsLoaded(l *agent.Loop, cwd string) {
 			"file_path":       f,
 		}, cwd)
 	}
+}
+
+// betaListForInit returns the live beta header list for the init event —
+// real ships the same names the request carries.
+func betaListForInit(l *agent.Loop) []string {
+	if c := l.Client; c != nil {
+		return c.BetaNames()
+	}
+	return []string{}
+}
+
+// agentTypesForInit lists the registered subagent type names — real
+// reports the builtin set plus any .claude/agents/*.md discovered types.
+func agentTypesForInit() []string {
+	// real's builtin order is fixed; discovered types append after
+	out := []string{"general-purpose", "Explore", "Plan"}
+	var extra []string
+	g, _ := filepath.Glob(filepath.Join(config.ClaudeDir(), "agents", "*.md"))
+	for _, p := range g {
+		extra = append(extra, strings.TrimSuffix(filepath.Base(p), ".md"))
+	}
+	sort.Strings(extra)
+	return append(out, extra...)
+}
+
+// skillNamesForInit lists invocable skill names — real reports the skill
+// surface, not the slash-command set.
+func skillNamesForInit() []string {
+	var out []string
+	for _, d := range []string{
+		filepath.Join(config.ClaudeDir(), "skills"),
+	} {
+		ents, _ := os.ReadDir(d)
+		for _, e := range ents {
+			if e.IsDir() {
+				out = append(out, e.Name())
+			}
+		}
+	}
+	sort.Strings(out)
+	if out == nil {
+		out = []string{}
+	}
+	return out
+}
+
+// pluginInitRecords emits real's plugins array — {name,path} objects for
+// each installed plugin (not bare names).
+func pluginInitRecords() []map[string]any {
+	var out []map[string]any
+	for _, d := range plugins.EnabledPluginDirs() {
+		out = append(out, map[string]any{
+			"name": filepath.Base(d), "path": d,
+		})
+	}
+	if out == nil {
+		out = []map[string]any{}
+	}
+	return out
+}
+
+// memoryPathsForInit lists the CLAUDE.md/rules paths that actually
+// loaded — real's memory_paths init field.
+func memoryPathsForInit(l *agent.Loop) []string {
+	var out []string
+	for _, p := range agent.MemoryPaths(l.ToolCtx.CWD) {
+		if _, err := os.Stat(p); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// mcpServerErrorRows lists MCP servers that failed to connect — real's
+// mcp_server_errors init field.
+func mcpServerErrorRows() []map[string]any {
+	var out []map[string]any
+	for _, s := range tools.MCPServerStatus() {
+		if s.Err != nil {
+			out = append(out, map[string]any{"name": s.Name, "error": s.Err.Error()})
+		}
+	}
+	return out
 }

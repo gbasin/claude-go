@@ -58,10 +58,11 @@ func wasEmitted(path string) bool {
 // ---------- Read ----------
 
 type readInput struct {
-	FilePath string `json:"file_path"`
-	Offset   int    `json:"offset"`
-	Limit    int    `json:"limit"`
-	Pages    string `json:"pages"`
+	FilePath   string `json:"file_path"`
+	Offset     int    `json:"offset"`
+	Limit      int    `json:"limit"`
+	Pages      string `json:"pages"`
+	AllowLarge bool   `json:"allow_large"` // lift the size caps toward context room (296)
 }
 
 func execRead(c *Context, raw json.RawMessage) Result {
@@ -115,6 +116,9 @@ func execRead(c *Context, raw json.RawMessage) Result {
 	if limit <= 0 {
 		limit = readDefaultLimit
 	}
+	if in.AllowLarge {
+		limit = 1 << 20 // real raises the cap toward the context window
+	}
 	offset := in.Offset
 	if offset < 0 {
 		offset = 0
@@ -137,7 +141,7 @@ func execRead(c *Context, raw json.RawMessage) Result {
 			continue // count the rest for the truncated marker
 		}
 		line := sc.Text()
-		if len(line) > readMaxLineLen {
+		if !in.AllowLarge && len(line) > readMaxLineLen {
 			line = line[:readMaxLineLen] + "…"
 			truncatedLines++
 		}
@@ -698,8 +702,6 @@ func orDefault(s, d string) string {
 	}
 	return s
 }
-
-var _ = bytes.MinRead
 
 func inFilePath(c *Context, raw json.RawMessage) string {
 	var in struct {

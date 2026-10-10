@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"claude-go/internal/agent"
 	"claude-go/internal/api"
 	"claude-go/internal/hooks"
+	"claude-go/internal/mcp"
 	"claude-go/internal/perms"
 	"claude-go/internal/tools"
 
@@ -40,11 +42,6 @@ type Store interface {
 	LogTitle(title string) error
 	Log(m api.Message) error
 	LogRecord(ev map[string]any) error
-}
-
-// Run drives the interactive session.
-func Run(l *agent.Loop) {
-	RunWithStore(l, nil)
 }
 
 // RunWithStore is Run with session transcript logging.
@@ -89,6 +86,13 @@ func RunWithStore(l *agent.Loop, store Store) {
 			}
 		}
 		l.PermMode = order[(idx+1)%len(order)]
+		// real stamps {type:"mode"} on every mode cycle (mod_0409)
+		if currentStore != nil {
+			currentStore.LogRecord(map[string]any{
+				"type": "mode", "mode": l.PermMode,
+				"sessionId": l.Client.SessionID,
+			})
+		}
 		compInline(fmt.Sprintf("\r\n%s⏵⏵ %s mode%s\r\n", yellow, l.PermMode, reset))
 	}
 	var wantQuit atomic.Bool
@@ -101,6 +105,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 	}
 	ks, err := startKeys()
 	if err == nil {
+		currentKeys.Store(ks)
 		// MCP elicitation: a server asks the user mid-flow — real shows a
 		// form; we prompt inline + fire Elicitation/ElicitationResult
 		tools.SetElicitHandler(func(req *tools.ElicitRequest) tools.ElicitAnswer {
@@ -157,9 +162,58 @@ func RunWithStore(l *agent.Loop, store Store) {
 	// EndConversation mid-turn → flag normal shutdown (raw-mode restore,
 	// unregister, MCP close, SessionEnd all run via the quit path).
 	endSession := func() { wantQuit.Store(true) }
-	_ = endSession
 	if l.SessionEndReason == "" {
 		l.SessionEndReason = "other"
+	}
+	// tool_use_summary — the aux label event lands as a transcript
+	// record + a dim line under the completed batch (real renders it
+	// as a summary row)
+	l.OnToolUseSummary = func(summary string, ids []string) {
+		if currentStore != nil {
+			currentStore.LogRecord(map[string]any{
+				"type": "tool_use_summary", "summary": summary,
+				"preceding_tool_use_ids": ids,
+				"sessionId":              l.Client.SessionID,
+			})
+		}
+		compInline("\r\n" + dim + "  ⏵ " + summary + reset + "\r\n")
+	}
+	// NotifyNeedsInput carries the dialog-kind notification type
+	// (elicitation_dialog/url/agent_needs_input) — real's Lee/kie map
+	l.ToolCtx.NotifyNeedsInput = func(ntype, message string) {
+		hooks.Run(l.Hooks, hooks.Notification, map[string]any{
+			"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+			"message":           message,
+			"notification_type": ntype,
+			"hook_event_name":   "Notification",
+			"permission_mode":   l.PermMode,
+		}, l.ToolCtx.CWD)
+	}
+	// AbovePrompt band: tool calls feed the collapsed activity rows
+	l.Events.OnToolUse = func(name string, input json.RawMessage) {
+		// one-line summary: the tool's primary arg (command/file_path/pattern)
+		var m map[string]any
+		json.Unmarshal(input, &m)
+		var arg string
+		for _, k := range []string{"command", "file_path", "pattern", "prompt", "url", "description"} {
+			if v, ok := m[k].(string); ok && v != "" {
+				arg = v
+				break
+			}
+		}
+		if len(arg) > 40 {
+			arg = arg[:40] + "…"
+		}
+		line := "⏵ " + name
+		if arg != "" {
+			line += " " + arg
+		}
+		abovePromptPush(line)
+	}
+	l.Events.OnToolResult = func(name, _ string, r tools.Result) {
+		if r.IsError {
+			abovePromptPush("  ✗ " + name)
+		}
 	}
 	l.ToolCtx.SetPermMode = func(mode string) {
 		l.PermMode = mode
@@ -364,6 +418,23 @@ func RunWithStore(l *agent.Loop, store Store) {
 	defer exitAltScreen()
 	compactBanner(api.Version, agent.ModelDisplay(l.Model), "", plan, l.CWD, l.Client.SessionID)
 	printAutoModeNotice(l.PermMode)
+	// .mcp.json trust flow — real prompts once per pending server;
+	// "y" writes enabledMcpjsonServers (mod_1441 approve path)
+	for _, name := range mcp.PendingProjectServers(l.ToolCtx.CWD) {
+		compInline(fmt.Sprintf("\r\n  %sThis project defines MCP server %q — approve? [y/N]%s ",
+			yellow, name, reset))
+		select {
+		case k := <-ks.ch:
+			if k.b == 'y' || k.b == 'Y' {
+				mcp.ApproveProjectServer(l.ToolCtx.CWD, name)
+				compInline("approved\r\n")
+			} else {
+				compInline("skipped\r\n")
+			}
+		case <-time.After(30 * time.Second):
+			compInline("skipped\r\n")
+		}
+	}
 
 	// transcript append cursor — session-scoped so each turn logs only
 	// new messages; starts past any resumed/loaded history, which is
@@ -553,6 +624,15 @@ func RunWithStore(l *agent.Loop, store Store) {
 										queued = append(queued, string(queueBuf))
 									}
 									queuedPending.Add(1)
+									// real stamps queue-operation on each
+									// mid-turn enqueue (mod_0409 nZr)
+									if currentStore != nil {
+										currentStore.LogRecord(map[string]any{
+											"type": "queue-operation", "operation": "enqueue",
+											"sessionId": l.Client.SessionID,
+											"content":   string(queueBuf),
+										})
+									}
 									printStatus(l, ed) // refresh "N queued" badge
 									queueBuf = nil
 									compQueueDraft("")
@@ -693,6 +773,8 @@ func RunWithStore(l *agent.Loop, store Store) {
 		}
 		for {
 			runTurn(line)
+			armIdleNotify(l)
+			armSleepCompact(l)
 			// drain session-injected prompts (cron, wakeup, monitor events)
 			for {
 				select {
@@ -1663,7 +1745,7 @@ func statusLineCmdReal(l *agent.Loop) string {
 		"session_id":      l.Client.SessionID,
 		"transcript_path": l.Transcript,
 		"cwd":             l.ToolCtx.CWD,
-		"version":         "2.1.295",
+		"version":         "2.1.296",
 		"model":           map[string]string{"id": l.Model, "display_name": l.Model},
 		"workspace":       map[string]any{"current_dir": l.ToolCtx.CWD, "project_dir": l.ToolCtx.CWD},
 		"output_style":    map[string]string{"name": outputStyle(l)},
@@ -1706,13 +1788,23 @@ func expandCustomSlash(l *agent.Loop, line string) string {
 	arg := strings.TrimSpace(strings.TrimPrefix(line, "/"+name))
 	if c.mcp != nil {
 		dprintf("  %s/%s%s\n", dim, name, reset)
+		// MCP prompt expansions fire the same hook (mod_0409 wXr)
+		hooks.Run(l.Hooks, hooks.UserPromptExpansion, map[string]any{
+			"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+			"expansion_type": "mcp_prompt", "command_name": name,
+			"command_args": arg, "command_source": c.Source,
+			"prompt": line, "hook_event_name": "UserPromptExpansion",
+		}, l.ToolCtx.CWD)
 		return expandMCPPrompt(c, arg)
 	}
 	dprintf("  %s/%s%s\n", dim, name, reset)
-	// real fires UserPromptExpansion when a custom command expands
+	// real's UserPromptExpansion payload (mod_0409 wXr):
+	// expansion_type/command_name/command_args/command_source/prompt
 	hooks.Run(l.Hooks, hooks.UserPromptExpansion, map[string]any{
 		"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
-		"command_name": name, "hook_event_name": "UserPromptExpansion",
+		"expansion_type": "slash_command", "command_name": name,
+		"command_args": arg, "command_source": c.Source,
+		"prompt": line, "hook_event_name": "UserPromptExpansion",
 	}, l.ToolCtx.CWD)
 	return expandCustomCommand(c, arg)
 }
@@ -2371,6 +2463,15 @@ func elicitDialog(l *agent.Loop, ks *keySource, req *tools.ElicitRequest) tools.
 		_ = json.Unmarshal(res.ElicitContent, &content)
 		return tools.ElicitAnswer{Action: res.ElicitAction, Content: content}
 	}
+	// real fires Notification{elicitation_dialog} when the dialog opens
+	// (the elicitation category row in K8)
+	hooks.Run(l.Hooks, hooks.Notification, map[string]any{
+		"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+		"message":           "Claude needs your input to continue",
+		"notification_type": "elicitation_dialog",
+		"hook_event_name":   "Notification",
+		"permission_mode":   l.PermMode,
+	}, l.ToolCtx.CWD)
 	compInline("\r\n" + "\x1b[38;5;246m" + "┌ MCP " + req.Server + " is asking:\x1b[39m\r\n")
 	compInline("  " + req.Message + "\r\n")
 	// requestedSchema fields → prompt for each string property
@@ -2430,4 +2531,85 @@ func elicitDialog(l *agent.Loop, ks *keySource, req *tools.ElicitRequest) tools.
 		"action": action,
 	}, l.ToolCtx.CWD)
 	return tools.ElicitAnswer{Action: action, Content: content}
+}
+
+// armIdleNotify schedules real's idle_prompt Notification hook — fires
+// after messageIdleNotifThresholdMs (default 60s) of prompt idle, only
+// when no background tasks are running (real's 93672 fix) and no dialog
+// is up.
+var idleNotifSeq atomic.Int64
+
+func armIdleNotify(l *agent.Loop) {
+	idleNotifSeq.Add(1)
+	if os.Getenv("CLAUDE_GO_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "[idle] armed hooks=%v\n", len(l.Hooks[string(hooks.Notification)]))
+	}
+	if l.Hooks == nil || len(l.Hooks[string(hooks.Notification)]) == 0 {
+		return
+	}
+	ms := float64(60000)
+	for _, p := range []string{
+		filepath.Join(l.ToolCtx.CWD, ".claude", "settings.json"),
+		filepath.Join(config.ClaudeDir(), "settings.json"),
+	} {
+		if b, err := os.ReadFile(p); err == nil {
+			var m map[string]any
+			if json.Unmarshal(b, &m) == nil {
+				if v, ok := m["messageIdleNotifThresholdMs"].(float64); ok && v > 0 {
+					ms = v
+					break
+				}
+			}
+		}
+	}
+	seq := idleNotifSeq.Load()
+	time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
+		if idleNotifSeq.Load() != seq {
+			return // a newer turn/prompt superseded this arming
+		}
+		if os.Getenv("CLAUDE_GO_DEBUG") != "" {
+			fmt.Fprintln(os.Stderr, "[idle] firing")
+		}
+		if l.ToolCtx.BgTasks == nil {
+			l.ToolCtx.BgTasks = tools.NewBackground()
+		}
+		for _, t := range l.ToolCtx.BgTasks.List() {
+			select {
+			case <-t.Done:
+			default:
+				return // bg task still running — real suppresses idle_prompt
+			}
+		}
+		hooks.Run(l.Hooks, hooks.Notification, map[string]any{
+			"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
+			"message":           "Claude is waiting for your input",
+			"notification_type": "idle_prompt",
+			"hook_event_name":   "Notification",
+			"permission_mode":   l.PermMode,
+		}, l.ToolCtx.CWD)
+	})
+}
+
+// armSleepCompact schedules real's compact_sleep: with
+// CLAUDE_CODE_SLEEP_COMPACT on, the session auto-compacts after
+// CLAUDE_CODE_SLEEP_COMPACT_AFTER_MS of post-turn idle (default 1h).
+func armSleepCompact(l *agent.Loop) {
+	if !envOn("CLAUDE_CODE_SLEEP_COMPACT") {
+		return
+	}
+	ms := 3600000
+	if v := os.Getenv("CLAUDE_CODE_SLEEP_COMPACT_AFTER_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			ms = n
+		}
+	}
+	seq := idleNotifSeq.Load()
+	time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
+		if idleNotifSeq.Load() != seq {
+			return // a newer turn superseded this arming
+		}
+		if err := l.CompactAuto(context.Background()); err == nil {
+			dprintf("  %s⏵ auto-compacted after %ds idle%s\r\n", dim, ms/1000, reset)
+		}
+	})
 }

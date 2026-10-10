@@ -45,13 +45,16 @@ const (
 	compMinScroll = 4 // transcript rows guaranteed above the zone
 	compMinEditH  = 8 // smallest screen hosting a minimal box zone
 
-	// synchronized output (mode 2026): begin/end update
-	compBSU = "\x1b[?2026h"
-	compESU = "\x1b[?2026l"
+	// synchronized output (mode 2026): begin/end update — real emits
+	// these only when the terminal answered the DECRPM probe; off-DECRPM
+	// terminals must not see raw escape bytes
+	compBSUEnc = "\x1b[?2026h"
+	compESUEnc = "\x1b[?2026l"
 )
 
 var (
-	compActive    atomic.Bool // region installed; read lock-free by the spinner
+	compActive    atomic.Bool
+	compSyncOut   atomic.Bool // set when the ?2026 probe answers supported // region installed; read lock-free by the spinner
 	compMu        sync.Mutex  // serializes every compositor frame
 	compW         int         // last measured width
 	compH         int         // last measured height
@@ -270,7 +273,7 @@ func compInline(s string) {
 		return
 	}
 	var b strings.Builder
-	b.WriteString(compBSU)
+	b.WriteString(compBSU())
 	fmt.Fprintf(&b, "\x1b[%d;1H", compH-compZoneH) // last scroll-region row
 	b.WriteString(s)
 	compPaintRowsLocked(&b, compRowsLocked()) // heal any clobbered zone row
@@ -280,7 +283,7 @@ func compInline(s string) {
 		// turn mode — streamed text owns the scroll bottom
 		fmt.Fprintf(&b, "\x1b[%d;1H", compH-compZoneH)
 	}
-	b.WriteString(compESU)
+	b.WriteString(compESU())
 	io.WriteString(compOut, b.String())
 	compMu.Unlock()
 }
@@ -297,12 +300,12 @@ func compSuspend() {
 	compSusp++
 	if compSusp == 1 && compZoneH > 0 {
 		var b strings.Builder
-		b.WriteString(compBSU)
+		b.WriteString(compBSU())
 		b.WriteString("\x1b7")
 		compClearZoneLocked(&b)
 		b.WriteString("\x1b[r") // scroll region back to full screen
 		b.WriteString("\x1b8")
-		b.WriteString(compESU)
+		b.WriteString(compESU())
 		io.WriteString(compOut, b.String())
 		compZoneH, compPainted = 0, nil
 	}
@@ -344,13 +347,13 @@ func compClose() {
 		compDone = nil
 	}
 	var b strings.Builder
-	b.WriteString(compBSU)
+	b.WriteString(compBSU())
 	b.WriteString("\x1b7")
 	if compZoneH > 0 {
 		compClearZoneLocked(&b)
 	}
 	b.WriteString("\x1b[r\x1b8")
-	b.WriteString(compESU)
+	b.WriteString(compESU())
 	io.WriteString(compOut, b.String())
 	compSusp, compFits, compZoneH = 0, false, 0
 	compEdit, compCur, compBox, compPainted = false, false, nil, nil
@@ -415,13 +418,13 @@ func compFrameLocked(echo []string) {
 	}
 	if !compFits {
 		if compZoneH > 0 {
-			io.WriteString(compOut, compBSU+"\x1b7\x1b[r\x1b8"+compESU)
+			io.WriteString(compOut, compBSU()+"\x1b7\x1b[r\x1b8"+compESU())
 			compZoneH, compPainted = 0, nil
 		}
 		return
 	}
 	var b strings.Builder
-	b.WriteString(compBSU)
+	b.WriteString(compBSU())
 	if !compCur {
 		b.WriteString("\x1b7")
 	}
@@ -476,7 +479,7 @@ func compFrameLocked(echo []string) {
 	default:
 		b.WriteString("\x1b8")
 	}
-	b.WriteString(compESU)
+	b.WriteString(compESU())
 	io.WriteString(compOut, b.String())
 }
 
@@ -905,7 +908,7 @@ func compStreamWrite(s string) {
 		return
 	}
 	var b strings.Builder
-	b.WriteString(compBSU)
+	b.WriteString(compBSU())
 	// position once at the tracked stream position, then let the terminal
 	// wrap/scroll naturally — emitting \r\n at each overflow means a real
 	// newline happens at the scroll bottom (the region scrolls up, the
@@ -955,7 +958,7 @@ func compStreamWrite(s string) {
 	} else {
 		fmt.Fprintf(&b, "\x1b[%d;%dH", compStreamRow, compStreamCol)
 	}
-	b.WriteString(compESU)
+	b.WriteString(compESU())
 	io.WriteString(compOut, b.String())
 	if f := os.Getenv("CG_TRACEF"); f != "" {
 		if fh, _ := os.OpenFile(f, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); fh != nil {
@@ -978,4 +981,25 @@ func compStreamEnd() {
 	compMu.Lock()
 	compStreamOn = false
 	compMu.Unlock()
+}
+
+// compBSUStr/compESUStr resolve to the sync-output wraps only when the
+// terminal reported ?2026 support — raw escapes otherwise.
+// the sync-output gate is live: a DECRPM reply that lands mid-session
+// enables wraps on the next frame — real reads its caps record at paint
+func compSyncEnabled() bool {
+	return compSyncOut.Load() || syncOutputSupported()
+}
+
+func compBSU() string {
+	if compSyncEnabled() {
+		return compBSUEnc
+	}
+	return ""
+}
+func compESU() string {
+	if compSyncEnabled() {
+		return compESUEnc
+	}
+	return ""
 }

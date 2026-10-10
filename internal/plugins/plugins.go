@@ -53,7 +53,10 @@ func home() string {
 }
 
 func pluginsDir() string { return filepath.Join(home(), ".claude", "plugins") }
-func syncedDir() string  { return filepath.Join(pluginsDir(), "synced") }
+func syncedDir() string {
+	// real's install root is plugins/cache — synced/ was the old local name
+	return filepath.Join(pluginsDir(), "cache")
+}
 
 func installedFile() string { return filepath.Join(pluginsDir(), "installed_plugins.json") }
 
@@ -168,7 +171,7 @@ func loadInstalled() []InstalledPlugin {
 			name, mkt, _ := strings.Cut(key, "@")
 			out = append(out, InstalledPlugin{Name: name, Marketplace: mkt,
 				Version: v.Version, Enabled: true,
-				Path: filepath.Join(syncedDir(), mkt, name)})
+				Path: filepath.Join(syncedDir(), mkt, name, v.Version)})
 		}
 		if len(v1.Plugins) > 0 {
 			fmt.Fprintf(os.Stderr,
@@ -550,13 +553,16 @@ func Install(mktName, pluginName string) error {
 	if plugin.Source != "" {
 		src = filepath.Join(mktPath, plugin.Source)
 	}
-	dst := filepath.Join(syncedDir(), mktName, pluginName)
+	ver := plugin.Version
+	if ver == "" {
+		ver = "unknown"
+	}
+	dst := filepath.Join(syncedDir(), mktName, pluginName, ver)
 	os.RemoveAll(dst)
 	if err := copyTree(src, dst); err != nil {
 		return err
 	}
 	inst := loadInstalled()
-	ver := plugin.Version
 	for i := range inst {
 		if inst[i].Name == pluginName && inst[i].Marketplace == mktName {
 			inst[i].Path = dst
