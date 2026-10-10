@@ -810,7 +810,6 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		if l.AllowedTools != nil && !containsStr(l.AllowedTools, b.Name) {
 			r = tools.Result{Content: fmt.Sprintf("tool %s not allowed for this agent", b.Name), IsError: true}
 			l.reportMissingAttachment(r)
-			l.reportMissingAttachment(r)
 			results = append(results, toolResultBlock(b.ID, r))
 			continue
 		}

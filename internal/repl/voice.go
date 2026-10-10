@@ -335,6 +335,14 @@ func (e *editor) renderedBuf() string {
 		if len(e.buf) == 0 && !e.histSearch {
 			return ghostText()
 		}
+		// mode badges: a leading # or ! renders with real's badge colors —
+		// # = "remember" on the memory background, ! = bash mode
+		if len(e.buf) > 0 && e.buf[0] == '#' {
+			return "[38;2;255;153;51m#" + reset + string(e.buf[1:])
+		}
+		if len(e.buf) > 0 && e.buf[0] == '!' {
+			return "[38;2;255;85;85m" + bold + "!" + unbold + reset + string(e.buf[1:])
+		}
 		// inlineGhostText — history autosuggestion: a history entry whose
 		// text starts with the buffer renders its tail dimmed after the
 		// cursor (real's inline ghost); → at EOL accepts it

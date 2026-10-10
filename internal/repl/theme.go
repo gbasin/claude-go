@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -60,19 +61,19 @@ func applyTheme(name string, cwd string) {
 
 // theme vars mirror the repl.go package vars they remap
 
-// autoTheme guesses dark vs light from the terminal env (COLORFGBG bg>7 = light).
+// autoTheme guesses dark vs light from the terminal env — real's
+// COLORFGBG rule (mod_0521 s()): last component ≤6 or ==8 → dark,
+// 7 and 9-15 → light, non-integer → undecided (dark).
 func autoTheme() string {
 	if c := os.Getenv("COLORFGBG"); c != "" {
 		parts := strings.Split(c, ";")
 		if len(parts) > 0 {
-			bg := parts[len(parts)-1]
-			if bg == "0" || bg == "7" || bg == "15" {
-				if bg == "0" {
+			if n, err := strconv.Atoi(parts[len(parts)-1]); err == nil && n >= 0 && n <= 15 {
+				if n <= 6 || n == 8 {
 					return "dark"
 				}
 				return "light"
 			}
-			return "dark"
 		}
 	}
 	return "dark"

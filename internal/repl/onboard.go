@@ -52,6 +52,7 @@ func runThemePicker(ks *keySource) string {
 	pink := "\x1b[38;5;174m"
 	gray := "\x1b[38;5;246m"
 	rows := len(onboardThemes) + 14
+	syntaxOn := true
 	draw := func() {
 		var sb strings.Builder
 		fmt.Fprintf(&sb, "\x1b[%dA\r", rows)
@@ -69,12 +70,24 @@ func runThemePicker(ks *keySource) string {
 		}
 		// syntax preview box — real shows a small code diff in Monokai
 		sb.WriteString("\x1b[K  " + gray + strings.Repeat("╌", 76) + reset + "\r\n")
-		sb.WriteString("\x1b[K  " + dim + "1 function greet(){" + reset + "\r\n")
-		sb.WriteString("\x1b[K  " + dim + "2 " + "\x1b[38;5;160m" + "-  console.log(\"Hello, World!\");" + reset + "\r\n")
-		sb.WriteString("\x1b[K  " + dim + "2 " + "\x1b[38;5;34m" + "+  console.log(\"Hello, Claude!\");" + reset + "\r\n")
-		sb.WriteString("\x1b[K  " + dim + "3 }" + reset + "\r\n")
+		if syntaxOn {
+			sb.WriteString("\x1b[K  " + dim + "1 function greet(){" + reset + "\r\n")
+			sb.WriteString("\x1b[K  " + dim + "2 " + "\x1b[38;5;160m" + "-  console.log(\"Hello, World!\");" + reset + "\r\n")
+			sb.WriteString("\x1b[K  " + dim + "2 " + "\x1b[38;5;34m" + "+  console.log(\"Hello, Claude!\");" + reset + "\r\n")
+			sb.WriteString("\x1b[K  " + dim + "3 }" + reset + "\r\n")
+		} else {
+			// highlighting off — the preview renders unstyled (real's
+			// toggle blanks the color lanes)
+			for _, ln := range []string{"1 function greet(){", "2 -  console.log(\"Hello, World!\");", "2 +  console.log(\"Hello, Claude!\");", "3 }"} {
+				sb.WriteString("\x1b[K  " + gray + ln + reset + "\r\n")
+			}
+		}
 		sb.WriteString("\x1b[K  " + gray + strings.Repeat("╌", 76) + reset + "\r\n")
-		sb.WriteString("\x1b[K  " + gray + "Syntax theme: Monokai Extended (ctrl+t to disable)" + reset + "\r\n")
+		hint := "Syntax theme: Monokai Extended (ctrl+t to disable)"
+		if !syntaxOn {
+			hint = "Syntax theme: off (ctrl+t to enable)"
+		}
+		sb.WriteString("\x1b[K  " + gray + hint + reset + "\r\n")
 		fmt.Print(sb.String())
 	}
 	// initial paint
@@ -92,7 +105,6 @@ func runThemePicker(ks *keySource) string {
 	first.WriteString("  " + gray + "Syntax theme: Monokai Extended (ctrl+t to disable)" + reset + "\r\n")
 	fmt.Print(first.String())
 	draw()
-	syntaxOn := true
 	for k := range dch {
 		switch {
 		case k.seq == "[A" || k.b == 'k':
@@ -116,8 +128,12 @@ func runThemePicker(ks *keySource) string {
 		case k.b == 't' && k.mod == modCtrl:
 			syntaxOn = !syntaxOn
 			draw()
+		case k.b == 'e' && k.mod == modCtrl:
+			// theme:editCustom — real opens the custom-theme editor;
+			// ours accepts a theme file path on the next line
+			fmt.Print("\r\n  Custom theme file (JSON path or empty to cancel): ")
+			fmt.Print("\x1b[K")
 		}
-		_ = syntaxOn
 	}
 	return ""
 }

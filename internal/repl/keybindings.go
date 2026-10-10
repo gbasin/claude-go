@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -194,8 +195,41 @@ var defaultKeybindings = []struct {
 	{"Chat", "cmd+k", "chat:clearScreen"},
 	{"Chat", "meta+w", "chat:workflowKeywordToggle"}, // bound, inert for us
 	{"Global", "ctrl+]", "app:openArtifact"},         // bound, inert for us
-	{"Global", "ctrl+up", "app:diffFileListUp"},      // bound, inert for us
-	{"Global", "ctrl+down", "app:diffFileListDown"},  // bound, inert for us
+	// Transcript context defaults (real's mod_0266 table) — user remaps
+	// resolve through dialogAction; the dialog switch stays the fallback
+	{"Transcript", "ctrl+e", "transcript:toggleShowAll"},
+	{"Transcript", "ctrl+c", "transcript:exit"},
+	{"Transcript", "escape", "transcript:exit"},
+	{"Transcript", "q", "transcript:exit"},
+	{"Transcript", "ctrl+u", "scroll:halfPageUp"},
+	{"Transcript", "ctrl+d", "scroll:halfPageDown"},
+	{"Transcript", "ctrl+b", "scroll:fullPageUp"},
+	{"Transcript", "ctrl+f", "scroll:fullPageDown"},
+	{"Transcript", "ctrl+n", "scroll:lineDown"},
+	{"Transcript", "ctrl+p", "scroll:lineUp"},
+	{"Transcript", "g", "scroll:top"},
+	{"Transcript", "shift+g", "scroll:bottom"},
+	{"Transcript", "j", "scroll:lineDown"},
+	{"Transcript", "k", "scroll:lineUp"},
+	{"Transcript", "up", "scroll:lineUp"},
+	{"Transcript", "down", "scroll:lineDown"},
+	{"Transcript", "space", "scroll:fullPageDown"},
+	{"Transcript", "b", "scroll:fullPageUp"},
+	// Select context (real's pickers) — up/down/j/k/ctrl+n/p/home/end
+	{"Select", "up", "select:previous"},
+	{"Select", "down", "select:next"},
+	{"Select", "j", "select:next"},
+	{"Select", "k", "select:previous"},
+	{"Select", "ctrl+n", "select:next"},
+	{"Select", "ctrl+p", "select:previous"},
+	{"Select", "pageup", "select:pageUp"},
+	{"Select", "pagedown", "select:pageDown"},
+	{"Select", "home", "select:first"},
+	{"Select", "end", "select:last"},
+	{"Select", "enter", "select:accept"},
+	{"Select", "escape", "select:cancel"},
+	{"Global", "ctrl+up", "app:diffFileListUp"},     // bound, inert for us
+	{"Global", "ctrl+down", "app:diffFileListDown"}, // bound, inert for us
 	{"Global", "meta+up", "app:diffFileListUp"},
 	{"Global", "meta+down", "app:diffFileListDown"},
 }
@@ -388,6 +422,10 @@ func (e *editor) loadKeybindings() {
 			e.kbPrefix[ctx+"\x00"+strings.Join(parts[:i], " ")] = true
 		}
 	}
+	// session mirror — dialogs/pickers without an editor reference resolve
+	// user remaps through this (real's dialogs read the same keymap)
+	sessionKB.Store(map[string]string(e.kb))
+	e.kbResolve = map[string]string{}
 	// display-resolution map (real's qa()/Y_): action -> the chord the UI
 	// should name in hints. Defaults claim first so user-added extra
 	// bindings don't shadow the canonical label; unbound actions fall
@@ -599,4 +637,26 @@ func (e *editor) bindingKey(k key) (*readResult, bool) {
 		return e.bindingKey(k) // chord missed: retry stroke standalone
 	}
 	return nil, false
+}
+
+// sessionKB is the process-level copy of the loaded keymap — modal
+// surfaces (transcript view, pickers) resolve remaps through it without
+// holding the editor.
+var sessionKB atomic.Value // map[string]string
+
+// dialogAction resolves a key in a named context — first the context's
+// table, then Global. Returns the action name or "".
+func dialogAction(ctx string, k key) string {
+	kb, _ := sessionKB.Load().(map[string]string)
+	if kb == nil {
+		return ""
+	}
+	s := keystroke(k)
+	if s == "" {
+		return ""
+	}
+	if a, ok := kb[ctx+"\x00"+s]; ok {
+		return a
+	}
+	return kb["Global\x00"+s]
 }

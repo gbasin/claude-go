@@ -45,6 +45,74 @@ func showTranscript(l *agent.Loop, ks *keySource) {
 	}
 	draw()
 	for k := range dch {
+		// user remaps in the Transcript context take precedence —
+		// real's dialogs resolve through the same keymap as the editor
+		// Transcript/Global remaps: actions this view understands run
+		// first; unrecognized actions fall through to the hardcoded keys
+		if act := dialogAction("Transcript", k); act != "" &&
+			(strings.HasPrefix(act, "scroll:") || strings.HasPrefix(act, "transcript:")) {
+			switch act {
+			case "transcript:exit":
+				fmt.Print("\x1b[H\x1b[2J")
+				return
+			case "transcript:toggleShowAll":
+				showAll = !showAll
+				lines = transcriptLines(l.Messages, showAll)
+				if top+viewH > len(lines) {
+					top = max(0, len(lines)-viewH)
+				}
+				draw()
+				continue
+			case "scroll:lineUp":
+				if top > 0 {
+					top--
+				}
+				draw()
+				continue
+			case "scroll:lineDown":
+				if top+viewH < len(lines) {
+					top++
+				}
+				draw()
+				continue
+			case "scroll:halfPageUp":
+				top -= viewH / 2
+				if top < 0 {
+					top = 0
+				}
+				draw()
+				continue
+			case "scroll:halfPageDown":
+				top += viewH / 2
+				if top+viewH > len(lines) {
+					top = max(0, len(lines)-viewH)
+				}
+				draw()
+				continue
+			case "scroll:top":
+				top = 0
+				draw()
+				continue
+			case "scroll:fullPageUp":
+				top -= viewH
+				if top < 0 {
+					top = 0
+				}
+				draw()
+				continue
+			case "scroll:fullPageDown":
+				top += viewH
+				if top+viewH > len(lines) {
+					top = max(0, len(lines)-viewH)
+				}
+				draw()
+				continue
+			case "scroll:bottom":
+				top = max(0, len(lines)-viewH)
+				draw()
+				continue
+			}
+		}
 		switch {
 		case k.b == 15 || k.b == 3 || k.b == 'q' || (k.b == 0x1b && k.seq == ""):
 			fmt.Print("\x1b[H\x1b[2J")
