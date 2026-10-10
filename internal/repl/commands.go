@@ -2763,7 +2763,7 @@ func printHelp() {
 
 func memoryCmd(l *agent.Loop, arg string) {
 	dir := filepath.Join(config.ClaudeDir(), "projects",
-		strings.ReplaceAll(filepath.Clean(l.ToolCtx.CWD), "/", "-"), "memory")
+		session.Slug(l.ToolCtx.CWD), "memory")
 	ents, err := os.ReadDir(dir)
 	if err != nil || len(ents) == 0 {
 		dprintln("  memory dir:", dir, "(empty)")

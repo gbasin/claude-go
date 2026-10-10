@@ -5,7 +5,6 @@ import (
 	"claude-go/internal/hooks"
 	"claude-go/internal/session"
 	"context"
-	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -49,8 +48,7 @@ var readOnlyDeny = []string{
 	"ExitPlanMode", "Edit", "Write", "NotebookEdit",
 }
 
-//go:embed prompts/agent_general_purpose.txt
-var generalPurposePrompt string
+var generalPurposePrompt = fallbackGeneralPurpose
 
 // builtinAgentDefs are the default agent types (mod_0416 uOe, 294).
 // Real registers: general-purpose, statusline-setup, the "claude"

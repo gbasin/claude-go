@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"claude-go/internal/config"
+	"claude-go/internal/extract"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1580,4 +1581,39 @@ func hasStr(ss []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// extractSub harvests Claude Code's bundled text (system prompts, tool
+// schemas, wire shape) from a local claude install into
+// ~/.claude-go/extracted. Nothing Anthropic-authored ships in this repo —
+// extraction is the parity path.
+func extractSub(args []string) {
+	for _, a := range args {
+		if a == "-h" || a == "--help" {
+			fmt.Println(`usage: claude-go extract
+
+Runs the local claude binary against a mock API, captures its
+/v1/messages request (system prompts, tool schemas, headers) for each
+model class, and caches the text in ~/.claude-go/extracted. The binary
+prefers extracted text over its built-in fallback prompts, restoring
+byte-level wire parity with real claude.
+
+Requires a real claude install (CLAUDE_REAL_BIN, ~/.local/bin/claude,
+or PATH). No credentials needed — the capture runs against an
+in-process mock.`)
+			return
+		}
+	}
+	bin := extract.FindRealClaude()
+	if bin == "" {
+		fatal("extract: no claude binary found — set CLAUDE_REAL_BIN, or install claude to ~/.local/bin or PATH")
+	}
+	res, err := extract.Harvest(context.Background(), bin,
+		func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) })
+	if err != nil {
+		fatal("extract: %v", err)
+	}
+	fmt.Printf("extracted %d model prompts (%d bytes) + %d tool schemas → %s\n",
+		len(res.Models), res.SystemLen, res.ToolCount, res.Dir)
+	fmt.Printf("from claude %s\n", res.Version)
 }

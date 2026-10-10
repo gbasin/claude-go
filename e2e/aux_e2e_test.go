@@ -28,6 +28,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"claude-go/internal/session"
 	"time"
 )
 
@@ -1683,7 +1685,7 @@ func TestCleanupPeriodDays(t *testing.T) {
 	if len(matches) > 0 {
 		dir = matches[0]
 	} else {
-		dir = filepath.Join(projDir, strings.ReplaceAll(s.cwd, "/", "-"))
+		dir = filepath.Join(projDir, session.Slug(s.cwd))
 	}
 	os.MkdirAll(dir, 0o755)
 	old := filepath.Join(dir, "old-session.jsonl")

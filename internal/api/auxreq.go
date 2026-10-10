@@ -23,18 +23,8 @@ import (
 	"time"
 
 	"claude-go/internal/config"
-	_ "embed"
 	"fmt"
 )
-
-//go:embed aux_title_prompt.txt
-var auxTitlePrompt string
-
-//go:embed aux_walkaway_prompt.txt
-var auxWalkAwayPrompt string
-
-//go:embed aux_suggest_prompt.txt
-var auxSuggestPrompt string
 
 const (
 	// auxReqTimeout bounds one auxiliary request (real's axios default is
@@ -768,9 +758,6 @@ func (c *Client) startupEvents(model string, interactive bool, f SessionFacts) [
 	}
 	return evs
 }
-
-//go:embed safety_monitor_prompt.txt
-var safetyMonitorPrompt string
 
 // safetyPreamble is real's CLAUDE.md-intent preamble — it heads the eval's
 // first user message before the <user_claude_md> block.

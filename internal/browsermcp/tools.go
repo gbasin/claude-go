@@ -1,7 +1,6 @@
 package browsermcp
 
 import (
-	_ "embed"
 	"encoding/json"
 	"strings"
 )
@@ -17,8 +16,7 @@ import (
 //	              tools) and context.excludedTools; the
 //	              list_connected_browsers description gets sko() appended.
 
-//go:embed tools.json
-var toolsJSON []byte
+var toolsJSON = fallbackToolsJSON
 
 // ServerName is the MCP server registration name (mod_0107.js dc).
 const ServerName = "claude-in-chrome"

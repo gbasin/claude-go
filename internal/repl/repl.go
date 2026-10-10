@@ -3,6 +3,7 @@ package repl
 import (
 	"bufio"
 	"claude-go/internal/config"
+	"claude-go/internal/session"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1834,7 +1835,7 @@ func expandMCPPrompt(c customCmd, arg string) string {
 
 // quickMemory: "# text" appends to the project memory index (CC's # prefix).
 func quickMemory(l *agent.Loop, text string) {
-	slug := strings.ReplaceAll(filepath.Clean(l.ToolCtx.CWD), "/", "-")
+	slug := session.Slug(l.ToolCtx.CWD)
 	dir := filepath.Join(config.ClaudeDir(), "projects", slug, "memory")
 	os.MkdirAll(dir, 0o755)
 	p := filepath.Join(dir, "MEMORY.md")

@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"claude-go/internal/config"
+	"claude-go/internal/session"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -463,7 +464,7 @@ func (b *Background) DrainNotifications() []string {
 func spillOutput(c *Context, text string) (string, error) {
 	// real writes <project-dir>/<sid>/tool-results/<rand>.txt so the
 	// transcript's persisted-output marker resolves after resume
-	slug := strings.ReplaceAll(filepath.Clean(c.CWD), "/", "-")
+	slug := session.Slug(c.CWD)
 	dir := filepath.Join(config.ClaudeDir(), "projects", slug, c.Session, "tool-results")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
@@ -548,7 +549,7 @@ func intSetting(key string, def int) int {
 // taskOutputFile opens the session-scoped output file real creates for
 // background tasks: <tmp>/claude-<uid>/<slug>/<session>/tasks/<id>.output
 func taskOutputFile(c *Context, id string) (*os.File, error) {
-	slug := strings.ReplaceAll(filepath.Clean(c.CWD), "/", "-")
+	slug := session.Slug(c.CWD)
 	sid := "default"
 	if c.Session != "" {
 		sid = c.Session

@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"claude-go/internal/extract"
 	"claude-go/internal/mock"
 )
 
@@ -131,6 +132,11 @@ func diffEnv(home, mockAddr string, oauthOnly bool) []string {
 		"CLAUDE_GO_NO_BROWSER=1",
 		"DISABLE_TELEMETRY=1",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+	}
+	// point claude-go at the user's extracted prompt/schema cache (isolated
+	// HOME hides it otherwise); ignored by real claude
+	if d := extract.Dir(); extract.Available() {
+		env = append(env, "CLAUDE_GO_EXTRACTED_DIR="+d)
 	}
 	if !oauthOnly {
 		env = append(env, "ANTHROPIC_API_KEY=test")

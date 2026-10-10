@@ -2,7 +2,7 @@ package agent
 
 import (
 	"claude-go/internal/config"
-	_ "embed"
+	"claude-go/internal/extract"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,8 +15,14 @@ import (
 	"time"
 )
 
-//go:embed builtin_skills.txt
-var builtinSkillIndex string
+// builtinSkillIndex returns the builtin skills index — the harvested
+// list when an extraction exists, else the community fallback.
+func builtinSkillIndex() string {
+	if t, ok := extract.Text("skills_index.txt"); ok {
+		return t
+	}
+	return fallbackBuiltinSkills
+}
 
 // modelInfo maps model IDs to display name / api id / cutoff.
 type modelInfo struct {
@@ -345,7 +351,7 @@ func loadSkillIndex(cwd string, seen map[string]bool) string {
 // user-installed skills of the same name dedupe against it.
 func builtinSkillNames() map[string]bool {
 	seen := map[string]bool{}
-	for _, line := range strings.Split(builtinSkillIndex, "\n") {
+	for _, line := range strings.Split(builtinSkillIndex(), "\n") {
 		if strings.HasPrefix(line, "- ") {
 			if i := strings.Index(line[2:], ":"); i > 0 {
 				seen[line[2:2+i]] = true
@@ -360,9 +366,9 @@ func builtinSkillNames() map[string]bool {
 func skillIndex(cwd string) string {
 	extra := loadSkillIndex(cwd, builtinSkillNames())
 	if extra == "" {
-		return builtinSkillIndex
+		return builtinSkillIndex()
 	}
-	return builtinSkillIndex + extra
+	return builtinSkillIndex() + extra
 }
 
 // parseFrontmatter extracts simple "key: value" pairs from --- yaml ---.

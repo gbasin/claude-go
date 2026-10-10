@@ -175,6 +175,7 @@ Subcommands:
   auth login|status|logout      credential management
   config get|set|list           settings.json
   doctor                        diagnostics
+  extract                       harvest real claude's prompts/schemas from a local install
   import <file>                 import a transcript into this project
   install, update               rebuild from source (git pull + go build)
   login                         OAuth login
@@ -213,6 +214,9 @@ func main() {
 			return
 		case "doctor":
 			doctorSub()
+			return
+		case "extract":
+			extractSub(args[1:])
 			return
 		case "config":
 			configSub(args[1:])
@@ -2850,7 +2854,7 @@ func fireInstructionsLoaded(l *agent.Loop, cwd string) {
 		filepath.Join(cwd, "CLAUDE.local.md"),
 		filepath.Join(cwd, ".claude", "CLAUDE.md"),
 		filepath.Join(config.ClaudeDir(), "projects",
-			strings.ReplaceAll(filepath.Clean(cwd), "/", "-"), "memory", "MEMORY.md"),
+			session.Slug(cwd), "memory", "MEMORY.md"),
 	} {
 		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
 			files = append(files, p)
