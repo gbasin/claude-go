@@ -162,7 +162,7 @@ func EnvMessage(cwd, model string, addDirs []string, permMode, entrypoint, sessi
 	sort.Slice(agents, func(i, j int) bool {
 		return strings.ToLower(agents[i].Name) < strings.ToLower(agents[j].Name)
 	})
-	harvested := extractedAgentsIndex(entrypoint)
+	harvested := extractedAgentsIndex(entrypoint, model)
 	for _, a := range agents {
 		if a.Unlisted {
 			continue
@@ -488,11 +488,12 @@ func SkillFacts(cwd string) []struct {
 // extractedAgentsIndex returns builtin agent listing lines harvested by
 // `extract` (keyed by lowercase name), chosen per entrypoint family —
 // the sdk capture differs from cli (no claude-code-guide).
-func extractedAgentsIndex(entrypoint string) map[string]string {
-	fn := "agents_index_sdk.txt"
+func extractedAgentsIndex(entrypoint, model string) map[string]string {
+	family := "sdk"
 	if !strings.HasPrefix(entrypoint, "sdk") {
-		fn = "agents_index_cli.txt"
+		family = "cli"
 	}
+	fn := "agents_index_" + family + "_" + modelClass(model) + ".txt"
 	t, ok := extract.Text(fn)
 	if !ok {
 		return nil

@@ -240,7 +240,8 @@ func Harvest(ctx context.Context, bin string, logf func(string, ...any)) (*Harve
 			writeJSONLines(filepath.Join(dir, "tools_cli.json"), body.Tools)
 		}
 		if idx := envSectionText(body, agentsMarker); idx != "" {
-			os.WriteFile(filepath.Join(dir, "agents_index_cli.txt"),
+			os.WriteFile(filepath.Join(dir,
+				"agents_index_cli_"+cliModelClass(body.Model)+".txt"),
 				[]byte(idx), 0o644)
 		}
 		writeWireCapture(dir, "interactive", rawBody, headers)
