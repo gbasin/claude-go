@@ -1824,6 +1824,28 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 			fmt.Println(string(ev))
 		}
 	}
+	l.Events.OnRateLimit = func(status string, info map[string]any) {
+		if sj {
+			info["status"] = status
+			ev, _ := json.Marshal(map[string]any{
+				"type": "rate_limit_event", "rate_limit_info": info,
+				"uuid": session.NewID(), "session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
+	}
+	l.Events.OnToolProgress = func(name, id string, sec int, hb bool) {
+		if sj {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "tool_progress", "tool_use_id": id, "tool_name": name,
+				"parent_tool_use_id":   nil,
+				"elapsed_time_seconds": sec,
+				"uuid":                 session.NewID(), "session_id": l.Client.SessionID,
+				"heartbeat": hb,
+			})
+			fmt.Println(string(ev))
+		}
+	}
 	l.Events.OnPermissionCheck = func(tuID, status string) {
 		if sj {
 			ev, _ := json.Marshal(map[string]any{
@@ -2065,7 +2087,25 @@ func runPrintStreamJSON(l *agent.Loop) {
 			}
 		}
 		turns++
-		if _, err := l.Ask(context.Background(), text); err != nil {
+		var askErr error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// a recovered fault surfaces as real's ui_client_fault
+					// event (mod_1744 dQe) before the error result
+					ev, _ := json.Marshal(map[string]any{
+						"type": "system", "subtype": "ui_client_fault",
+						"error":      fmt.Sprint(r),
+						"component":  "turn",
+						"session_id": l.Client.SessionID, "uuid": session.NewID(),
+					})
+					fmt.Println(string(ev))
+					askErr = fmt.Errorf("internal fault: %v", r)
+				}
+			}()
+			_, askErr = l.Ask(context.Background(), text)
+		}()
+		if err := askErr; err != nil {
 			ev, _ := json.Marshal(map[string]any{
 				"type": "result", "subtype": "error_during_execution",
 				"is_error": true, "errors": []string{err.Error()},

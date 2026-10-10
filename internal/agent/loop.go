@@ -55,6 +55,12 @@ type Events struct {
 	// OnThinkingTokens emits the thinking block's estimated token count —
 	// real's thinking_tokens system event at content_block_stop.
 	OnThinkingTokens func(n int)
+	// OnToolProgress emits real's tool_progress — a heartbeat while a
+	// tool runs long (mod_0656 tool_heartbeat / bash_progress).
+	OnToolProgress func(name, toolUseID string, elapsedSec int, heartbeat bool)
+	// OnRateLimit emits real's rate_limit_event when the unified status
+	// changes (mod_0069 v0).
+	OnRateLimit func(status string, info map[string]any)
 	// OnToolResult carries the tool_use block id — stream-json user
 	// events reference the real API-assigned id, not a fabricated one
 	OnToolResult func(name, toolUseID string, r tools.Result)
@@ -213,7 +219,8 @@ type Loop struct {
 	dropOutputConfig bool
 	dropBetas        bool
 	maxTokensClamp   bool
-	lastTotal        int // last request's total input tokens (incl. cache)
+	lastRLStatus     string // last emitted rate-limit status
+	lastTotal        int    // last request's total input tokens (incl. cache)
 }
 
 func NewLoop(client *api.Client, cwd string) *Loop {
@@ -805,9 +812,28 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		}
 		var r tools.Result
 		toolStart := time.Now()
+		hbDone := make(chan struct{})
+		// real emits tool_progress heartbeats while a tool runs long
+		// (mod_0656 tool_heartbeat) — armed once permission gates pass
+		armHeartbeat := func() {
+			if l.Events.OnToolProgress == nil {
+				return
+			}
+			name, id := b.Name, b.ID
+			go func() {
+				t := time.NewTimer(30 * time.Second)
+				defer t.Stop()
+				select {
+				case <-t.C:
+					l.Events.OnToolProgress(name, id, 30, true)
+				case <-hbDone:
+				}
+			}()
+		}
 		// nil = unrestricted; a non-nil EMPTY slice (real's --tools "")
 		// withholds every tool
 		if l.AllowedTools != nil && !containsStr(l.AllowedTools, b.Name) {
+			close(hbDone)
 			r = tools.Result{Content: fmt.Sprintf("tool %s not allowed for this agent", b.Name), IsError: true}
 			l.reportMissingAttachment(r)
 			results = append(results, toolResultBlock(b.ID, r))
@@ -883,6 +909,7 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 						IsError: true,
 					}
 				case sev < 50:
+					armHeartbeat()
 					r = l.dispatch(b.Name, b.Input)
 				default:
 					if cat != "" {
@@ -905,8 +932,10 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 				}
 			}
 		} else {
+			armHeartbeat()
 			r = l.dispatch(b.Name, b.Input)
 		}
+		close(hbDone)
 		toolDurMs := time.Since(toolStart).Milliseconds()
 		l.prevToolDurations = append(l.prevToolDurations,
 			struct {
@@ -1128,6 +1157,21 @@ func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
 		})
 		l.apiNanos.Add(int64(time.Since(reqStart)))
 		if err == nil {
+			// rate_limit_event: real emits when the unified status header
+			// flips (mod_0069 v0 — emitted on change only)
+			if l.Events.OnRateLimit != nil {
+				if rl := l.Client.LastRateLimit(); rl != nil && rl.Status != l.lastRLStatus {
+					l.lastRLStatus = rl.Status
+					info := map[string]any{"status": rl.Status}
+					if rl.RepresentativeClaim != "" {
+						info["claim"] = rl.RepresentativeClaim
+					}
+					if !rl.ResetsAt.IsZero() {
+						info["resets_at"] = rl.ResetsAt.Unix()
+					}
+					l.Events.OnRateLimit(rl.Status, info)
+				}
+			}
 			break
 		}
 		// refusal ladder: a 400 naming a request feature drops it and
