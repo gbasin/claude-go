@@ -1753,6 +1753,36 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 			fmt.Println(string(ev))
 		}
 	}
+	// real's system/file_attachments_missing — a bridge-shape event
+	// ({message_uuid, sent_count, missing:[{file_uuid,reason}]}); our
+	// attachments are path markers so the missing entries carry the path
+	l.Events.OnFileMissing = func(path string) {
+		if sj {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "system", "subtype": "file_attachments_missing",
+				"sent_count": 1,
+				"missing": []map[string]any{{
+					"file_uuid": path, "reason": "file missing",
+				}},
+				"uuid": session.NewID(), "session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
+	}
+	l.Events.OnVCSChange = func(kind, branch string) {
+		if sj {
+			ev := map[string]any{
+				"type": "system", "subtype": "vcs_state_changed",
+				"kind": kind, "cwd": l.ToolCtx.CWD,
+				"uuid": session.NewID(), "session_id": l.Client.SessionID,
+			}
+			if branch != "" {
+				ev["branch"] = branch
+			}
+			b, _ := json.Marshal(ev)
+			fmt.Println(string(b))
+		}
+	}
 	l.Events.OnPermissionCheck = func(tuID, status string) {
 		if sj {
 			ev, _ := json.Marshal(map[string]any{

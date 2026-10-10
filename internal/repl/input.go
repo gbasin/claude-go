@@ -393,6 +393,12 @@ func decodeCSI(s string) key {
 		}
 		return k
 	}
+	// focus events: ?1004h reports "[I" focus-in, "[O" focus-out —
+	// real's ui_focus system event rides these
+	if final == 'I' || final == 'O' {
+		k.seq = "[" + string(final)
+		return k
+	}
 	// letter final: arrows/home/end/shift-tab ("[A", "[Z", "[1;5A" -> "[A"+mod)
 	k.seq = "[" + string(final)
 	return k
