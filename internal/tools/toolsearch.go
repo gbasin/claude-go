@@ -341,7 +341,13 @@ func requestDefs(c *Context) []api.Tool {
 			out = append(out, d)
 			continue
 		}
-		out = append(out, t.Def)
+		def := t.Def
+		if def.Name == "WebSearch" && webSearchCitationsDeclared(c) {
+			def.Citations = &struct {
+				Enabled bool `json:"enabled"`
+			}{Enabled: true}
+		}
+		out = append(out, def)
 	}
 	// subagents get real's trimmed surface with SubagentHandback —
 	// independent of the deferral lane (captured in real's subagent wire)
@@ -390,6 +396,17 @@ func subagentDefs(c *Context, parent []api.Tool, deferred []string) []api.Tool {
 		case "advisor":
 			if m := advisorModelFor(c); m != "" {
 				sOut = append(sOut, api.Tool{Raw: advisorRaw(m)})
+			}
+		case "WebSearch":
+			if t, ok := registry[n]; ok {
+				def := t.Def
+				if webSearchCitationsDeclared(c) {
+					def.Citations = &struct {
+						Enabled bool `json:"enabled"`
+					}{Enabled: true}
+				}
+				sOut = append(sOut, def)
+				seen[n] = true
 			}
 		case "ToolSearch":
 			if toolSearchEnabled() {
@@ -663,4 +680,19 @@ func anyContains(parts []string, term string) bool {
 		}
 	}
 	return false
+}
+
+// webSearchCitationsDeclared is real's Qpr (296 mod_0345): the env flag
+// plus a first-party lane puts citations:{enabled:true} on WebSearch's
+// wire schema.
+func webSearchCitationsDeclared(c *Context) bool {
+	if !envTruthy(os.Getenv("CLAUDE_CODE_WEBSEARCH_CITATIONS_DECLARED")) {
+		return false
+	}
+	// first-party lane check — non-first-party providers skip the field
+	if p := os.Getenv("CLAUDE_CODE_API_PROVIDER"); p != "" &&
+		p != "firstParty" && p != "first-party" {
+		return false
+	}
+	return true
 }

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -778,6 +779,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 		for {
 			runTurn(line)
 			armIdleNotify(l)
+			armSleepCompact(l)
 			// drain session-injected prompts (cron, wakeup, monitor events)
 			for {
 				select {
@@ -2590,5 +2592,29 @@ func armIdleNotify(l *agent.Loop) {
 			"hook_event_name":   "Notification",
 			"permission_mode":   l.PermMode,
 		}, l.ToolCtx.CWD)
+	})
+}
+
+// armSleepCompact schedules real's compact_sleep: with
+// CLAUDE_CODE_SLEEP_COMPACT on, the session auto-compacts after
+// CLAUDE_CODE_SLEEP_COMPACT_AFTER_MS of post-turn idle (default 1h).
+func armSleepCompact(l *agent.Loop) {
+	if !envOn("CLAUDE_CODE_SLEEP_COMPACT") {
+		return
+	}
+	ms := 3600000
+	if v := os.Getenv("CLAUDE_CODE_SLEEP_COMPACT_AFTER_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			ms = n
+		}
+	}
+	seq := idleNotifSeq.Load()
+	time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
+		if idleNotifSeq.Load() != seq {
+			return // a newer turn superseded this arming
+		}
+		if err := l.CompactAuto(context.Background()); err == nil {
+			dprintf("  %s⏵ auto-compacted after %ds idle%s\r\n", dim, ms/1000, reset)
+		}
 	})
 }
