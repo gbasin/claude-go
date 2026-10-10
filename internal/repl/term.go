@@ -79,6 +79,7 @@ type editor struct {
 	onFastMode      func()
 	runningAgents   func() int // ← agents-pane gate (real needs running tasks)
 	insertRemaps    []string   // vimInsertModeRemaps: 2-char sequences -> <Esc>
+	lastInsAt       time.Time  // when lastIns was typed — real's 1s remap window
 	lastIns         rune
 	insGroup        bool // mid insert-group — push undo once per burst
 	vimOp           rune
@@ -725,8 +726,10 @@ func (e *editor) insertKey(k key) *readResult {
 		e.showShortcuts() // real: '?' on empty input opens the shortcuts overlay
 		return nil
 	case k.r != 0 && k.mod&^modShift == 0: // shift alone still inserts text
-		// vimInsertModeRemaps: 2-char sequence mapped to <Esc>
-		if e.vim && len(e.insertRemaps) > 0 && e.lastIns != 0 {
+		// vimInsertModeRemaps: 2-char sequence mapped to <Esc> — real
+		// gates the pair on a 1000ms window (mod_0819 Po)
+		if e.vim && len(e.insertRemaps) > 0 && e.lastIns != 0 &&
+			time.Since(e.lastInsAt) <= time.Second {
 			pair := string([]rune{e.lastIns, k.r})
 			for _, seq := range e.insertRemaps {
 				if seq == pair {
@@ -746,6 +749,7 @@ func (e *editor) insertKey(k key) *readResult {
 			}
 		}
 		e.lastIns = k.r
+		e.lastInsAt = time.Now()
 		if !wasInsert {
 			e.pushUndo()
 		}
