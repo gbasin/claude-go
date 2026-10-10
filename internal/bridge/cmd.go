@@ -21,22 +21,22 @@ import (
 
 // Options is the parsed remote-control CLI surface.
 type Options struct {
-	Name           string // --name
-	NamePrefix     string // --remote-control-session-name-prefix (env fallback)
-	Continue       bool   // -c / --continue
-	SessionID      string // --session-id
-	PermissionMode string // --permission-mode
-	Spawn          string // --spawn same-dir|worktree|session (def same-dir)
-	Capacity       int    // --capacity (def 32 = real's Ar)
-	Chrome         *bool  // --[no-]chrome
-	AllowUnattended bool  // --allow-unattended-tool-calls
-	spawnSet        bool  // --spawn seen (real: may only be specified once)
-	capacitySet     bool  // --capacity seen (same)
-	createInDirSet  bool  // --[no-]create-session-in-dir seen
-	CreateInDir    *bool  // --[no-]create-session-in-dir (def on)
-	Verbose        bool
-	Debug          string
-	DebugFile      string
+	Name            string // --name
+	NamePrefix      string // --remote-control-session-name-prefix (env fallback)
+	Continue        bool   // -c / --continue
+	SessionID       string // --session-id
+	PermissionMode  string // --permission-mode
+	Spawn           string // --spawn same-dir|worktree|session (def same-dir)
+	Capacity        int    // --capacity (def 32 = real's Ar)
+	Chrome          *bool  // --[no-]chrome
+	AllowUnattended bool   // --allow-unattended-tool-calls
+	spawnSet        bool   // --spawn seen (real: may only be specified once)
+	capacitySet     bool   // --capacity seen (same)
+	createInDirSet  bool   // --[no-]create-session-in-dir seen
+	CreateInDir     *bool  // --[no-]create-session-in-dir (def on)
+	Verbose         bool
+	Debug           string
+	DebugFile       string
 }
 
 // parseOptions mirrors mod_1269.js arg parsing; returns error text in

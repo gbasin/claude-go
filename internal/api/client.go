@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -350,7 +351,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 	if body != nil {
 		raw, err = json.Marshal(body)
 		if os.Getenv("CLAUDE_GO_DEBUG_REQ") != "" {
-			if f, ferr := os.OpenFile("/tmp/reqs.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); ferr == nil {
+			if f, ferr := os.OpenFile(filepath.Join(os.TempDir(), "claude-go-reqs.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); ferr == nil {
 				f.WriteString("=== " + path + "\n" + string(raw) + "\n")
 				f.Close()
 			}
@@ -424,7 +425,6 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 		// (anthropic-dispatch-id, x-claude-code-request-class,
 		// x-claude-code-prompt-id, x-client-request-id) on main requests —
 		// verified against a fresh wire capture.
-		_ = newUUID // keep helper referenced
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
 			lastErr = err

@@ -12,7 +12,7 @@ import (
 // session keeps running headless) and --bg (fresh session id, optional
 // first prompt).
 type SpawnOpts struct {
-	Auth string // optional: pre-minted attach token (daemon respawn)
+	Auth       string // optional: pre-minted attach token (daemon respawn)
 	SessionID  string
 	CWD        string
 	ResumeFrom string

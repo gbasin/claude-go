@@ -218,22 +218,6 @@ func FetchProfile(token string) *Profile {
 	return &p
 }
 
-// WriteKeychain stores credentials the same way real claude does.
-func WriteKeychain(creds *Credentials) error {
-	inner := map[string]any{"claudeAiOauth": creds}
-	b, _ := json.Marshal(inner)
-	if runtime.GOOS == "darwin" {
-		user := os.Getenv("USER")
-		// delete existing then add
-		exec.Command("security", "delete-generic-password",
-			"-s", "Claude Code-credentials", "-a", user).Run()
-		return exec.Command("security", "add-generic-password",
-			"-s", "Claude Code-credentials", "-a", user,
-			"-w", string(b), "-U").Run()
-	}
-	return fmt.Errorf("keychain only on macOS")
-}
-
 // OpenBrowser opens the login URL.
 func OpenBrowser(url string) {
 	switch runtime.GOOS {

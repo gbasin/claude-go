@@ -53,14 +53,6 @@ func UnregisterMCPServer(server string) {
 	mcpTools = keep
 }
 
-// MCPToolEntry is the minimal shape SyncMCPTools needs (kept local —
-// tools doesn't import the mcp package).
-type MCPToolEntry struct {
-	Name        string
-	Description string
-	InputSchema json.RawMessage
-}
-
 // mcpPrompts maps the slash-command name (mcp__server__prompt) to a fetch
 // closure — real surfaces MCP prompts as slash commands.
 var mcpPrompts = map[string]func(ctx context.Context, args map[string]string) (string, error){}
@@ -75,17 +67,4 @@ func RegisterMCPPrompt(server, prompt string, fetch func(ctx context.Context, ar
 func ResolveMCPPrompt(cmd string) (func(context.Context, map[string]string) (string, error), bool) {
 	f, ok := mcpPrompts[cmd]
 	return f, ok
-}
-
-// SyncMCPTools registers any tool in the list that isn't registered
-// yet — called after a tools/list_changed notification refreshes the
-// client's tool list (real reloads the surface in place).
-func SyncMCPTools(server string, caller MCPCaller, list []MCPToolEntry) {
-	for _, t := range list {
-		full := "mcp__" + server + "__" + t.Name
-		if _, ok := registry[full]; ok {
-			continue
-		}
-		RegisterMCP(server, caller, t.Name, t.Description, t.InputSchema)
-	}
 }

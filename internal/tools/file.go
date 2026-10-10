@@ -703,8 +703,6 @@ func orDefault(s, d string) string {
 	return s
 }
 
-var _ = bytes.MinRead
-
 func inFilePath(c *Context, raw json.RawMessage) string {
 	var in struct {
 		FilePath string `json:"file_path"`

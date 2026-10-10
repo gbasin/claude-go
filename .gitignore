@@ -1,11 +1,16 @@
 # build
 claude-go
 claude-go-new
+cg
 *.test
 # captures & extracted source stay local (contains Anthropic IP / personal data)
 capture/
 reference/
+audits/captures-*/
 ../claude-extracted/
 claude-extracted/
 e2e/zz_*_test.go
 .gocache/
+# scratch
+.worktrees/
+.DS_Store

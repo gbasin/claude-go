@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -243,15 +242,6 @@ func Dispatch(ctx *Context, name string, input json.RawMessage) Result {
 	return t.Exec(ctx, input)
 }
 
-// Defs returns the wire tool definitions.
-func Defs() []api.Tool {
-	var out []api.Tool
-	for _, t := range All() {
-		out = append(out, t.Def)
-	}
-	return out
-}
-
 // loadSchema pulls one tool def from the embedded schemas file.
 func loadSchema(name string) api.Tool {
 	var all []api.Tool
@@ -333,24 +323,6 @@ func Names() []string {
 // ExtraAllowedDirs widens the writable workspace (settings
 // permissions.additionalDirectories). File tools treat these like the cwd.
 var ExtraAllowedDirs []string
-
-// DirAllowed reports whether p is inside the working dir or an additional dir.
-func DirAllowed(c *Context, p string) bool {
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return false
-	}
-	abs = filepath.Clean(abs)
-	if strings.HasPrefix(abs, filepath.Clean(c.CWD)+string(filepath.Separator)) || abs == filepath.Clean(c.CWD) {
-		return true
-	}
-	for _, d := range ExtraAllowedDirs {
-		if abs == d || strings.HasPrefix(abs, d+string(filepath.Separator)) {
-			return true
-		}
-	}
-	return false
-}
 
 // isTaskTool reports whether n is one of the tasks.enabled-gated tools.
 func isTaskTool(n string) bool {
