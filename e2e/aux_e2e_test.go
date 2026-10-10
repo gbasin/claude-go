@@ -1721,3 +1721,26 @@ func TestMcpJsonTrustPrompt(t *testing.T) {
 		t.Fatalf("approval not persisted: %s\noutput:\n%s", string(b), p.clean())
 	}
 }
+
+// TestAbovePromptBand: ctrl+x ctrl+a expands the collapsed-activity band
+// above the composer; the band appears once it has content.
+func TestAbovePromptBand(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s)
+	p.sendAtPrompt(1, "say hi\r")
+	p.waitCount("❯", 2, 30*time.Second)
+	// after the turn the band exists — expand then collapse it
+	p.send("\x18\x01") // ctrl+x ctrl+a → expand
+	time.Sleep(300 * time.Millisecond)
+	out := p.clean()
+	if !strings.Contains(out, "no recent activity") &&
+		!strings.Contains(out, "⏵") {
+		t.Fatalf("expanded band missing:\n%s", truncStr(out, 3000))
+	}
+	p.send("\x18\x01") // toggle again → collapse
+	time.Sleep(300 * time.Millisecond)
+	if !strings.Contains(p.clean(), "collapsed") {
+		t.Fatalf("collapsed band missing:\n%s", truncStr(p.clean(), 3000))
+	}
+	p.exit()
+}

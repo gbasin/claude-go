@@ -193,6 +193,32 @@ func RunWithStore(l *agent.Loop, store Store) {
 			"permission_mode":   l.PermMode,
 		}, l.ToolCtx.CWD)
 	}
+	// AbovePrompt band: tool calls feed the collapsed activity rows
+	l.Events.OnToolUse = func(name string, input json.RawMessage) {
+		// one-line summary: the tool's primary arg (command/file_path/pattern)
+		var m map[string]any
+		json.Unmarshal(input, &m)
+		var arg string
+		for _, k := range []string{"command", "file_path", "pattern", "prompt", "url", "description"} {
+			if v, ok := m[k].(string); ok && v != "" {
+				arg = v
+				break
+			}
+		}
+		if len(arg) > 40 {
+			arg = arg[:40] + "…"
+		}
+		line := "⏵ " + name
+		if arg != "" {
+			line += " " + arg
+		}
+		abovePromptPush(line)
+	}
+	l.Events.OnToolResult = func(name, _ string, r tools.Result) {
+		if r.IsError {
+			abovePromptPush("  ✗ " + name)
+		}
+	}
 	l.ToolCtx.SetPermMode = func(mode string) {
 		l.PermMode = mode
 		if currentStore != nil {

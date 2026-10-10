@@ -37,6 +37,8 @@ func newFakeTerm(t *testing.T, w, h int) *fakeTerm {
 
 func TestCompInitPinsRegion(t *testing.T) {
 	f := newFakeTerm(t, 80, 40)
+	compSyncOut.Store(true) // tests assume a ?2026-capable terminal
+	defer compSyncOut.Store(false)
 	compInit()
 	out := f.buf.String()
 	if !compActive.Load() {
@@ -45,7 +47,7 @@ func TestCompInitPinsRegion(t *testing.T) {
 	if !strings.Contains(out, "\x1b[1;38r") {
 		t.Fatalf("expected DECSTBM 1;38r, got %q", out)
 	}
-	if !strings.HasPrefix(out, compBSU+"\x1b7") || !strings.HasSuffix(out, "\x1b8"+compESU) {
+	if !strings.HasPrefix(out, compBSUEnc+"\x1b7") || !strings.HasSuffix(out, "\x1b8"+compESU()) {
 		t.Fatalf("install frame not BSU-wrapped + cursor-saved/restored: %q", out)
 	}
 }
@@ -343,6 +345,8 @@ func TestCompCloseRestores(t *testing.T) {
 
 func TestCompDiffRepaint(t *testing.T) {
 	f := newFakeTerm(t, 80, 40)
+	compSyncOut.Store(true) // tests assume a ?2026-capable terminal
+	defer compSyncOut.Store(false)
 	compInit()
 	compSetFooter([]string{"spin", "status"})
 	f.buf.Reset()
@@ -354,8 +358,8 @@ func TestCompDiffRepaint(t *testing.T) {
 	if strings.Contains(out, "\x1b[40;1H") {
 		t.Fatalf("unchanged status row re-emitted: %q", out)
 	}
-	// BSU/ESU wraps every frame
-	if !strings.Contains(out, compBSU) || !strings.Contains(out, compESU) {
+	// BSU/ESU wraps every frame when the terminal reports ?2026
+	if !strings.Contains(out, compBSUEnc) || !strings.Contains(out, compESUEnc) {
 		t.Fatalf("frame missing synchronized-output wrap: %q", out)
 	}
 	// save/restore still brackets the frame

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -58,6 +59,8 @@ type editor struct {
 	searchIdx       int                          // ctrl+r: index of current match in e.history
 	completer       func(prefix string) []string // slash command completion
 	acOpen          bool                         // autocomplete menu visible
+	abovePrompt     bool                         // ctrl+x ctrl+a — the collapsed-activity band
+	abovePromptSel  bool                         // ctrl+x tab — navigation focus lives in the band
 	acDesc          func(name string) string     // per-item description
 	acItems         []string                     // filtered matches
 	acSel           int                          // selected index
@@ -164,7 +167,8 @@ func (e *editor) boxFrame() (box []string, curRow, curCol int) {
 	// lay out: top border, soft-wrapped input rows, voice hint, bottom
 	// border — tracking which box row each logical line starts on
 	rule := "\x1b[38;5;244m" + strings.Repeat("─", w) + "\x1b[39m"
-	all := make([]string, 0, len(lines)+5)
+	all := make([]string, 0, len(lines)+8)
+	all = append(all, e.abovePromptRows()...)
 	// real renders the effort pill right-aligned on the row above the
 	// top rule: "◐ medium · /effort"
 	if eff := effortLabel(); eff != "" {
@@ -232,6 +236,9 @@ func (e *editor) redraw() {
 	}
 	var b strings.Builder
 	b.WriteString("\r\x1b[J") // col0, clear to screen bottom
+	for _, row := range e.abovePromptRows() {
+		b.WriteString(row + "\r\n")
+	}
 	hint := e.voiceHint()
 	b.WriteString(e.prompt + e.renderedBuf())
 	extra := 0 // rows drawn below the input line
@@ -1854,6 +1861,29 @@ func (e *editor) toggleTodos() {
 	}
 }
 
+// abovePromptToggle/abovePromptFocus drive real's AbovePrompt band —
+// the collapsed recent-activity row above the composer. ctrl+x ctrl+a
+// toggles it expanded; ctrl+x tab moves focus there for navigation.
+func (e *editor) abovePromptToggle() {
+	// real: toggle collapses an expanded band, expands an opened one;
+	// the band itself appears on the first toggle
+	if !e.abovePrompt {
+		e.abovePrompt = true
+		abovePromptExpanded = true
+	} else {
+		abovePromptExpanded = !abovePromptExpanded
+	}
+	e.redraw()
+}
+
+func (e *editor) abovePromptFocus() {
+	if !e.abovePrompt {
+		e.abovePrompt = true // focusing implies expanding
+	}
+	e.abovePromptSel = true
+	e.redraw()
+}
+
 func (e *editor) cyclePermMode() {
 	if e.cycleMode != nil {
 		e.cycleMode()
@@ -3160,4 +3190,65 @@ func (e *editor) copySelection() {
 // real uses before shelling out to pbcopy.
 func writeOSC52(s string) {
 	os.Stdout.WriteString("\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(s)) + "\x07")
+}
+
+// abovePrompt feed — the loop pushes recent activity lines in; the band
+// renders the last few when expanded, a count row when collapsed.
+var (
+	abovePromptRows     []string
+	abovePromptExpanded bool
+)
+
+func abovePromptPush(line string) {
+	if len(abovePromptRows) >= 50 {
+		abovePromptRows = abovePromptRows[1:]
+	}
+	abovePromptRows = append(abovePromptRows, line)
+}
+
+func abovePromptCount() int { return len(abovePromptRows) }
+
+func abovePromptLines() []string {
+	n := len(abovePromptRows)
+	if n > 6 {
+		n = 6
+	}
+	out := abovePromptRows[len(abovePromptRows)-n:]
+	return out
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// abovePromptRows renders real's AbovePrompt band — the collapsed
+// recent-activity rows above the composer box.
+func (e *editor) abovePromptRows() []string {
+	if !e.abovePrompt {
+		return nil
+	}
+	var out []string
+	arrow := "❯"
+	if e.abovePromptSel {
+		arrow = cyan + "❯" + reset
+	}
+	n := abovePromptCount()
+	if abovePromptExpanded {
+		lines2 := abovePromptLines()
+		if len(lines2) == 0 {
+			out = append(out, "   "+dim+"no recent activity"+reset)
+		} else {
+			for _, ln := range lines2 {
+				out = append(out, "   "+ln)
+			}
+		}
+	} else {
+		out = append(out, " "+arrow+dim+" collapsed "+
+			strconv.Itoa(n)+" recent "+plural(n, "message", "messages")+
+			" · ctrl+x ctrl+a to collapse"+reset)
+	}
+	return out
 }
