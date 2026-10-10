@@ -1565,6 +1565,12 @@ func (l *Loop) subagentModel() string {
 	}
 	pin := strings.TrimSpace(os.Getenv("CLAUDE_CODE_SUBAGENT_MODEL"))
 	pinned := pin != "" && !strings.EqualFold(pin, "inherit")
+	// CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL (296 mod_1008): when set, a
+	// workflow-spawned agent's declared model is ignored — resolution
+	// falls back to the parent model like SUBAGENT_MODEL_FORCE.
+	if os.Getenv("CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL") != "" {
+		return parent
+	}
 	if envOn("CLAUDE_CODE_SUBAGENT_MODEL_FORCE") {
 		if pinned {
 			return resolveSubagentAlias(pin)

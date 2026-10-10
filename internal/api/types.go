@@ -103,6 +103,11 @@ type Tool struct {
 	// DeferLoading marks the DeferredToolPlaceholder stub
 	// (mod_0386.js CWt): {defer_loading:true}.
 	DeferLoading bool `json:"defer_loading,omitempty"`
+	// Citations rides WebSearch's wire — {enabled:true} when
+	// CLAUDE_CODE_WEBSEARCH_CITATIONS_DECLARED is on (296 Qpr).
+	Citations *struct {
+		Enabled bool `json:"enabled"`
+	} `json:"citations,omitempty"`
 	// Raw, when set, is the complete wire object (server-side tools like
 	// web_search_20250305 have no input_schema and carry "type").
 	Raw json.RawMessage `json:"-"`
@@ -191,13 +196,13 @@ type StreamEvent struct {
 	// Raw is the verbatim SSE data payload — stream-json's stream_event
 	// wraps it unchanged (real's partial-event emit).
 	Raw          json.RawMessage `json:"-"`
-	Type         string        `json:"type"`
-	Index        int           `json:"index,omitempty"`
-	ContentBlock *ContentBlock `json:"content_block,omitempty"`
-	Delta        *Delta        `json:"delta,omitempty"`
-	Message      *Response     `json:"message,omitempty"`
-	Usage        *Usage        `json:"usage,omitempty"`
-	Error        *APIError     `json:"error,omitempty"`
+	Type         string          `json:"type"`
+	Index        int             `json:"index,omitempty"`
+	ContentBlock *ContentBlock   `json:"content_block,omitempty"`
+	Delta        *Delta          `json:"delta,omitempty"`
+	Message      *Response       `json:"message,omitempty"`
+	Usage        *Usage          `json:"usage,omitempty"`
+	Error        *APIError       `json:"error,omitempty"`
 }
 
 type Delta struct {

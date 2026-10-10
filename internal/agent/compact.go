@@ -37,6 +37,10 @@ func (l *Loop) Compact(ctx context.Context, transcriptPath string) error {
 	return l.compactWithTrigger(ctx, transcriptPath, "manual", 0)
 }
 
+// CompactAuto is the exported auto-lane trigger — sleep-compact fires
+// it (real's compact_sleep timer, mod_2220).
+func (l *Loop) CompactAuto(ctx context.Context) error { return l.compactAuto(ctx) }
+
 // PartialCompact compacts only messages before index keepLast — the
 // --resume-session-at boundary form. Messages at/after keepLast are kept.
 func (l *Loop) PartialCompact(ctx context.Context, keepLast int) error {
