@@ -4205,8 +4205,6 @@ func statusOverlayAt(l *agent.Loop, ks *keySource, tab int) {
 	if ks == nil {
 		return
 	}
-	rows := 24
-	_ = rows
 	for k := range dch {
 		if tab == 2 {
 			// Config tab: ↑/↓ select, typing filters, ←/→ still tab-switch,

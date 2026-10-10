@@ -10,10 +10,10 @@
 package e2e
 
 import (
-	"path/filepath"
 	"bytes"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"

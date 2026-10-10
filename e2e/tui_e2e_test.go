@@ -52,10 +52,10 @@ func TestStartupChrome(t *testing.T) {
 	p := startREPL(t, s)
 	screen := p.clean()
 	for _, want := range []string{
-		"◐ medium",       // effort pill above the top rule
-		"auto mode on",   // footer pill — real 294 defaults to auto mode
-		"─",              // composer rule
-		"❯",              // prompt glyph
+		"◐ medium",     // effort pill above the top rule
+		"auto mode on", // footer pill — real 294 defaults to auto mode
+		"─",            // composer rule
+		"❯",            // prompt glyph
 	} {
 		if !strings.Contains(screen, want) {
 			t.Fatalf("startup chrome missing %q\n%s", want, truncStr(screen, 1500))

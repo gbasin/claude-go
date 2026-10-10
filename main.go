@@ -4,11 +4,11 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/user"
@@ -71,7 +71,7 @@ Flags:
   --task-budget <n>             (accepted)
   --permission-mode <mode>      default|acceptEdits|plan|bypassPermissions|auto
   --dangerously-skip-permissions  bypass all permission checks
-  --allow-dangerously-skip-permissions  same
+  --allow-dangerously-skip-permissions  enable bypass mode availability
   --enable-auto-mode            start in auto permission mode
   --plan-mode-required          start in plan mode
   --permission-prompt-tool <t>  (accepted)
@@ -103,7 +103,7 @@ Flags:
   -w, --worktree [name]         create .claude/worktrees/<name> and cd into it
   --project <dir>               run in a different project directory
   --from-pr <ref>               (accepted)
-  --tmux                        (accepted; tmux integration not supported)
+  --tmux[=classic]              run the session in a detached tmux session for the worktree (requires -w)
   --ide, --desktop              IDE integration hints (bridge auto-connects via ~/.claude/ide/*.lock)
   --chrome, --no-chrome         chrome tool toggle (env)
   --claude-in-chrome-mcp        run the Claude in Chrome stdio MCP server (no REPL)
@@ -168,18 +168,24 @@ Subcommands:
   daemon run|start|status|stop  background-session supervisor (respawns dead workers)
                                 install|uninstall register as a service (launchd/systemd)
   stop <id>                     stop a running background session
+  kill <id>                     kill a running background session
+  logs <id>                     stream a background session's output
+  rm <id>                       remove a stopped background session's state
+  respawn <id>                  respawn a dead background worker
   auth login|status|logout      credential management
   config get|set|list           settings.json
   doctor                        diagnostics
   import <file>                 import a transcript into this project
-  install, update               version info (built from source)
+  install, update               rebuild from source (git pull + go build)
   login                         OAuth login
-  mcp list|add|get|remove       manage MCP servers
+  mcp list|add|add-json|add-from-claude-desktop|get|remove
+      login|logout|reset-project-choices|serve  manage MCP servers / run claude-go as one
   plugin list|install|remove|marketplace
   purge [--dry-run] [--all]     delete local project state
   sandbox trust                 trust the sandbox MITM CA (macOS keychain)
   setup-token                   store a long-lived token
   remote-control, rc            Remote Control server (control-plane skeleton)
+  bg-host                       (internal) background-session pty host
   gateway, ssh, connect, self-hosted-runner  (stubs; not supported)
 `, version)
 }
@@ -369,6 +375,9 @@ func main() {
 	}
 	sessionID := newUUID()
 	if o.sessID != "" {
+		if len(o.sessID) > 64 {
+			fatal("Error: --session-id is too long")
+		}
 		sessionID = o.sessID
 	}
 	if o.bgMode {
@@ -387,7 +396,7 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("background session %s started\n", sessionID)
-		fmt.Printf("  attach:   claude attach %s\n", sessionID[:8])
+		fmt.Printf("  attach:   claude attach %s\n", sid8(sessionID))
 		fmt.Println("  monitor:  claude agents")
 		os.Exit(0)
 	}
@@ -719,8 +728,6 @@ func main() {
 			return res
 		}
 	}
-	if !o.mockMode {
-	}
 	loop.Entrypoint = "sdk-cli"
 	if o.model != "" {
 		loop.Model = resolveModel(o.model)
@@ -911,7 +918,11 @@ func main() {
 		if strings.HasPrefix(strings.TrimSpace(o.settingsF), "{") {
 			sb = []byte(o.settingsF) // --settings accepts a JSON string too
 		} else {
-			sb, _ = os.ReadFile(o.settingsF)
+			var err error
+			sb, err = os.ReadFile(o.settingsF)
+			if err != nil {
+				fatal("Error: Settings file not found: %s", o.settingsF)
+			}
 		}
 		sb2 = sb
 		if len(sb) > 0 {
@@ -1239,7 +1250,7 @@ func main() {
 					uname = u.Username
 				}
 				sessCtx := fmt.Sprintf("- **User identity**: `%s`. The `$USER/...` pattern in the rules above resolves to `%s/...`. Branches whose first path segment is a different person's name (`<other-user>/...`) are NOT this user's personal branches.", uname, uname)
-				tr := safetyTranscript(loop, name, input)
+				tr := safetyTranscript(loop)
 				md := agent.ClaudeMDContext(cwd)
 				sev, cat, err := client.SafetyEvalCall(ctx, billing, sessCtx, md, tr)
 				if err != nil || sev >= 50 {
@@ -1368,14 +1379,16 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 		cfgs = mcp.LoadConfigs(cwd)
 	}
 	if configFile != "" {
-		if b, err := os.ReadFile(configFile); err == nil {
-			var top struct {
-				McpServers map[string]mcp.ServerConfig `json:"mcpServers"`
-			}
-			if json.Unmarshal(b, &top) == nil {
-				for n, c := range top.McpServers {
-					cfgs[n] = c
-				}
+		b, err := os.ReadFile(configFile)
+		if err != nil {
+			fatal("Error: MCP config file not found: %s", configFile)
+		}
+		var top struct {
+			McpServers map[string]mcp.ServerConfig `json:"mcpServers"`
+		}
+		if json.Unmarshal(b, &top) == nil {
+			for n, c := range top.McpServers {
+				cfgs[n] = c
 			}
 		}
 	}
@@ -1435,8 +1448,6 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 	}
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	httpMCP := map[string]*mcp.HTTPClient{}
-	_ = httpMCP
 	for name, cfg := range cfgs {
 		if cfg.Command == "" && cfg.URL == "" {
 			continue
@@ -1519,19 +1530,10 @@ func startMCP(cwd, configFile string, strict bool, dynamic map[string]mcp.Server
 				return out
 			}
 			c.OnToolsChanged = func() {
-				var ents []tools.MCPToolEntry
-				for _, t := range c.ListTools() {
-					ents = append(ents, tools.MCPToolEntry{
-						Name: t.Name, Description: t.Description,
-						InputSchema: t.InputSchema})
-				}
-			}
-			c.OnToolsChanged = func() {
 				tools.UnregisterMCPServer(prefix)
 				for _, t := range c.Tools {
 					tools.RegisterMCP(prefix, c, t.Name, t.Description, t.InputSchema)
 				}
-				_ = tools.MCPToolEntry{} // SyncMCPTools is the additive variant
 			}
 			tools.RegisterMCPServer(name, c)
 			mu.Lock()
@@ -1652,8 +1654,8 @@ func teleportPick(l *agent.Loop) string {
 		}
 		fmt.Printf("  %d. %s  %s  %s\n", i+1, title, s.ID, s.UpdatedAt)
 	}
-	st, _ := os.Stdin.Stat()
-	if st.Mode()&os.ModeCharDevice == 0 {
+	st, stErr := os.Stdin.Stat()
+	if stErr == nil && st.Mode()&os.ModeCharDevice == 0 {
 		fmt.Println("run `claude --teleport <session-id>` to resume one")
 		return ""
 	}
@@ -1956,8 +1958,9 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 			// real wraps the result in structured output when a schema is given
 			var v any
 			if json.Unmarshal([]byte(out.String()), &v) != nil {
+				raw := out.String()
 				out.Reset()
-				b2, _ := json.Marshal(map[string]any{"result": out.String()})
+				b2, _ := json.Marshal(map[string]any{"result": raw})
 				out.Write(b2)
 			}
 		}
@@ -2020,13 +2023,20 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 }
 
 func newUUID() string {
-	f, _ := os.Open("/dev/urandom")
 	var b [16]byte
-	io.ReadFull(f, b[:])
-	f.Close()
+	rand.Read(b[:])
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// sid8 clips a session id for display names without panicking on a
+// short --session-id (real rejects non-UUIDs; we degrade to the id).
+func sid8(s string) string {
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
 }
 
 // runPrintStreamJSON implements --input-format stream-json: reads
@@ -2385,7 +2395,7 @@ func selfUpdate() {
 		}
 	}
 	if repo == "" {
-		fmt.Println("update: binary isn't inside a claude-go source checkout — rebuild with `go install github.com/gbasin/claude-go@latest`")
+		fmt.Println("update: binary isn't inside a claude-go source checkout — rebuild with `go build -o claude-go .` in a clone of github.com/gbasin/claude-go")
 		return
 	}
 	out, err := exec.Command("git", "-C", repo, "pull", "--ff-only").CombinedOutput()
@@ -2586,7 +2596,7 @@ func startupFacts(cwd string, o *cliOpts) api.SessionFacts {
 // safetyTranscript builds real's compact {"role":"summary"} JSON lines
 // the auto-mode eval sees — user prompts verbatim, tool calls as
 // {"Name":"<summary>"}, then the pending call itself.
-func safetyTranscript(l *agent.Loop, name string, input json.RawMessage) []string {
+func safetyTranscript(l *agent.Loop) []string {
 	var lines []string
 	for _, m := range l.Messages {
 		var blocks []api.ContentBlock
@@ -2626,8 +2636,6 @@ func safetyTranscript(l *agent.Loop, name string, input json.RawMessage) []strin
 	}
 	// the proposed call is already the last assistant tool_use in
 	// l.Messages — no extra line needed
-	_ = name
-	_ = input
 	return lines
 }
 
@@ -2657,7 +2665,7 @@ func safetyInputSummary(input json.RawMessage) string {
 // session bound to the worktree with CLAUDE_CODE_TMUX_SESSION advertised to
 // the UI ("tmux session: <name>"); --tmux=classic forces traditional tmux.
 func setupTmuxSession(wtPath, wtName, sessionID string) {
-	name := "claude-" + sessionID[:8]
+	name := "claude-" + sid8(sessionID)
 	if wtName != "" {
 		name = "claude-" + wtName
 	}
@@ -2694,7 +2702,17 @@ func sessionForPR(cwd, ref string) string {
 			continue
 		}
 		for _, ln := range strings.Split(string(b), "\n") {
-			if strings.Contains(ln, "pull/"+want) || strings.Contains(ln, "#"+want) {
+			var rec struct {
+				PrNumber int    `json:"prNumber"`
+				PrURL    string `json:"prUrl"`
+			}
+			if json.Unmarshal([]byte(ln), &rec) != nil {
+				continue
+			}
+			if rec.PrURL == want || strings.HasSuffix(rec.PrURL, "/pull/"+want) {
+				return strings.TrimSuffix(e.Name(), ".jsonl")
+			}
+			if n, err := strconv.Atoi(want); err == nil && rec.PrNumber == n && n != 0 {
 				return strings.TrimSuffix(e.Name(), ".jsonl")
 			}
 		}
@@ -2825,7 +2843,6 @@ func fireInstructionsLoaded(l *agent.Loop, cwd string) {
 	if len(l.Hooks["InstructionsLoaded"]) == 0 {
 		return
 	}
-	home, _ := os.UserHomeDir()
 	var files []string
 	for _, p := range []string{
 		filepath.Join(config.ClaudeDir(), "CLAUDE.md"),
@@ -2839,7 +2856,6 @@ func fireInstructionsLoaded(l *agent.Loop, cwd string) {
 			files = append(files, p)
 		}
 	}
-	_ = home
 	for _, f := range files {
 		hooks.Run(l.Hooks, hooks.InstructionsLoaded, map[string]any{
 			"session_id": l.Client.SessionID, "cwd": cwd,

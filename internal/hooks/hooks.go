@@ -715,11 +715,6 @@ var onceKeys sync.Map
 // built-in hooks like the artifact emulator's.
 var hookFns sync.Map // callbackId -> func(stdin []byte) (stdout []byte, err error)
 
-// RegisterFunction installs an in-proc hook for callback/function types.
-func RegisterFunction(id string, fn func(stdin []byte) ([]byte, error)) {
-	hookFns.Store(id, fn)
-}
-
 func registeredHook(id string) func([]byte) ([]byte, error) {
 	if fn, ok := hookFns.Load(id); ok {
 		return fn.(func([]byte) ([]byte, error))

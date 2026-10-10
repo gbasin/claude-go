@@ -44,11 +44,6 @@ type Store interface {
 	LogRecord(ev map[string]any) error
 }
 
-// Run drives the interactive session.
-func Run(l *agent.Loop) {
-	RunWithStore(l, nil)
-}
-
 // RunWithStore is Run with session transcript logging.
 func RunWithStore(l *agent.Loop, store Store) {
 	applyTheme(themeSetting(l.CWD), l.CWD)
@@ -167,7 +162,6 @@ func RunWithStore(l *agent.Loop, store Store) {
 	// EndConversation mid-turn → flag normal shutdown (raw-mode restore,
 	// unregister, MCP close, SessionEnd all run via the quit path).
 	endSession := func() { wantQuit.Store(true) }
-	_ = endSession
 	if l.SessionEndReason == "" {
 		l.SessionEndReason = "other"
 	}
