@@ -46,6 +46,12 @@ type Events struct {
 	// OnVCSChange emits system/vcs_state_changed — a successful git
 	// mutation Bash call (commit/push/merge/rebase).
 	OnVCSChange func(kind, branch string)
+	// OnPerTurnEffort emits system/per_turn_effort_changed — a false
+	// means a refusal dropped output_config mid-session (mod_0069).
+	OnPerTurnEffort func(active bool)
+	// OnDevIntent emits system/dev_intent — an Apple/Android toolchain
+	// Bash command marks the session's dev intent (mod_0069 Dkr).
+	OnDevIntent func(kind string)
 	// OnThinkingTokens emits the thinking block's estimated token count —
 	// real's thinking_tokens system event at content_block_stop.
 	OnThinkingTokens func(n int)
@@ -203,6 +209,7 @@ type Loop struct {
 	handbackTail     bool // append the SubagentHandback reminder to msg[0]
 	noThinking       bool // thinking config dropped after a thinking 400
 	dropSafeguards   bool
+	dropEffort       bool // output_config dropped after a per-turn-effort 400
 	dropOutputConfig bool
 	dropBetas        bool
 	maxTokensClamp   bool
@@ -274,7 +281,8 @@ func (l *Loop) buildRequest() *api.Request {
 	// effort'). Real omits the key for those models.
 	// CLAUDE_CODE_ALWAYS_ENABLE_EFFORT forces effort emission for models
 	// lacking declared effort support (real QE(), mod_0198.js).
-	effortCapable := isXHighModel(model) || envOn("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT")
+	effortCapable := (isXHighModel(model) || envOn("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT")) &&
+		!l.dropEffort
 	var ocRaw json.RawMessage
 	oc := map[string]any{}
 	eb := extraBodyFields()
@@ -949,6 +957,13 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 				l.Events.OnVCSChange(kind, branch)
 			}
 		}
+		// dev_intent: Apple/Android toolchain commands mark the intent
+		// (mod_0069 Dkr/Dw — ios_command / android_command evidence)
+		if b.Name == "Bash" && l.Events.OnDevIntent != nil {
+			if kind := devIntentKind(string(b.Input)); kind != "" {
+				l.Events.OnDevIntent(kind)
+			}
+		}
 		l.toolBatchForSummary = append(l.toolBatchForSummary, struct {
 			name, input, output string
 		}{b.Name, string(b.Input), truncAt(r.Content, 300)})
@@ -1032,7 +1047,8 @@ func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
 	var resp *api.Response
 	var err error
 	models := append([]string{l.Model}, l.fallbackModels()...)
-	for mi, m := range models {
+	for mi := 0; mi < len(models); mi++ {
+		m := models[mi]
 		if mi > 0 {
 			// real emits system/model_fallback on the stream when the
 			// retry chain moves to a different model (mod_0653)
@@ -1115,11 +1131,47 @@ func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
 		if err == nil {
 			break
 		}
+		// refusal ladder: a 400 naming a request feature drops it and
+		// retries on the same model — real's thinking / output_config /
+		// safeguards drops (mod_0198). output_config's drop emits
+		// system/per_turn_effort_changed before the retry.
+		if l.dropRefusedFeature(err) {
+			mi-- // retry this model with the feature dropped
+			err = nil
+			continue
+		}
 		if !retryableErr(err) || mi == len(models)-1 {
 			break
 		}
 	}
 	return resp, err
+}
+
+// dropRefusedFeature inspects a 400's error text: a refusal that names
+// thinking, output_config, or safeguards drops that feature and asks for
+// a retry (returns true). per_turn_effort's drop emits real's
+// system/per_turn_effort_changed.
+func (l *Loop) dropRefusedFeature(err error) bool {
+	s := err.Error()
+	if !strings.Contains(s, "400") && !strings.Contains(s, "invalid_request") {
+		return false
+	}
+	switch {
+	case strings.Contains(s, "thinking") && !l.noThinking:
+		l.noThinking = true
+		return true
+	case (strings.Contains(s, "output_config") || strings.Contains(s, "per-turn") ||
+		strings.Contains(s, "per_turn")) && !l.dropEffort:
+		l.dropEffort = true
+		if l.Events.OnPerTurnEffort != nil {
+			l.Events.OnPerTurnEffort(false)
+		}
+		return true
+	case strings.Contains(s, "safeguards") && !l.dropSafeguards:
+		l.dropSafeguards = true
+		return true
+	}
+	return false
 }
 
 // SessionStarted returns the session's wall-clock start.
@@ -2189,4 +2241,29 @@ func vcsMutation(output, input string) (kind, branch string, ok bool) {
 		branch = m[1]
 	}
 	return kind, branch, true
+}
+
+// devIntentKind returns real's dev-intent kind for an Apple/Android
+// toolchain command — ios_command for xcodebuild/simctl/swift/xcrun,
+// android_command for adb/fastlane/gradle.
+func devIntentKind(input string) string {
+	var in struct {
+		Command string `json:"command"`
+	}
+	_ = json.Unmarshal([]byte(input), &in)
+	cmd := in.Command
+	if cmd == "" {
+		return ""
+	}
+	for _, t := range []string{"xcodebuild", "simctl", "devicectl", "swift build", "swift run", "xcrun"} {
+		if strings.Contains(cmd, t) {
+			return "ios_app"
+		}
+	}
+	for _, t := range []string{"adb ", "fastlane", "./gradlew", "gradle "} {
+		if strings.Contains(cmd, t) {
+			return "android_app"
+		}
+	}
+	return ""
 }
