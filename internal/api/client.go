@@ -20,7 +20,7 @@ import (
 	"claude-go/internal/config"
 )
 
-const Version = "2.1.295"
+const Version = "2.1.296"
 
 // betaFlags — real 2.1.294's base anthropic-beta list (captured through
 // the mock harness: the 289-era oauth/advisor-tool/advanced-tool-use/
@@ -497,12 +497,19 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 func statusRetryDelay(resp *http.Response) time.Duration {
 	d, _ := retryAfterDelay(resp.Header, time.Now())
 	if resp.StatusCode == 529 {
-		// CLAUDE_CODE_OVERLOADED_RETRY_BASE_DELAY_MS — real's 529 backoff
-		// base (changelog 2.1.292); default keeps the retry-after value
+		// CLAUDE_CODE_OVERLOADED_RETRY_{BASE,MAX}_DELAY_MS — real's 529
+		// backoff bounds (mod_0416 PB/U$): base floors, max caps
 		if v := os.Getenv("CLAUDE_CODE_OVERLOADED_RETRY_BASE_DELAY_MS"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				if base := time.Duration(n) * time.Millisecond; d < base {
 					d = base
+				}
+			}
+		}
+		if v := os.Getenv("CLAUDE_CODE_OVERLOADED_RETRY_MAX_DELAY_MS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				if mx := time.Duration(n) * time.Millisecond; d > mx {
+					d = mx
 				}
 			}
 		}
