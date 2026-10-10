@@ -194,7 +194,7 @@ func (s *Store) logMessage(m api.Message, compact bool, modelOnlyText string) er
 		Type: role, UUID: uuid, ParentUUID: s.lastUUID,
 		SessionID: s.SessionID, CWD: s.CWD,
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
-		Message:   raw, Version: "2.1.295",
+		Message:   raw, Version: "2.1.296",
 		UserType:         "external",
 		GitBranch:        currentGitBranch(s.CWD),
 		Entrypoint:       "cli",
@@ -265,7 +265,7 @@ func (s *Store) LogInitMeta(model, parentSessionID, agentType, sysSnap, permMode
 	rec := map[string]any{
 		"type": "system", "subtype": "init",
 		"model": model, "cwd": s.CWD,
-		"version": "2.1.295", "userType": "external",
+		"version": "2.1.296", "userType": "external",
 		"gitBranch": currentGitBranch(s.CWD), "entrypoint": "cli",
 	}
 	if parentSessionID != "" {

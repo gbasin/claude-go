@@ -476,4 +476,4 @@ func formatSearchResults(query string, hits []searchHit) string {
 	return b.String()
 }
 
-func version() string { return "2.1.295" }
+func version() string { return "2.1.296" }

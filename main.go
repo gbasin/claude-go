@@ -1187,7 +1187,27 @@ func main() {
 			os.Stderr = f
 		}
 	}
-	fireHook(loop, hooks.SessionStart)
+	// real's resume path: SessionStart hooks run in flight, and the
+	// session waits up to CLAUDE_CODE_RESUME_SESSIONSTART_HOOKS_WAIT_MS
+	// for them before continuing (default: run to completion inline)
+	if o.cont || o.resume != "" {
+		wait := 0
+		if v := os.Getenv("CLAUDE_CODE_RESUME_SESSIONSTART_HOOKS_WAIT_MS"); v != "" {
+			wait, _ = strconv.Atoi(v)
+		}
+		if wait > 0 {
+			done := make(chan struct{})
+			go func() { fireHook(loop, hooks.SessionStart); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(time.Duration(wait) * time.Millisecond):
+			}
+		} else {
+			fireHook(loop, hooks.SessionStart)
+		}
+	} else {
+		fireHook(loop, hooks.SessionStart)
+	}
 	if o.printMode {
 		tools.Interactive = false
 		if o.inFormat == "stream-json" {
