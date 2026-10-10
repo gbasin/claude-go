@@ -3076,6 +3076,9 @@ const altScreenExit = "[?1004l[?2031l" +
 var altScreenOn atomic.Bool
 
 func enterAltScreen() {
+	if envOn("CLAUDE_CODE_NO_FLICKER") {
+		return // real: NO_FLICKER pins the inline renderer — no alt screen
+	}
 	if altScreenOn.Swap(true) {
 		return
 	}

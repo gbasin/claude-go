@@ -343,7 +343,9 @@ func animateMascot() {
 		j := int(state % uint64(i+1))
 		cells[i], cells[j] = cells[j], cells[i]
 	}
-	fmt.Print("\x1b[?25l")
+	if !envOn("CLAUDE_CODE_NATIVE_CURSOR") {
+		fmt.Print("\x1b[?25l") // real draws its own cursor unless the env asks for native
+	}
 	for i, cl := range cells {
 		fmt.Printf("\x1b[%d;1H\x1b[%dC%s%c%s", cl.r+1, cl.col, claudeOrange, cl.ch, reset)
 		if i%5 == 0 {
@@ -361,6 +363,9 @@ func compactBanner(version, name, effort, plan, cwd, sessionID string) {
 	if home != "" && strings.HasPrefix(cwd, home) {
 		short = "~" + cwd[len(home):]
 	}
+	if envOn("CLAUDE_CODE_HIDE_CWD") {
+		short = "" // real: the cwd label is suppressed entirely
+	}
 	link := fmt.Sprintf("\x1b]8;id=%x;https://claude.ai/code/session_%s?from=cli\x07/rc\x1b]8;;\x07",
 		uint32(time.Now().UnixNano()&0xffffffff), sessionID)
 	// \r\n — the editor is in raw mode when the banner prints (ONLCR off,
@@ -374,7 +379,11 @@ func compactBanner(version, name, effort, plan, cwd, sessionID string) {
 	} else {
 		fmt.Printf("%s▝▜██████▀%s  %s · %s\r\n", claudeOrange, reset, name, plan)
 	}
-	fmt.Printf(" %s▝▝   ▝▝%s   %s · %s\r\n", claudeOrange, reset, short, link)
+	if short != "" {
+		fmt.Printf(" %s▝▝   ▝▝%s   %s · %s\r\n", claudeOrange, reset, short, link)
+	} else {
+		fmt.Printf(" %s▝▝   ▝▝%s   %s\r\n", claudeOrange, reset, link)
+	}
 }
 
 // printAutoModeNotice renders real's one-time auto-mode announcement —

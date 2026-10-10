@@ -3,6 +3,8 @@ package repl
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 
 	"claude-go/internal/agent"
@@ -86,6 +88,19 @@ func showTranscript(l *agent.Loop, ks *keySource) {
 			draw()
 		case k.b == 'G' || k.seq == "[F" || k.seq == "[4~" || k.seq == "[8~": // G / end (real)
 			top = max(0, len(lines)-viewH)
+			draw()
+		case k.seq == "[<wheel-up":
+			step := wheelScrollStep()
+			top -= step
+			if top < 0 {
+				top = 0
+			}
+			draw()
+		case k.seq == "[<wheel-down":
+			top += wheelScrollStep()
+			if top+viewH > len(lines) {
+				top = max(0, len(lines)-viewH)
+			}
 			draw()
 		case k.b == 5: // ctrl+e — transcript:toggleShowAll
 			showAll = !showAll
@@ -198,4 +213,17 @@ func transcriptResultLines(b api.ContentBlock) []string {
 		}
 	}
 	return out
+}
+
+// wheelScrollStep is CLAUDE_CODE_SCROLL_SPEED (a row multiplier, real
+// clamps at 20); absent/invalid means 1.
+func wheelScrollStep() int {
+	v, err := strconv.ParseFloat(os.Getenv("CLAUDE_CODE_SCROLL_SPEED"), 64)
+	if err != nil || v <= 0 {
+		return 1
+	}
+	if v > 20 {
+		v = 20
+	}
+	return int(v)
 }
