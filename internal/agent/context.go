@@ -652,3 +652,21 @@ func billingLine(entrypoint string, bill BillingMeta) string {
 	}
 	return b.String()
 }
+
+// InstructionSizeStats sums the memory chain's file sizes — real's
+// instruction_size_warning input (mod_0409 Dvt): total over a 120k-char
+// floor, the per-file count, and the largest single file.
+func InstructionSizeStats(cwd string) (total, fileCount, largest int) {
+	for _, p := range claudeMDPaths(cwd) {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		fileCount++
+		total += len(b)
+		if len(b) > largest {
+			largest = len(b)
+		}
+	}
+	return
+}

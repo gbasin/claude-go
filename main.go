@@ -1665,6 +1665,7 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 	sj := format == "stream-json"
 	if sj {
 		emitStreamJSONInit(l)
+		emitInstructionSizeWarning(l)
 		// real echoes the -p prompt as a user event after init
 		if prompt != "" {
 			ev, _ := json.Marshal(map[string]any{
@@ -1781,6 +1782,26 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 			}
 			b, _ := json.Marshal(ev)
 			fmt.Println(string(b))
+		}
+	}
+	l.Events.OnDevIntent = func(kind string) {
+		if sj {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "system", "subtype": "dev_intent",
+				"kind": kind,
+				"uuid": session.NewID(), "session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
+		}
+	}
+	l.Events.OnPerTurnEffort = func(active bool) {
+		if sj {
+			ev, _ := json.Marshal(map[string]any{
+				"type": "system", "subtype": "per_turn_effort_changed",
+				"per_turn_effort_active": active,
+				"uuid":                   session.NewID(), "session_id": l.Client.SessionID,
+			})
+			fmt.Println(string(ev))
 		}
 	}
 	l.Events.OnPermissionCheck = func(tuID, status string) {
@@ -2050,6 +2071,29 @@ func runPrintStreamJSON(l *agent.Loop) {
 
 // emitStreamJSONInit writes the system/init event real emits first on
 // --output-format stream-json.
+func emitInstructionSizeWarning(l *agent.Loop) {
+	total, fileCount, largest := agent.InstructionSizeStats(l.ToolCtx.CWD)
+	if total <= 120000 {
+		return
+	}
+	// real gates the emit on tengu_jolly_aurora (mod_1760 II)
+	if v, _ := config.GBFeature("tengu_jolly_aurora").(bool); !v &&
+		os.Getenv("CLAUDE_CODE_INSTRUCTION_SIZE_WARNING") == "" {
+		return
+	}
+	ev := map[string]any{
+		"type": "system", "subtype": "instruction_size_warning",
+		"total_chars": total, "total_limit_chars": 120000,
+		"file_count": fileCount,
+		"uuid":       session.NewID(), "session_id": l.Client.SessionID,
+	}
+	if fileCount > 1 && largest > 120000 {
+		ev["largest_chars"] = largest
+	}
+	b, _ := json.Marshal(ev)
+	fmt.Println(string(b))
+}
+
 func emitStreamJSONInit(l *agent.Loop) {
 	toolNames := tools.Names()
 	// mcp_servers as [{name,status}] objects (real's shape)
