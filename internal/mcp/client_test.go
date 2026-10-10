@@ -271,8 +271,10 @@ func TestNotificationDispatch(t *testing.T) {
 	}
 	defer c.Close()
 	c.SetNotificationHandler(func(method string, _ json.RawMessage) { notify <- method })
-	// trigger the notification via a call
-	go c.CallTool(context.Background(), "t1", nil)
+	// trigger the notification via a call — wait for it so the /msg
+	// handler's postCh sends finish before the deferred close(postCh)
+	done := make(chan struct{})
+	go func() { c.CallTool(context.Background(), "t1", nil); close(done) }()
 	select {
 	case m := <-notify:
 		if m != "notifications/progress" {
@@ -280,6 +282,11 @@ func TestNotificationDispatch(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no notification received")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("tool call didn't resolve")
 	}
 }
 

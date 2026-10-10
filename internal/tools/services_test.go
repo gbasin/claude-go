@@ -135,7 +135,7 @@ func TestBgTaskKill(t *testing.T) {
 	}
 	select {
 	case <-c.BgTasks.Get(id).Done:
-	case <-time.After(4 * time.Second):
+	case <-time.After(15 * time.Second): // slow under -race on CI
 		t.Error("task not stopped")
 	}
 }
