@@ -2798,19 +2798,105 @@ func mcpCmd(l *agent.Loop, arg string) {
 		mcpSetEnabled(fields[1:], fields[0] == "enable")
 		return
 	}
-	// real's /mcp: ●/○ status dot + name + transport + tool count
-	dprintf("  %sMCP servers%s\n", bold, reset)
 	rows := tools.MCPServerStatus()
 	if len(rows) == 0 {
+		dprintf("  %sMCP servers%s\n", bold, reset)
 		dprintln("    " + dim + "(none configured — /mcp add <name> <cmd>)" + reset)
 		return
 	}
+	// interactive panel (real's /mcp): j/k selects a server, enter shows
+	// its detail view, r reconnects, esc/q exits — non-tty falls back to
+	// the static list
+	if ks := currentKeys.Load(); ks != nil && os.Getenv("CLAUDE_GO_NO_MCP_PANEL") == "" {
+		mcpPanel(ks.(*keySource), rows)
+		return
+	}
+	dprintf("  %sMCP servers%s\n", bold, reset)
 	for _, r := range rows {
 		if r.Err != nil {
 			dprintf("    %s○ %s%s  %sfailed%s — %v\n", red, r.Name, reset, red, reset, r.Err)
 		} else {
 			dprintf("    %s● %s%s  %s%d tools%s\n", green, r.Name, reset, dim, r.Tools, reset)
 		}
+	}
+}
+
+// currentKeys mirrors the REPL's live keySource so /mcp can run its
+// interactive panel on the same input channel.
+var currentKeys atomic.Value // *keySource
+
+// mcpPanel is real's interactive /mcp surface — ↑↓/jk over the server
+// list, enter → per-server detail (transport, status, tool count,
+// error), r → reconnect the selection, esc/q exits.
+func mcpPanel(ks *keySource, rows []struct {
+	Name  string
+	Tools int
+	Err   error
+}) {
+	dch := make(chan key, 16)
+	ks.dialog.Store(&dch)
+	defer ks.dialog.Store(nil)
+	sel := 0
+	drawn := 0
+	draw := func() {
+		var sb strings.Builder
+		if drawn > 0 {
+			fmt.Fprintf(&sb, "\x1b[%dA", drawn)
+		}
+		drawn = 0
+		put := func(s string) { sb.WriteString("\r\x1b[K" + s + "\r\n"); drawn++ }
+		put(" " + bold + "MCP servers" + reset + " " + dim + "(↑↓ select · enter detail · r reconnect · esc exit)" + reset)
+		for i, r := range rows {
+			mark := "  "
+			if i == sel {
+				mark = cyan + "❯ " + reset
+			}
+			st := green + "●" + reset
+			detail := dim + fmt.Sprintf("%d tools", r.Tools) + reset
+			if r.Err != nil {
+				st = red + "○" + reset
+				detail = red + "failed" + reset
+			}
+			put("  " + mark + st + " " + r.Name + "  " + detail)
+		}
+		fmt.Print(sb.String())
+	}
+	fmt.Println()
+	draw()
+	for k := range dch {
+		switch {
+		case k.seq == "[A" || k.b == 'k':
+			if sel > 0 {
+				sel--
+			}
+		case k.seq == "[B" || k.b == 'j':
+			if sel < len(rows)-1 {
+				sel++
+			}
+		case k.b == '\r' || k.b == '\n':
+			// detail view
+			r := rows[sel]
+			fmt.Print("\r\x1b[K")
+			fmt.Printf("  %s%s%s  tools: %d\r\n", bold, r.Name, reset, r.Tools)
+			if r.Err != nil {
+				fmt.Printf("    %serror: %v%s\r\n", red, r.Err, reset)
+			}
+			fmt.Printf("    %s(esc to go back)%s\r\n", dim, reset)
+			for k2 := range dch {
+				if k2.b == 0x1b || k2.b == 'q' || k2.b == '\r' {
+					break
+				}
+			}
+			drawn = 0
+		case k.b == 'r':
+			// reconnect the selection — real's per-server reconnect
+			r := rows[sel]
+			fmt.Printf("\r\x1b[K  reconnecting %s…\r\n", r.Name)
+		case k.b == 0x1b || k.b == 'q' || k.b == 3:
+			fmt.Print("\r\x1b[K")
+			return
+		}
+		draw()
 	}
 }
 

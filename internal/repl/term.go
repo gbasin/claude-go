@@ -347,6 +347,17 @@ func (e *editor) expandPaste(pasted string) string {
 	pasted = strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(pasted)
 	pasted = strings.ReplaceAll(pasted, "\t", "    ")
 	nl := strings.Count(pasted, "\n")
+	// dragged file path: a single-line paste naming an existing image
+	// file collapses to [Image #N] (real's R() sniff path, mod_0263)
+	if nl == 0 {
+		if p := sniffImagePath(pasted); p != "" {
+			e.imgN++
+			b, _ := os.ReadFile(p)
+			ph := fmt.Sprintf("[Image #%d]", e.imgN)
+			e.pastes[ph] = fmt.Sprintf("\x00IMAGE\x00%s\x00%d", p, len(b))
+			return ph
+		}
+	}
 	if len(pasted) <= 800 && nl <= 2 {
 		return pasted
 	}
@@ -3254,4 +3265,30 @@ func (e *editor) abovePromptRows() []string {
 			" · ctrl+x ctrl+a to collapse"+reset)
 	}
 	return out
+}
+
+// sniffImagePath — a pasted path that names an existing image file
+// returns its absolute path (else ""). Real sniffs a handful of image
+// extensions on the dropped-path paste.
+func sniffImagePath(pasted string) string {
+	p := strings.TrimSpace(pasted)
+	p = strings.Trim(p, "'\"")            // drag drops arrive quoted
+	p = strings.ReplaceAll(p, "\\ ", " ") // escaped spaces
+	if strings.HasPrefix(p, "~/") {
+		if h, err := os.UserHomeDir(); err == nil {
+			p = filepath.Join(h, p[2:])
+		}
+	}
+	if !filepath.IsAbs(p) {
+		return ""
+	}
+	switch strings.ToLower(filepath.Ext(p)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".bmp", ".tiff", ".tif":
+	default:
+		return ""
+	}
+	if fi, err := os.Stat(p); err != nil || fi.IsDir() {
+		return ""
+	}
+	return p
 }

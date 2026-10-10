@@ -110,6 +110,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 	}
 	ks, err := startKeys()
 	if err == nil {
+		currentKeys.Store(ks)
 		// MCP elicitation: a server asks the user mid-flow — real shows a
 		// form; we prompt inline + fire Elicitation/ElicitationResult
 		tools.SetElicitHandler(func(req *tools.ElicitRequest) tools.ElicitAnswer {

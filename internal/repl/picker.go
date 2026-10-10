@@ -340,6 +340,20 @@ func pickSession(cwd string, ks *keySource, selfID string) string {
 				if sel < len(view)-1 {
 					sel++
 				}
+			case "select:first":
+				sel = 0
+			case "select:last":
+				sel = len(view) - 1
+			case "select:pageUp":
+				sel -= 10
+				if sel < 0 {
+					sel = 0
+				}
+			case "select:pageDown":
+				sel += 10
+				if sel > len(view)-1 {
+					sel = len(view) - 1
+				}
 			case "select:accept":
 				if len(view) > 0 {
 					if id, ok := tryPick(); ok {
