@@ -308,6 +308,27 @@ func (ks *keySource) read() {
 func decodeCSI(s string) key {
 	final := s[len(s)-1]
 	params := s[1 : len(s)-1]
+	// SGR mouse ([<btn;x;yM/m): button 64/65 = wheel up/down.
+	// Press (M) and release (m) both arrive; only press scrolls.
+	if strings.HasPrefix(params, "<") && (final == 'M' || final == 'm') {
+		btn := 0
+		for _, ch := range params[1:] {
+			if ch >= '0' && ch <= '9' {
+				btn = btn*10 + int(ch-'0')
+			} else {
+				break
+			}
+		}
+		if final == 'M' {
+			switch btn & 0x43 { // ignore modifier bits (4/8/16/32)
+			case 64:
+				return key{seq: "[<wheel-up"}
+			case 65:
+				return key{seq: "[<wheel-down"}
+			}
+		}
+		return key{seq: "[<mouse"}
+	}
 	nums := strings.Split(params, ";")
 	pnum := func(idx int) int {
 		if idx >= len(nums) {
