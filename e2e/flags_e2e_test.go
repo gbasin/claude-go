@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"claude-go/internal/session"
 )
 
 // recordRequests runs -p with MOCK_RECORD enabled and returns the captured
@@ -724,8 +726,7 @@ func TestFlagExec(t *testing.T) {
 // PR and resumes it.
 func TestFlagFromPR(t *testing.T) {
 	s := newSession(t)
-	slug := strings.NewReplacer("/", "-", ".", "-").Replace(
-		filepath.Clean(s.cwd))
+	slug := session.Slug(s.cwd)
 	dir := filepath.Join(s.home, ".claude", "projects", slug)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)

@@ -69,7 +69,12 @@ func Slug(cwd string) string {
 	if r, err := filepath.EvalSymlinks(cwd); err == nil {
 		cwd = r
 	}
-	return strings.ReplaceAll(filepath.Clean(cwd), "/", "-")
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return '-'
+	}, filepath.Clean(cwd))
 }
 
 func dir(cwd string) string {

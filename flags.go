@@ -7,6 +7,7 @@ package main
 import (
 	"bufio"
 	"claude-go/internal/config"
+	"claude-go/internal/session"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -671,7 +672,7 @@ type resumeAtRec struct {
 // resumes mid-chain.
 func loadSessionAt(cwd, sessionID, atUUID, dropsTurn string) ([]api.Message, string, error) {
 	return loadSessionAtPath(filepath.Join(config.ClaudeDir(), "projects",
-		strings.ReplaceAll(filepath.Clean(cwd), "/", "-"), sessionID+".jsonl"), atUUID, dropsTurn)
+		session.Slug(cwd), sessionID+".jsonl"), atUUID, dropsTurn)
 }
 
 // loadSessionAtPath is loadSessionAt on an arbitrary transcript file —

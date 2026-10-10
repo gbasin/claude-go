@@ -5,9 +5,9 @@ wire- and UI-level parity with `claude` 2.1.296. One static binary, no
 runtime dependencies.
 
 **Not affiliated with or endorsed by Anthropic.** This is a clean-room
-compatibility clone for study and personal use. Bundled prompt text and
-behavioral details are derived from the public Claude Code product;
-that content remains Anthropic's property (see [License](#license)).
+compatibility clone for study and personal use. No Anthropic-authored
+text (system prompts, tool schemas) ships in this repository — see
+[Extraction](#extraction) below and [License](#license).
 
 ## Requirements
 
@@ -25,6 +25,7 @@ go build -o claude-go .
 ## Quickstart
 
 ```sh
+./claude-go extract         # optional: harvest real prompts/schemas from your claude install
 ./claude-go --mock          # run against the built-in mock API — no credentials needed
 ./claude-go -p "say hi"     # print mode
 ./claude-go login           # OAuth login (or: setup-token for a long-lived token)
@@ -48,6 +49,7 @@ respawn <id>      respawn a dead background worker
 auth …            login|status|logout
 config get|set|list
 doctor            diagnostics
+extract           harvest real prompts/schemas from a local claude install
 import <file>     import a JSONL transcript
 login             OAuth login
 mcp …             list|add|add-json|add-from-claude-desktop|get|remove|
@@ -94,7 +96,7 @@ CLAUDE_GO_DIFF_DUMP=/tmp/dump go test -tags e2e -run 'TestDiffScenarios' ./e2e/
 | Package | Role |
 |---|---|
 | `internal/api` | Anthropic API client, SSE streaming, providers (Bedrock/Vertex), uTLS fingerprinting |
-| `internal/agent` | Agentic loop, compaction, subagents, bundled system prompts |
+| `internal/agent` | Agentic loop, compaction, subagents, system-prompt assembly |
 | `internal/tools` | Builtin toolset: bash/file/search/web, MCP bridge, sandbox, cron, tasks |
 | `internal/repl` | Terminal UI: editor, keybindings, dialogs, slash commands |
 | `internal/session` | JSONL transcript store, resume/rewind, picker |
@@ -109,6 +111,7 @@ CLAUDE_GO_DIFF_DUMP=/tmp/dump go test -tags e2e -run 'TestDiffScenarios' ./e2e/
 | `internal/browsermcp` | Claude-in-Chrome MCP server + native-messaging host |
 | `internal/netproxy` | Sandbox egress MITM proxy + CA |
 | `internal/mock` | Fake Anthropic API used by `--mock`, e2e, and `cmd/mockd` |
+| `internal/extract` | Optional harvest of real's bundled text (prompts, tool schemas) from a local `claude` install |
 | `internal/lsp`, `internal/telemetry`, `internal/voice` | LSP client, telemetry, push-to-talk |
 
 `cmd/mockd` runs the mock API as a standalone daemon on `127.0.0.1:8898`
@@ -125,6 +128,23 @@ so real `claude` can complete turns against it for wire captures.
   the reference trees themselves are gitignored (Anthropic IP).
 - Committed `e2e/testdata/realwire_*.json` are real-wire captures with
   identity fields scrubbed — fixtures for golden-wire tests.
+
+## Extraction
+
+No Anthropic-authored prompt text or tool schemas ship in this repo.
+The binary ships minimal community-authored fallbacks so `--mock`, tests,
+and basic use work standalone. For byte-level wire parity, run:
+
+```sh
+./claude-go extract
+```
+
+This finds your local `claude` (CLAUDE_REAL_BIN → `~/.local/bin/claude` →
+PATH), runs it once per model class against the in-process mock API, and
+caches the captured `system` prompts + `tools` schemas in
+`~/.claude-go/extracted/` — the text never leaves your machine. The
+binary prefers extracted text when present. Re-run after `claude`
+self-updates.
 
 ## License
 

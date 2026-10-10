@@ -5,7 +5,6 @@ import (
 	"claude-go/internal/config"
 	"claude-go/internal/hooks"
 	"context"
-	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -15,9 +14,6 @@ import (
 
 	"claude-go/internal/api"
 )
-
-//go:embed builtin_schemas.json
-var schemasJSON []byte
 
 // Result is a tool execution result.
 type Result struct {
@@ -245,7 +241,7 @@ func Dispatch(ctx *Context, name string, input json.RawMessage) Result {
 // loadSchema pulls one tool def from the embedded schemas file.
 func loadSchema(name string) api.Tool {
 	var all []api.Tool
-	if err := json.Unmarshal(schemasJSON, &all); err != nil {
+	if err := json.Unmarshal(schemasJSON(), &all); err != nil {
 		panic(err)
 	}
 	for _, t := range all {

@@ -3,7 +3,6 @@ package agent
 import (
 	"claude-go/internal/config"
 	"context"
-	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,8 +15,7 @@ import (
 	"claude-go/internal/hooks"
 )
 
-//go:embed compact_prompt.txt
-var compactPrompt string
+var compactPrompt = fallbackCompactPrompt
 
 var summaryRe = regexp.MustCompile(`(?s)<summary>(.*)</summary>`)
 

@@ -16,6 +16,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"claude-go/internal/extract"
+	"claude-go/internal/session"
 )
 
 type wireCapture struct {
@@ -35,9 +38,14 @@ type wireCapture struct {
 }
 
 func TestGoldenRequestParity(t *testing.T) {
+	// fixtures were unvendored (Anthropic text); regenerate locally with
+	// `claude-go extract` — the cache dir carries the same capture format.
 	gb, err := os.ReadFile("testdata/realwire_print_294.json")
 	if err != nil {
-		t.Skip("no golden capture")
+		gb, err = os.ReadFile(filepath.Join(extract.Dir(), "realwire_print_default.json"))
+	}
+	if err != nil {
+		t.Skip("no golden capture (run `claude-go extract` to regenerate)")
 	}
 	var golden wireCapture
 	if err := json.Unmarshal(gb, &golden); err != nil {
@@ -46,7 +54,7 @@ func TestGoldenRequestParity(t *testing.T) {
 
 	s := newSession(t)
 	recDir := filepath.Join(t.TempDir(), "reqs")
-	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + recDir}, 30*time.Second,
+	r := s.runEx(t, goldenEnv(recDir), 30*time.Second,
 		"--mock", "-p", "say hi")
 	s.mustOK(t, r)
 
@@ -162,7 +170,7 @@ func TestGoldenToolLoopParity(t *testing.T) {
 
 	s := newSession(t)
 	recDir := filepath.Join(t.TempDir(), "reqs")
-	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + recDir}, 60*time.Second,
+	r := s.runEx(t, goldenEnv(recDir), 60*time.Second,
 		"--mock", "-p", `tool:Bash {"command":"echo hi"}`,
 		"--permission-mode", "bypassPermissions")
 	s.mustOK(t, r)
@@ -294,7 +302,7 @@ func TestGoldenResumeParity(t *testing.T) {
 
 	// seed ~/.claude/projects/<slug>/<id>.jsonl — a prior turn plus two
 	// consecutive user records (real merges them into one wire message)
-	slug := strings.ReplaceAll(s.cwd, "/", "-")
+	slug := session.Slug(s.cwd)
 	proj := filepath.Join(s.home, ".claude", "projects", slug)
 	if err := os.MkdirAll(proj, 0o755); err != nil {
 		t.Fatalf("mkdir projects: %v", err)
@@ -325,7 +333,7 @@ func TestGoldenResumeParity(t *testing.T) {
 		t.Fatalf("seed transcript: %v", err)
 	}
 
-	r := s.runEx(t, []string{"CLAUDE_GO_MOCK_RECORD=" + recDir}, 30*time.Second,
+	r := s.runEx(t, goldenEnv(recDir), 30*time.Second,
 		"--mock", "-c", "-p", "fresh prompt")
 	s.mustOK(t, r)
 
@@ -402,4 +410,14 @@ func roleForm(msgs []map[string]any) string {
 		fmt.Fprintf(&b, "%d:%s(%s) ", i, m["role"], form)
 	}
 	return b.String()
+}
+
+// goldenEnv points the child at the user's extraction cache so golden
+// parity checks exercise the real prompt text when available.
+func goldenEnv(recDir string) []string {
+	env := []string{"CLAUDE_GO_MOCK_RECORD=" + recDir}
+	if extract.Available() {
+		env = append(env, "CLAUDE_GO_EXTRACTED_DIR="+extract.Dir())
+	}
+	return env
 }

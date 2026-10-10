@@ -2,7 +2,7 @@ package agent
 
 import (
 	"claude-go/internal/config"
-	_ "embed"
+	"claude-go/internal/extract"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,8 +15,14 @@ import (
 	"time"
 )
 
-//go:embed builtin_skills.txt
-var builtinSkillIndex string
+// builtinSkillIndex returns the builtin skills index — the harvested
+// list when an extraction exists, else the community fallback.
+func builtinSkillIndex() string {
+	if t, ok := extract.Text("skills_index.txt"); ok {
+		return t
+	}
+	return fallbackBuiltinSkills
+}
 
 // modelInfo maps model IDs to display name / api id / cutoff.
 type modelInfo struct {
@@ -156,6 +162,7 @@ func EnvMessage(cwd, model string, addDirs []string, permMode, entrypoint, sessi
 	sort.Slice(agents, func(i, j int) bool {
 		return strings.ToLower(agents[i].Name) < strings.ToLower(agents[j].Name)
 	})
+	harvested := extractedAgentsIndex(entrypoint, model)
 	for _, a := range agents {
 		if a.Unlisted {
 			continue
@@ -164,6 +171,12 @@ func EnvMessage(cwd, model string, addDirs []string, permMode, entrypoint, sessi
 		// SDK family (mod_0416 uOe: skipped for sdk-ts/sdk-py/sdk-cli)
 		if a.Name == "claude-code-guide" && strings.HasPrefix(entrypoint, "sdk") {
 			continue
+		}
+		if a.Source == "builtin" {
+			if line, ok := harvested[strings.ToLower(a.Name)]; ok {
+				b.WriteString(line + "\n")
+				continue
+			}
 		}
 		fmt.Fprintf(&b, "- %s: %s (Tools: %s)\n", a.Name, a.Description, toolSpecString(a))
 	}
@@ -345,7 +358,7 @@ func loadSkillIndex(cwd string, seen map[string]bool) string {
 // user-installed skills of the same name dedupe against it.
 func builtinSkillNames() map[string]bool {
 	seen := map[string]bool{}
-	for _, line := range strings.Split(builtinSkillIndex, "\n") {
+	for _, line := range strings.Split(builtinSkillIndex(), "\n") {
 		if strings.HasPrefix(line, "- ") {
 			if i := strings.Index(line[2:], ":"); i > 0 {
 				seen[line[2:2+i]] = true
@@ -360,9 +373,9 @@ func builtinSkillNames() map[string]bool {
 func skillIndex(cwd string) string {
 	extra := loadSkillIndex(cwd, builtinSkillNames())
 	if extra == "" {
-		return builtinSkillIndex
+		return builtinSkillIndex()
 	}
-	return builtinSkillIndex + extra
+	return builtinSkillIndex() + extra
 }
 
 // parseFrontmatter extracts simple "key: value" pairs from --- yaml ---.
@@ -468,6 +481,33 @@ func SkillFacts(cwd string) []struct {
 				Chars      int
 			}{name, dir, len(fb)})
 		}
+	}
+	return out
+}
+
+// extractedAgentsIndex returns builtin agent listing lines harvested by
+// `extract` (keyed by lowercase name), chosen per entrypoint family —
+// the sdk capture differs from cli (no claude-code-guide).
+func extractedAgentsIndex(entrypoint, model string) map[string]string {
+	family := "sdk"
+	if !strings.HasPrefix(entrypoint, "sdk") {
+		family = "cli"
+	}
+	fn := "agents_index_" + family + "_" + modelClass(model) + ".txt"
+	t, ok := extract.Text(fn)
+	if !ok {
+		return nil
+	}
+	out := map[string]string{}
+	for _, ln := range strings.Split(t, "\n") {
+		if !strings.HasPrefix(ln, "- ") {
+			continue
+		}
+		name := strings.TrimPrefix(ln, "- ")
+		if i := strings.Index(name, ":"); i > 0 {
+			name = name[:i]
+		}
+		out[strings.ToLower(strings.TrimSpace(name))] = ln
 	}
 	return out
 }

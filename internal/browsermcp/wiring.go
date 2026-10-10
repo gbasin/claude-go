@@ -1,7 +1,6 @@
 package browsermcp
 
 import (
-	_ "embed"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -22,9 +21,6 @@ import (
 //
 // Real's tengu_chrome_auto_enable GrowthBook check and the auto-enable
 // dialog (Q$r/l5n) are not reproduced — opt-in is flag/setting only.
-
-//go:embed prompt.txt
-var chromeSystemPrompt string
 
 // chromeScopesAccepted mirrors DQe(): the OAuth token must carry a scope
 // /api/oauth/validate accepts for the bridge — user:profile, user:office,
