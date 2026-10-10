@@ -104,10 +104,10 @@ var builtinAgentDefs = []AgentDef{
 			"default when no agent name is typed.",
 	},
 	{
-		Name:   "claude-code-guide",
-		Source: "builtin",
-		Model:  "haiku",
-		Tools:  []string{"Bash", "Read", "WebFetch", "WebSearch"},
+		Name:        "claude-code-guide",
+		Source:      "builtin",
+		Model:       "haiku",
+		Tools:       []string{"Bash", "Read", "WebFetch", "WebSearch"},
 		Description: `Use this agent for questions about Claude Code and the Claude ecosystem — "Can Claude...", "Does Claude...", "How do I..." — covering: (1) the CLI: features, hooks, slash commands, MCP servers, settings, IDE integrations, keybindings; (2) the Agent SDK: building custom agents; (3) the API: messages, tool use loops, tool_runner, managed agents, prompt caching, SDK usage; (4) Claude in Slack; (5) plugin eval suites and the /skill-doctor report. Before spawning, reuse a running or recently completed claude-code-guide agent via SendMessage if one exists.`,
 	},
 	{

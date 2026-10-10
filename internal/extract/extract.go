@@ -217,6 +217,10 @@ func Harvest(ctx context.Context, bin string, logf func(string, ...any)) (*Harve
 				skillsWritten = true
 			}
 		}
+		if idx := envSectionText(body, agentsMarker); idx != "" {
+			os.WriteFile(filepath.Join(dir, "agents_index_sdk.txt"),
+				[]byte(idx), 0o644)
+		}
 	}
 	// one default-model run feeds the golden-wire fixture — real's default
 	// is not necessarily a probed class
