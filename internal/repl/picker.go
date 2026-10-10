@@ -327,6 +327,32 @@ func pickSession(cwd string, ks *keySource, selfID string) string {
 			draw()
 			continue
 		}
+		// Select-context remaps resolve first (real: pickers run the
+		// same keymap); hardcoded cases stay as the fallback layer.
+		// Global-context actions (ctrl+c interrupt) fall through.
+		if act := dialogAction("Select", k); strings.HasPrefix(act, "select:") {
+			switch act {
+			case "select:previous":
+				if sel > 0 {
+					sel--
+				}
+			case "select:next":
+				if sel < len(view)-1 {
+					sel++
+				}
+			case "select:accept":
+				if len(view) > 0 {
+					if id, ok := tryPick(); ok {
+						return id
+					}
+				}
+			case "select:cancel":
+				fmt.Print("\r\n")
+				return ""
+			}
+			draw()
+			continue
+		}
 		switch {
 		case k.b == '\r' || k.b == '\n':
 			if len(view) > 0 {

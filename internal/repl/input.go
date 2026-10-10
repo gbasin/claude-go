@@ -68,10 +68,12 @@ func startKeys() (*keySource, error) {
 	// mod_0501 records extendedKeys/synchronizedOutput/kittyKeyboard/
 	// kittyGraphics/mousePixels/programStatus from the replies)
 	if os.Getenv("CLAUDE_GO_NO_TERMPROBE") == "" {
-		os.Stdout.WriteString("\x1b[?2026$p") // synchronized output DECRPM
-		os.Stdout.WriteString("\x1b[?u")      // kitty keyboard flags query
-		os.Stdout.WriteString("\x1b[?1016$p") // SGR pixel-mouse DECRPM
-		os.Stdout.WriteString("\x1b[c")       // primary DA (programStatus)
+		os.Stdout.WriteString("\x1b[?2026$p")                               // synchronized output DECRPM
+		os.Stdout.WriteString("\x1b[?u")                                    // kitty keyboard flags query
+		os.Stdout.WriteString("\x1b[?1016$p")                               // SGR pixel-mouse DECRPM
+		os.Stdout.WriteString("\x1b[c")                                     // primary DA (programStatus)
+		os.Stdout.WriteString("\x1b[>q")                                    // XTVERSION — terminal name/ver
+		os.Stdout.WriteString("\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\") // kitty graphics query
 	}
 	if kittyCapable() {
 		// kitty keyboard protocol: push flags 5 = disambiguate (1) +
@@ -106,10 +108,12 @@ func (ks *keySource) stop() {
 
 // terminalCaps holds the DECRPM/DA probe answers (real's mod_0501 record).
 type terminalCaps struct {
-	syncOutput    bool // ?2026 DECRPM — bsu/esu batched repaint support
-	kittyFlags    int  // ?u reply — kitty keyboard flags actually active
-	sgrMousePixel bool // ?1016 DECRPM — pixel-position mouse reporting
-	daAnswered    bool // CSI ?...c answered — terminal is a live terminal
+	syncOutput    bool   // ?2026 DECRPM — bsu/esu batched repaint support
+	kittyFlags    int    // ?u reply — kitty keyboard flags actually active
+	sgrMousePixel bool   // ?1016 DECRPM — pixel-position mouse reporting
+	daAnswered    bool   // CSI ?...c answered — terminal is a live terminal
+	xtVersion     string // >q reply — terminal name (xtversion)
+	kittyGraphics bool   // Gi= query got a graphics-protocol reply
 }
 
 // recordProbeReply recognizes capability-probe replies on the input stream
@@ -137,6 +141,16 @@ func (ks *keySource) recordProbeReply(seq string) bool {
 		return true
 	case strings.HasSuffix(body, "c"): // primary DA \x1b[?…c
 		ks.caps.daAnswered = true
+		return true
+	}
+	return false
+}
+
+// handleOSCReply parses an OSC-structured reply — the kitty graphics
+// probe answers ESC _Gi=...;OK ESC \ (or NG on no-graphics).
+func (ks *keySource) handleOSCReply(body string) bool {
+	if strings.HasPrefix(body, "_Gi=") {
+		ks.caps.kittyGraphics = strings.Contains(body, ";OK")
 		return true
 	}
 	return false
@@ -251,6 +265,31 @@ func (ks *keySource) read() {
 			if c == 0x1b && i+1 < n && buf[i+1] == '\r' {
 				ks.push(key{b: '\n', r: '\n'}) // option+enter -> newline
 				i++
+				continue
+			}
+			if c == 0x1b && i+2 < n && (buf[i+1] == 'P' || buf[i+1] == '_') {
+				// DCS/APC reply — terminates on ESC \\ (or raw \\)
+				j := i + 2
+				for j+1 < n && !(buf[j] == 0x1b && buf[j+1] == '\\') {
+					j++
+				}
+				if j+1 >= n {
+					// incomplete — hold the tail for the next read
+					pending = append(pending, buf[i:n]...)
+					n = i
+					break
+				}
+				body := string(buf[i+1 : j])
+				if buf[i+1] == 'P' && strings.HasPrefix(body[1:], ">") {
+					ks.caps.xtVersion = strings.TrimPrefix(body[1:], ">")
+				} else if buf[i+1] == '_' && strings.HasPrefix(body[1:], "Gi=") {
+					ks.caps.kittyGraphics = strings.Contains(body, ";OK") ||
+						!strings.Contains(body, "NG")
+				}
+				probeCaps.mu.Lock()
+				probeCaps.caps = ks.caps
+				probeCaps.mu.Unlock()
+				i = j + 2
 				continue
 			}
 			if c == 0x1b && i+2 < n && buf[i+1] == '[' {
