@@ -140,17 +140,27 @@ func parseCLI(args []string) *cliOpts {
 		},
 		"--input-format": func(v string) { o.inFormat = v },
 		"--max-turns": func(v string) {
-			if n, err := strconv.Atoi(v); err == nil {
-				o.maxTurns = n
-				o.maxTurnsSet = true
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				fatal("Error: --max-turns expects an integer")
 			}
+			o.maxTurns = n
+			o.maxTurnsSet = true
 		},
 		"--max-thinking-tokens": func(v string) {
-			if n, err := strconv.Atoi(v); err == nil {
-				o.thinkingTok = n
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				fatal("Error: --max-thinking-tokens expects an integer")
 			}
+			o.thinkingTok = n
 		},
-		"--max-budget-usd":       func(v string) { o.maxBudget, _ = strconv.ParseFloat(v, 64) },
+		"--max-budget-usd": func(v string) {
+			n, err := strconv.ParseFloat(v, 64)
+			if err != nil {
+				fatal("Error: --max-budget-usd expects a number")
+			}
+			o.maxBudget = n
+		},
 		"--append-system-prompt": func(v string) { o.appendSys = v },
 		"--append-system-prompt-file": func(v string) {
 			if b, err := os.ReadFile(v); err == nil {
@@ -208,7 +218,13 @@ func parseCLI(args []string) *cliOpts {
 		"--session-id": func(v string) { o.sessID = v },
 		"--settings":   func(v string) { o.settingsF = v },
 		"--debug-file": func(v string) { o.debugFile = v },
-		"--mock-port":  func(v string) { fmt.Sscanf(v, "%d", &o.mockPort) },
+		"--mock-port": func(v string) {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				fatal("Error: --mock-port expects an integer")
+			}
+			o.mockPort = n
+		},
 	}
 	// parse-only value flags -> env vars
 	for _, f := range []string{
@@ -300,7 +316,6 @@ func parseCLI(args []string) *cliOpts {
 		"--chrome":                             func() { os.Setenv("CLAUDE_GO_CHROME", "1") },
 		"--no-chrome":                          func() { os.Setenv("CLAUDE_GO_CHROME", "0") },
 		"--tmux":                               func() { o.tmux = "auto" },
-		"--tmux=classic":                       func() { o.tmux = "classic" },
 		"--init":                               func() { o.initHook = "init" },
 		"--maintenance":                        func() { o.initHook = "maintenance" },
 	}
@@ -308,7 +323,7 @@ func parseCLI(args []string) *cliOpts {
 		"--safe-mode", "--forward-subagent-text",
 		"--session-mirror", "--await-claim", "--await-initialize",
 		"--enable-auth-status", "--restricted",
-		"--exclude-dynamic-system-prompt-sections", "--deep-link-origin",
+		"--exclude-dynamic-system-prompt-sections",
 		"--reply-on-resume", "--disable-slash-commands",
 		"--brief", "--ax-screen-reader", "--hard-fail",
 	} {
@@ -374,6 +389,14 @@ func parseCLI(args []string) *cliOpts {
 			return args[i]
 		}
 		switch {
+		case name == "--tmux" && hasInline:
+			// --tmux=classic selects the traditional tmux backend; the
+			// parser splits --x=v before lookup, so handle the inline
+			// form ahead of the bool-flag table.
+			if inline != "classic" {
+				fatal(`Error: --tmux takes no value (or "classic")`)
+			}
+			o.tmux = "classic"
 		case boolFlags[name] != nil:
 			if hasInline {
 				fatal("flag %s does not take a value", name)
@@ -600,7 +623,7 @@ func installCLIAgents(js, cwd string) func() {
 // on a new branch worktree-<name> and returns the directory to cd into.
 func setupWorktree(cwd, name, sessionID string) string {
 	if name == "" {
-		name = "claude-" + sessionID[:8]
+		name = "claude-" + sid8(sessionID)
 	}
 	root := filepath.Join(cwd, ".claude", "worktrees")
 	wt := filepath.Join(root, name)

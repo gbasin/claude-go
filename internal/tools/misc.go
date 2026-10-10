@@ -1,9 +1,9 @@
 package tools
 
 import (
-	"claude-go/internal/hooks"
 	"bufio"
 	"claude-go/internal/config"
+	"claude-go/internal/hooks"
 	"context"
 	"encoding/json"
 	"fmt"

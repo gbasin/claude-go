@@ -246,13 +246,6 @@ func FetchClaudeAIConfigs(ctx context.Context, creds *auth.Credentials, cwd stri
 	return out
 }
 
-// ConnectorRecords exposes the raw discovery payload (for diagnostics).
-func ConnectorRecords() []connectorRecord {
-	fetchMu.Lock()
-	defer fetchMu.Unlock()
-	return append([]connectorRecord(nil), fetchRecords...)
-}
-
 // fetchConnectorRecords performs the GET with SLn's retry/budget policy:
 // ≤3 attempts, 5s per-request timeout, 500ms×3^i backoff, 12s total budget.
 // On a non-401/429 failure the request is retried once without

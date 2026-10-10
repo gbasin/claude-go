@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"claude-go/internal/config"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"claude-go/internal/api"
@@ -26,6 +28,7 @@ type Store struct {
 	SessionID string
 	CWD       string
 	f         *os.File
+	mu        sync.Mutex // serializes writers (OnTurnEnd goroutine, etc)
 	lastUUID  string
 	sidechain bool // subagent transcript — records get isSidechain:true
 }
@@ -100,9 +103,7 @@ func NewID() string { return newUUID() }
 
 func newUUID() string {
 	var b [16]byte
-	f, _ := os.Open("/dev/urandom")
-	f.Read(b[:])
-	f.Close()
+	rand.Read(b[:])
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return formatUUID(b)
@@ -139,9 +140,12 @@ func (s *Store) LogMessage(m api.Message) error {
 	// last-prompt stamps only on real user prompts — tool_result rows
 	// ride the user role but aren't prompts (real's leafUuid semantic)
 	if err == nil && m.Role == "user" && isPromptContent(m.Content) {
+		s.mu.Lock()
+		leaf := s.lastUUID
+		s.mu.Unlock()
 		_ = s.LogRecord(map[string]any{
 			"type": "last-prompt", "sessionId": s.SessionID,
-			"leafUuid": s.lastUUID, "explicit": true,
+			"leafUuid": leaf, "explicit": true,
 		})
 	}
 	return err
@@ -175,6 +179,8 @@ func (s *Store) LogCompactSummary(m api.Message, modelOnlyText string) error {
 }
 
 func (s *Store) logMessage(m api.Message, compact bool, modelOnlyText string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var raw json.RawMessage
 	role := m.Role
 	if role == "assistant" && len(m.Raw) > 0 {
@@ -210,6 +216,8 @@ func (s *Store) logMessage(m api.Message, compact bool, modelOnlyText string) er
 
 // LogRecord writes an arbitrary transcript record (summary/system/etc).
 func (s *Store) LogRecord(ev map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if ev["uuid"] == nil {
 		ev["uuid"] = newUUID()
 	}
@@ -475,6 +483,8 @@ func ResolveArg(cwd, arg string) string {
 // writeRaw appends an already-complete record verbatim (used by Fork, which
 // controls every field including a nil parentUuid).
 func (s *Store) writeRaw(ev map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	b, _ := json.Marshal(ev)
 	_, err := s.f.Write(append(b, '\n'))
 	return err
@@ -551,12 +561,20 @@ func currentGitBranch(cwd string) string {
 	return strings.TrimSpace(out)
 }
 
-func (s *Store) Close() { s.f.Close() }
+func (s *Store) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.f.Close()
+}
 
 // SeedParent primes the parentUuid chain — on same-transcript resume the
 // next logged record must link to the loaded branch's leaf, not start a
 // new root.
-func (s *Store) SeedParent(uuid string) { s.lastUUID = uuid }
+func (s *Store) SeedParent(uuid string) {
+	s.mu.Lock()
+	s.lastUUID = uuid
+	s.mu.Unlock()
+}
 
 // LeafUUID returns the uuid at the active branch's leaf in a transcript —
 // the parentUuid anchor a same-transcript resume continues from.
@@ -795,7 +813,9 @@ func (s *Store) forkCopy(branch []map[string]any, srcID string) ([]api.Message, 
 			msgs = append(msgs, m)
 		}
 	}
+	s.mu.Lock()
 	s.lastUUID = parent
+	s.mu.Unlock()
 	return msgs, nil
 }
 

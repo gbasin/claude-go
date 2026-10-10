@@ -40,7 +40,7 @@ const (
 
 var (
 	// 294 wire shape: every cache_control is plain {"type":"ephemeral"}
-	// — no ttl, no scope (captured real-body0/1)
+	// — no ttl, no scope (captured wire)
 	ephemeralPlain = &api.CacheControl{Type: "ephemeral"}
 )
 

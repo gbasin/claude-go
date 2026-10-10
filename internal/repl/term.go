@@ -476,7 +476,7 @@ func (e *editor) insertKey(k key) *readResult {
 		e.exitArm = false // an unrelated key press disarms the exit gate
 		e.exitArmKey = ""
 	}
-	if os.Getenv("CG_DBGKEY") != "" {
+	if os.Getenv("CLAUDE_GO_DEBUG_KEYS") != "" {
 		fmt.Fprintf(os.Stderr, "[dbgkey b=%d seq=%q] ", c, k.seq)
 	}
 	if k.mod&modCtrl != 0 && k.r >= 'a' && k.r <= 'z' {
