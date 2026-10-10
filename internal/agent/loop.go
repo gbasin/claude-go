@@ -40,6 +40,12 @@ type Events struct {
 	// OnPermissionCheck emits real's permission_check_status events —
 	// "checking" ~4s into a classifier wait, "done" at the verdict.
 	OnPermissionCheck func(toolUseID, status string)
+	// OnFileMissing fires when an attachment (pasted image) vanished
+	// before send — real's system/file_attachments_missing.
+	OnFileMissing func(path string)
+	// OnVCSChange emits system/vcs_state_changed — a successful git
+	// mutation Bash call (commit/push/merge/rebase).
+	OnVCSChange func(kind, branch string)
 	// OnThinkingTokens emits the thinking block's estimated token count —
 	// real's thinking_tokens system event at content_block_stop.
 	OnThinkingTokens func(n int)
@@ -795,6 +801,8 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		// withholds every tool
 		if l.AllowedTools != nil && !containsStr(l.AllowedTools, b.Name) {
 			r = tools.Result{Content: fmt.Sprintf("tool %s not allowed for this agent", b.Name), IsError: true}
+			l.reportMissingAttachment(r)
+			l.reportMissingAttachment(r)
 			results = append(results, toolResultBlock(b.ID, r))
 			continue
 		}
@@ -934,6 +942,13 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		if l.Events.OnToolResult != nil {
 			l.Events.OnToolResult(b.Name, b.ID, r)
 		}
+		// vcs_state_changed: a successful git mutation Bash call emits
+		// real's system event (mod_0295 — commit/push/merge/rebase)
+		if !r.IsError && b.Name == "Bash" && l.Events.OnVCSChange != nil {
+			if kind, branch, ok := vcsMutation(r.Content, string(b.Input)); ok {
+				l.Events.OnVCSChange(kind, branch)
+			}
+		}
 		l.toolBatchForSummary = append(l.toolBatchForSummary, struct {
 			name, input, output string
 		}{b.Name, string(b.Input), truncAt(r.Content, 300)})
@@ -948,6 +963,7 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 				})
 			}
 		}
+		l.reportMissingAttachment(r)
 		results = append(results, toolResultBlock(b.ID, r))
 		batchCalls = append(batchCalls, map[string]any{
 			"tool_name": b.Name, "tool_input": json.RawMessage(b.Input),
@@ -2132,4 +2148,45 @@ func truncAt(s string, n int) string {
 		return s[:n]
 	}
 	return s
+}
+
+// reportMissingAttachment emits real's system/file_attachments_missing
+// when an image marker's file vanished before the result went out.
+func (l *Loop) reportMissingAttachment(r tools.Result) {
+	if l.Events.OnFileMissing == nil || !strings.HasPrefix(r.Content, "\x00IMAGE\x00") {
+		return
+	}
+	path, _, _ := strings.Cut(strings.TrimPrefix(r.Content, "\x00IMAGE\x00"), "\x00")
+	if _, err := os.Stat(path); err != nil {
+		l.Events.OnFileMissing(path)
+	}
+}
+
+// vcsMutation matches real's git-mutation detector (mod_0295 bg): the
+// Bash command's git verb + branch named in the result/output.
+func vcsMutation(output, input string) (kind, branch string, ok bool) {
+	var in struct {
+		Command string `json:"command"`
+	}
+	_ = json.Unmarshal([]byte(input), &in)
+	cmd := in.Command
+	if cmd == "" {
+		cmd = input
+	}
+	for _, verb := range []string{"commit", "push", "merge", "rebase"} {
+		if strings.Contains(cmd, "git "+verb) || strings.Contains(cmd, "git "+verb+"-") ||
+			strings.Contains(cmd, "git "+verb+" ") {
+			kind = verb
+			break
+		}
+	}
+	if kind == "" {
+		return "", "", false
+	}
+	if m := regexp.MustCompile(`\[(\S+)`).FindStringSubmatch(output); len(m) > 1 {
+		branch = strings.TrimRight(m[1], "]")
+	} else if m := regexp.MustCompile(`branch '([^']+)'`).FindStringSubmatch(output); len(m) > 1 {
+		branch = m[1]
+	}
+	return kind, branch, true
 }
