@@ -29,7 +29,7 @@ import (
 	"sync"
 	"testing"
 
-	"claude-go/internal/session"
+	"github.com/gbasin/claude-go/internal/session"
 	"time"
 )
 

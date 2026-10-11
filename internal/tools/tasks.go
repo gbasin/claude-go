@@ -1,9 +1,9 @@
 package tools
 
 import (
-	"claude-go/internal/config"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,7 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/api"
 )
 
 // Session task list + todos — TaskCreate/Get/Update/List and TodoWrite.

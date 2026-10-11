@@ -2,11 +2,11 @@ package main
 
 import (
 	"bufio"
-	"claude-go/internal/config"
-	"claude-go/internal/extract"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/extract"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,15 +17,15 @@ import (
 	"sync"
 	"time"
 
-	"claude-go/internal/api"
-	"claude-go/internal/auth"
-	"claude-go/internal/bg"
-	"claude-go/internal/bridge"
-	"claude-go/internal/mcp"
-	"claude-go/internal/netproxy"
-	"claude-go/internal/plugins"
-	"claude-go/internal/session"
-	"claude-go/internal/tools"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/auth"
+	"github.com/gbasin/claude-go/internal/bg"
+	"github.com/gbasin/claude-go/internal/bridge"
+	"github.com/gbasin/claude-go/internal/mcp"
+	"github.com/gbasin/claude-go/internal/netproxy"
+	"github.com/gbasin/claude-go/internal/plugins"
+	"github.com/gbasin/claude-go/internal/session"
+	"github.com/gbasin/claude-go/internal/tools"
 
 	"golang.org/x/term"
 )

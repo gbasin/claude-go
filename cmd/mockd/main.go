@@ -4,8 +4,8 @@
 package main
 
 import (
-	"claude-go/internal/mock"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/mock"
 	"os"
 )
 

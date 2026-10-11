@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/config"
 )
 
 // RewindFiles is real's --rewind-files <user-msg-uuid>: restore every

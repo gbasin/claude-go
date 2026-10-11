@@ -12,8 +12,8 @@ import (
 	"io"
 	"os"
 
-	"claude-go/internal/api"
-	"claude-go/internal/tools"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/tools"
 )
 
 // ServeOpts carries the serve-mode options (`-d/--debug`, --verbose).

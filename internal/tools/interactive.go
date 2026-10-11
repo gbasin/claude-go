@@ -1,11 +1,11 @@
 package tools
 
 import (
-	"claude-go/internal/config"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
 	"os"
 	"path/filepath"
 	"regexp"

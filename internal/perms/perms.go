@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/config"
 )
 
 type Mode string

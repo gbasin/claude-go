@@ -15,10 +15,10 @@
 package tools
 
 import (
-	"claude-go/internal/config"
-	"claude-go/internal/netproxy"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/netproxy"
 	"os"
 	"path/filepath"
 	"regexp"

@@ -20,9 +20,9 @@ package repl
 // with '+' plus a key name: "ctrl+alt+shift+cmd+<name>".
 
 import (
-	"claude-go/internal/config"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
 	"os"
 	"path/filepath"
 	"sort"

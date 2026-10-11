@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"testing"
 
-	"claude-go/internal/api"
-	"claude-go/internal/auth"
-	"claude-go/internal/mock"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/auth"
+	"github.com/gbasin/claude-go/internal/mock"
 )
 
 func TestMockToolInput(t *testing.T) {

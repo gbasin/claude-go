@@ -5,11 +5,11 @@ package session
 import (
 	"bufio"
 	"bytes"
-	"claude-go/internal/config"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/api"
 )
 
 type Store struct {

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"claude-go/internal/lsp"
+	"github.com/gbasin/claude-go/internal/lsp"
 )
 
 func init() {

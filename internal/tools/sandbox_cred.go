@@ -15,8 +15,8 @@
 package tools
 
 import (
-	"claude-go/internal/netproxy"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/netproxy"
 	"os"
 	"path/filepath"
 	"regexp"

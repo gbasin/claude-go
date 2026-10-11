@@ -2,7 +2,6 @@ package tools
 
 import (
 	"bytes"
-	"claude-go/internal/config"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -11,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
 	"math"
 	"net"
 	"os"

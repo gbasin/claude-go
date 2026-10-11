@@ -33,9 +33,9 @@ import (
 	"sync"
 	"time"
 
-	"claude-go/internal/api"
-	"claude-go/internal/auth"
-	"claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/auth"
+	"github.com/gbasin/claude-go/internal/config"
 )
 
 // Prod endpoints — pn() in mod_0032.js. Package vars so tests (and exotic

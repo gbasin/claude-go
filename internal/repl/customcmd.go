@@ -1,7 +1,7 @@
 package repl
 
 import (
-	"claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/config"
 	"os"
 	"os/exec"
 	"path/filepath"

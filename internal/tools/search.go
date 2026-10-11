@@ -1,9 +1,9 @@
 package tools
 
 import (
-	"claude-go/internal/api"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/api"
 	"os"
 	"os/exec"
 	"path/filepath"

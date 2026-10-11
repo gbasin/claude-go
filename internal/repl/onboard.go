@@ -1,8 +1,8 @@
 package repl
 
 import (
-	"claude-go/internal/api"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/api"
 	"os"
 	"strings"
 

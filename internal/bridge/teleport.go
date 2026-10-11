@@ -30,7 +30,7 @@ import (
 	"strings"
 	"time"
 
-	"claude-go/internal/telemetry"
+	"github.com/gbasin/claude-go/internal/telemetry"
 )
 
 // ---------------------------------------------------------------------------

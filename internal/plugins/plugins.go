@@ -7,10 +7,10 @@ package plugins
 
 import (
 	"archive/tar"
-	"claude-go/internal/config"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
 	"io"
 	"net/http"
 	"os"

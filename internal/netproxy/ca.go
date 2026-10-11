@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/config"
 )
 
 const (

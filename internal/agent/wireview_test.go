@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"claude-go/internal/api"
-	"claude-go/internal/tools"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/tools"
 )
 
 // wireMessages shape vs captured real wire (294): req1 keeps the env

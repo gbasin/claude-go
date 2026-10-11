@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"claude-go/internal/bridge"
+	"github.com/gbasin/claude-go/internal/bridge"
 )
 
 // remoteTestEnv points RemoteTrigger at an httptest stub and clears the

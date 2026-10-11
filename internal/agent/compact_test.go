@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"claude-go/internal/api"
-	"claude-go/internal/auth"
-	"claude-go/internal/mock"
-	"claude-go/internal/session"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/auth"
+	"github.com/gbasin/claude-go/internal/mock"
+	"github.com/gbasin/claude-go/internal/session"
 )
 
 // compactLoop builds a mock-backed loop plus a real transcript store under a

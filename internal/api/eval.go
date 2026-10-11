@@ -10,7 +10,7 @@ import (
 	"runtime"
 	"sync"
 
-	"claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/config"
 	"time"
 )
 

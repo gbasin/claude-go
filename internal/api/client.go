@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"claude-go/internal/auth"
-	"claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/auth"
+	"github.com/gbasin/claude-go/internal/config"
 )
 
 const Version = "2.1.296"

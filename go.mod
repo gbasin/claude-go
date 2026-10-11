@@ -1,4 +1,4 @@
-module claude-go
+module github.com/gbasin/claude-go
 
 go 1.26.0
 

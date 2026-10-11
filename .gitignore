@@ -14,3 +14,4 @@ e2e/zz_*_test.go
 # scratch
 .worktrees/
 .DS_Store
+dist/

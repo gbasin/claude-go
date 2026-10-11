@@ -60,7 +60,7 @@ func TestWriteRawRequest(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", "https://api.anthropic.com/v1/messages",
 		strings.NewReader(`{"x":1}`))
-	req.Header.Set("User-Agent", "claude-go/test")
+	req.Header.Set("User-Agent", "github.com/gbasin/claude-go/test")
 	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("X-Custom", "z")
 	req.Header.Set("Connection", "close") // hop header: must not be written

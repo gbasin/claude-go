@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"claude-go/internal/session"
+	"github.com/gbasin/claude-go/internal/session"
 )
 
 // recordRequests runs -p with MOCK_RECORD enabled and returns the captured

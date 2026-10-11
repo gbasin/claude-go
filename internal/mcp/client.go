@@ -5,14 +5,14 @@ package mcp
 
 import (
 	"bufio"
-	"claude-go/internal/config"
-	"claude-go/internal/plugins"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/plugins"
 	"io"
 	"os"
 	"os/exec"

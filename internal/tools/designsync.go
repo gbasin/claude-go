@@ -2,12 +2,12 @@ package tools
 
 import (
 	"bytes"
-	"claude-go/internal/config"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
 	"io"
 	"net/http"
 	"net/url"

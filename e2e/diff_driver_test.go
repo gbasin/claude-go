@@ -28,8 +28,8 @@ import (
 	"testing"
 	"time"
 
-	"claude-go/internal/extract"
-	"claude-go/internal/mock"
+	"github.com/gbasin/claude-go/internal/extract"
+	"github.com/gbasin/claude-go/internal/mock"
 )
 
 // diffScenario is one identical input script driven through both binaries.

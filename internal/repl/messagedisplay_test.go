@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"claude-go/internal/hooks"
+	"github.com/gbasin/claude-go/internal/hooks"
 )
 
 func TestMsgDisplayBatchesLines(t *testing.T) {

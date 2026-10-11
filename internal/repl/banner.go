@@ -1,9 +1,9 @@
 package repl
 
 import (
-	"claude-go/internal/config"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
 	"golang.org/x/term"
 	"os"
 	"path/filepath"

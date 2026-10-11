@@ -9,10 +9,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"claude-go/internal/api"
-	"claude-go/internal/auth"
-	"claude-go/internal/hooks"
-	"claude-go/internal/mock"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/auth"
+	"github.com/gbasin/claude-go/internal/hooks"
+	"github.com/gbasin/claude-go/internal/mock"
 )
 
 func mockLoop(t *testing.T) *Loop {

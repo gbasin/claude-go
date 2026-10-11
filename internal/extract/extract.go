@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"claude-go/internal/mock"
+	"github.com/gbasin/claude-go/internal/mock"
 )
 
 // Dir is the extraction cache root — ~/.claude-go/extracted, overridable

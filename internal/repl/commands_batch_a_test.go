@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/api"
 )
 
 // persistLocalSetting merges, writes, and deletes keys in

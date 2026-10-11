@@ -12,8 +12,8 @@ import (
 	"sync"
 	"testing"
 
-	"claude-go/internal/api"
-	"claude-go/internal/auth"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/auth"
 )
 
 // StartupTraffic fires real's captured GET sequence in order and stores

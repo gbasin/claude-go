@@ -2,11 +2,11 @@ package tools
 
 import (
 	"bytes"
-	"claude-go/internal/config"
-	"claude-go/internal/session"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/session"
 	"io"
 	"os"
 	"os/exec"

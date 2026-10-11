@@ -137,7 +137,7 @@ func doWebFetch(c *Context, in fetchIn) Result {
 	var resp *http.Response
 	for redirects := 0; ; redirects++ {
 		req, _ := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
-		req.Header.Set("User-Agent", "claude-go/"+version()+" (WebFetch)")
+		req.Header.Set("User-Agent", "github.com/gbasin/claude-go/"+version()+" (WebFetch)")
 		resp, err = client.Do(req)
 		if err != nil {
 			return Result{Content: "Fetch failed: " + err.Error(), IsError: true}

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"claude-go/internal/tools"
+	"github.com/gbasin/claude-go/internal/tools"
 )
 
 // MCP prompt slash commands: tools.RegisterMCPPrompt → ResolveMCPPrompt

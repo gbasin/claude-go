@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"claude-go/internal/bg"
-	"claude-go/internal/session"
+	"github.com/gbasin/claude-go/internal/bg"
+	"github.com/gbasin/claude-go/internal/session"
 	"golang.org/x/term"
 )
 

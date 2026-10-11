@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"claude-go/internal/api"
-	"claude-go/internal/auth"
-	"claude-go/internal/bridge"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/auth"
+	"github.com/gbasin/claude-go/internal/bridge"
 )
 
 // RemoteTrigger — real client for claude.ai's trigger service.

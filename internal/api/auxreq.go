@@ -22,8 +22,8 @@ import (
 	"strings"
 	"time"
 
-	"claude-go/internal/config"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
 )
 
 const (

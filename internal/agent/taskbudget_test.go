@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"claude-go/internal/api"
-	"claude-go/internal/auth"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/auth"
 )
 
 func budgetLoop(t *testing.T, model string) *Loop {
