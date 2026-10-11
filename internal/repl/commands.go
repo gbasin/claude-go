@@ -3882,7 +3882,7 @@ func cdCmd(l *agent.Loop, arg string) {
 	// follows the session — moving cwd across project dirs renames
 	// <oldslug>/<sid>.jsonl into the new slug dir and stamps a bare
 	// {type:"relocated",sessionId,relocatedCwd} row
-	if rs, ok := currentStore.(*session.Store); ok {
+	if rs, ok := currentStore.(*session.Store); ok && rs != nil {
 		if err := rs.Relocate(p); err == nil {
 			l.Transcript = rs.Path // transcript_path hooks read the new home
 		}

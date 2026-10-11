@@ -164,7 +164,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 	// markSessionEndedByModel) — the /resume picker filters such sessions.
 	endSession := func() {
 		wantQuit.Store(true)
-		if st, ok := currentStore.(*session.Store); ok {
+		if st, ok := currentStore.(*session.Store); ok && st != nil {
 			_ = st.LogEndedByModel()
 		}
 	}
@@ -1695,7 +1695,7 @@ func fireSessionEndHook(l *agent.Loop) {
 	if !l.SessionEndFired {
 		// real's exit re-stamp (reAppendSessionMetadataAtExit, sJr): the
 		// session-metadata rows land once on the transcript tail
-		if st, ok := currentStore.(*session.Store); ok {
+		if st, ok := currentStore.(*session.Store); ok && st != nil {
 			_ = st.StampMeta("normal", l.PermMode)
 		}
 	}
