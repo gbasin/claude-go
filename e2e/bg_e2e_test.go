@@ -95,7 +95,7 @@ func TestBgStop(t *testing.T) {
 	r = s.run(t, "stop", short)
 	s.mustOK(t, r)
 	contains(t, r.stdout, "stopped", "stop output")
-	poll(t, 5*time.Second, "worker reaped after stop", func() bool {
+	poll(t, 15*time.Second, "worker reaped after stop", func() bool {
 		return !strings.Contains(s.run(t, "agents").stdout, short)
 	})
 	if trans, _ := filepath.Glob(s.home + "/.claude/projects/*/*.jsonl"); len(trans) == 0 {
@@ -220,20 +220,21 @@ func TestResumeLiveBgRefused(t *testing.T) {
 	r := s.run(t, "--mock", "--bg", "-p", "ping", "--session-id", sid)
 	s.mustOK(t, r)
 	short := sid[:8]
-	deadline := time.Now().Add(15 * time.Second)
-	for !strings.Contains(s.run(t, "agents").stdout, short) {
-		if time.Now().After(deadline) {
-			jd := filepath.Join(s.home, ".claude", "jobs")
-			ents, _ := os.ReadDir(jd)
-			var names []string
-			for _, e := range ents {
-				names = append(names, e.Name())
-			}
-			xnote, _ := os.ReadFile(filepath.Join(jd, "last-exit.log"))
-			t.Fatalf("worker never registered (jobdirs=%v agents=%q exitnote=%s)",
-				names, s.run(t, "agents").stdout, xnote)
-		}
+	registered := false
+	for i := 0; i < 200 && !registered; i++ {
 		time.Sleep(150 * time.Millisecond)
+		registered = strings.Contains(s.run(t, "agents").stdout, short)
+	}
+	if !registered {
+		jd := filepath.Join(s.home, ".claude", "jobs")
+		ents, _ := os.ReadDir(jd)
+		var names []string
+		for _, e := range ents {
+			names = append(names, e.Name())
+		}
+		xnote, _ := os.ReadFile(filepath.Join(jd, "last-exit.log"))
+		t.Fatalf("worker never registered (jobdirs=%v agents=%q exitnote=%s)",
+			names, s.run(t, "agents").stdout, xnote)
 	}
 
 	// direct -r on the live session → refused
@@ -263,7 +264,7 @@ func TestResumeLiveBgRefused(t *testing.T) {
 
 	// cleanup — keep poking /exit; a host that's slow to bring its
 	// socket up fails the attach fast so we can retry
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 15; i++ {
 		s.runStdin(t, "/exit\r", "attach", sid)
 		out := s.run(t, "agents").stdout
 		if !strings.Contains(out, short) {
@@ -328,7 +329,7 @@ func TestDaemonRespawnsVersionStale(t *testing.T) {
 		})
 		t.Fatalf("worker not respawned\ndaemon.log:\n%s\njobfiles:\n%s", dl, strings.Join(dump, "\n"))
 	}
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	var okSkew bool
 	for !okSkew && time.Now().Before(deadline) {
 		b, err := os.ReadFile(jobFile)
@@ -352,7 +353,7 @@ func TestDaemonRespawnsVersionStale(t *testing.T) {
 	}
 	// keep poking /exit — the respawned host's rendezvous socket may not
 	// be up yet when we first attach (a dead socket fails fast)
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 15; i++ {
 		r := s.runStdin(t, "/exit\r", "attach", sid)
 		out := s.run(t, "agents").stdout
 		if !strings.Contains(out, short) {

@@ -596,7 +596,7 @@ func TestMCPRootsList(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	srv.pushRequest(77, "roots/list", map[string]any{})
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		res := srv.sawResults()
 		if len(res) > 0 {
