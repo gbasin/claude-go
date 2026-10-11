@@ -31,6 +31,10 @@ type Store struct {
 	mu        sync.Mutex // serializes writers (OnTurnEnd goroutine, etc)
 	lastUUID  string
 	sidechain bool // subagent transcript — records get isSidechain:true
+
+	replayIdx     map[string]bool // api-request-shape/api-request-blob hashes persisted
+	replaySeeded  bool            // replayIdx populated from the file once
+	replayForkRef bool            // file carries a fork-context-ref row
 }
 
 type event struct {
@@ -487,12 +491,134 @@ func ResolveArg(cwd, arg string) string {
 
 // writeRaw appends an already-complete record verbatim (used by Fork, which
 // controls every field including a nil parentUuid).
-func (s *Store) writeRaw(ev map[string]any) error {
+func (s *Store) writeRaw(ev any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.writeRawLocked(ev)
+}
+
+func (s *Store) writeRawLocked(ev any) error {
 	b, _ := json.Marshal(ev)
 	_, err := s.f.Write(append(b, '\n'))
 	return err
+}
+
+// LogRawRecord appends a record verbatim — no uuid/timestamp/parentUuid
+// stamps. cost-state, history-suppression, and the api-request* family are
+// side-channel rows real writes without a message-chain position.
+func (s *Store) LogRawRecord(ev any) error { return s.writeRaw(ev) }
+
+// isoNow renders real's `new Date().toISOString()` — millisecond precision,
+// Z suffix (the ts field on history-suppression / api-request records).
+func isoNow() string { return time.Now().UTC().Format("2006-01-02T15:04:05.000Z") }
+
+// LogHistorySuppression writes real's {type:"history-suppression"} row
+// (mod_0092 c8e → mod_0416 writeHistorySuppression): sessionId, cause,
+// optional vetoedAgainstAccountUuid, ts — deliberately no uuid/chain fields.
+func (s *Store) LogHistorySuppression(cause, vetoedAccountUUID string) error {
+	rec := map[string]any{
+		"type":      "history-suppression",
+		"sessionId": s.SessionID,
+		"cause":     cause,
+		"ts":        isoNow(),
+	}
+	if vetoedAccountUUID != "" {
+		rec["vetoedAgainstAccountUuid"] = vetoedAccountUUID
+	}
+	return s.writeRaw(rec)
+}
+
+// ReplayBlob pairs a message hash with its complete api-request-blob record.
+type ReplayBlob struct {
+	Hash   string
+	Record any
+}
+
+// replayShapeCap is real's XKr — an api-request-shape row over this many
+// bytes means the system+tools payload is too big to record; requests
+// using that shape are skipped entirely (return "shape_too_large").
+const replayShapeCap = 2000000
+
+// seedReplayIndex scans the transcript once for api-request-shape /
+// api-request-blob / fork-context-ref rows so a resumed session doesn't
+// rewrite shapes/blobs already persisted (real's replayIndexFor).
+func (s *Store) seedReplayIndex() {
+	if s.replaySeeded {
+		return
+	}
+	s.replaySeeded = true
+	s.replayIdx = map[string]bool{}
+	f, err := os.Open(s.Path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1<<20), 64<<20)
+	var rec struct {
+		Type      string `json:"type"`
+		ShapeHash string `json:"shapeHash"`
+		Hash      string `json:"hash"`
+	}
+	for sc.Scan() {
+		ln := sc.Bytes()
+		if len(ln) == 0 {
+			continue
+		}
+		switch {
+		case bytes.Contains(ln, []byte(`"type":"fork-context-ref"`)):
+			s.replayForkRef = true
+		case bytes.Contains(ln, []byte(`"type":"api-request-shape"`)),
+			bytes.Contains(ln, []byte(`"type":"api-request-blob"`)):
+			rec.Type, rec.ShapeHash, rec.Hash = "", "", ""
+			if json.Unmarshal(ln, &rec) == nil {
+				if h := rec.ShapeHash; h != "" {
+					s.replayIdx[h] = true
+				}
+				if h := rec.Hash; h != "" {
+					s.replayIdx[h] = true
+				}
+			}
+		}
+	}
+}
+
+// AppendReplayRecords is real's appendRequestReplayRecords (mod_0416): the
+// api-request-shape row lands once per shapeHash, one api-request-blob row
+// per unseen message hash, then the api-request row — replay rebuilds a
+// request as shape → blobs → request. shape/request/blob.Record must be
+// fully-formed rows (the loop builds them with real's field order).
+// Returns "written", "shape_too_large", or "no_transcript" like real.
+func (s *Store) AppendReplayRecords(shapeHash string, shape, request any, blobs []ReplayBlob) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.seedReplayIndex()
+	if s.replayForkRef {
+		return "no_transcript"
+	}
+	if !s.replayIdx[shapeHash] {
+		b, _ := json.Marshal(shape)
+		if len(b) > replayShapeCap {
+			return "shape_too_large"
+		}
+		if err := s.writeRawLocked(shape); err != nil {
+			return "no_transcript"
+		}
+		s.replayIdx[shapeHash] = true
+	}
+	for _, bl := range blobs {
+		if s.replayIdx[bl.Hash] {
+			continue
+		}
+		if err := s.writeRawLocked(bl.Record); err != nil {
+			return "no_transcript"
+		}
+		s.replayIdx[bl.Hash] = true
+	}
+	if err := s.writeRawLocked(request); err != nil {
+		return "no_transcript"
+	}
+	return "written"
 }
 
 // WriteTitle sets the custom title on a stored (possibly closed) transcript:
@@ -737,6 +863,10 @@ func Fork(cwd, srcID string) (*Store, []api.Message, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	// real's fork writes {type:"history-suppression",cause:"fork_inherit"}
+	// into the new transcript ahead of the copied messages when the source
+	// carried the row (mod_1044) — suppressed history stays suppressed.
+	st.writeSuppressionOnFork(recs)
 	msgs, err := st.forkCopy(branch, srcID)
 	if err != nil {
 		st.Close()
@@ -775,7 +905,21 @@ func (s *Store) ForkInto(srcPath, srcID, leafUUID string) ([]api.Message, error)
 	if len(branch) == 0 {
 		return nil, errors.New("session has no message chain to fork")
 	}
+	// fork_inherit suppression row ahead of the copied records (same as Fork)
+	s.writeSuppressionOnFork(recs)
 	return s.forkCopy(branch, srcID)
+}
+
+// writeSuppressionOnFork appends a {type:"history-suppression",
+// cause:"fork_inherit"} row when the source transcript records carry one —
+// real's createFork rewrites the taint onto the branched session.
+func (s *Store) writeSuppressionOnFork(recs []map[string]any) {
+	for _, r := range recs {
+		if t, _ := r["type"].(string); t == "history-suppression" {
+			_ = s.LogHistorySuppression("fork_inherit", "")
+			return
+		}
+	}
 }
 
 // forkCopy writes the branch records into s with forkedFrom stamps and a
