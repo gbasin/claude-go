@@ -32,6 +32,18 @@ type Result struct {
 	// subagent's run and delivers Content as the Agent result (real's
 	// contract: only a SubagentHandback call reaches the caller).
 	Handback bool
+	// AgentStats carries a completed subagent's run summary — the TUI
+	// renders "Done (N tool uses · Xk tokens · Ds)" for the Agent row
+	// instead of dumping the result body (real's Task completion row).
+	AgentStats *AgentStats
+}
+
+// AgentStats is the subagent-run summary for the Done row.
+type AgentStats struct {
+	ToolUses int
+	Tokens   int // input+output tokens, real's "155.5k tokens" figure
+	DurMs    int64
+	Models   []string // every model the run used — transitions print "m1 → m2"
 }
 
 // Tool is a callable builtin.

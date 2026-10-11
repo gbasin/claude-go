@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gbasin/claude-go/internal/api"
 	"github.com/gbasin/claude-go/internal/plugins"
@@ -377,10 +378,10 @@ type Runner struct {
 	// Parent, when set, is the spawning loop — fork subagents inherit its
 	// messages. Wired by the caller that owns the parent Loop.
 	Parent *Loop
-	// OnSubToolUse / OnSubToolResult surface a running subagent's inner
-	// tool calls to the host — the interactive TUI renders them nested
-	// under the Agent row (real shows live sub-activity; ours ran the sub
-	// headless and printed nothing until the result).
+	// OnSubStart / OnSubToolUse / OnSubToolResult surface a running
+	// subagent to the host — real shows "Initializing…" then live inner
+	// activity nested under the Agent row.
+	OnSubStart      func()
 	OnSubToolUse    func(name string, input json.RawMessage)
 	OnSubToolResult func(name string, r tools.Result)
 	// stopHookActive guards SubagentStop recursion — a blocked stop
@@ -592,7 +593,8 @@ func (r *Runner) runAgentRaw(c *tools.Context, description, prompt, subagentType
 		out = fmt.Sprintf("%s\n\n<usage><subagent_tokens>%d</subagent_tokens></usage>",
 			out, sub.UsageTotal.InputTokens+sub.UsageTotal.OutputTokens)
 	}
-	return tools.Result{Content: out, IsError: res.IsError}
+	res.Content = out
+	return res
 }
 
 func firstLine(s string) string {
@@ -607,6 +609,17 @@ func firstLine(s string) string {
 }
 
 func (r *Runner) runAgentTurn(sub *Loop, prompt string, c *tools.Context, rec *tools.AgentRecord) tools.Result {
+	startedAt := time.Now()
+	if r.OnSubStart != nil {
+		r.OnSubStart()
+	}
+	var models []string
+	if m := sub.Model; m != "" {
+		models = append(models, m)
+	}
+	sub.Events.OnModelFallback = func(from, to string) {
+		models = append(models, to)
+	}
 	ctx := context.Background()
 	if sub.ToolCtx != nil && sub.ToolCtx.Ctx != nil {
 		ctx = sub.ToolCtx.Ctx // cancellation propagates from the parent turn
@@ -707,7 +720,14 @@ func (r *Runner) runAgentTurn(sub *Loop, prompt string, c *tools.Context, rec *t
 	if err != nil {
 		return tools.Result{Content: "agent error: " + err.Error(), IsError: true}
 	}
-	return tools.Result{Content: out}
+	res := tools.Result{Content: out}
+	res.AgentStats = &tools.AgentStats{
+		ToolUses: sub.toolCallsTotal,
+		Tokens:   int(sub.UsageTotal.InputTokens) + int(sub.UsageTotal.OutputTokens),
+		DurMs:    time.Since(startedAt).Milliseconds(),
+		Models:   models,
+	}
+	return res
 }
 
 // WebSearch implements tools.Searcher via the API's server-side web_search tool.
