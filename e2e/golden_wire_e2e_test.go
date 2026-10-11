@@ -37,6 +37,30 @@ type wireCapture struct {
 	} `json:"body"`
 }
 
+// TestExtractSubcommand: end-to-end `claude-go extract` against the
+// real binary — requires a local claude install (skipped in CI).
+func TestExtractSubcommand(t *testing.T) {
+	realClaudeBin(t) // skips when absent
+
+	s := newSession(t)
+	dir := filepath.Join(t.TempDir(), "extracted")
+	r := s.runEx(t, []string{"CLAUDE_GO_EXTRACTED_DIR=" + dir},
+		180*time.Second, "extract")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "extracted") {
+		t.Fatalf("extract output missing summary:\n%s", truncStr(r.stdout+r.stderr, 2000))
+	}
+	for _, want := range []string{
+		"meta.json", "tools.json",
+		"system_main_fable.txt", "system_main_opus.txt", "system_main_haiku.txt",
+		"realwire_print_default.json", "skills_index.txt",
+	} {
+		if _, err := os.Stat(filepath.Join(dir, want)); err != nil {
+			t.Errorf("extracted dir missing %s", want)
+		}
+	}
+}
+
 func TestGoldenRequestParity(t *testing.T) {
 	// fixtures were unvendored (Anthropic text); regenerate locally with
 	// `claude-go extract` — the cache dir carries the same capture format.

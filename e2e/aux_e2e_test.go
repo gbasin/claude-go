@@ -918,8 +918,77 @@ func Test401RefreshRetry(t *testing.T) {
 	}
 }
 
+// TestBorrowedCredsReBorrowOn401: creds living in the shared store
+// (~/.claude/.credentials.json → Borrowed) must never hit the refresh
+// endpoint — but on a 401 the client re-reads the store and retries
+// with whatever real rotated it to (simulated here by the server
+// rewriting the file on the first 401).
+func TestBorrowedCredsReBorrowOn401(t *testing.T) {
+	s := newSession(t)
+	shared := filepath.Join(s.home, ".claude", ".credentials.json")
+	os.MkdirAll(filepath.Dir(shared), 0o700)
+	os.WriteFile(shared, []byte(`{"claudeAiOauth":{"accessToken":"stale-token",`+
+		`"refreshToken":"stale-refresh","expiresAt":9999999999999,"subscriptionType":"max"}}`), 0o600)
+
+	var auths []string
+	var mu sync.Mutex
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/v1/messages") {
+			json.NewEncoder(w).Encode(map[string]any{})
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		mu.Lock()
+		auths = append(auths, auth)
+		mu.Unlock()
+		if auth == "Bearer stale-token" {
+			// real rotated the family meanwhile — the store now holds
+			// a fresh token the retry should pick up
+			os.WriteFile(shared, []byte(`{"claudeAiOauth":{"accessToken":"fresh-token",`+
+				`"refreshToken":"fresh-refresh","expiresAt":9999999999999,"subscriptionType":"max"}}`), 0o600)
+			w.WriteHeader(401)
+			fmt.Fprint(w, `{"type":"error","error":{"type":"authentication_error","message":"invalid token"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"fable\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n")
+		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"REBORROW OK\"}}\n\n")
+		fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n")
+		fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer apiSrv.Close()
+
+	var refreshCalls int
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		refreshCalls++
+		w.WriteHeader(400) // must never be reached for borrowed creds
+	}))
+	defer tokenSrv.Close()
+
+	r := s.runEx(t, []string{
+		// no own creds file → Load() falls through to the shared store
+		"CLAUDE_GO_CREDS_FILE=" + filepath.Join(s.home, "nonexistent.json"),
+		"CLAUDE_GO_TOKEN_URL=" + tokenSrv.URL,
+		"ANTHROPIC_BASE_URL=" + apiSrv.URL,
+	}, 60*time.Second, "-p", "hi")
+	s.mustOK(t, r)
+	if !strings.Contains(r.stdout, "REBORROW OK") {
+		t.Fatalf("no re-borrow reply (auths=%v):\n%s", auths, truncStr(r.stdout+r.stderr, 2000))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(auths) < 2 || auths[len(auths)-1] != "Bearer fresh-token" {
+		t.Fatalf("retry didn't carry the rotated token: %v", auths)
+	}
+	if refreshCalls != 0 {
+		t.Fatalf("borrowed creds hit the refresh endpoint %d times — must stay 0", refreshCalls)
+	}
+}
+
 // TestPrefillWire: --prefill/--prefill-b64 append an assistant
 // continuation block after the first user message (real's prefill).
+
 func TestPrefillWire(t *testing.T) {
 	s := newSession(t)
 	rec := t.TempDir() + "/reqs"
