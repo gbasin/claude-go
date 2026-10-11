@@ -456,7 +456,20 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 			sent := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
 			if sent != "" && c.Creds.AccessToken == sent {
 				resp.Body.Close()
-				c.Creds.ForceRefresh()
+				if c.Creds.Borrowed {
+					// never rotate a borrowed family — but real may have
+					// refreshed its store since we borrowed. Re-load and
+					// pick up the rotated token; if it's the same stale
+					// one the bounded retries exhaust and the caller
+					// prompts for login as before.
+					if nc, err := auth.Load(); err == nil && nc != nil {
+						c.mu.Lock()
+						c.Creds = nc
+						c.mu.Unlock()
+					}
+				} else {
+					c.Creds.ForceRefresh()
+				}
 				continue
 			}
 			if sent != "" && c.Creds.AccessToken != sent {
