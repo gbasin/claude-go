@@ -12,8 +12,9 @@ text (system prompts, tool schemas) ships in this repository — see
 ## Requirements
 
 - Go 1.26+
-- A real `claude` install is *optional* — needed only for the
-  differential wire tests (`TestDiff*`)
+- A real `claude` install is *optional* — needed for `extract`
+  (full-fidelity prompts/schemas) and the differential wire tests
+  (`TestDiff*`)
 
 ## Build
 
@@ -149,7 +150,8 @@ self-updates.
 ## License
 
 MIT — see [LICENSE](LICENSE). The license applies to the Go code in this
-repository. Bundled Claude Code prompt text, tool schemas, and other
-behavioral artifacts derived from the real product are Anthropic's
-intellectual property and are included here under no license from
-Anthropic; this project is unaffiliated with Anthropic.
+repository. Claude Code prompt text, tool schemas, and other behavioral
+artifacts remain Anthropic's intellectual property — none ship in this
+repository; `claude-go extract` derives them locally from the user's own
+`claude` install at runtime. This project is unaffiliated with
+Anthropic.
