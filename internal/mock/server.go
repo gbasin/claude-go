@@ -352,13 +352,24 @@ func lastUserInfo(req *api.Request) (text string, hasToolResult bool) {
 		}
 		var sb strings.Builder
 		lastText := ""
+		toolText := ""
 		for _, b := range blocks {
 			if b.Type == "tool_result" {
 				hasToolResult = true
 			}
 			if b.Type == "text" {
 				lastText = b.Text
+				if strings.HasPrefix(b.Text, "tool:") || strings.HasPrefix(b.Text, "error:") {
+					toolText = b.Text
+				}
 			}
+		}
+		// the LAST text block wins — except when it's an injected
+		// reminder (subagent handback appends one after the real prompt).
+		// Real user text appended into an earlier user message (interrupt
+		// re-queue) must not lose to a stale directive block.
+		if toolText != "" && strings.HasPrefix(lastText, "<system-reminder>") {
+			lastText = toolText
 		}
 		sb.WriteString(lastText)
 		return sb.String(), hasToolResult
