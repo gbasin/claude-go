@@ -185,20 +185,25 @@ func TestAgentToolNestedDisplay(t *testing.T) {
 	p.sendUntilEchoed(t,
 		`tool:Agent {"description":"nested e2e","prompt":"tool:Bash {\"command\":\"echo inner-tool\"}","run_in_background":false}`+"\r",
 		"❯ tool:Agent", 8)
-	// the sub's Bash call nests one level under the Agent row — poll the
-	// full scrollback (it scrolls past the live screen in a fast mock turn)
+	// real's nested rows: "Initializing…" then col-5 "Name(summary)"
+	// — poll the full scrollback (rows scroll past the live screen)
 	deadline2 := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline2) {
-		if strings.Contains(stripANSI(p.output()), "⎿  ⏺ Bash") {
+		if strings.Contains(stripANSI(p.output()), "Bash(echo inner-tool)") {
 			break
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	if !strings.Contains(stripANSI(p.output()), "⎿  ⏺ Bash") {
-		t.Fatalf("no nested tool row\noutput:\n%s", truncStr(p.output(), 4000))
+	out := stripANSI(p.output())
+	if !strings.Contains(out, "Initializing…") {
+		t.Fatalf("no Initializing… row\noutput:\n%s", truncStr(out, 4000))
 	}
-	// the Agent result (sub reply) lands inside the parent's tool result
-	p.waitFor("subagent_tokens", 60*time.Second)
+	if !strings.Contains(out, "     Bash(echo inner-tool)") {
+		t.Fatalf("no nested Bash row\noutput:\n%s", truncStr(out, 4000))
+	}
+	// completion: real's "Done (N tool uses · Xk tokens · Ds)" row
+	p.waitFor("Done (", 60*time.Second)
+	p.waitFor("tool use", 5*time.Second)
 	p.exit()
 }
 

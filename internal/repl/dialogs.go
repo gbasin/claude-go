@@ -280,6 +280,7 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 
 	sel := 0
 	renderRows := 0
+	deadline := time.Now().Add(permAskTimeout)
 	draw := func() {
 		var sb strings.Builder
 		if renderRows > 0 {
@@ -307,6 +308,12 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 		}
 		put(dot)
 		put(" " + question)
+		if rem := time.Until(deadline); rem > 0 {
+			m, s := int(rem.Minutes()), int(rem.Seconds())%60
+			put(" " + token("warning") + fmt.Sprintf(
+				"⚠ Claude Code will automatically deny this request in %d:%02d, to avoid blocking progress on an unattended session",
+				m, s) + reset)
+		}
 		for i, o := range opts {
 			row := o.label
 			if o.input != "" {
@@ -329,6 +336,8 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 	draw()
 	timeout := time.NewTimer(permAskTimeout)
 	defer timeout.Stop()
+	tick := time.NewTicker(time.Second) // repaints the ⚠ countdown in place
+	defer tick.Stop()
 	deny := func() (bool, string, bool) {
 		res := hooks.Run(l.Hooks, hooks.PermissionDenied, map[string]any{
 			"session_id": l.Client.SessionID, "cwd": l.ToolCtx.CWD,
@@ -356,6 +365,8 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 	}
 	for {
 		select {
+		case <-tick.C:
+			draw()
 		case <-timeout.C:
 			dprintf("\n  %s⏵ auto-denied — unattended for %s%s\n", dim, permAskTimeout, reset)
 			if a, fb, done := deny(); done {
@@ -916,7 +927,17 @@ func permFilePath(input json.RawMessage) string {
 // single summary line.
 func permContentLines(name string, input json.RawMessage, single string) []string {
 	var m map[string]any
-	json.Unmarshal(input, &m)
+	// real's guardrail rows (mod_1531): unrenderable params get a warn
+	// line instead of content — deny unless the shape is expected
+	guard := func(s string) []string {
+		return []string{token("warning") + s + reset}
+	}
+	if err := json.Unmarshal(input, &m); err != nil {
+		return guard("(parameters are not an object — deny unless expected)")
+	}
+	if len(m) > 10 {
+		return guard(fmt.Sprintf("(%d parameters — too many to show — deny unless expected)", len(m)))
+	}
 	switch name {
 	case "Edit", "MultiEdit":
 		// captured: " 1 -old" fg-167/bg-52, " 1 +new" fg-77/bg-22,

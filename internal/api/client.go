@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gbasin/claude-go/internal/auth"
@@ -43,6 +44,28 @@ const betaFlags = "claude-code-20250219," +
 // the SDK's default timeout (X-Stainless-Timeout: 600). Applied to the
 // request context, never to http.Client.Timeout — that would kill streams.
 const streamTimeout = 600 * time.Second
+
+// retryWait is the live retry state the TUI reads for the spinner's
+// "· next try in Ns · attempt N/M" tail (mod_1409).
+type retryWait struct {
+	until   time.Time
+	attempt int
+	max     int
+}
+
+// RetryInfo reports the in-flight retry backoff, or ok=false when no
+// retry is pending.
+func (c *Client) RetryInfo() (wait, attempt, max int, ok bool) {
+	rw := c.retryInfo.Load()
+	if rw == nil {
+		return 0, 0, 0, false
+	}
+	wait = int(time.Until(rw.until).Seconds())
+	if wait < 0 {
+		wait = 0
+	}
+	return wait, rw.attempt, rw.max, true
+}
 
 // retryBackoff is the SDK backoff table (maxRetries=2 → 3 total attempts).
 var retryBackoff = []time.Duration{1 * time.Second, 3 * time.Second, 9 * time.Second}
@@ -82,6 +105,8 @@ type Client struct {
 	evalFailed bool   // eval returned empty features (fallback state)
 	RetryCount int    // exposed for x-stainless-retry-count
 	UnixSocket string // ANTHROPIC_UNIX_SOCKET path, when set
+
+	retryInfo atomic.Pointer[retryWait] // live backoff state for the UI
 
 	mu              sync.Mutex
 	RateLimit       *RateLimit // headers from the most recent response
@@ -433,11 +458,17 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 			if transportAttempt > maxRetries {
 				break
 			}
+			c.retryInfo.Store(&retryWait{
+				until:   time.Now().Add(retryBackoff[min(transportAttempt-1, len(retryBackoff)-1)]),
+				attempt: transportAttempt + 1,
+				max:     maxRetries + 1,
+			})
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			case <-time.After(retryBackoff[min(transportAttempt-1, len(retryBackoff)-1)]):
 			}
+			c.retryInfo.Store(nil)
 			continue
 		}
 		c.setRateLimit(resp)
@@ -493,11 +524,16 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 			}
 			statusRetries--
 			wait := statusRetryDelay(resp)
+			c.retryInfo.Store(&retryWait{
+				until:   time.Now().Add(wait),
+				attempt: 2, max: 2, // status errors retry once (real's outer layer)
+			})
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			case <-time.After(wait):
 			}
+			c.retryInfo.Store(nil)
 			continue
 		}
 		return resp, nil

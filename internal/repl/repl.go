@@ -413,6 +413,25 @@ func RunWithStore(l *agent.Loop, store Store) {
 		if focusMode.Load() {
 			return
 		}
+		// real's Agent/Task completion row (mod_1522): "Done (N tool
+		// uses · Xk tokens · Ds)" + "(ctrl+o to expand)" — the reply
+		// body shows only in transcript mode
+		if r.AgentStats != nil {
+			st := r.AgentStats
+			uses := "1 tool use"
+			if st.ToolUses != 1 {
+				uses = fmt.Sprintf("%d tool uses", st.ToolUses)
+			}
+			done := fmt.Sprintf("  %s⎿%s  Done (%s · %s tokens · %s)",
+				dim, reset, uses, fmtTokens(st.Tokens), fmtDur(time.Duration(st.DurMs)*time.Millisecond))
+			if len(st.Models) > 1 {
+				done += fmt.Sprintf("\n     %s%s%s", dim, strings.Join(st.Models, " → "), reset)
+			}
+			streamPrint(done)
+			key := ed.resolvedChord("Global", "app:toggleTranscript", "ctrl+o")
+			streamPrint(fmt.Sprintf("  %s(%s to expand)%s", dim, key, reset))
+			return
+		}
 		lines := strings.Split(strings.TrimRight(r.Content, "\n"), "\n")
 		if briefMode.Load() {
 			// brief mode: tool previews collapse to one line
@@ -438,32 +457,44 @@ func RunWithStore(l *agent.Loop, store Store) {
 		if len(rows) > fold+1 {
 			above, rem = rows[:fold], len(rows)-fold
 		}
-		for _, ln := range above {
-			streamPrint(fmt.Sprintf("  %s⎿%s  %s", dim, reset, compClamp(ln, w)))
+		// real puts ⎿ on the FIRST row only — wrapped continuations and
+		// the fold line sit at col 5 bare (verified on captured rows)
+		for i, ln := range above {
+			if i == 0 {
+				streamPrint(fmt.Sprintf("  %s⎿%s  %s", dim, reset, compClamp(ln, w)))
+			} else {
+				streamPrint(fmt.Sprintf("     %s%s%s", dim, compClamp(ln, w), reset))
+			}
 		}
 		if rem > 0 {
 			key := ed.resolvedChord("Global", "app:toggleTranscript", "ctrl+o")
-			streamPrint(fmt.Sprintf("  %s⎿%s  … +%d %s (%s to expand)",
-				dim, reset, rem, pluralize(rem, "line", "lines"), key))
+			streamPrint(fmt.Sprintf("     %s… +%d %s (%s to expand)%s",
+				dim, rem, pluralize(rem, "line", "lines"), key, reset))
 		}
 	}
-	// subagent inner-tool display: real renders a running agent's tool
-	// calls nested under the Agent row (dim, one level in); ours ran the
-	// sub headless — bind the runner's hooks to nested ⎿/⏺ rows
+	// subagent inner-tool display (real's renderToolUseProgressMessage):
+	// "  ⎿  Initializing…" until first progress, then inner calls at col
+	// 5 as "Name(summary)" — no ⏺ — with results dim on the same level
 	if ar, ok := l.ToolCtx.Agent.(*agent.Runner); ok {
+		ar.OnSubStart = func() {
+			if focusMode.Load() {
+				return
+			}
+			streamPrint(fmt.Sprintf("  %s⎿%s  %sInitializing…%s", dim, reset, dim, reset))
+		}
 		ar.OnSubToolUse = func(name string, input json.RawMessage) {
 			if focusMode.Load() {
 				return
 			}
-			streamPrint(fmt.Sprintf("  %s⎿%s  %s⏺%s %s%s",
-				dim, reset, dim, reset, name, summarize(name, input)))
+			streamPrint(fmt.Sprintf("     %s%s%s%s%s",
+				bold, name, reset, summarize(name, input), ""))
 		}
 		ar.OnSubToolResult = func(name string, r tools.Result) {
 			if focusMode.Load() || briefMode.Load() {
 				return
 			}
 			line := strings.Split(strings.TrimRight(r.Content, "\n"), "\n")[0]
-			streamPrint(fmt.Sprintf("    %s⎿%s  %s", dim, reset, trunc(line, 110)))
+			streamPrint(fmt.Sprintf("     %s%s%s", dim, trunc(line, 110), reset))
 		}
 	}
 	historySessionID = l.Client.SessionID
@@ -656,6 +687,20 @@ func RunWithStore(l *agent.Loop, store Store) {
 			thinkingSeen = false
 			spin := newSpinner()
 			spin.agents = func() int { return runningAgents(l) }
+			spin.retry = func() (int, int, int, bool) {
+				return l.Client.RetryInfo()
+			}
+			var thoughtAt time.Time
+			spin.thoughtFor = func() int {
+				if thinkingSeen {
+					if thoughtAt.IsZero() {
+						thoughtAt = time.Now()
+					}
+					return int(time.Since(thoughtAt).Seconds())
+				}
+				thoughtAt = time.Time{}
+				return 0
+			}
 			// real shows a rotating ⎿ Tip line under the spinner
 			// periodically (spinnerTipsOverride-able)
 			if tip := spinnerTip(); tip != "" && tipNth.Add(1)%3 == 0 {
@@ -838,7 +883,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			}
 			if err != nil {
 				if wasCancelled {
-					dprintf("%s⏺ Interrupted%s\n", yellow, reset)
+					dprintf("%s⏺ Interrupted%s\n", dim, reset)
 				} else {
 					dprintf("%sError: %v%s\n", red, err, reset)
 				}
@@ -1026,6 +1071,11 @@ type spinner struct {
 	done   chan struct{}
 	verb   string
 	agents func() int // running bg-agent count for the busy footer
+	// retry returns (waitSec, attempt, max) while the client backs off —
+	// spinner renders "· next try in Ns · attempt N/M" (mod_1409)
+	retry func() (wait, attempt, max int, ok bool)
+	// thoughtFor returns seconds spent thinking — "· thought for Ns"
+	thoughtFor func() int
 }
 
 // spinVerb exposes the active verb for the past-tense footer.
@@ -1315,6 +1365,14 @@ func newSpinner() *spinner {
 	return s
 }
 
+// fmtTokens renders real's token figure — 155.5k / 12.3k / 999
+func fmtTokens(n int) string {
+	if n >= 1000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return fmt.Sprintf("%d", n)
+}
+
 func fmtDur(d time.Duration) string {
 	s := int(d.Seconds())
 	if s < 60 {
@@ -1363,17 +1421,29 @@ func (s *spinner) run() {
 					hookTxt = fmt.Sprintf(" · (running %s hook · %ds)", hn, int(el.Seconds()))
 				}
 			}
-			// real sweeps a bright band across the dim verb text —
-			// glimmerIndex advances ~every 90ms, band wraps over len+pad
-			agentsHint := "← for agents"
-			if s.agents != nil {
-				if n := s.agents(); n > 0 {
-					agentsHint = fmt.Sprintf("← %d agents · ↑↓ to manage", n)
+			// real's tail: esc to interrupt · ctrl+t to show todos ·
+			// Ns · ↓ Nk tokens · [next try in Ns · attempt N/M] ·
+			// [thought for Ns] — agents hint lives in the footer only
+			// (mod_1409: no "for agents" in the spinner row)
+			todoHint := ""
+			if tools.TodosText() != "" {
+				todoHint = " · ctrl+t to show todos"
+			}
+			retryTxt := ""
+			if s.retry != nil {
+				if wait, attempt, maxA, ok := s.retry(); ok {
+					retryTxt = fmt.Sprintf(" · next try in %ds · attempt %d/%d", wait, attempt, maxA)
 				}
 			}
-			txt := fmt.Sprintf("%s%s %s… %s(esc to interrupt · %s · %s%s)",
+			thoughtTxt := ""
+			if s.thoughtFor != nil {
+				if t := s.thoughtFor(); t > 0 {
+					thoughtTxt = fmt.Sprintf(" · thought for %ds", t)
+				}
+			}
+			txt := fmt.Sprintf("%s%s %s… %s(esc to interrupt%s · %s · %s%s%s)",
 				claudeOrange, spinnerFrames[i%len(spinnerFrames)],
-				shimmerVerb(s.verb, i), claudeOrange, agentsHint, el, toks+hookTxt)
+				shimmerVerb(s.verb, i), claudeOrange, todoHint, el, toks+hookTxt, retryTxt, thoughtTxt)
 			if compActive.Load() {
 				compFooter(txt) // pinned bottom row — doesn't scroll
 			} else {
@@ -2238,9 +2308,9 @@ func showAgentsPane(l *agent.Loop, ks *keySource) {
 	if l.ToolCtx.BgTasks != nil {
 		tasks = l.ToolCtx.BgTasks.List()
 	}
-	// real's agents view (captured 2.1.292): banner, "N awaiting input ·
-	// M working · K completed" counts, Needs input + Completed sections,
-	// a "describe a task for a new session" input row, mode-pill footer
+	// real's agents view (2.1.296): "N awaiting input · claude agents"
+	// counts, then Ready for review / Needs input / Working / Completed
+	// sections, each with a dim description line (mod_0831)
 	var running, done int
 	for _, t := range tasks {
 		select {
@@ -2250,10 +2320,11 @@ func showAgentsPane(l *agent.Loop, ks *keySource) {
 			running++
 		}
 	}
-	dprintf("\n  %d awaiting input · %d working · %d completed\n", running, 0, done)
+	dprintf("\n  %d awaiting input · %sclaude agents%s\n", running, bold, reset)
 	dprintf("  %sYour conversation moved to the background — enter opens it · esc returns to it · ctrl+c twice quits%s\n", dim, reset)
 	if running > 0 {
 		dprintf("\n  %sNeeds input%s\n", bold, reset)
+		dprintf("  %sSessions that have a question or need your decision land here%s\n", dim, reset)
 		for _, t := range tasks {
 			select {
 			case <-t.Done:
@@ -2263,9 +2334,12 @@ func showAgentsPane(l *agent.Loop, ks *keySource) {
 			dprintf("  %s✻%s %-36s %s%s%s  %s%s\n", claudeOrange, reset,
 				truncRunes(t.Command, 36), dim, "", reset, relAgo(t.Started), reset)
 		}
+		dprintf("\n  %sWorking%s\n", bold, reset)
+		dprintf("  %sSessions Claude is actively working on — they keep running even if you close the terminal%s\n", dim, reset)
 	}
 	if done > 0 {
 		dprintf("\n  %sCompleted%s\n", bold, reset)
+		dprintf("  %sFinished sessions wait here for you to review%s\n", dim, reset)
 		for _, t := range tasks {
 			select {
 			case <-t.Done:
