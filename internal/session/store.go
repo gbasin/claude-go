@@ -42,6 +42,10 @@ type Store struct {
 	gitBranch   string
 	gitDone     bool
 	meta        sessionMeta // latched session state, re-stamped per flush
+	// OnUserPrompt fires after a real user prompt row is written (its uuid
+	// is the leaf just logged). Real keys file-history-snapshot rows to the
+	// user message uuid — the host wires this to emit them.
+	OnUserPrompt func(uuid string)
 }
 
 // sessionMeta mirrors real's currentSession* fields (mod_0416 AFn): the
@@ -67,6 +71,14 @@ type sessionMeta struct {
 	prURL         string
 	prRepo        string
 	artifactCount int
+}
+
+// ISONow formats a timestamp like real's new Date().toISOString() —
+// UTC, millisecond precision, trailing Z. Transcript bookkeeping rows
+// (queue-operation, file-history-*, worktree-state …) use it; the
+// message envelope keeps RFC3339Nano.
+func ISONow() string {
+	return time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 }
 
 // ForkedFrom marks a message copied into a forked session.
@@ -407,6 +419,12 @@ func (s *Store) restampMeta(m api.Message) {
 		s.mu.Lock()
 		s.meta.lastPrompt = prompt
 		s.mu.Unlock()
+		s.mu.Lock()
+		leaf := s.lastUUID
+		s.mu.Unlock()
+		if s.OnUserPrompt != nil {
+			s.OnUserPrompt(leaf)
+		}
 	}
 	emit := func(rec map[string]any) {
 		t, _ := rec["type"].(string)
@@ -608,6 +626,27 @@ func (s *Store) branch() string {
 //
 // progress rows stamp parentUuid but do not advance the chain (real's
 // boundary-cleared semantic).
+
+// LogBare appends a record exactly as given — real's non-transcript rows
+// (last-wins state, boundary-cleared, accumulate) carry only their
+// emit-site literal: no uuid, no parentUuid, no synthesized timestamp.
+// Verified against captured 296 transcripts: ai-title, queue-operation,
+// file-history-*, fork-context-ref, cost-state, atis-latch all write bare.
+func (s *Store) LogBare(ev map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var b []byte
+	if order, ok := stateKeyOrder[ev["type"].(string)]; ok {
+		// real's emit-site key order is known — write in it verbatim
+		b = orderedMap(order, ev)
+	} else {
+		b, _ = json.Marshal(ev)
+	}
+	_, err := s.f.Write(append(b, '\n'))
+	return err
+}
+
+// LogRecord writes an arbitrary transcript record (summary/system/etc).
 func (s *Store) LogRecord(ev map[string]any) error {
 	t, _ := ev["type"].(string)
 	if order, ok := stateKeyOrder[t]; ok {
@@ -782,13 +821,51 @@ func InitMode(cwd, sessionID string) string {
 	return initMode
 }
 
-// LogAttachment appends an attachment record
-// ({type:"attachment",attachment:{...}}) — queued commands, file mentions,
-// relevant memories, etc.
+// LogAttachment appends an attachment record — queued commands, hook
+// system messages, file mentions, memory context, etc. Real's
+// {type:"attachment"} rows are full transcript records: they carry the
+// message envelope (uuid, parentUuid, isSidechain, timestamp, sessionId +
+// session_id, cwd, version, gitBranch, userType, entrypoint) and DO join
+// the parentUuid chain — the next message's parentUuid is the attachment
+// uuid (verified on captured rows).
 func (s *Store) LogAttachment(att map[string]any) error {
-	return s.LogRecord(map[string]any{
-		"type": "attachment", "attachment": att,
-	})
+	return s.LogAttachmentMeta(att, nil)
+}
+
+// LogAttachmentMeta is LogAttachment plus top-level extras real stamps
+// beside the envelope (rendered, renderedInHumanTurn, isMeta).
+func (s *Store) LogAttachmentMeta(att, extra map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	uuid := newUUID()
+	e := map[string]any{
+		"type":        "attachment",
+		"attachment":  att,
+		"uuid":        uuid,
+		"timestamp":   ISONow(),
+		"isSidechain": s.sidechain,
+		"sessionId":   s.SessionID,
+		"session_id":  s.SessionID,
+		"userType":    "external",
+		"entrypoint":  "cli",
+		"cwd":         s.CWD,
+		"version":     "2.1.296",
+	}
+	if s.chainParent != "" {
+		e["parentUuid"] = s.chainParent
+	} else {
+		e["parentUuid"] = nil // real writes an explicit null
+	}
+	if b := currentGitBranch(s.CWD); b != "" {
+		e["gitBranch"] = b
+	}
+	for k, v := range extra {
+		e[k] = v
+	}
+	s.chainParent = uuid
+	b, _ := json.Marshal(e)
+	_, err := s.f.Write(append(b, '\n'))
+	return err
 }
 
 // LogProgress appends a progress record (tool progress, heartbeat, hook
@@ -894,8 +971,101 @@ func (s *Store) LogPRLink(number int, url, repo string) error {
 // session id (background/handoff spawn). Picker: the superseded
 // transcript is hidden.
 func (s *Store) LogContinuedIn(newSessionID string) error {
-	return s.LogRecord(map[string]any{
-		"type": "continued-in", "continuedInSessionId": newSessionID,
+	return s.LogBare(map[string]any{
+		"type": "continued-in", "timestamp": ISONow(),
+		"sessionId": s.SessionID, "continuedInSessionId": newSessionID,
+	})
+}
+
+// LogContinuedInTo appends the continued-in marker to another session's
+// transcript (the --bg -r handoff: the resumed source continues under the
+// new bg session id). onlyIfExists — a missing source file stays missing.
+func LogContinuedInTo(cwd, srcID, dstID string) error {
+	return AppendContinuedIn(filepath.Join(dir(cwd), srcID+".jsonl"), srcID, dstID)
+}
+
+// AppendContinuedIn appends the continued-in marker to an arbitrary
+// transcript path (real's TRe writes it onto the source session file).
+func AppendContinuedIn(path, srcID, dstID string) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	b, _ := json.Marshal(map[string]any{
+		"type": "continued-in", "timestamp": ISONow(),
+		"sessionId": srcID, "continuedInSessionId": dstID,
+	})
+	_, werr := f.Write(append(b, '\n'))
+	cerr := f.Close()
+	if werr != nil {
+		return werr
+	}
+	return cerr
+}
+
+// LogWorktreeState writes {type:"worktree-state",worktreeSession,sessionId}
+// — real's saveWorktreeState (AM), stamped when the session enters a
+// worktree; ws is nil on exit (real emits worktreeSession:null).
+func (s *Store) LogWorktreeState(ws map[string]any) error {
+	return s.LogBare(map[string]any{
+		"type": "worktree-state", "worktreeSession": ws,
+		"sessionId": s.SessionID,
+	})
+}
+
+// LogForkContextRef writes {type:"fork-context-ref",agentId,
+// parentSessionId,parentLastUuid,contextLength} — real's fJr: a fork
+// subagent that references the parent's conversation instead of carrying
+// copies stamps it into its own (subagent) transcript so a resume can
+// hydrate the prefix. Captured rows carry no sessionId/uuid/timestamp.
+func (s *Store) LogForkContextRef(agentID, parentSessionID, parentLastUUID string, contextLength int) error {
+	return s.LogBare(map[string]any{
+		"type": "fork-context-ref", "agentId": agentID,
+		"parentSessionId": parentSessionID, "parentLastUuid": parentLastUUID,
+		"contextLength": contextLength,
+	})
+}
+
+// LogContentReplacement writes {type:"content-replacement",sessionId,
+// agentId?,replacements:[{kind,toolUseId,replacement}]} — real's
+// insertContentReplacement: tool-result content the wire rewrote
+// (persisted-message budget) is recorded so resume can re-apply it.
+// Route-by-agent: agentID non-empty targets the subagent transcript.
+func (s *Store) LogContentReplacement(replacements []any, agentID string) error {
+	rec := map[string]any{
+		"type": "content-replacement", "sessionId": s.SessionID,
+		"replacements": replacements,
+	}
+	if agentID != "" {
+		rec["agentId"] = agentID
+	}
+	return s.LogBare(rec)
+}
+
+// LogFileHistorySnapshot writes real's per-user-message checkpoint row:
+// {type:"file-history-snapshot",messageId:<user-msg-uuid>,snapshot:
+// {messageId,trackedFileBackups,timestamp},isSnapshotUpdate}.
+func (s *Store) LogFileHistorySnapshot(messageID string, trackedFileBackups map[string]any, isSnapshotUpdate bool) error {
+	return s.LogBare(map[string]any{
+		"type": "file-history-snapshot", "messageId": messageID,
+		"snapshot": map[string]any{
+			"messageId":          messageID,
+			"trackedFileBackups": trackedFileBackups,
+			"timestamp":          ISONow(),
+		},
+		"isSnapshotUpdate": isSnapshotUpdate,
+	})
+}
+
+// LogFileHistoryDelta writes {type:"file-history-delta",messageId,
+// snapshotMessageId,trackingPath,backup,timestamp} — real's Jes: a file
+// newly tracked mid-turn merges its pre-edit backup into the latest
+// snapshot.
+func (s *Store) LogFileHistoryDelta(messageID, snapshotMessageID, trackingPath string, backup map[string]any) error {
+	return s.LogBare(map[string]any{
+		"type": "file-history-delta", "messageId": messageID,
+		"snapshotMessageId": snapshotMessageID, "trackingPath": trackingPath,
+		"backup": backup, "timestamp": ISONow(),
 	})
 }
 
@@ -1334,6 +1504,7 @@ func Fork(cwd, srcID string) (*Store, []api.Message, error) {
 		st.Close()
 		return nil, nil, err
 	}
+	st.replayContentReplacements(recs, srcID)
 	if p := firstPromptText(msgs); p != "" {
 		// best-effort title, matching CC's "<prompt> (Branch N)" naming —
 		// N dedups against existing branch titles of the same prompt
@@ -1367,7 +1538,37 @@ func (s *Store) ForkInto(srcPath, srcID, leafUUID string) ([]api.Message, error)
 	if len(branch) == 0 {
 		return nil, errors.New("session has no message chain to fork")
 	}
-	return s.forkCopy(branch, srcID)
+	msgs, err := s.forkCopy(branch, srcID)
+	if err != nil {
+		return nil, err
+	}
+	s.replayContentReplacements(recs, srcID)
+	return msgs, nil
+}
+
+// replayContentReplacements re-emits the source transcript's
+// content-replacement rows as one consolidated record on the fork —
+// real's session-copy path (mod_1044 ne) collects every {type:
+// "content-replacement",sessionId:<src>} row's replacements and appends
+// {type:"content-replacement",sessionId:<new>,replacements:[...]} after
+// the copied messages.
+func (s *Store) replayContentReplacements(recs []map[string]any, srcID string) {
+	var all []any
+	for _, r := range recs {
+		if t, _ := r["type"].(string); t != "content-replacement" {
+			continue
+		}
+		if sid, _ := r["sessionId"].(string); sid != srcID {
+			continue
+		}
+		if rs, ok := r["replacements"].([]any); ok {
+			all = append(all, rs...)
+		}
+	}
+	if len(all) == 0 {
+		return
+	}
+	_ = s.LogContentReplacement(all, "")
 }
 
 // forkCopy writes the branch records into s with forkedFrom stamps and a

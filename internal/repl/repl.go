@@ -38,6 +38,14 @@ var (
 	red    = "\x1b[31m"
 )
 
+// queuedItem is one mid-turn queue entry — injected marks
+// session-injected prompts (cron/monitor) vs typed ones for the
+// queued_command attachment's commandMode/origin fields.
+type queuedItem struct {
+	text     string
+	injected bool
+}
+
 // Store abstracts transcript logging.
 type Store interface {
 	LogTitle(title string) error
@@ -53,6 +61,12 @@ type Store interface {
 	// LogAgentMeta stamps the agent-identity state rows (tag, agent-name,
 	// agent-color, agent-setting) — one non-empty argument per call.
 	LogAgentMeta(tag, agentName, agentColor, agentSetting string) error
+	// LogBare writes a record verbatim — real's bookkeeping rows carry
+	// only their emit-site literal (ended-by-model, queue-operation, …).
+	LogBare(ev map[string]any) error
+	// LogAttachmentMeta writes a chain-participating {type:"attachment"}
+	// row; extra lands at top level (rendered, renderedInHumanTurn, …).
+	LogAttachmentMeta(att, extra map[string]any) error
 }
 
 // RunWithStore is Run with session transcript logging.
@@ -169,11 +183,16 @@ func RunWithStore(l *agent.Loop, store Store) {
 		}
 	}
 	// EndConversation mid-turn → flag normal shutdown (raw-mode restore,
-	// unregister, MCP close, SessionEnd all run via the quit path). Real
-	// stamps {type:"ended-by-model"} before aborting (markSessionEndedByModel).
+	// unregister, MCP close, SessionEnd all run via the quit path).
 	endSession := func() {
+		// real's EndConversation stamps {type:"ended-by-model"} on the
+		// transcript (markSessionEndedByModel, mod_0292 TJr) — the picker
+		// hides ended sessions
 		if currentStore != nil {
-			currentStore.LogRecord(map[string]any{"type": "ended-by-model"})
+			_ = currentStore.LogBare(map[string]any{
+				"type": "ended-by-model", "timestamp": session.ISONow(),
+				"sessionId": l.Client.SessionID,
+			})
 		}
 		wantQuit.Store(true)
 	}
@@ -556,7 +575,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			continue
 		}
 
-		var queued []string
+		var queued []queuedItem
 		var draftBack []rune
 		if store != nil {
 			// mid-turn compaction replaces history inside Ask — persist
@@ -647,16 +666,17 @@ func RunWithStore(l *agent.Loop, store Store) {
 								if len(queueBuf) > 0 {
 									if act == "chat:sendNow" {
 										// sendNow jumps ahead of queued messages
-										queued = append([]string{string(queueBuf)}, queued...)
+										queued = append([]queuedItem{{text: string(queueBuf)}}, queued...)
 									} else {
-										queued = append(queued, string(queueBuf))
+										queued = append(queued, queuedItem{text: string(queueBuf)})
 									}
 									queuedPending.Add(1)
 									// real stamps queue-operation on each
-									// mid-turn enqueue (mod_0409 nZr)
+									// mid-turn enqueue (mod_0409 insertQueueOperation)
 									if currentStore != nil {
-										currentStore.LogRecord(map[string]any{
+										currentStore.LogBare(map[string]any{
 											"type": "queue-operation", "operation": "enqueue",
+											"timestamp": session.ISONow(),
 											"sessionId": l.Client.SessionID,
 											"content":   string(queueBuf),
 										})
@@ -668,7 +688,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 									// at the hardware cursor but leaves
 									// compStreamCol stale, so the next stream
 									// write repositions and overwrites it
-									streamPrint("  " + dim + "❯ " + trunc(string(queueBufLast(queued)), 90) + reset)
+									streamPrint("  " + dim + "❯ " + trunc(queueBufLast(queued), 90) + reset)
 								}
 							} else if k.r != 0 {
 								queueBuf = append(queueBuf, k.r)
@@ -807,8 +827,16 @@ func RunWithStore(l *agent.Loop, store Store) {
 			for {
 				select {
 				case p := <-tools.SessionQueue:
-					queued = append(queued, p)
+					queued = append(queued, queuedItem{text: p, injected: true})
 					queuedPending.Add(1)
+					if currentStore != nil {
+						currentStore.LogBare(map[string]any{
+							"type": "queue-operation", "operation": "enqueue",
+							"timestamp": session.ISONow(),
+							"sessionId": l.Client.SessionID,
+							"content":   p,
+						})
+					}
 					printStatus(l, ed)
 				default:
 					goto drained
@@ -830,9 +858,18 @@ func RunWithStore(l *agent.Loop, store Store) {
 			if len(queued) == 0 {
 				break
 			}
-			line = queued[0]
+			qm := queued[0]
 			queued = queued[1:]
 			queuedPending.Add(-1)
+			// real stamps queue-operation on dequeue too
+			if currentStore != nil {
+				currentStore.LogBare(map[string]any{
+					"type": "queue-operation", "operation": "dequeue",
+					"timestamp": session.ISONow(),
+					"sessionId": l.Client.SessionID,
+				})
+			}
+			line = qm.text
 			printStatus(l, ed)
 			// queued lines get the same local dispatch as typed ones —
 			// a "/clear" submitted mid-turn is a command, not a prompt
@@ -856,6 +893,13 @@ func RunWithStore(l *agent.Loop, store Store) {
 					}
 					goto nextQueued
 				}
+			}
+			// delivered to the model — real records the queued prompt as a
+			// queued_command attachment row before the turn consumes it
+			// (prompt = the post-expansion text the model actually gets)
+			if currentStore != nil {
+				att, extra := queuedCommandAttachment(line, qm.injected)
+				currentStore.LogAttachmentMeta(att, extra)
 			}
 		}
 		// EndConversation (or anything that set wantQuit mid-turn) takes
@@ -1420,14 +1464,12 @@ func fireStopHook(l *agent.Loop) {
 	if l.Hooks == nil {
 		return
 	}
-	res := hooks.Run(l.Hooks, hooks.Stop, map[string]any{
-		"session_id":      l.Client.SessionID,
-		"transcript_path": l.Transcript,
-		"cwd":             l.ToolCtx.CWD,
-		"hook_event_name": "Stop", "permission_mode": l.PermMode,
+	// runHook route: same base payload, and a Stop systemMessage lands as
+	// a hook_system_message attachment like real's
+	res := l.RunHookEvent(hooks.Stop, map[string]any{
 		"stop_hook_active":       stopHookActive.Load(),
 		"last_assistant_message": lastAssistantText(l),
-	}, l.ToolCtx.CWD)
+	})
 	if res.SystemMessage != "" {
 		dprintf("  %s%s%s\n", dim, res.SystemMessage, reset)
 	}
@@ -2468,11 +2510,45 @@ func readUserSettingStr(key string) string {
 // real reads it once at startup too (restart to pick up edits).
 func userSetting(key string) any { return config.UserSetting(key) }
 
-func queueBufLast(q []string) string {
+// queuedCommandAttachment builds real's queued_command attachment for a
+// delivered queue item (mod_0416: prompt, source_uuid, delivery_id,
+// commandMode, origin, timestamp) plus the top-level rendered row —
+// typed prompts render a "sent a new message while you were working"
+// system-reminder (real's $Dn); session-injected items come through as
+// task-notification mode.
+func queuedCommandAttachment(prompt string, injected bool) (att, extra map[string]any) {
+	mode, kind := "prompt", "human"
+	if injected {
+		mode, kind = "task-notification", "task-notification"
+	}
+	att = map[string]any{
+		"type":        "queued_command",
+		"prompt":      prompt,
+		"source_uuid": session.NewID(),
+		"delivery_id": session.NewID(),
+		"commandMode": mode,
+		"origin":      map[string]any{"kind": kind},
+		"timestamp":   session.ISONow(),
+	}
+	extra = map[string]any{}
+	if !injected {
+		extra["rendered"] = []any{map[string]any{
+			"content": "<system-reminder>\nThe user sent a new message while you were " +
+				"working:\n" + prompt + "\n\nThis is how Claude Code surfaces messages " +
+				"the user sends mid-turn — within the running turn, often alongside the " +
+				"next tool result, rather than as a separate conversation turn. Address " +
+				"the message above as you continue this turn.\n</system-reminder>",
+		}}
+		extra["renderedInHumanTurn"] = true
+	}
+	return att, extra
+}
+
+func queueBufLast(q []queuedItem) string {
 	if len(q) == 0 {
 		return ""
 	}
-	return q[len(q)-1]
+	return q[len(q)-1].text
 }
 
 // elicitDialog renders the elicitation/create prompt: server name +
