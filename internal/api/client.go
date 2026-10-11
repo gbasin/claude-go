@@ -349,7 +349,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 	var raw []byte
 	var err error
 	if body != nil {
-		raw, err = json.Marshal(body)
+		raw, err = marshalNoEscape(body)
 		if os.Getenv("CLAUDE_GO_DEBUG_REQ") != "" {
 			if f, ferr := os.OpenFile(filepath.Join(os.TempDir(), "claude-go-reqs.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); ferr == nil {
 				f.WriteString("=== " + path + "\n" + string(raw) + "\n")
@@ -364,6 +364,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.R
 	if err != nil {
 		return nil, err
 	}
+	raw = unescapeHTMLSeq(raw)
 	var lastErr error
 	maxRetries := 2 // SDK default (transport-error attempts)
 	if v := os.Getenv("CLAUDE_CODE_MAX_RETRIES"); v != "" {

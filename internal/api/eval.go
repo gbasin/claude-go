@@ -61,12 +61,14 @@ func (c *Client) EvalCheck(ctx context.Context, ua string) (map[string]any, erro
 	if nonessentialDisabled() {
 		return nil, fmt.Errorf("eval skipped: nonessential traffic disabled")
 	}
-	if c.Creds == nil || c.Creds.IsAPIKey {
-		return nil, fmt.Errorf("eval skipped: no oauth credentials")
-	}
-	tok, err := c.Creds.Token()
-	if err != nil {
-		return nil, err
+	// authed lane when oauth creds exist; the anonymous /api/eval/
+	// endpoint is real's fallback for api-key and credless runs
+	authed := c.Creds != nil && !c.Creds.IsAPIKey
+	var tok string
+	if authed {
+		if t, err := c.Creds.Token(); err == nil {
+			tok = t
+		}
 	}
 	_, acctUUID, _ := config.Account()
 	devID := config.UserID()
@@ -94,43 +96,59 @@ func (c *Client) EvalCheck(ctx context.Context, ua string) (map[string]any, erro
 		ForcedVariations: map[string]any{},
 		ForcedFeatures:   []any{},
 	})
-	url := c.evalBase() + "/api/eval-authed/" + evalSDKKey
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+tok)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "claude-code/"+Version)
-	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
-	req.Header.Set("Accept", "*/*")
-	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	resp, err := c.HTTP.Do(req.WithContext(ctx2))
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("eval http %d", resp.StatusCode)
-	}
-	var parsed struct {
-		Features map[string]any `json:"features"`
-	}
-	if json.Unmarshal(raw, &parsed) == nil {
-		if len(parsed.Features) > 0 {
-			config.MergeCachedGBFeatures(parsed.Features)
-			return parsed.Features, nil
+	if raw := c.evalPost(ctx, body, authed, tok); raw != nil {
+		var parsed struct {
+			Features map[string]any `json:"features"`
 		}
-		// empty-feature 200: real treats this as eval-failed — the
-		// default-on header/beta set appears (MITM-verified)
-		return map[string]any{}, nil
+		if json.Unmarshal(raw, &parsed) == nil {
+			if len(parsed.Features) > 0 {
+				config.MergeCachedGBFeatures(parsed.Features)
+				return parsed.Features, nil
+			}
+			// empty-feature 200: real treats this as eval-failed — the
+			// default-on header/beta set appears (MITM-verified)
+			return map[string]any{}, nil
+		}
+		return nil, fmt.Errorf("eval: unparseable body")
 	}
-	return nil, fmt.Errorf("eval: unparseable body")
+	return nil, fmt.Errorf("eval: request failed")
+}
+
+// evalPost tries the authed eval endpoint first (when tok is set) and
+// falls back to the anonymous /api/eval/ path real uses for credless
+// runs. Returns the response body or nil on failure.
+func (c *Client) evalPost(ctx context.Context, body []byte, authed bool, tok string) []byte {
+	try := func(url, bearer string) []byte {
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+		if err != nil {
+			return nil
+		}
+		if bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+bearer)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "claude-code/"+Version)
+		req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+		req.Header.Set("Accept", "*/*")
+		ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		resp, err := c.HTTP.Do(req.WithContext(ctx2))
+		if err != nil {
+			return nil
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			return nil
+		}
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		return raw
+	}
+	if authed && tok != "" {
+		if raw := try(c.evalBase()+"/api/eval-authed/"+evalSDKKey, tok); raw != nil {
+			return raw
+		}
+	}
+	return try(c.evalBase()+"/api/eval/"+evalSDKKey, "")
 }
 
 // evalBase is always the first-party API host — real's GB client does
