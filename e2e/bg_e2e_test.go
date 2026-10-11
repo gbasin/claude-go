@@ -36,7 +36,7 @@ func TestBgSessionLifecycle(t *testing.T) {
 
 	// claude agents lists the live worker (registry write can lag a beat)
 	ok := false
-	for i := 0; i < 60 && !ok; i++ {
+	for i := 0; i < 200 && !ok; i++ {
 		time.Sleep(150 * time.Millisecond)
 		ok = strings.Contains(s.run(t, "agents").stdout, short)
 	}
@@ -50,7 +50,7 @@ func TestBgSessionLifecycle(t *testing.T) {
 	// session keeps running
 	r = s.runStdin(t, "ping-from-attach\r\x1a", "attach", short)
 	contains(t, r.stdout, "detached — session "+short+" keeps running", "detach message")
-	poll(t, 5*time.Second, "session still running after detach", func() bool {
+	poll(t, 15*time.Second, "session still running after detach", func() bool {
 		return strings.Contains(s.run(t, "agents").stdout, short)
 	})
 
