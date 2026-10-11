@@ -31,6 +31,9 @@ type Store struct {
 	mu        sync.Mutex // serializes writers (OnTurnEnd goroutine, etc)
 	lastUUID  string
 	sidechain bool // subagent transcript — records get isSidechain:true
+
+	metaStamps   map[string]string // last re-stamped value per meta row type
+	relocatedCwd string            // last cwd a {type:"relocated"} row named
 }
 
 type event struct {
@@ -102,6 +105,12 @@ func Open(cwd, sessionID string) (*Store, error) {
 // Store fields additions
 
 var lastUUID string
+
+// isoMillis renders a timestamp the way real's new Date().toISOString()
+// does: millisecond precision, trailing Z.
+func isoMillis(t time.Time) string {
+	return t.UTC().Format("2006-01-02T15:04:05.000Z")
+}
 
 // NewID generates a session/message uuid.
 func NewID() string { return newUUID() }
@@ -215,6 +224,19 @@ func (s *Store) logMessage(m api.Message, compact bool, modelOnlyText string) er
 	}
 	s.lastUUID = uuid
 	b, _ := json.Marshal(e)
+	_, err := s.f.Write(append(b, '\n'))
+	return err
+}
+
+// logBare appends a session-metadata record verbatim. Real writes these
+// rows ({type:"mode"}, {type:"permission-mode"}, {type:"ai-title"},
+// {type:"tag"}, {type:"relocated"}, {type:"history-suppression"}, …) with
+// exactly the fields the emit site builds — no uuid/parentUuid and no
+// implicit timestamp (verified against real transcripts on disk).
+func (s *Store) logBare(rec map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, _ := json.Marshal(rec)
 	_, err := s.f.Write(append(b, '\n'))
 	return err
 }
@@ -381,17 +403,23 @@ func (s *Store) LogTitle(title string) error {
 
 // LogAITitle writes an {type:"ai-title",aiTitle} record — real
 // auto-generates one from the first turn (recordAITitle). Called when a
-// title is produced for the session.
+// title is produced for the session. Bare shape: {type,aiTitle,sessionId}
+// — real stamps no uuid/timestamp on metadata rows.
 func (s *Store) LogAITitle(title string) error {
-	return s.LogRecord(map[string]any{
-		"type": "ai-title", "aiTitle": title,
+	return s.logBare(map[string]any{
+		"type": "ai-title", "aiTitle": title, "sessionId": s.SessionID,
 	})
 }
 
 // LogEndedByModel writes {type:"ended-by-model"} — real marks sessions the
-// model closed via EndConversation (I4r); the picker filters them.
+// model closed via EndConversation (I4r/markSessionEndedByModel); the
+// picker filters them. Bare shape: {type,timestamp,sessionId}.
 func (s *Store) LogEndedByModel() error {
-	return s.LogRecord(map[string]any{"type": "ended-by-model"})
+	return s.logBare(map[string]any{
+		"type":      "ended-by-model",
+		"timestamp": isoMillis(time.Now()),
+		"sessionId": s.SessionID,
+	})
 }
 
 // LogPRLink writes {type:"pr-link",prNumber,prUrl,prRepository} — real's
@@ -414,9 +442,11 @@ func (s *Store) LogContinuedIn(newSessionID string) error {
 }
 
 // LogAgentMeta writes the teammate/agent identity records real persists
-// ("always" merge policy): tag, agent-name, agent-color, agent-setting.
+// ("always"/"last-wins" merge policy): tag, agent-name, agent-color,
+// agent-setting. Bare shapes — e.g. {type:"tag",tag,sessionId},
+// {type:"agent-name",agentName,sessionId}.
 func (s *Store) LogAgentMeta(tag, agentName, agentColor, agentSetting string) error {
-	rec := map[string]any{}
+	rec := map[string]any{"sessionId": s.SessionID}
 	switch {
 	case tag != "":
 		rec["type"] = "tag"
@@ -433,7 +463,116 @@ func (s *Store) LogAgentMeta(tag, agentName, agentColor, agentSetting string) er
 	default:
 		return nil
 	}
-	return s.LogRecord(rec)
+	return s.logBare(rec)
+}
+
+// LogMode writes {type:"mode",mode,sessionId} — real's saveMode row. The
+// value is the session mode ("normal" for a plain REPL, "coordinator" for
+// a coordinator session), NOT the permission mode. Real stamps it through
+// the metadata re-append (file materialize, resume adopt, post-compact,
+// exit).
+func (s *Store) LogMode(mode string) error {
+	return s.logBare(map[string]any{
+		"type": "mode", "mode": mode, "sessionId": s.SessionID,
+	})
+}
+
+// LogPermissionMode writes {type:"permission-mode",permissionMode,
+// sessionId} — real's savePermissionMode row (default|acceptEdits|plan|
+// bypassPermissions|auto|dontAsk), also via the metadata re-append. Real
+// stamps nothing at mode-change time.
+func (s *Store) LogPermissionMode(mode string) error {
+	return s.logBare(map[string]any{
+		"type": "permission-mode", "permissionMode": mode,
+		"sessionId": s.SessionID,
+	})
+}
+
+// StampMeta mirrors real's reAppendSessionMetadata: the metadata rows that
+// get re-written when the session file materializes, on resume adopt,
+// after compaction, and at exit. Rows identical to the last stamp are
+// skipped (real dedupes against a tail scan of the file).
+func (s *Store) StampMeta(mode, permMode string) error {
+	s.mu.Lock()
+	if s.metaStamps == nil {
+		s.metaStamps = map[string]string{}
+	}
+	writeMode := mode != "" && s.metaStamps["mode"] != mode
+	writePerm := permMode != "" && s.metaStamps["permission-mode"] != permMode
+	s.metaStamps["mode"] = mode
+	s.metaStamps["permission-mode"] = permMode
+	s.mu.Unlock()
+	if writeMode {
+		if err := s.LogMode(mode); err != nil {
+			return err
+		}
+	}
+	if writePerm {
+		return s.LogPermissionMode(permMode)
+	}
+	return nil
+}
+
+// LogRelocated writes {type:"relocated",sessionId,relocatedCwd} — stamped
+// when /cd moves the session to a different working directory.
+func (s *Store) LogRelocated(cwd string) error {
+	return s.logBare(map[string]any{
+		"type": "relocated", "sessionId": s.SessionID, "relocatedCwd": cwd,
+	})
+}
+
+// Relocate mirrors real's relocateSessionTranscript (mod_0416 cnt): /cd
+// carries the session with it — the <oldslug>/<sid>.jsonl transcript (and
+// the <sid>/ sidecar dir holding custom-title.json etc.) moves to the new
+// cwd's project dir, then a bare {type:"relocated"} row is stamped. When
+// the project dir is unchanged the file stays put and only the row lands
+// — and only when the relocated cwd actually changed.
+func (s *Store) Relocate(newCWD string) error {
+	s.mu.Lock()
+	oldPath := s.Path
+	dest := filepath.Join(dir(newCWD), s.SessionID+".jsonl")
+	move := filepath.Clean(dest) != filepath.Clean(oldPath)
+	s.mu.Unlock()
+
+	if move {
+		newDir := dir(newCWD)
+		if err := os.MkdirAll(newDir, 0o755); err != nil {
+			return err
+		}
+		// real sets an existing destination aside as
+		// <file>.superseded-<unixms> before moving (LZe)
+		if _, err := os.Stat(dest); err == nil {
+			setAside := fmt.Sprintf("%s.superseded-%d", dest, time.Now().UnixMilli())
+			if err := os.Rename(dest, setAside); err != nil {
+				return err
+			}
+		}
+		if err := os.Rename(oldPath, dest); err != nil {
+			// old file missing (ENOENT): real logs "old file missing" and
+			// skips the stamp; the session still repoints
+			if !os.IsNotExist(err) {
+				return err
+			}
+		}
+		// move the per-session sidecar dir (custom-title.json et al)
+		oldSub := filepath.Join(filepath.Dir(oldPath), s.SessionID)
+		newSub := filepath.Join(newDir, s.SessionID)
+		_ = os.Rename(oldSub, newSub) // absent on most sessions — ignore
+		s.mu.Lock()
+		s.Path = dest
+		s.mu.Unlock()
+	}
+	s.mu.Lock()
+	s.CWD = newCWD
+	changed := s.relocatedCwd != newCWD
+	if changed {
+		s.relocatedCwd = newCWD
+	}
+	s.mu.Unlock()
+	if !changed {
+		return nil
+	}
+	return s.LogRelocated(newCWD)
 }
 
 // ResolveArg resolves a -r/--resume argument to a session id in cwd's

@@ -87,13 +87,10 @@ func RunWithStore(l *agent.Loop, store Store) {
 			}
 		}
 		l.PermMode = order[(idx+1)%len(order)]
-		// real stamps {type:"mode"} on every mode cycle (mod_0409)
-		if currentStore != nil {
-			currentStore.LogRecord(map[string]any{
-				"type": "mode", "mode": l.PermMode,
-				"sessionId": l.Client.SessionID,
-			})
-		}
+		// real stamps NO transcript row on a mode cycle — the
+		// {type:"permission-mode"} row is written by the metadata
+		// re-append (materialize/resume/compact/exit), which picks up the
+		// mode current then
 		compInline(fmt.Sprintf("\r\n%s⏵⏵ %s mode%s\r\n", yellow, l.PermMode, reset))
 	}
 	var wantQuit atomic.Bool
@@ -161,8 +158,16 @@ func RunWithStore(l *agent.Loop, store Store) {
 		}
 	}
 	// EndConversation mid-turn → flag normal shutdown (raw-mode restore,
-	// unregister, MCP close, SessionEnd all run via the quit path).
-	endSession := func() { wantQuit.Store(true) }
+	// unregister, MCP close, SessionEnd all run via the quit path). Real's
+	// tool handler also stamps {type:"ended-by-model",timestamp,sessionId}
+	// into the transcript before aborting (mod_1681 → TJr/
+	// markSessionEndedByModel) — the /resume picker filters such sessions.
+	endSession := func() {
+		wantQuit.Store(true)
+		if st, ok := currentStore.(*session.Store); ok {
+			_ = st.LogEndedByModel()
+		}
+	}
 	if l.SessionEndReason == "" {
 		l.SessionEndReason = "other"
 	}
@@ -218,11 +223,9 @@ func RunWithStore(l *agent.Loop, store Store) {
 	}
 	l.ToolCtx.SetPermMode = func(mode string) {
 		l.PermMode = mode
-		if currentStore != nil {
-			currentStore.LogRecord(map[string]any{
-				"type": "system", "subtype": "permission-mode", "mode": mode,
-			})
-		}
+		// real writes no transcript row on a permission-mode change — the
+		// {type:"permission-mode"} row lands via the metadata re-append
+		// (StampMeta at exit / resume / materialize)
 	}
 	l.ToolCtx.OnCwdChanged = func(nc string) {
 		hooks.Run(l.Hooks, hooks.CwdChanged, map[string]any{
@@ -1689,6 +1692,13 @@ func (p *promptUI) askStructured(ks *keySource, header, question string, options
 }
 
 func fireSessionEndHook(l *agent.Loop) {
+	if !l.SessionEndFired {
+		// real's exit re-stamp (reAppendSessionMetadataAtExit, sJr): the
+		// session-metadata rows land once on the transcript tail
+		if st, ok := currentStore.(*session.Store); ok {
+			_ = st.StampMeta("normal", l.PermMode)
+		}
+	}
 	if l.Hooks == nil {
 		return
 	}

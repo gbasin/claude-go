@@ -1053,6 +1053,11 @@ func main() {
 
 	if st2 != nil {
 		defer st2.Close()
+		// real's exit re-stamp (sJr / reAppendSessionMetadataAtExit) lands
+		// the session-metadata rows ({type:"mode"},{type:"permission-mode"})
+		// on the transcript tail — deferred so the final mode is written.
+		// RunWithStore's SessionEnd path stamps too; StampMeta dedupes.
+		defer func() { _ = st2.StampMeta("normal", loop.PermMode) }()
 		loop.Transcript = st2.Path
 		loop.OnSessionTitle = func(title string) {
 			_ = st2.LogTitle(title)
@@ -1222,6 +1227,12 @@ func main() {
 		}
 	} else {
 		fireHook(loop, hooks.SessionStart)
+	}
+	// session file materialized — real's reAppendSessionMetadata stamps
+	// {type:"mode"} + {type:"permission-mode"} rows here (and on resume
+	// adopt); PermMode is final by now (flag > inherit > settings)
+	if st2 != nil {
+		_ = st2.StampMeta("normal", loop.PermMode)
 	}
 	if o.printMode {
 		tools.Interactive = false
