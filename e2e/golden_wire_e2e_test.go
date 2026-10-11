@@ -161,6 +161,9 @@ func TestGoldenRequestParity(t *testing.T) {
 func TestGoldenToolLoopParity(t *testing.T) {
 	gb, err := os.ReadFile("testdata/realwire_toolloop_294.json")
 	if err != nil {
+		gb, err = os.ReadFile(filepath.Join(extract.Dir(), "realwire_toolloop_default.json"))
+	}
+	if err != nil {
 		t.Skip("no golden capture")
 	}
 	var golden wireCapture
@@ -295,7 +298,7 @@ func normJSON(r json.RawMessage) string {
 //   - consecutive same-role transcript records coalesce into one message
 //   - the new prompt is bare-string user content
 //
-// Structural diff against realwire_resume_fable.json where env-conditional.
+// Structural diff against the realwire resume fixture where env-conditional.
 func TestGoldenResumeParity(t *testing.T) {
 	s := newSession(t)
 	recDir := filepath.Join(t.TempDir(), "reqs")

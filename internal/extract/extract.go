@@ -187,7 +187,7 @@ func Harvest(ctx context.Context, bin string, logf func(string, ...any)) (*Harve
 	var toolsWritten, skillsWritten bool
 
 	for _, mc := range modelClasses {
-		body, rawBody, headers, mainText, err := capture(ctx, bin, mc.Model, logf)
+		body, raws, headers, mainText, err := capture(ctx, bin, mc.Model, logf)
 		if err != nil {
 			logf("  %s: capture failed: %v", mc.Class, err)
 			continue
@@ -209,7 +209,7 @@ func Harvest(ctx context.Context, bin string, logf func(string, ...any)) (*Harve
 			res.ToolCount = len(body.Tools)
 			toolsWritten = true
 		}
-		writeWireCapture(dir, mc.Class, rawBody, headers)
+		writeWireCapture(dir, "print_"+mc.Class, raws[len(raws)-1], headers)
 		if !skillsWritten {
 			if idx := skillsIndexText(body); idx != "" {
 				os.WriteFile(filepath.Join(dir, "skills_index.txt"),
@@ -224,8 +224,15 @@ func Harvest(ctx context.Context, bin string, logf func(string, ...any)) (*Harve
 	}
 	// one default-model run feeds the golden-wire fixture — real's default
 	// is not necessarily a probed class
-	if _, rawBody, headers, _, err := capture(ctx, bin, "", logf); err == nil {
-		writeWireCapture(dir, "default", rawBody, headers)
+	if _, raws, headers, _, err := capture(ctx, bin, "", logf); err == nil {
+		writeWireCapture(dir, "print_default", raws[len(raws)-1], headers)
+	}
+
+	// tool-loop run — the golden toolloop fixture is the second request
+	// (post-tool_use); mock serves "tool:<name> <json>" prompts
+	if raws, hdrs, err := captureArgv(ctx, bin, "-p", `tool:Bash {"command":"echo hi"}`,
+		"--permission-mode", "bypassPermissions"); err == nil && len(raws) > 1 {
+		writeWireCapture(dir, "toolloop_default", raws[1], hdrs)
 	}
 
 	// interactive (PTY) run — the cli entrypoint's wire differs: CLI tool
@@ -244,7 +251,7 @@ func Harvest(ctx context.Context, bin string, logf func(string, ...any)) (*Harve
 				"agents_index_cli_"+cliModelClass(body.Model)+".txt"),
 				[]byte(idx), 0o644)
 		}
-		writeWireCapture(dir, "interactive", rawBody, headers)
+		writeWireCapture(dir, "print_interactive", rawBody, headers)
 	} else {
 		logf("  interactive: capture skipped: %v", err)
 	}
@@ -263,7 +270,7 @@ func Harvest(ctx context.Context, bin string, logf func(string, ...any)) (*Harve
 // capture runs `claude -p ping --model X` against a fresh mock in a seeded
 // sandbox. Returns the last /v1/messages body, its headers, and the main
 // system text with run-known dynamic values tokenized.
-func capture(ctx context.Context, bin, model string, logf func(string, ...any)) (*wireBody, []byte, http.Header, string, error) {
+func capture(ctx context.Context, bin, model string, logf func(string, ...any)) (*wireBody, [][]byte, http.Header, string, error) {
 	srv, err := mock.Start()
 	if err != nil {
 		return nil, nil, nil, "", err
@@ -296,7 +303,7 @@ func capture(ctx context.Context, bin, model string, logf func(string, ...any)) 
 	if err := json.Unmarshal(raw, &b); err != nil {
 		return nil, nil, nil, "", fmt.Errorf("captured body unmarshal: %w", err)
 	}
-	return &b, raw, srv.Headers[len(srv.Bodies)-1], tokenize(mainSystemText(b.System), cwd, home), nil
+	return &b, srv.Bodies, srv.Headers[len(srv.Bodies)-1], tokenize(mainSystemText(b.System), cwd, home), nil
 }
 
 // seedSandbox makes the isolated HOME/cwd + env real claude runs under.
@@ -456,7 +463,7 @@ type wireCapture struct {
 	Body        json.RawMessage   `json:"body"`
 }
 
-func writeWireCapture(dir, class string, raw []byte, headers http.Header) {
+func writeWireCapture(dir, name string, raw []byte, headers http.Header) {
 	h := map[string]string{}
 	for k, v := range headers {
 		if len(v) > 0 {
@@ -468,8 +475,7 @@ func writeWireCapture(dir, class string, raw []byte, headers http.Header) {
 		Headers:     h, Body: raw,
 	}
 	b, _ := json.MarshalIndent(wc, "", "  ")
-	os.WriteFile(filepath.Join(dir,
-		fmt.Sprintf("realwire_print_%s.json", class)), b, 0o644)
+	os.WriteFile(filepath.Join(dir, "realwire_"+name+".json"), b, 0o644)
 }
 
 const skillsMarker = "The following skills are available for use with the Skill tool:"
@@ -549,4 +555,33 @@ func cliModelClass(model string) string {
 	default:
 		return "haiku"
 	}
+}
+
+// captureArgv runs real claude with an arbitrary argv in the seeded
+// sandbox and returns all captured request bodies + last-seen headers.
+func captureArgv(ctx context.Context, bin string, argv ...string) ([][]byte, http.Header, error) {
+	srv, err := mock.Start()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer srv.Shutdown(ctx)
+
+	home, cwd, env, err := seedSandbox(srv.Addr)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer os.RemoveAll(home)
+	defer os.RemoveAll(cwd)
+
+	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, bin, argv...)
+	cmd.Env = env
+	cmd.Dir = cwd
+	out, runErr := cmd.CombinedOutput()
+
+	if len(srv.Bodies) == 0 {
+		return nil, nil, fmt.Errorf("no API request: %v\n%s", runErr, out)
+	}
+	return srv.Bodies, srv.Headers[len(srv.Bodies)-1], nil
 }
