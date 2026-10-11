@@ -133,7 +133,7 @@ func TestWriteWireCaptureShape(t *testing.T) {
 	raw := []byte(`{"model":"claude-fable-5-1","max_tokens":128000,"stream":true}`)
 	hdrs := make(map[string][]string)
 	hdrs["User-Agent"] = []string{"claude-cli/2.1.296"}
-	writeWireCapture(d, "fable", raw, hdrs)
+	writeWireCapture(d, "print_fable", raw, hdrs)
 	b, err := os.ReadFile(filepath.Join(d, "realwire_print_fable.json"))
 	if err != nil {
 		t.Fatal(err)
