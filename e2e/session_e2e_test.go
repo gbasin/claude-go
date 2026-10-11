@@ -48,9 +48,29 @@ func TestTranscriptWritten(t *testing.T) {
 	if len(recs) == 0 {
 		t.Fatal("transcript is empty")
 	}
+	// bookkeeping rows real writes bare (no uuid/parentUuid/timestamp):
+	// mode, permission-mode, latches, titles, file-history, cost-state…
+	bareTypes := map[string]bool{
+		"mode": true, "permission-mode": true, "atis-latch": true,
+		"isolation-latch": true, "dev-mods": true, "tag": true,
+		"agent-name": true, "agent-color": true, "agent-setting": true,
+		"ai-title": true, "custom-title": true, "summary": true,
+		"last-prompt": true, "queue-operation": true, "pr-link": true,
+		"continued-in": true, "ended-by-model": true, "relocated": true,
+		"fork-context-ref": true, "worktree-state": true,
+		"content-replacement": true, "file-history-snapshot": true,
+		"file-history-delta": true, "cost-state": true,
+		"history-suppression": true, "api-request": true,
+		"api-request-shape": true, "api-request-blob": true,
+		"observer-ref": true, "frame-link": true,
+	}
 	var sawUser, sawAssistant bool
 	for _, rec := range recs {
-		// every record: uuid + sessionId + timestamp present
+		typ, _ := rec["type"].(string)
+		if bareTypes[typ] {
+			continue
+		}
+		// chain records: uuid + sessionId + timestamp present
 		if u, _ := rec["uuid"].(string); u == "" {
 			t.Fatalf("record missing uuid: %v", rec)
 		}
@@ -60,7 +80,6 @@ func TestTranscriptWritten(t *testing.T) {
 		if ts, _ := rec["timestamp"].(string); ts == "" {
 			t.Fatalf("record missing timestamp: %v", rec)
 		}
-		typ, _ := rec["type"].(string)
 		if typ == "user" || typ == "assistant" {
 			if typ == "user" {
 				sawUser = true

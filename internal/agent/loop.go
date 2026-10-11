@@ -14,12 +14,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gbasin/claude-go/internal/api"
 	"github.com/gbasin/claude-go/internal/config"
 	"github.com/gbasin/claude-go/internal/hooks"
+	"github.com/gbasin/claude-go/internal/session"
 	"github.com/gbasin/claude-go/internal/tools"
 )
 
@@ -211,9 +213,39 @@ type Loop struct {
 	OnToolUseSummary func(summary string, toolUseIDs []string)
 	// OnSessionRecord writes transcript side records (pr-link et al) —
 	// the host binds it to the session store
-	OnSessionRecord  func(map[string]any)
-	handbackTail     bool // append the SubagentHandback reminder to msg[0]
-	noThinking       bool // thinking config dropped after a thinking 400
+	OnSessionRecord func(map[string]any)
+	// OnAttachment emits a transcript attachment row — the host binds it
+	// to the session store's LogAttachmentMeta (extra lands at top level:
+	// rendered, isMeta, …).
+	OnAttachment func(att, extra map[string]any)
+	handbackTail bool // append the SubagentHandback reminder to msg[0]
+	// forkedContext marks a fork subagent that inherited the parent's
+	// conversation — its transcript opens with a fork-context-ref row
+	// pointing back at the parent's leaf (real's fJr).
+	forkedContext bool
+	noThinking    bool // thinking config dropped after a thinking 400
+	// OnRequestReplay persists the api-request*/api-request-shape/
+	// api-request-blob row family — real's appendRequestReplayRecords
+	// (boundary-cleared request telemetry). Bound to the session store for
+	// the main loop and the agent transcript store on subagent loops.
+	// Returns "written"/"shape_too_large"/"no_transcript".
+	OnRequestReplay func(shapeHash string, shape, request any, blobs []session.ReplayBlob) string
+	// ReplaySource is real's querySource on api-request rows —
+	// "repl_main_thread" for the interactive main loop, "sdk" for -p, and
+	// agent:builtin:<type>/agent:custom:<type> on subagent loops. Empty on
+	// aux sub-loops (advisor/answerer/etc.) → nothing is recorded, matching
+	// real's as() gate (only main/subagent sources are captured).
+	ReplaySource string
+	rrLastID     string
+	rrLastHashes []string
+	rrBadShapes  map[string]bool
+	// cost-state ledger: per-model token/cost accumulation feeding the
+	// transcript's cost-state row (real's s3t emit, mod_0416).
+	costModels       map[string]*costModelUsage
+	unknownModelCost bool
+	costMu           sync.Mutex
+	toolNanos        atomic.Int64 // cumulative tool exec — totalToolDuration
+	apiNanosNoRetry  atomic.Int64 // final-attempt time — totalAPIDurationWithoutRetries
 	dropSafeguards   bool
 	dropEffort       bool // output_config dropped after a per-turn-effort 400
 	dropOutputConfig bool
@@ -610,6 +642,20 @@ func (l *Loop) ResetForNewSession() {
 	l.envIdx = 0
 	l.ambientPending = false
 	l.turnCount = 0
+	// the cost ledger resets with the conversation — real's jxo()
+	// claims a fresh ledger for the new session (and the replay chain
+	// map lives per ledger too)
+	l.costModels = nil
+	l.unknownModelCost = false
+	l.rrLastID, l.rrLastHashes = "", nil
+	l.costUSD = 0
+	l.UsageTotal = api.Usage{}
+	l.apiNanos.Store(0)
+	l.apiNanosNoRetry.Store(0)
+	l.toolNanos.Store(0)
+	l.LinesAdded.Store(0)
+	l.LinesRemoved.Store(0)
+	l.sessionStarted = time.Time{}
 }
 
 func (l *Loop) Ask(ctx context.Context, prompt string) (*api.Response, error) {
@@ -790,7 +836,9 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 			l.taskBudgetRemaining = 0
 		}
 	}
-	l.costUSD += modelCostUSD(l.Model, resp.Usage)
+	cost, known := modelCostUSD(l.Model, resp.Usage)
+	l.costUSD += cost
+	l.recordCostUsage(resp, cost, known)
 	if l.MaxBudgetUSD > 0 && l.costUSD > l.MaxBudgetUSD {
 		l.Messages = append(l.Messages, assistantMessage(resp))
 		return nil, fmt.Errorf("budget exceeded: $%.4f spent > $%.4f --max-budget-usd",
@@ -938,6 +986,7 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 		}
 		close(hbDone)
 		toolDurMs := time.Since(toolStart).Milliseconds()
+		l.toolNanos.Add(int64(time.Since(toolStart)))
 		l.prevToolDurations = append(l.prevToolDurations,
 			struct {
 				name string
@@ -1004,6 +1053,7 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 				l.OnSessionRecord(map[string]any{
 					"type": "pr-link", "sessionId": l.Client.SessionID,
 					"prNumber": n, "prUrl": url, "prRepository": repo,
+					"timestamp": time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
 				})
 			}
 		}
@@ -1075,6 +1125,7 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
 	var resp *api.Response
 	var err error
+	var lastAttemptNanos int64
 	models := append([]string{l.Model}, l.fallbackModels()...)
 	for mi := 0; mi < len(models); mi++ {
 		m := models[mi]
@@ -1090,7 +1141,12 @@ func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
 		if l.startAt.IsZero() {
 			l.startAt = reqStart
 		}
-		resp, err = l.Client.StreamMessage(ctx, l.buildRequest(), func(ev *api.StreamEvent) error {
+		req := l.buildRequest()
+		// api-request*/shape/blob rows — real's ust recorder call sits
+		// inside the per-attempt request builder (no-op unless the
+		// elegant-meadow gate is open)
+		l.recordAPIRequest(req)
+		resp, err = l.Client.StreamMessage(ctx, req, func(ev *api.StreamEvent) error {
 			if l.Events.OnStreamEvent != nil {
 				l.Events.OnStreamEvent(ev)
 			}
@@ -1157,6 +1213,7 @@ func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
 			return nil
 		})
 		l.apiNanos.Add(int64(time.Since(reqStart)))
+		lastAttemptNanos = int64(time.Since(reqStart))
 		if err == nil {
 			// rate_limit_event: real emits when the unified status header
 			// flips (mod_0069 v0 — emitted on change only)
@@ -1188,6 +1245,9 @@ func (l *Loop) tryModels(ctx context.Context) (*api.Response, error) {
 			break
 		}
 	}
+	// totalAPIDurationWithoutRetries on the cost-state row counts the
+	// settled attempt only — retries/fallback legs are excluded
+	l.apiNanosNoRetry.Add(lastAttemptNanos)
 	return resp, err
 }
 
@@ -1341,6 +1401,23 @@ func (l *Loop) runHook(ev hooks.Event, extra map[string]any) hooks.Result {
 		})
 	}
 	res := hooks.Run(l.Hooks, ev, payload, l.ToolCtx.CWD)
+	// a hook's systemMessage lands in the transcript as an attachment row
+	// ({type:"hook_system_message",content,hookName,toolUseID,hookEvent}).
+	if res.SystemMessage != "" && l.OnAttachment != nil {
+		hookName := string(ev)
+		if ms := l.Hooks[string(ev)]; len(ms) == 1 &&
+			ms[0].Matcher != "" && ms[0].Matcher != "*" {
+			hookName += ":" + ms[0].Matcher // real's hookName is "<Event>:<matcher>"
+		}
+		toolUseID, _ := extra["tool_use_id"].(string)
+		if toolUseID == "" {
+			toolUseID = "hook-" + api.NewUUID()
+		}
+		l.OnAttachment(map[string]any{
+			"type": "hook_system_message", "content": res.SystemMessage,
+			"hookName": hookName, "toolUseID": toolUseID, "hookEvent": string(ev),
+		}, nil)
+	}
 	if l.OnHookEvent != nil {
 		if len(res.Records) == 0 {
 			l.OnHookEvent(map[string]any{
@@ -2165,8 +2242,10 @@ func tokenBudgetStart() int64 {
 }
 
 // modelCostUSD approximates the request cost — real's per-token price
-// table; the replica keeps rough per-1M rates per model family.
-func modelCostUSD(model string, u api.Usage) float64 {
+// table; the replica keeps rough per-1M rates per model family. known is
+// false when the model fell through to the default rate — that feeds
+// cost-state's hasUnknownModelCost.
+func modelCostUSD(model string, u api.Usage) (usd float64, known bool) {
 	var in, out float64 // per 1M tokens
 	switch {
 	case strings.Contains(model, "opus"):
@@ -2176,9 +2255,46 @@ func modelCostUSD(model string, u api.Usage) float64 {
 	default: // fable/sonnet class
 		in, out = 3, 15
 	}
-	return (float64(u.InputTokens)*in + float64(u.OutputTokens)*out +
+	usd = (float64(u.InputTokens)*in + float64(u.OutputTokens)*out +
 		float64(u.CacheReadInputTokens)*in*0.1 +
 		float64(u.CacheCreationInputTokens)*in*1.25) / 1e6
+	known = strings.Contains(model, "opus") || strings.Contains(model, "haiku") ||
+		strings.Contains(model, "sonnet") || strings.Contains(model, "fable")
+	return usd, known
+}
+
+// recordCostUsage accumulates per-model token/cost usage — the modelUsage
+// map on the transcript's cost-state row (real's cost ledger, jO()).
+func (l *Loop) recordCostUsage(resp *api.Response, cost float64, known bool) {
+	model := resp.Model
+	if model == "" {
+		model = l.Model
+	}
+	l.costMu.Lock()
+	defer l.costMu.Unlock()
+	if l.costModels == nil {
+		l.costModels = map[string]*costModelUsage{}
+	}
+	e := l.costModels[model]
+	if e == nil {
+		e = &costModelUsage{}
+		l.costModels[model] = e
+	}
+	u := resp.Usage
+	e.InputTokens += u.InputTokens
+	e.OutputTokens += u.OutputTokens
+	e.CacheReadInputTokens += u.CacheReadInputTokens
+	e.CacheCreationInputTokens += u.CacheCreationInputTokens
+	if u.OutputTokensDetails != nil {
+		e.ThinkingTokens += u.OutputTokensDetails.ThinkingTokens
+	}
+	if u.ServerToolUse != nil {
+		e.WebSearchRequests += u.ServerToolUse.WebSearchRequests
+	}
+	e.CostUSD += cost
+	if !known {
+		l.unknownModelCost = true
+	}
 }
 
 // stopFailureClass maps an API error to real's StopFailure matcher

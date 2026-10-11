@@ -399,6 +399,17 @@ func main() {
 			fmt.Fprintln(os.Stderr, "--bg:", err)
 			os.Exit(1)
 		}
+		// real stamps continued-in on the source transcript when its work
+		// hands off to a different session id (TRe/Jns) — the picker then
+		// hides the superseded file
+		if o.resume != "" && o.resume != "-" {
+			if strings.HasSuffix(o.resume, ".jsonl") {
+				_ = session.AppendContinuedIn(o.resume,
+					strings.TrimSuffix(filepath.Base(o.resume), ".jsonl"), sessionID)
+			} else if src := session.ResolveArg(cwd, o.resume); src != "" && src != sessionID {
+				_ = session.LogContinuedInTo(cwd, src, sessionID)
+			}
+		}
 		fmt.Printf("background session %s started\n", sessionID)
 		fmt.Printf("  attach:   claude attach %s\n", sid8(sessionID))
 		fmt.Println("  monitor:  claude agents")
@@ -416,11 +427,19 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	var worktreeState map[string]any
 	if o.worktreeSet {
-		cwd = setupWorktree(cwd, o.worktreeName, sessionID)
+		var wc string
+		wc, worktreeState = setupWorktree(cwd, o.worktreeName, sessionID)
+		cwd = wc
 		os.Chdir(cwd)
 		if o.tmux != "" {
 			setupTmuxSession(cwd, o.worktreeName, sessionID)
+			if worktreeState != nil {
+				if tn := os.Getenv("CLAUDE_CODE_TMUX_SESSION"); tn != "" {
+					worktreeState["tmuxSessionName"] = tn
+				}
+			}
 		}
 	}
 
@@ -1053,6 +1072,11 @@ func main() {
 
 	if st2 != nil {
 		defer st2.Close()
+		// real's exit re-stamp (sJr / reAppendSessionMetadataAtExit) lands
+		// the session-metadata rows ({type:"mode"},{type:"permission-mode"})
+		// on the transcript tail — deferred so the final mode is written.
+		// RunWithStore's SessionEnd path stamps too; StampMeta dedupes.
+		defer func() { _ = st2.StampMeta("normal", loop.PermMode) }()
 		loop.Transcript = st2.Path
 		loop.OnSessionTitle = func(title string) {
 			_ = st2.LogTitle(title)
@@ -1063,14 +1087,59 @@ func main() {
 				o.permMode) // system/init — incl. perm mode for --inherit-permission-mode
 			// resumed transcript already carries its own init record
 		}
-		tools.OnSnapshot = func(path, backup string, ver int) {
-			st2.LogRecord(map[string]any{
-				"type": "file-history-snapshot", "isSnapshotUpdate": true,
-				"snapshot": map[string]any{"trackedFileBackups": map[string]any{
-					path: map[string]any{"backupFileName": filepath.Base(backup),
-						"version": ver, "backupTime": time.Now().UTC().Format(time.RFC3339)},
-				}},
-			})
+		// session-state stamps — real latches + flushes these at session
+		// start (mod_0416 _2/mlr + planReAppendSessionMetadata):
+		//   {type:"mode"}       — "coordinator"|"normal" (NOT the perm mode)
+		//   {type:"permission-mode"} — the permission mode
+		//   {type:"atis-latch"} — the atis latch; "" on standard sessions
+		mode := "normal"
+		if tools.IsCoordinatorMode() {
+			mode = "coordinator"
+		}
+		_ = st2.StampMode(mode)
+		// --inherit-permission-mode resolves BEFORE the materialize stamp —
+		// the stamp itself writes last-wins permission-mode rows into the
+		// resumed transcript, so reading after it would return our own write
+		if os.Getenv("CLAUDE_GO_INHERIT_PERMISSION_MODE") != "" && !o.permModeSet && resumeID != "" {
+			if m := session.InitMode(cwd, resumeID); m != "" {
+				loop.PermMode = m
+			}
+		}
+		_ = st2.StampPermMode(loop.PermMode)
+		_ = st2.LogAtisLatch("")
+		if tc := loop.TeammateCtx; tc != nil {
+			// teammate sessions stamp their identity (saveAgentName/fAe,
+			// saveAgentColor/XKt)
+			_ = st2.LogAgentMeta("", tc.AgentName, "", "")
+			_ = st2.LogAgentMeta("", "", tc.Color, "")
+		}
+		if o.agentName != "" {
+			// --agent <type> → real's agent-setting latch (pnt)
+			_ = st2.LogAgentMeta("", "", "", o.agentName)
+		}
+		// real's saveWorktreeState — stamped once when the session entered
+		// the worktree (AM); resume dedupes an identical tail row, so a
+		// same-state re-stamp would be a no-op anyway
+		if worktreeState != nil {
+			_ = st2.LogWorktreeState(worktreeState)
+		}
+		// real's file-history rows: a file-history-snapshot keyed to each
+		// user message uuid (empty trackedFileBackups when nothing is
+		// tracked yet) plus a file-history-delta per file first tracked
+		// during that message's turn (pending first-tracks flush here).
+		st2.OnUserPrompt = func(u string) {
+			if os.Getenv("CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING") != "" {
+				return
+			}
+			_ = st2.LogFileHistorySnapshot(u, tools.Checkpoints.BackupMap(), false)
+			for _, d := range tools.Checkpoints.TakePending() {
+				_ = st2.LogFileHistoryDelta(u, u, d.Path, d.Wire())
+			}
+		}
+		// hook system messages land as attachment rows
+		// ({type:"attachment",attachment:{type:"hook_system_message",...}})
+		loop.OnAttachment = func(att, extra map[string]any) {
+			_ = st2.LogAttachmentMeta(att, extra)
 		}
 		if ar, ok := loop.ToolCtx.Agent.(*agent.Runner); ok {
 			ar.Transcript = st2.Path
@@ -1095,8 +1164,20 @@ func main() {
 			st2.LogRecord(map[string]any{"type": "summary", "summary": o.sessionName})
 		}
 		// pr-link: real writes the record when a gh PR URL lands in a
-		// Bash result — the loop detects, we persist (mod_0409 q2s)
-		loop.OnSessionRecord = func(rec map[string]any) { _ = st2.LogRecord(rec) }
+		// Bash result — the loop detects, we persist (mod_0409 q2s).
+		// Bare: real's pr-link is a last-wins row, no uuid/parentUuid.
+		loop.OnSessionRecord = func(rec map[string]any) { _ = st2.LogBare(rec) }
+		// api-request* rows: real's request-replay recorder routes to the
+		// transcript — only emitted under the elegant-meadow gate
+		loop.OnRequestReplay = func(sh string, shape, request any, blobs []session.ReplayBlob) string {
+			return st2.AppendReplayRecords(sh, shape, request, blobs)
+		}
+	}
+	// querySource for api-request rows — real's repl_main_thread / sdk
+	if o.printMode {
+		loop.ReplaySource = "sdk"
+	} else {
+		loop.ReplaySource = "repl_main_thread"
 	}
 
 	if o.cont || o.resume != "" {
@@ -1165,6 +1246,11 @@ func main() {
 							"type": "system", "subtype": "fork",
 							"forkedFrom": map[string]string{"sessionId": id},
 						})
+					} else {
+						// real's TRe/Jns: the source transcript gets
+						// {type:"continued-in",continuedInSessionId:<new>}
+						// marking it superseded for the picker
+						_ = session.StampContinuedIn(src, id, sessionID)
 					}
 					fmt.Fprintf(os.Stderr, "forked session %s → %s (%d messages)\n", id[:8], sessionID[:8], len(msgs))
 				} else {
@@ -1222,6 +1308,12 @@ func main() {
 		}
 	} else {
 		fireHook(loop, hooks.SessionStart)
+	}
+	// session file materialized — real's reAppendSessionMetadata stamps
+	// {type:"mode"} + {type:"permission-mode"} rows here (and on resume
+	// adopt); PermMode is final by now (flag > inherit > settings)
+	if st2 != nil {
+		_ = st2.StampMeta("normal", loop.PermMode)
 	}
 	if o.printMode {
 		tools.Interactive = false
@@ -1923,6 +2015,11 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 	if st != nil {
 		for _, mm := range l.Messages {
 			st.LogMessage(mm)
+		}
+		// cost-state: the ledger save that runs on graceful shutdown —
+		// for -p the completed run is that boundary
+		if rec := l.CostState(); rec != nil {
+			_ = st.LogRawRecord(rec)
 		}
 	}
 	if format == "text" {

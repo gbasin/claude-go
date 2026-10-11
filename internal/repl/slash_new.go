@@ -158,6 +158,11 @@ func colorCmd(ed *editor, arg string) {
 	for _, c := range promptBarColors {
 		if arg == c.name {
 			ed.prompt = " " + c.ansi + "❯\u00a0" + reset
+			// real's saveAgentColor (XKt): the session color latches into
+			// the transcript as {type:"agent-color"} and re-stamps per flush
+			if currentStore != nil {
+				currentStore.LogAgentMeta("", "", c.name, "")
+			}
 			dprintf("  prompt bar color → %s%s%s\n", c.ansi, c.name, reset)
 			return
 		}

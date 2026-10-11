@@ -622,19 +622,38 @@ func installCLIAgents(js, cwd string) func() {
 
 // setupWorktree creates a git worktree at <cwd>/.claude/worktrees/<name>
 // on a new branch worktree-<name> and returns the directory to cd into.
-func setupWorktree(cwd, name, sessionID string) string {
+// The second result is real's worktreeSession descriptor — stamped on the
+// transcript as {type:"worktree-state"} (saveWorktreeState/AM) — or nil
+// when the session stays in cwd.
+func setupWorktree(cwd, name, sessionID string) (string, map[string]any) {
 	if name == "" {
 		name = "claude-" + sid8(sessionID)
 	}
 	root := filepath.Join(cwd, ".claude", "worktrees")
 	wt := filepath.Join(root, name)
+	ws := func(branch string, enteredExisting bool) map[string]any {
+		out, _ := exec.Command("git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD").Output()
+		head, _ := exec.Command("git", "-C", cwd, "rev-parse", "HEAD").Output()
+		return map[string]any{
+			"originalCwd":         cwd,
+			"preEnterOriginalCwd": cwd,
+			"worktreePath":        wt,
+			"worktreeName":        name,
+			"worktreeBranch":      branch,
+			"originalBranch":      strings.TrimSpace(string(out)),
+			"originalHeadCommit":  strings.TrimSpace(string(head)),
+			"sessionId":           sessionID,
+			"hookBased":           false,
+			"enteredExisting":     enteredExisting,
+		}
+	}
 	if fi, err := os.Stat(wt); err == nil && fi.IsDir() {
 		fmt.Fprintf(os.Stderr, "reusing existing worktree %s\n", wt)
-		return wt
+		return wt, ws("worktree-"+name, true)
 	}
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "worktree: %v (staying in %s)\n", err, cwd)
-		return cwd
+		return cwd, nil
 	}
 	branch := "worktree-" + name
 	out, err := exec.Command("git", "-C", cwd, "worktree", "add", wt, "-b", branch).CombinedOutput()
@@ -643,11 +662,11 @@ func setupWorktree(cwd, name, sessionID string) string {
 		out2, err2 := exec.Command("git", "-C", cwd, "worktree", "add", wt, branch).CombinedOutput()
 		if err2 != nil {
 			fmt.Fprintf(os.Stderr, "worktree failed: %s%s (staying in %s)\n", out, out2, cwd)
-			return cwd
+			return cwd, nil
 		}
 	}
 	fmt.Fprintf(os.Stderr, "worktree %s at %s\n", branch, wt)
-	return wt
+	return wt, ws(branch, false)
 }
 
 // --- --resume-session-at ---------------------------------------------------

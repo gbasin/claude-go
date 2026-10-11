@@ -465,11 +465,18 @@ func (r *Runner) runAgentRaw(c *tools.Context, description, prompt, subagentType
 	if r.Parent != nil {
 		parentAID = r.Parent.LoopAgentID
 	}
+	// real's subagent querySource — agent:builtin:<type> for shipped defs,
+	// agent:custom:<type> for user/project/plugin/cli defs (mod_0591 lte)
+	agentQS := "agent:custom:" + def.Name
+	if def.Source == "builtin" {
+		agentQS = "agent:builtin:" + def.Name
+	}
 	sub := &Loop{
 		IsSubagent:    true,
 		Depth:         depth,
 		LoopAgentID:   rec.AgentID,
 		ParentAgentID: parentAID,
+		ReplaySource:  agentQS,
 		AllowedTools:  def.resolveAllowed(extraAllowed),
 		AppendSysP:    def.effectiveSystemPrompt(),
 		ExtraSystem: func() []string {
@@ -502,6 +509,7 @@ func (r *Runner) runAgentRaw(c *tools.Context, description, prompt, subagentType
 		// fork inherits the parent's full conversation
 		sub.Messages = append(sub.Messages, r.Parent.Messages...)
 		sub.started = true
+		sub.forkedContext = true
 	}
 	if def.InitialPrompt != "" {
 		prompt = def.InitialPrompt + "\n\n" + prompt
@@ -602,6 +610,25 @@ func (r *Runner) runAgentTurn(sub *Loop, prompt string, c *tools.Context, rec *t
 	if r.Transcript != "" {
 		if st, err := session.OpenSubagent(r.Transcript, rec.AgentID, c.CWD); err == nil {
 			subStore = st
+			// real's fJr: a fork-context subagent references the parent's
+			// transcript tail instead of copying messages — the ref row
+			// ({type:"fork-context-ref",agentId,parentSessionId,
+			// parentLastUuid,contextLength}) lets a resume hydrate the
+			// prefix. Written before the agent's first record.
+			if sub.forkedContext && r.Parent != nil {
+				if leaf := session.LeafUUID(r.Transcript); leaf != "" {
+					_ = st.LogForkContextRef(rec.AgentID, r.Client.SessionID,
+						leaf, len(r.Parent.Messages))
+				}
+			}
+			sub.OnAttachment = func(att, extra map[string]any) {
+				_ = st.LogAttachmentMeta(att, extra)
+			}
+			// api-request* rows for this agent route to its own
+			// transcript (real's route-by-agent → lg(agentId))
+			sub.OnRequestReplay = func(sh string, shape, request any, blobs []session.ReplayBlob) string {
+				return st.AppendReplayRecords(sh, shape, request, blobs)
+			}
 			// a mid-turn auto-compact in the subagent rewrites history —
 			// log the replaced span + boundary so the sidechain
 			// transcript keeps the full record like the parent does

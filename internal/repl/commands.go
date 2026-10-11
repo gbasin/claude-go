@@ -85,6 +85,9 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 			"cwd": l.ToolCtx.CWD, "hook_event_name": "SessionEnd",
 			"reason": "clear", "permission_mode": l.PermMode,
 		}, l.ToolCtx.CWD)
+		// cost-state lands on the outgoing ledger before reset (real's
+		// save on conversation reset, mod_1144)
+		writeCostState(l)
 		l.ResetForNewSession()
 		l.SessionStartSource = "clear"
 		hooks.Run(l.Hooks, hooks.SessionStart, map[string]any{
@@ -209,12 +212,22 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 				// new turns append to it parented at the loaded leaf
 				path := filepath.Join(session.ProjectsDir(l.ToolCtx.CWD), id+".jsonl")
 				if ns, err2 := session.Open(l.ToolCtx.CWD, id); err2 == nil {
+					// cost-state: real saves the outgoing session's
+					// ledger to ITS transcript before switching
+					writeCostState(l)
 					ns.SeedParent(session.LeafUUID(path))
 					if old, ok := currentStore.(io.Closer); ok {
 						old.Close()
 					}
 					currentStore = ns
 					l.Transcript = ns.Path
+					// side-record callbacks were bound to the old
+					// store in main.go — rebind so pr-link and
+					// api-request* rows land in the resumed file
+					l.OnSessionRecord = func(rec map[string]any) { _ = ns.LogRecord(rec) }
+					l.OnRequestReplay = func(sh string, shape, request any, blobs []session.ReplayBlob) string {
+						return ns.AppendReplayRecords(sh, shape, request, blobs)
+					}
 				} else {
 					dprintln("  resume: couldn't open transcript:", err2)
 				}
@@ -3878,6 +3891,15 @@ func cdCmd(l *agent.Loop, arg string) {
 	l.CWD = p
 	l.ToolCtx.CWD = p
 	os.Chdir(p)
+	// real's relocateSessionTranscript (mod_0416 cnt): the session file
+	// follows the session — moving cwd across project dirs renames
+	// <oldslug>/<sid>.jsonl into the new slug dir and stamps a bare
+	// {type:"relocated",sessionId,relocatedCwd} row
+	if rs, ok := currentStore.(*session.Store); ok && rs != nil {
+		if err := rs.Relocate(p); err == nil {
+			l.Transcript = rs.Path // transcript_path hooks read the new home
+		}
+	}
 	if l.ToolCtx.OnCwdChanged != nil {
 		l.ToolCtx.OnCwdChanged(p)
 	}

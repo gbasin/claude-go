@@ -362,9 +362,28 @@ func artPublish(c *Context, in *artIn) Result {
 		if err != nil {
 			return Result{Content: err.Error(), IsError: true}
 		}
-		return artCall(c, "PUT", "/v1/artifacts/"+url.PathEscape(slug), body)
+		res := artCall(c, "PUT", "/v1/artifacts/"+url.PathEscape(slug), body)
+		emitFrameLink(c, in, res)
+		return res
 	}
-	return artCall(c, "POST", "/v1/artifacts", body)
+	res := artCall(c, "POST", "/v1/artifacts", body)
+	emitFrameLink(c, in, res)
+	return res
+}
+
+// emitFrameLink stamps real's {type:"frame-link"} transcript record after
+// a successful page publish (mod_1663): path/frameUrl/title plus the
+// session's known-frame count. The frame URL is the artifact URL the
+// publish response just recorded.
+func emitFrameLink(c *Context, in *artIn, res Result) {
+	if c.OnSessionRecord == nil || res.IsError || len(SessionArtifacts) == 0 {
+		return
+	}
+	c.OnSessionRecord(map[string]any{
+		"type": "frame-link", "path": in.FilePath,
+		"frameUrl": SessionArtifacts[len(SessionArtifacts)-1],
+		"title":    in.Title, "artifactCount": len(SessionArtifacts),
+	})
 }
 
 // artReadLocal reads a publishable local file into the wire shape.
