@@ -266,6 +266,12 @@ type Usage struct {
 		Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 		Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 	} `json:"cache_creation,omitempty"`
+	// ServerToolUse counts server-side tool calls the API metered —
+	// server_tool_use.web_search_requests feeds modelUsage.webSearchRequests
+	// on cost-state rows.
+	ServerToolUse *struct {
+		WebSearchRequests int `json:"web_search_requests,omitempty"`
+	} `json:"server_tool_use,omitempty"`
 }
 
 type APIError struct {

@@ -1154,6 +1154,17 @@ func main() {
 		// Bash result — the loop detects, we persist (mod_0409 q2s).
 		// Bare: real's pr-link is a last-wins row, no uuid/parentUuid.
 		loop.OnSessionRecord = func(rec map[string]any) { _ = st2.LogBare(rec) }
+		// api-request* rows: real's request-replay recorder routes to the
+		// transcript — only emitted under the elegant-meadow gate
+		loop.OnRequestReplay = func(sh string, shape, request any, blobs []session.ReplayBlob) string {
+			return st2.AppendReplayRecords(sh, shape, request, blobs)
+		}
+	}
+	// querySource for api-request rows — real's repl_main_thread / sdk
+	if o.printMode {
+		loop.ReplaySource = "sdk"
+	} else {
+		loop.ReplaySource = "repl_main_thread"
 	}
 
 	if o.cont || o.resume != "" {
@@ -1985,6 +1996,11 @@ func runPrint(l *agent.Loop, prompt, format string, st *session.Store, schema st
 	if st != nil {
 		for _, mm := range l.Messages {
 			st.LogMessage(mm)
+		}
+		// cost-state: the ledger save that runs on graceful shutdown —
+		// for -p the completed run is that boundary
+		if rec := l.CostState(); rec != nil {
+			_ = st.LogRawRecord(rec)
 		}
 	}
 	if format == "text" {

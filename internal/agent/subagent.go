@@ -465,11 +465,18 @@ func (r *Runner) runAgentRaw(c *tools.Context, description, prompt, subagentType
 	if r.Parent != nil {
 		parentAID = r.Parent.LoopAgentID
 	}
+	// real's subagent querySource — agent:builtin:<type> for shipped defs,
+	// agent:custom:<type> for user/project/plugin/cli defs (mod_0591 lte)
+	agentQS := "agent:custom:" + def.Name
+	if def.Source == "builtin" {
+		agentQS = "agent:builtin:" + def.Name
+	}
 	sub := &Loop{
 		IsSubagent:    true,
 		Depth:         depth,
 		LoopAgentID:   rec.AgentID,
 		ParentAgentID: parentAID,
+		ReplaySource:  agentQS,
 		AllowedTools:  def.resolveAllowed(extraAllowed),
 		AppendSysP:    def.effectiveSystemPrompt(),
 		ExtraSystem: func() []string {
@@ -616,6 +623,11 @@ func (r *Runner) runAgentTurn(sub *Loop, prompt string, c *tools.Context, rec *t
 			}
 			sub.OnAttachment = func(att, extra map[string]any) {
 				_ = st.LogAttachmentMeta(att, extra)
+			}
+			// api-request* rows for this agent route to its own
+			// transcript (real's route-by-agent → lg(agentId))
+			sub.OnRequestReplay = func(sh string, shape, request any, blobs []session.ReplayBlob) string {
+				return st.AppendReplayRecords(sh, shape, request, blobs)
 			}
 			// a mid-turn auto-compact in the subagent rewrites history —
 			// log the replaced span + boundary so the sidechain

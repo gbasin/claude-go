@@ -67,12 +67,29 @@ type Store interface {
 	// LogAttachmentMeta writes a chain-participating {type:"attachment"}
 	// row; extra lands at top level (rendered, renderedInHumanTurn, …).
 	LogAttachmentMeta(att, extra map[string]any) error
+	// LogRawRecord appends a record verbatim — cost-state and
+	// history-suppression carry no uuid/parentUuid stamps in real.
+	LogRawRecord(ev any) error
+}
+
+// writeCostState persists the session's cost ledger row — real emits
+// {type:"cost-state"} when the ledger is saved (conversation reset,
+// session switch, graceful shutdown).
+func writeCostState(l *agent.Loop) {
+	if currentStore == nil || l == nil {
+		return
+	}
+	if rec := l.CostState(); rec != nil {
+		_ = currentStore.LogRawRecord(rec)
+	}
 }
 
 // RunWithStore is Run with session transcript logging.
 func RunWithStore(l *agent.Loop, store Store) {
 	applyTheme(themeSetting(l.CWD), l.CWD)
 	currentStore = store
+	// graceful shutdown → cost-state row on the outgoing transcript
+	defer writeCostState(l)
 	l.Entrypoint = "cli"
 	ed := newEditor()
 	// viewMode: default|verbose|focus — real's startup transcript mode
