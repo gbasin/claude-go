@@ -65,7 +65,7 @@ type ContentBlock struct {
 // the field even when false (294 wire), and never on other block types.
 func (b ContentBlock) MarshalJSON() ([]byte, error) {
 	type alias ContentBlock
-	raw, err := json.Marshal(alias(b))
+	raw, err := marshalNoEscape(alias(b))
 	if err != nil || b.Type != "tool_result" {
 		return raw, err
 	}
@@ -77,7 +77,7 @@ func (b ContentBlock) MarshalJSON() ([]byte, error) {
 	m["is_error"] = ie
 	// is_error position follows content on real's wire — Go's map
 	// marshal sorts keys, but the API doesn't care about order.
-	out, err := json.Marshal(m)
+	out, err := marshalNoEscape(m)
 	if err != nil {
 		return raw, nil
 	}
@@ -118,16 +118,18 @@ func (t Tool) MarshalJSON() ([]byte, error) {
 		return t.Raw, nil
 	}
 	type plain Tool
-	return json.Marshal(plain(t))
+	return marshalNoEscape(plain(t))
 }
 
 type Request struct {
-	Model             string          `json:"model"`
+	Model    string          `json:"model"`
+	Messages []Message       `json:"messages"`
+	System   []SystemBlock   `json:"system,omitempty"`
+	Tools    []Tool          `json:"tools,omitempty"`
+	Metadata json.RawMessage `json:"metadata,omitempty"`
+	// max_tokens lands after metadata on real's wire — the SDK param
+	// object emits CLI fields first, SDK-resolved fields last
 	MaxTokens         int             `json:"max_tokens"`
-	Messages          []Message       `json:"messages"`
-	System            []SystemBlock   `json:"system,omitempty"`
-	Tools             []Tool          `json:"tools,omitempty"`
-	Metadata          json.RawMessage `json:"metadata,omitempty"`
 	Thinking          json.RawMessage `json:"thinking,omitempty"`
 	ContextManagement json.RawMessage `json:"context_management,omitempty"`
 	Safeguards        json.RawMessage `json:"safeguards,omitempty"`
@@ -171,7 +173,7 @@ type Request struct {
 // over env-driven ones.
 func (r *Request) MarshalJSON() ([]byte, error) {
 	type plain Request
-	b, err := json.Marshal((*plain)(r))
+	b, err := marshalNoEscape((*plain)(r))
 	if err != nil || len(r.ExtraBody) == 0 {
 		return b, err
 	}
@@ -182,13 +184,13 @@ func (r *Request) MarshalJSON() ([]byte, error) {
 	// real's XY() lands via a later object spread — env fields override
 	// built ones (except output_config, which seeds Aa before CLI fields)
 	for k, v := range r.ExtraBody {
-		raw, err := json.Marshal(v)
+		raw, err := marshalNoEscape(v)
 		if err != nil {
 			continue
 		}
 		m[k] = raw
 	}
-	return json.Marshal(m)
+	return marshalNoEscape(m)
 }
 
 // SSE event types from stream=true

@@ -341,7 +341,7 @@ func mergeExtraBody(raw []byte) []byte {
 	for k, v := range extra {
 		base[k] = v
 	}
-	out, err := json.Marshal(base)
+	out, err := marshalNoEscape(base)
 	if err != nil {
 		return raw
 	}
@@ -1347,4 +1347,51 @@ func (c *Client) applyIdentityAuth(req *http.Request) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// marshalNoEscape is json.Marshal without HTML escaping — real's Bun
+// JSON.stringify emits literal <>& in strings, and Go's default escapes
+// them to \u003c etc., diverging wire bytes (env blocks carry
+// <total_tokens> tags).
+func marshalNoEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
+// unescapeHTMLSeq converts Go-style \u003c/\u003e/\u0026 escapes inside
+// JSON strings back to literal chars — Bun's JSON.stringify (real) never
+// escapes them. A literal backslash before the sequence is left alone —
+// replacing there would corrupt the JSON.
+func unescapeHTMLSeq(b []byte) []byte {
+	if !bytes.Contains(b, []byte(`\u00`)) {
+		return b
+	}
+	var out bytes.Buffer
+	out.Grow(len(b))
+	for i := 0; i < len(b); i++ {
+		if b[i] == '\\' && i+5 < len(b) && b[i+1] == 'u' &&
+			b[i+2] == '0' && b[i+3] == '0' && !(i > 0 && b[i-1] == '\\') {
+			var repl byte
+			switch {
+			case b[i+4] == '3' && (b[i+5] == 'c' || b[i+5] == 'C'):
+				repl = '<'
+			case b[i+4] == '3' && (b[i+5] == 'e' || b[i+5] == 'E'):
+				repl = '>'
+			case b[i+4] == '2' && b[i+5] == '6':
+				repl = '&'
+			}
+			if repl != 0 {
+				out.WriteByte(repl)
+				i += 5
+				continue
+			}
+		}
+		out.WriteByte(b[i])
+	}
+	return out.Bytes()
 }

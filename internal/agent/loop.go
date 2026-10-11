@@ -349,10 +349,11 @@ func (l *Loop) buildRequest() *api.Request {
 		l.EvalWait = nil
 	}
 	var safeguards json.RawMessage
-	// safeguards classifier_context rides only when the turn opened a
-	// fresh request (mid-tool-loop msgs end in tool_result → omitted,
-	// real 294) AND the GB eval left the flag enabled
-	if !l.dropSafeguards && !tailEndsInToolResult(msgs) && !l.Client.EvalFailed() {
+	// safeguards classifier_context rides on every opening request —
+	// mid-tool-loop msgs end in tool_result → omitted (real 294).
+	// Eval-failure only drops the GB betas, not this block (harness:
+	// real emits it even with a failed/sandboxed eval).
+	if !l.dropSafeguards && !tailEndsInToolResult(msgs) {
 		safeguards = Safeguards(l.PermMode, l.ToolCtx.CWD, l.PermRules)
 	}
 	var outCfg json.RawMessage

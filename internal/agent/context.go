@@ -398,44 +398,88 @@ func Safeguards(permMode, cwd string, rules map[string][]string) json.RawMessage
 		}
 		return out
 	}
-	cc := map[string]any{
-		"v": 1, "permission_mode": permMode,
-		"platform": platformName(), "live_cwd": cwdp, "home_dir": config.Home(),
-		"rule_roots": map[string]string{
-			"userSettings": filepath.Join(config.ClaudeDir()), "projectSettings": cwdp,
-			"localSettings": cwdp, "flagSettings": cwdp, "policySettings": cwdp,
-			"cliArg": cwdp, "command": cwdp, "session": cwdp,
-			"toolsNarrowing": cwdp, "mcpServerPolicy": cwdp, "hostCredential": cwdp,
-		},
-		"trusted_directories": map[string]any{
-			"primary":    map[string]any{"path": cwdp, "resolved": []string{cwdp}},
-			"additional": []any{}, "network": []any{},
-			"block_reads_outside_working_directories": false,
-		},
-		"rules": safeguardRulesMap(rules, mkRules),
+	rulesObj := safeguardRulesObj(rules, mkRules)
+	// nested key order mirrors real's classifier_context emission —
+	// captured 2.1.296: v, permission_mode, platform, live_cwd,
+	// home_dir, rule_roots, trusted_directories, rules, auto_mode,
+	// artifact_consent_holdback, case_insensitive_paths, restricted,
+	// is_remote_mode, classify_all_shell, user_identity, git_state
+	pairs := []any{
+		"v", 1, "permission_mode", permMode,
+		"platform", platformName(), "live_cwd", cwdp, "home_dir", config.Home(),
+		"rule_roots", orderedObj(
+			"userSettings", filepath.Join(config.ClaudeDir()),
+			"projectSettings", cwdp, "localSettings", cwdp,
+			"flagSettings", cwdp, "policySettings", cwdp,
+			"cliArg", cwdp, "command", cwdp, "session", cwdp,
+			"toolsNarrowing", cwdp, "mcpServerPolicy", cwdp,
+			"hostCredential", cwdp),
+		"trusted_directories", orderedObj(
+			"primary", orderedObj("path", cwdp, "resolved", []string{cwdp}),
+			"additional", []any{}, "network", []any{},
+			"block_reads_outside_working_directories", false),
+		"rules", rulesObj,
 		// real's auto_mode is the rule-set object, not a flag (294)
-		"auto_mode": map[string]any{
-			"allow": []any{}, "soft_deny": []any{}, "hard_deny": []any{},
-			"environment": []any{},
-		},
-		"git_state":      gitState(cwdp),
-		"is_remote_mode": false,
-		"restricted":     false,
-		// real's tail fields (captured 2.1.294)
-		"classify_all_shell":        false,
-		"artifact_consent_holdback": false,
-		"case_insensitive_paths":    false,
-		"user_identity":             os.Getenv("USER"),
+		"auto_mode", orderedObj(
+			"allow", []any{}, "soft_deny", []any{},
+			"hard_deny", []any{}, "environment", []any{}),
+		"artifact_consent_holdback", false,
+		"case_insensitive_paths", false,
+		"restricted", false,
+		"is_remote_mode", false,
+		"classify_all_shell", false,
+		"user_identity", os.Getenv("USER"),
+		"git_state", gitStateObj(cwdp),
 	}
 	if d := safeguardDropped(rules, mkRules); d != nil {
-		cc["dropped"] = d
+		pairs = append(pairs, "dropped", d)
 	}
-	s := map[string]any{
-		"type":               "dangerous_tool_use",
-		"classifier_context": cc,
-	}
-	b, _ := json.Marshal([]any{s})
+	cc := orderedObj(pairs...)
+	b, _ := json.Marshal([]json.RawMessage{
+		orderedObj("type", "dangerous_tool_use", "classifier_context", cc),
+	})
 	return b
+}
+
+// orderedObj emits {"k":v,...} preserving pair order — Go maps marshal
+// alphabetically, which diverges from real's safeguards field ordering.
+func orderedObj(pairs ...any) json.RawMessage {
+	var b strings.Builder
+	b.WriteByte('{')
+	for i := 0; i+1 < len(pairs); i += 2 {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		k, _ := json.Marshal(pairs[i])
+		v, _ := json.Marshal(pairs[i+1])
+		b.Write(k)
+		b.WriteByte(':')
+		b.Write(v)
+	}
+	b.WriteByte('}')
+	return json.RawMessage(b.String())
+}
+
+// safeguardRulesObj is safeguardRulesMap with real's allow/deny/ask key
+// order (alphabetical marshal puts ask between them).
+func safeguardRulesObj(rules map[string][]string, mk func([]string, string) []any) json.RawMessage {
+	m := safeguardRulesMap(rules, mk)
+	return orderedObj("allow", m["allow"], "deny", m["deny"], "ask", m["ask"])
+}
+
+// gitStateObj is gitState with real's captured key order:
+// cwd, root, branch, default_branch, status, visibility{origin,
+// push_remote, remotes, visibility_cache}, error.
+func gitStateObj(cwd string) json.RawMessage {
+	g := gitState(cwd)
+	vis, _ := g["visibility"].(map[string]any)
+	return orderedObj(
+		"cwd", g["cwd"], "root", g["root"], "branch", g["branch"],
+		"default_branch", g["default_branch"], "status", g["status"],
+		"visibility", orderedObj(
+			"origin", vis["origin"], "push_remote", vis["push_remote"],
+			"remotes", vis["remotes"], "visibility_cache", vis["visibility_cache"]),
+		"error", g["error"])
 }
 
 func platformName() string {
