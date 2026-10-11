@@ -918,7 +918,6 @@ func Test401RefreshRetry(t *testing.T) {
 	}
 }
 
-
 // TestBorrowedCredsReBorrowOn401: creds living in the shared store
 // (~/.claude/.credentials.json → Borrowed) must never hit the refresh
 // endpoint — but on a 401 the client re-reads the store and retries
