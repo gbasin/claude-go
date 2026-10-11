@@ -447,6 +447,25 @@ func RunWithStore(l *agent.Loop, store Store) {
 				dim, reset, rem, pluralize(rem, "line", "lines"), key))
 		}
 	}
+	// subagent inner-tool display: real renders a running agent's tool
+	// calls nested under the Agent row (dim, one level in); ours ran the
+	// sub headless — bind the runner's hooks to nested ⎿/⏺ rows
+	if ar, ok := l.ToolCtx.Agent.(*agent.Runner); ok {
+		ar.OnSubToolUse = func(name string, input json.RawMessage) {
+			if focusMode.Load() {
+				return
+			}
+			streamPrint(fmt.Sprintf("  %s⎿%s  %s⏺%s %s%s",
+				dim, reset, dim, reset, name, summarize(name, input)))
+		}
+		ar.OnSubToolResult = func(name string, r tools.Result) {
+			if focusMode.Load() || briefMode.Load() {
+				return
+			}
+			line := strings.Split(strings.TrimRight(r.Content, "\n"), "\n")[0]
+			streamPrint(fmt.Sprintf("    %s⎿%s  %s", dim, reset, trunc(line, 110)))
+		}
+	}
 	historySessionID = l.Client.SessionID
 	l.Events.OnUsage = func(u api.Usage) {
 		spinTokens.Store(int64(u.OutputTokens)) // spinner's ↓ token counter

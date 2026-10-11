@@ -176,6 +176,32 @@ func TestAgentToolSubagent(t *testing.T) {
 	p.exit()
 }
 
+// TestAgentToolNestedDisplay: a foreground subagent's inner tool calls
+// render as nested ⎿/⏺ rows under the Agent line while it runs.
+func TestAgentToolNestedDisplay(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+
+	p.sendUntilEchoed(t,
+		`tool:Agent {"description":"nested e2e","prompt":"tool:Bash {\"command\":\"echo inner-tool\"}","run_in_background":false}`+"\r",
+		"❯ tool:Agent", 8)
+	// the sub's Bash call nests one level under the Agent row — poll the
+	// full scrollback (it scrolls past the live screen in a fast mock turn)
+	deadline2 := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline2) {
+		if strings.Contains(stripANSI(p.output()), "⎿  ⏺ Bash") {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	if !strings.Contains(stripANSI(p.output()), "⎿  ⏺ Bash") {
+		t.Fatalf("no nested tool row\noutput:\n%s", truncStr(p.output(), 4000))
+	}
+	// the Agent result (sub reply) lands inside the parent's tool result
+	p.waitFor("subagent_tokens", 60*time.Second)
+	p.exit()
+}
+
 // TestInterruptMidTurn: esc during a retrying turn (mock 5xx → SDK
 // backoff) interrupts the turn; the REPL stays alive afterward.
 func TestInterruptMidTurn(t *testing.T) {

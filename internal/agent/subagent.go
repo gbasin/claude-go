@@ -377,6 +377,12 @@ type Runner struct {
 	// Parent, when set, is the spawning loop — fork subagents inherit its
 	// messages. Wired by the caller that owns the parent Loop.
 	Parent *Loop
+	// OnSubToolUse / OnSubToolResult surface a running subagent's inner
+	// tool calls to the host — the interactive TUI renders them nested
+	// under the Agent row (real shows live sub-activity; ours ran the sub
+	// headless and printed nothing until the result).
+	OnSubToolUse    func(name string, input json.RawMessage)
+	OnSubToolResult func(name string, r tools.Result)
 	// stopHookActive guards SubagentStop recursion — a blocked stop
 	// re-runs the turn but the hook must not fire again on the retry.
 	stopHookActive bool
@@ -641,6 +647,18 @@ func (r *Runner) runAgentTurn(sub *Loop, prompt string, c *tools.Context, rec *t
 				_, trig := sub.CompactMeta()
 				st.LogCompactBoundaryTrig(sub.LastInputTokens(), len(sub.Messages), trig)
 			}
+		}
+	}
+	// inner tool activity → host display hook (nested rows under the
+	// Agent tool call in the TUI)
+	if r.OnSubToolUse != nil {
+		sub.Events.OnToolUse = func(name string, input json.RawMessage) {
+			r.OnSubToolUse(name, input)
+		}
+	}
+	if r.OnSubToolResult != nil {
+		sub.Events.OnToolResult = func(name, _ string, res tools.Result) {
+			r.OnSubToolResult(name, res)
 		}
 	}
 	resp, err := sub.Ask(ctx, prompt+"\n")
