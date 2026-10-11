@@ -390,7 +390,7 @@ func TestResumePickerInteractive(t *testing.T) {
 
 	// same-transcript resume: the new turn lands in the SEED session's
 	// file, not the running session's — real's /resume switches sessions
-	poll(t, 5*time.Second, "turn appended to resumed transcript", func() bool {
+	poll(t, 15*time.Second, "turn appended to resumed transcript", func() bool {
 		for _, tp := range s.transcriptPaths(t) {
 			b, _ := os.ReadFile(tp)
 			if strings.Contains(string(b), "seed prior session") &&

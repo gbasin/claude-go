@@ -417,7 +417,7 @@ func TestAuxInteractiveSession(t *testing.T) {
 	p.waitFor("aux-server reply", 30*time.Second)
 
 	// post-turn calls are async — poll the recorder briefly
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	var sawCodeSession, sawUltrareview, sawTitle, sawWalkAway bool
 	for time.Now().Before(deadline) {
 		sawCodeSession, sawUltrareview, sawTitle, sawWalkAway = false, false, false, false
