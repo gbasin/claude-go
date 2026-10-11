@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"testing"
 
-	"claude-go/internal/api"
-	"claude-go/internal/tools"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/tools"
 )
 
 func apiErr(msg string) error {

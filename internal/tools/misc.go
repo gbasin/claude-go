@@ -2,11 +2,11 @@ package tools
 
 import (
 	"bufio"
-	"claude-go/internal/config"
-	"claude-go/internal/hooks"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/hooks"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"claude-go/internal/api"
-	"claude-go/internal/plugins"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/plugins"
 )
 
 func init() {

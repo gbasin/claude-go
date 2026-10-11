@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"claude-go/internal/extract"
-	"claude-go/internal/session"
+	"github.com/gbasin/claude-go/internal/extract"
+	"github.com/gbasin/claude-go/internal/session"
 )
 
 type wireCapture struct {

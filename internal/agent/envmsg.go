@@ -1,16 +1,16 @@
 package agent
 
 import (
-	"claude-go/internal/config"
-	"claude-go/internal/extract"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/extract"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
 
-	"claude-go/internal/plugins"
+	"github.com/gbasin/claude-go/internal/plugins"
 	"strings"
 	"time"
 )

@@ -3,11 +3,11 @@ package repl
 import (
 	"golang.org/x/term"
 
-	"claude-go/internal/config"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
 	"io"
 	"math"
 	"os"
@@ -23,15 +23,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"claude-go/internal/agent"
-	"claude-go/internal/api"
-	"claude-go/internal/auth"
-	"claude-go/internal/bg"
-	"claude-go/internal/bridge"
-	"claude-go/internal/hooks"
-	"claude-go/internal/plugins"
-	"claude-go/internal/session"
-	"claude-go/internal/tools"
+	"github.com/gbasin/claude-go/internal/agent"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/auth"
+	"github.com/gbasin/claude-go/internal/bg"
+	"github.com/gbasin/claude-go/internal/bridge"
+	"github.com/gbasin/claude-go/internal/hooks"
+	"github.com/gbasin/claude-go/internal/plugins"
+	"github.com/gbasin/claude-go/internal/session"
+	"github.com/gbasin/claude-go/internal/tools"
 )
 
 // handleSlash runs a /command. Returns true to exit the REPL.

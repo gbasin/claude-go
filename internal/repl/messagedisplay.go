@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"claude-go/internal/hooks"
+	"github.com/gbasin/claude-go/internal/hooks"
 )
 
 // msgDisplay implements real's MessageDisplay hook lane (mod_1378.js):

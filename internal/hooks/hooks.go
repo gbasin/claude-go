@@ -4,13 +4,13 @@ package hooks
 
 import (
 	"bytes"
-	"claude-go/internal/config"
-	"claude-go/internal/perms"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/perms"
 	"io"
 	"net/http"
 	"os"

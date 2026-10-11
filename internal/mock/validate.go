@@ -17,9 +17,9 @@ package mock
 //    history is [summary-user, new-user] and the API accepts it)
 
 import (
-	"claude-go/internal/api"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/api"
 )
 
 // validateRequest returns an error string ("" when valid) describing the

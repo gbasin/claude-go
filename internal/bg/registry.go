@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/config"
 )
 
 // Job is the registry record for one background session — real's jobDir

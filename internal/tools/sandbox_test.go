@@ -1,9 +1,9 @@
 package tools
 
 import (
-	"claude-go/internal/netproxy"
 	"context"
 	"encoding/json"
+	"github.com/gbasin/claude-go/internal/netproxy"
 	"os"
 	"path/filepath"
 	"runtime"

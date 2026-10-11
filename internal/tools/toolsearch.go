@@ -37,7 +37,7 @@ import (
 	"sort"
 	"strings"
 
-	"claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/api"
 )
 
 const (

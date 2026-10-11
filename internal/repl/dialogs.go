@@ -12,10 +12,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"claude-go/internal/agent"
-	"claude-go/internal/hooks"
-	"claude-go/internal/perms"
-	"claude-go/internal/tools"
+	"github.com/gbasin/claude-go/internal/agent"
+	"github.com/gbasin/claude-go/internal/hooks"
+	"github.com/gbasin/claude-go/internal/perms"
+	"github.com/gbasin/claude-go/internal/tools"
 )
 
 // permAskTimeout is the unattended auto-deny window (mod_1477's

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"claude-go/internal/agent"
+	"github.com/gbasin/claude-go/internal/agent"
 )
 
 // queuedPending counts messages queued while a turn runs (typed input plus

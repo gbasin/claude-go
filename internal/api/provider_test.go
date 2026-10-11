@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"claude-go/internal/auth"
+	"github.com/gbasin/claude-go/internal/auth"
 )
 
 func TestDetectProvider(t *testing.T) {

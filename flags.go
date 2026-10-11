@@ -6,17 +6,17 @@ package main
 
 import (
 	"bufio"
-	"claude-go/internal/config"
-	"claude-go/internal/session"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/session"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 
-	"claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/api"
 )
 
 type cliOpts struct {

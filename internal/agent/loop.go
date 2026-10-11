@@ -17,10 +17,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"claude-go/internal/api"
-	"claude-go/internal/config"
-	"claude-go/internal/hooks"
-	"claude-go/internal/tools"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/hooks"
+	"github.com/gbasin/claude-go/internal/tools"
 )
 
 const defaultModel = "claude-opus-5-5"

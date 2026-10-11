@@ -1,9 +1,9 @@
 package agent
 
 import (
-	"claude-go/internal/config"
 	"context"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,8 +11,8 @@ import (
 	"strings"
 	"sync"
 
-	"claude-go/internal/api"
-	"claude-go/internal/hooks"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/hooks"
 )
 
 var compactPrompt = fallbackCompactPrompt

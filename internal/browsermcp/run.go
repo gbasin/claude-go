@@ -5,8 +5,8 @@ import (
 	"io"
 	"os"
 
-	"claude-go/internal/api"
-	"claude-go/internal/auth"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/auth"
 )
 
 // run.go — runClaudeInChromeMcpServer (mod_0807.js qe): the entry point

@@ -1,20 +1,20 @@
 package agent
 
 import (
-	"claude-go/internal/config"
-	"claude-go/internal/hooks"
-	"claude-go/internal/session"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/hooks"
+	"github.com/gbasin/claude-go/internal/session"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
-	"claude-go/internal/api"
-	"claude-go/internal/plugins"
-	"claude-go/internal/tools"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/plugins"
+	"github.com/gbasin/claude-go/internal/tools"
 )
 
 // ---------- Agent type registry ----------

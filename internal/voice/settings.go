@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/config"
 )
 
 // Config is the resolved voice settings view: ~/.claude/settings.json

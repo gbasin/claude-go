@@ -37,8 +37,8 @@ import (
 	"strings"
 	"time"
 
-	"claude-go/internal/api"
-	"claude-go/internal/telemetry"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/telemetry"
 )
 
 // UserError mirrors Au (TeleportError/UserError): Message is the plain

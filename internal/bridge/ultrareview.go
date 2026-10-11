@@ -43,7 +43,7 @@ import (
 	"strings"
 	"time"
 
-	"claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/api"
 )
 
 // bughunterEnvironmentID is the review environment (S in GNn).

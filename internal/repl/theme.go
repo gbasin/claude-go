@@ -1,8 +1,8 @@
 package repl
 
 import (
-	"claude-go/internal/config"
 	"encoding/json"
+	"github.com/gbasin/claude-go/internal/config"
 	"os"
 	"path/filepath"
 	"strconv"

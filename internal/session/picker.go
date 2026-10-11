@@ -2,9 +2,9 @@ package session
 
 import (
 	"bufio"
-	"claude-go/internal/config"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
 	"os"
 	"os/exec"
 	"path/filepath"

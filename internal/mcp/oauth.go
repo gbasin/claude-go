@@ -11,13 +11,13 @@ package mcp
 // Tokens persist in ~/.claude/.credentials-mcp.json.
 
 import (
-	"claude-go/internal/config"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
 	"io"
 	"net"
 	"net/http"
@@ -28,7 +28,7 @@ import (
 	"sync"
 	"time"
 
-	"claude-go/internal/auth"
+	"github.com/gbasin/claude-go/internal/auth"
 )
 
 // AuthError is returned when a server answers 401/403 and no usable token

@@ -7,11 +7,11 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"claude-go/internal/agent"
-	"claude-go/internal/api"
-	"claude-go/internal/auth"
-	"claude-go/internal/config"
-	"claude-go/internal/voice"
+	"github.com/gbasin/claude-go/internal/agent"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/auth"
+	"github.com/gbasin/claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/voice"
 )
 
 // voiceUI is the editor-side voice state — the glue behind voice:pushToTalk

@@ -3,7 +3,7 @@ package agent
 import (
 	"strings"
 
-	"claude-go/internal/extract"
+	"github.com/gbasin/claude-go/internal/extract"
 )
 
 // This file holds community-authored fallback text used when no

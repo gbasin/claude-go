@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/api"
 )
 
 // MCPCaller abstracts an MCP server connection (avoids import cycle).

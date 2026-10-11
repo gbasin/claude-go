@@ -18,10 +18,10 @@ package tools
 // lock acquisition, then removed — matching real's aWo catch-up path.
 
 import (
-	"claude-go/internal/config"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
 	"os"
 	"os/exec"
 	"path/filepath"

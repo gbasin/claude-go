@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"claude-go/internal/agent"
-	"claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/agent"
+	"github.com/gbasin/claude-go/internal/api"
 )
 
 // showTranscript is real's ctrl+o — a scrollable overlay listing the whole

@@ -3,8 +3,8 @@ package tools
 import (
 	"strings"
 
-	"claude-go/internal/bridge"
-	"claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/bridge"
+	"github.com/gbasin/claude-go/internal/config"
 )
 
 // PolicyCheck mirrors real's sn(key) + lp(key,label,verb,fallback) pair for

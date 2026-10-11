@@ -17,9 +17,17 @@ text (system prompts, tool schemas) ships in this repository — see
   (full-fidelity prompts/schemas) and the differential wire tests
   (`TestDiff*`)
 
-## Build
+## Install
 
 ```sh
+go install github.com/gbasin/claude-go@latest
+```
+
+## Build from source
+
+```sh
+git clone https://github.com/gbasin/claude-go
+cd claude-go
 make build          # go build ./...
 go build -o claude-go .
 ```

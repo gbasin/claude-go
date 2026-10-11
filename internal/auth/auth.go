@@ -4,10 +4,10 @@ package auth
 
 import (
 	"bytes"
-	"claude-go/internal/config"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
 	"net/http"
 	"os"
 	"os/exec"

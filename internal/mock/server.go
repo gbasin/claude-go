@@ -27,7 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/api"
 )
 
 // Hit is one observed HTTP request — method, path?query, response status.

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"claude-go/internal/voice"
+	"github.com/gbasin/claude-go/internal/voice"
 )
 
 func newVoiceEditor(t *testing.T, cfg voice.Config) *editor {

@@ -3,9 +3,9 @@ package repl
 
 import (
 	"bytes"
-	"claude-go/internal/auth"
-	"claude-go/internal/config"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/auth"
+	"github.com/gbasin/claude-go/internal/config"
 	"io"
 	"os"
 	"os/exec"
@@ -19,7 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 
-	"claude-go/internal/voice"
+	"github.com/gbasin/claude-go/internal/voice"
 )
 
 // editor is a modal (vim-capable) multiline line editor fed by keySource.

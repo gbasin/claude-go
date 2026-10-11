@@ -3,9 +3,9 @@
 package tools
 
 import (
-	"claude-go/internal/netproxy"
 	"crypto/sha256"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/netproxy"
 	"os"
 	"os/exec"
 	"path/filepath"

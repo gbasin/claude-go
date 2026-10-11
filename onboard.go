@@ -4,10 +4,10 @@ package main
 // and the minimal update-check marker read.
 
 import (
-	"claude-go/internal/config"
-	"claude-go/internal/hooks"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/hooks"
 	"os"
 	"path/filepath"
 	"strings"

@@ -2,11 +2,11 @@ package repl
 
 import (
 	"bufio"
-	"claude-go/internal/config"
-	"claude-go/internal/session"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/session"
 	"net/url"
 	"os"
 	"os/exec"
@@ -17,12 +17,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"claude-go/internal/agent"
-	"claude-go/internal/api"
-	"claude-go/internal/hooks"
-	"claude-go/internal/mcp"
-	"claude-go/internal/perms"
-	"claude-go/internal/tools"
+	"github.com/gbasin/claude-go/internal/agent"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/hooks"
+	"github.com/gbasin/claude-go/internal/mcp"
+	"github.com/gbasin/claude-go/internal/perms"
+	"github.com/gbasin/claude-go/internal/tools"
 
 	"golang.org/x/term"
 )

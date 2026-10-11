@@ -1,12 +1,12 @@
 package agent
 
 import (
-	"claude-go/internal/config"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
 	"hash/fnv"
 	"os"
 	"os/exec"
@@ -15,8 +15,8 @@ import (
 	"sort"
 	"strings"
 
-	"claude-go/internal/api"
-	"claude-go/internal/mcp"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/mcp"
 )
 
 // pastedContentBullet is the flag-gated Harness bullet (mod_0416 pNe).

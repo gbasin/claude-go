@@ -3,8 +3,8 @@ package tools
 import (
 	"encoding/json"
 
-	"claude-go/internal/api"
-	"claude-go/internal/extract"
+	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/extract"
 )
 
 // schemasJSON returns the builtin tool schemas: the harvested

@@ -1,10 +1,10 @@
 package bg
 
 import (
-	"claude-go/internal/api"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/api"
 	"io"
 	"net"
 	"os"

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"claude-go/internal/auth"
+	"github.com/gbasin/claude-go/internal/auth"
 )
 
 func TestDetectProviderNewEnvs(t *testing.T) {

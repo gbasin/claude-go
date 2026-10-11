@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"claude-go/internal/auth"
+	"github.com/gbasin/claude-go/internal/auth"
 )
 
 func connTestCreds() *auth.Credentials {

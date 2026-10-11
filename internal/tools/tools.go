@@ -2,17 +2,17 @@
 package tools
 
 import (
-	"claude-go/internal/config"
-	"claude-go/internal/hooks"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/config"
+	"github.com/gbasin/claude-go/internal/hooks"
 	"os"
 	"sort"
 	"strings"
 	"sync"
 
-	"claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/api"
 )
 
 // Result is a tool execution result.
