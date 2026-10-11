@@ -1063,6 +1063,28 @@ func main() {
 				o.permMode) // system/init — incl. perm mode for --inherit-permission-mode
 			// resumed transcript already carries its own init record
 		}
+		// session-state stamps — real latches + flushes these at session
+		// start (mod_0416 _2/mlr + planReAppendSessionMetadata):
+		//   {type:"mode"}       — "coordinator"|"normal" (NOT the perm mode)
+		//   {type:"permission-mode"} — the permission mode
+		//   {type:"atis-latch"} — the atis latch; "" on standard sessions
+		mode := "normal"
+		if tools.IsCoordinatorMode() {
+			mode = "coordinator"
+		}
+		_ = st2.StampMode(mode)
+		_ = st2.StampPermMode(loop.PermMode)
+		_ = st2.LogAtisLatch("")
+		if tc := loop.TeammateCtx; tc != nil {
+			// teammate sessions stamp their identity (saveAgentName/fAe,
+			// saveAgentColor/XKt)
+			_ = st2.LogAgentMeta("", tc.AgentName, "", "")
+			_ = st2.LogAgentMeta("", "", tc.Color, "")
+		}
+		if o.agentName != "" {
+			// --agent <type> → real's agent-setting latch (pnt)
+			_ = st2.LogAgentMeta("", "", "", o.agentName)
+		}
 		tools.OnSnapshot = func(path, backup string, ver int) {
 			st2.LogRecord(map[string]any{
 				"type": "file-history-snapshot", "isSnapshotUpdate": true,
@@ -1165,6 +1187,11 @@ func main() {
 							"type": "system", "subtype": "fork",
 							"forkedFrom": map[string]string{"sessionId": id},
 						})
+					} else {
+						// real's TRe/Jns: the source transcript gets
+						// {type:"continued-in",continuedInSessionId:<new>}
+						// marking it superseded for the picker
+						_ = session.StampContinuedIn(src, id, sessionID)
 					}
 					fmt.Fprintf(os.Stderr, "forked session %s → %s (%d messages)\n", id[:8], sessionID[:8], len(msgs))
 				} else {

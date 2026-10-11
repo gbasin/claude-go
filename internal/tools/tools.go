@@ -77,6 +77,9 @@ type Context struct {
 	// OnTaskEvent emits real's task_started/task_notification system
 	// records for background agents (stream-json prints them)
 	OnTaskEvent func(rec map[string]any)
+	// OnSessionRecord appends a session-metadata transcript row (real's
+	// DC(stateRecord) path — frame-link et al). Nil-safe.
+	OnSessionRecord func(rec map[string]any)
 	// AskStructuredMulti renders real's multi-question wizard (question
 	// tabs + Submit). Falls back to sequential AskStructured when unset.
 	AskStructuredMulti func(questions []AskQuestion) (map[string][]string, error)

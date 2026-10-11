@@ -43,6 +43,16 @@ type Store interface {
 	LogTitle(title string) error
 	Log(m api.Message) error
 	LogRecord(ev map[string]any) error
+	// StampPermMode latches + stamps the {type:"permission-mode"} state row
+	// (real's savePermissionMode); the latched value rides user rows as
+	// permissionMode and re-stamps in each metadata flush.
+	StampPermMode(mode string) error
+	// LogRelocated stamps {type:"relocated",relocatedCwd} on cwd changes
+	// (real's relocateSessionTranscript marker).
+	LogRelocated(newCwd string) error
+	// LogAgentMeta stamps the agent-identity state rows (tag, agent-name,
+	// agent-color, agent-setting) — one non-empty argument per call.
+	LogAgentMeta(tag, agentName, agentColor, agentSetting string) error
 }
 
 // RunWithStore is Run with session transcript logging.
@@ -87,12 +97,10 @@ func RunWithStore(l *agent.Loop, store Store) {
 			}
 		}
 		l.PermMode = order[(idx+1)%len(order)]
-		// real stamps {type:"mode"} on every mode cycle (mod_0409)
+		// real latches permissionMode + stamps {type:"permission-mode"}
+		// on every mode cycle (mod_0416 mlr / metadata flush)
 		if currentStore != nil {
-			currentStore.LogRecord(map[string]any{
-				"type": "mode", "mode": l.PermMode,
-				"sessionId": l.Client.SessionID,
-			})
+			currentStore.StampPermMode(l.PermMode)
 		}
 		compInline(fmt.Sprintf("\r\n%s⏵⏵ %s mode%s\r\n", yellow, l.PermMode, reset))
 	}
@@ -161,8 +169,14 @@ func RunWithStore(l *agent.Loop, store Store) {
 		}
 	}
 	// EndConversation mid-turn → flag normal shutdown (raw-mode restore,
-	// unregister, MCP close, SessionEnd all run via the quit path).
-	endSession := func() { wantQuit.Store(true) }
+	// unregister, MCP close, SessionEnd all run via the quit path). Real
+	// stamps {type:"ended-by-model"} before aborting (markSessionEndedByModel).
+	endSession := func() {
+		if currentStore != nil {
+			currentStore.LogRecord(map[string]any{"type": "ended-by-model"})
+		}
+		wantQuit.Store(true)
+	}
 	if l.SessionEndReason == "" {
 		l.SessionEndReason = "other"
 	}
@@ -219,12 +233,25 @@ func RunWithStore(l *agent.Loop, store Store) {
 	l.ToolCtx.SetPermMode = func(mode string) {
 		l.PermMode = mode
 		if currentStore != nil {
-			currentStore.LogRecord(map[string]any{
-				"type": "system", "subtype": "permission-mode", "mode": mode,
-			})
+			// real's savePermissionMode — a bare {type:"permission-mode"}
+			// state row, not a system record
+			currentStore.StampPermMode(mode)
+		}
+	}
+	// state-row writes from inside tool bodies (Artifact publish →
+	// frame-link) land through the same LogRecord path as loop records
+	l.ToolCtx.OnSessionRecord = func(rec map[string]any) {
+		if currentStore != nil {
+			currentStore.LogRecord(rec)
 		}
 	}
 	l.ToolCtx.OnCwdChanged = func(nc string) {
+		// real's relocateSessionTranscript stamps {type:"relocated"} on the
+		// session when cwd changes (the file relocates; ours keeps it in
+		// place and stamps the same marker)
+		if currentStore != nil {
+			currentStore.LogRelocated(nc)
+		}
 		hooks.Run(l.Hooks, hooks.CwdChanged, map[string]any{
 			"session_id": l.Client.SessionID, "old_cwd": l.ToolCtx.CWD, "new_cwd": nc,
 			"transcript_path": l.Transcript, "hook_event_name": "CwdChanged",
