@@ -2,7 +2,8 @@
 
 A from-scratch Go reimplementation of the Claude Code CLI, targeting
 wire- and UI-level parity with `claude` 2.1.296. One static binary, no
-runtime dependencies.
+runtime dependencies — 18.9 MB vs real's 240 MB, ~3× faster startup,
+~9× lower resident memory (measured on `-p` turns against a mock API).
 
 **Not affiliated with or endorsed by Anthropic.** This is a clean-room
 compatibility clone for study and personal use. No Anthropic-authored
@@ -26,16 +27,36 @@ go build -o claude-go .
 ## Quickstart
 
 ```sh
-./claude-go extract         # optional: harvest real prompts/schemas from your claude install
-./claude-go --mock          # run against the built-in mock API — no credentials needed
-./claude-go -p "say hi"     # print mode
-./claude-go login           # OAuth login (or: setup-token for a long-lived token)
+# works out of the box — mock API, no credentials needed
+./claude-go --mock
+./claude-go -p "say hi" --mock
+
+# optional: full wire/text parity — needs a local claude install
+./claude-go extract
+
+# real usage — needs Anthropic credentials
+./claude-go login           # OAuth (or: setup-token for a long-lived token)
+./claude-go -p "say hi"     # print mode — hits the real API
 ./claude-go                 # interactive REPL
 ```
+
+To put it on your PATH: `cp claude-go ~/.local/bin/` (or anywhere in PATH).
 
 Credentials live in `~/.claude-go/.credentials.json` (override with
 `CLAUDE_GO_CREDS_FILE`) or the macOS Keychain, so the binary can borrow
 an existing `claude` login without sharing a write path.
+
+### Useful environment variables
+
+| Variable | Effect |
+|---|---|
+| `CLAUDE_GO_EXTRACTED_DIR` | override the extraction cache (default `~/.claude-go/extracted/`) |
+| `CLAUDE_GO_CREDS_FILE` | override the credentials file path |
+| `CLAUDE_REAL_BIN` | path to real `claude` for `extract` / diff tests |
+| `CLAUDE_GO_MOCK` | force mock-API mode (same as `--mock`) |
+| `CLAUDE_GO_MOCK_RECORD=<dir>` | record request bodies to `<dir>` (debug) |
+| `ANTHROPIC_BASE_URL` | point the API client elsewhere (mockd, proxy, gateway) |
+| `CLAUDE_GO_DIFF_DUMP=<dir>` | diff tests dump normalized real+ours bodies |
 
 ## Subcommands
 
