@@ -9,10 +9,14 @@ import (
 )
 
 // RewindFiles is real's --rewind-files <user-msg-uuid>: restore every
-// tracked file to the state recorded in the transcript's
-// file-history-snapshot records AT that message. The anchor must be a
-// user message; the newest backup for each path before it wins. A path
-// with no backup at the anchor didn't exist yet — it gets removed.
+// tracked file to the state recorded at that message. The anchor must be
+// a user message. Real keys the checkpoint by messageId: the
+// file-history-snapshot row whose messageId is the anchor carries the
+// full trackedFileBackups state, extended by any file-history-delta rows
+// whose snapshotMessageId matches. Transcripts from before messageId
+// linkage (per-write snapshot rows with no messageId) fall back to the
+// positional scan: the first snapshot after the previous message
+// boundary holds each path's pre-write content for the anchor's turn.
 //
 // Returns (restored, removed, error) — errors are real's refusal strings.
 func RewindFiles(cwd, sessionID, msgUUID string) (int, int, error) {
@@ -35,38 +39,69 @@ func RewindFiles(cwd, sessionID, msgUUID string) (int, int, error) {
 		return 0, 0, fmt.Errorf("message %s not found in %s", msgUUID, path)
 	}
 
-	// file order isn't turn order — the user record is written at turn
-	// end while snapshots land mid-turn, so the turn starting at the
-	// anchor leaves its snapshots just BEFORE the anchor record. The
-	// anchor-state backup for each path is the FIRST snapshot after the
-	// previous message boundary (that turn's pre-write content — and a
-	// later turn's first backup is equally the unmodified anchor state).
-	boundary := 0
-	for i := anchor - 1; i >= 0; i-- {
-		if t, _ := recs[i]["type"].(string); t == "user" || t == "assistant" {
-			boundary = i + 1
-			break
-		}
-	}
-	histDir := filepath.Join(config.ClaudeDir(), "file-history", sessionID)
+	// messageId-linked restore (real's model): the LAST snapshot row keyed
+	// to the anchor message is the checkpoint (real's findLast); deltas
+	// pointing at it merge in files first tracked during that turn.
 	backups := map[string]string{}
-	for _, r := range recs[boundary:] {
+	linked := false
+	for _, r := range recs {
 		if t, _ := r["type"].(string); t != "file-history-snapshot" {
 			continue
 		}
-		snap, _ := r["snapshot"].(map[string]any)
-		tfb, _ := snap["trackedFileBackups"].(map[string]any)
-		for p, v := range tfb {
-			if _, seen := backups[p]; seen {
-				continue
-			}
-			if m, ok := v.(map[string]any); ok {
-				bn, _ := m["backupFileName"].(string)
-				backups[p] = bn
+		if mid, _ := r["messageId"].(string); mid == msgUUID {
+			linked = true
+			snap, _ := r["snapshot"].(map[string]any)
+			if tfb, _ := snap["trackedFileBackups"].(map[string]any); tfb != nil {
+				for p, v := range tfb {
+					if m, ok := v.(map[string]any); ok {
+						bn, _ := m["backupFileName"].(string)
+						backups[p] = bn
+					}
+				}
 			}
 		}
 	}
+	if linked {
+		for _, r := range recs {
+			if t, _ := r["type"].(string); t != "file-history-delta" {
+				continue
+			}
+			if sid, _ := r["snapshotMessageId"].(string); sid != msgUUID {
+				continue
+			}
+			p, _ := r["trackingPath"].(string)
+			if p == "" {
+				continue
+			}
+			if _, seen := backups[p]; seen {
+				continue
+			}
+			if b, ok := r["backup"].(map[string]any); ok {
+				bn, _ := b["backupFileName"].(string)
+				backups[p] = bn
+			}
+		}
+	} else {
+		// legacy: file order isn't turn order — the user record is written
+		// at turn end while snapshots land mid-turn, so the turn starting
+		// at the anchor leaves its snapshots just BEFORE the anchor record.
+		boundary := 0
+		for i := anchor - 1; i >= 0; i-- {
+			if t, _ := recs[i]["type"].(string); t == "user" || t == "assistant" {
+				boundary = i + 1
+				break
+			}
+		}
+		for _, r := range recs[boundary:] {
+			if t, _ := r["type"].(string); t != "file-history-snapshot" {
+				continue
+			}
+			snap, _ := r["snapshot"].(map[string]any)
+			mergeBackups(backups, snap)
+		}
+	}
 
+	histDir := filepath.Join(config.ClaudeDir(), "file-history", sessionID)
 	restored, removed := 0, 0
 	for p, bn := range backups {
 		if bn == "" {
@@ -85,4 +120,19 @@ func RewindFiles(cwd, sessionID, msgUUID string) (int, int, error) {
 		}
 	}
 	return restored, removed, nil
+}
+
+// mergeBackups folds a snapshot row's trackedFileBackups into backups —
+// first-seen wins (the earliest record of a path is its anchor state).
+func mergeBackups(backups map[string]string, snap map[string]any) {
+	tfb, _ := snap["trackedFileBackups"].(map[string]any)
+	for p, v := range tfb {
+		if _, seen := backups[p]; seen {
+			continue
+		}
+		if m, ok := v.(map[string]any); ok {
+			bn, _ := m["backupFileName"].(string)
+			backups[p] = bn
+		}
+	}
 }

@@ -211,8 +211,16 @@ type Loop struct {
 	OnToolUseSummary func(summary string, toolUseIDs []string)
 	// OnSessionRecord writes transcript side records (pr-link et al) —
 	// the host binds it to the session store
-	OnSessionRecord  func(map[string]any)
-	handbackTail     bool // append the SubagentHandback reminder to msg[0]
+	OnSessionRecord func(map[string]any)
+	// OnAttachment emits a transcript attachment row — the host binds it
+	// to the session store's LogAttachmentMeta (extra lands at top level:
+	// rendered, isMeta, …).
+	OnAttachment func(att, extra map[string]any)
+	handbackTail bool // append the SubagentHandback reminder to msg[0]
+	// forkedContext marks a fork subagent that inherited the parent's
+	// conversation — its transcript opens with a fork-context-ref row
+	// pointing back at the parent's leaf (real's fJr).
+	forkedContext    bool
 	noThinking       bool // thinking config dropped after a thinking 400
 	dropSafeguards   bool
 	dropEffort       bool // output_config dropped after a per-turn-effort 400
@@ -1004,6 +1012,7 @@ func (l *Loop) run(ctx context.Context, depth int) (*api.Response, error) {
 				l.OnSessionRecord(map[string]any{
 					"type": "pr-link", "sessionId": l.Client.SessionID,
 					"prNumber": n, "prUrl": url, "prRepository": repo,
+					"timestamp": time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
 				})
 			}
 		}
@@ -1341,6 +1350,23 @@ func (l *Loop) runHook(ev hooks.Event, extra map[string]any) hooks.Result {
 		})
 	}
 	res := hooks.Run(l.Hooks, ev, payload, l.ToolCtx.CWD)
+	// a hook's systemMessage lands in the transcript as an attachment row
+	// ({type:"hook_system_message",content,hookName,toolUseID,hookEvent}).
+	if res.SystemMessage != "" && l.OnAttachment != nil {
+		hookName := string(ev)
+		if ms := l.Hooks[string(ev)]; len(ms) == 1 &&
+			ms[0].Matcher != "" && ms[0].Matcher != "*" {
+			hookName += ":" + ms[0].Matcher // real's hookName is "<Event>:<matcher>"
+		}
+		toolUseID, _ := extra["tool_use_id"].(string)
+		if toolUseID == "" {
+			toolUseID = "hook-" + api.NewUUID()
+		}
+		l.OnAttachment(map[string]any{
+			"type": "hook_system_message", "content": res.SystemMessage,
+			"hookName": hookName, "toolUseID": toolUseID, "hookEvent": string(ev),
+		}, nil)
+	}
 	if l.OnHookEvent != nil {
 		if len(res.Records) == 0 {
 			l.OnHookEvent(map[string]any{

@@ -399,6 +399,17 @@ func main() {
 			fmt.Fprintln(os.Stderr, "--bg:", err)
 			os.Exit(1)
 		}
+		// real stamps continued-in on the source transcript when its work
+		// hands off to a different session id (TRe/Jns) — the picker then
+		// hides the superseded file
+		if o.resume != "" && o.resume != "-" {
+			if strings.HasSuffix(o.resume, ".jsonl") {
+				_ = session.AppendContinuedIn(o.resume,
+					strings.TrimSuffix(filepath.Base(o.resume), ".jsonl"), sessionID)
+			} else if src := session.ResolveArg(cwd, o.resume); src != "" && src != sessionID {
+				_ = session.LogContinuedInTo(cwd, src, sessionID)
+			}
+		}
 		fmt.Printf("background session %s started\n", sessionID)
 		fmt.Printf("  attach:   claude attach %s\n", sid8(sessionID))
 		fmt.Println("  monitor:  claude agents")
@@ -416,11 +427,19 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	var worktreeState map[string]any
 	if o.worktreeSet {
-		cwd = setupWorktree(cwd, o.worktreeName, sessionID)
+		var wc string
+		wc, worktreeState = setupWorktree(cwd, o.worktreeName, sessionID)
+		cwd = wc
 		os.Chdir(cwd)
 		if o.tmux != "" {
 			setupTmuxSession(cwd, o.worktreeName, sessionID)
+			if worktreeState != nil {
+				if tn := os.Getenv("CLAUDE_CODE_TMUX_SESSION"); tn != "" {
+					worktreeState["tmuxSessionName"] = tn
+				}
+			}
 		}
 	}
 
@@ -1063,14 +1082,29 @@ func main() {
 				o.permMode) // system/init — incl. perm mode for --inherit-permission-mode
 			// resumed transcript already carries its own init record
 		}
-		tools.OnSnapshot = func(path, backup string, ver int) {
-			st2.LogRecord(map[string]any{
-				"type": "file-history-snapshot", "isSnapshotUpdate": true,
-				"snapshot": map[string]any{"trackedFileBackups": map[string]any{
-					path: map[string]any{"backupFileName": filepath.Base(backup),
-						"version": ver, "backupTime": time.Now().UTC().Format(time.RFC3339)},
-				}},
-			})
+		// real's saveWorktreeState — stamped once when the session entered
+		// the worktree (AM); resume dedupes an identical tail row, so a
+		// same-state re-stamp would be a no-op anyway
+		if worktreeState != nil {
+			_ = st2.LogWorktreeState(worktreeState)
+		}
+		// real's file-history rows: a file-history-snapshot keyed to each
+		// user message uuid (empty trackedFileBackups when nothing is
+		// tracked yet) plus a file-history-delta per file first tracked
+		// during that message's turn (pending first-tracks flush here).
+		st2.OnUserPrompt = func(u string) {
+			if os.Getenv("CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING") != "" {
+				return
+			}
+			_ = st2.LogFileHistorySnapshot(u, tools.Checkpoints.BackupMap(), false)
+			for _, d := range tools.Checkpoints.TakePending() {
+				_ = st2.LogFileHistoryDelta(u, u, d.Path, d.Wire())
+			}
+		}
+		// hook system messages land as attachment rows
+		// ({type:"attachment",attachment:{type:"hook_system_message",...}})
+		loop.OnAttachment = func(att, extra map[string]any) {
+			_ = st2.LogAttachmentMeta(att, extra)
 		}
 		if ar, ok := loop.ToolCtx.Agent.(*agent.Runner); ok {
 			ar.Transcript = st2.Path
@@ -1095,8 +1129,9 @@ func main() {
 			st2.LogRecord(map[string]any{"type": "summary", "summary": o.sessionName})
 		}
 		// pr-link: real writes the record when a gh PR URL lands in a
-		// Bash result — the loop detects, we persist (mod_0409 q2s)
-		loop.OnSessionRecord = func(rec map[string]any) { _ = st2.LogRecord(rec) }
+		// Bash result — the loop detects, we persist (mod_0409 q2s).
+		// Bare: real's pr-link is a last-wins row, no uuid/parentUuid.
+		loop.OnSessionRecord = func(rec map[string]any) { _ = st2.LogBare(rec) }
 	}
 
 	if o.cont || o.resume != "" {

@@ -31,6 +31,18 @@ type Store struct {
 	mu        sync.Mutex // serializes writers (OnTurnEnd goroutine, etc)
 	lastUUID  string
 	sidechain bool // subagent transcript — records get isSidechain:true
+	// OnUserPrompt fires after a real user prompt row is written (its uuid
+	// is the leaf just logged). Real keys file-history-snapshot rows to the
+	// user message uuid — the host wires this to emit them.
+	OnUserPrompt func(uuid string)
+}
+
+// ISONow formats a timestamp like real's new Date().toISOString() —
+// UTC, millisecond precision, trailing Z. Transcript bookkeeping rows
+// (queue-operation, file-history-*, worktree-state …) use it; the
+// message envelope keeps RFC3339Nano.
+func ISONow() string {
+	return time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 }
 
 type event struct {
@@ -139,19 +151,27 @@ func (s *Store) LogMessage(m api.Message) error {
 		return s.logMessage(m, true, "Compact summary")
 	}
 	err := s.logMessage(m, false, "")
-	// real stamps {type:"last-prompt",leafUuid:<user-uuid>,explicit:true}
-	// after a user row — the session picker reads it as the last-prompt
-	// metadata
+	// real stamps {type:"last-prompt",lastPrompt?,leafUuid:<user-uuid>,
+	// explicit:true,sessionId} after a user row — the session picker reads
+	// it as the last-prompt metadata. It's a bare bookkeeping row (no uuid/
+	// parentUuid), not a chain record.
 	// last-prompt stamps only on real user prompts — tool_result rows
 	// ride the user role but aren't prompts (real's leafUuid semantic)
 	if err == nil && m.Role == "user" && isPromptContent(m.Content) {
 		s.mu.Lock()
 		leaf := s.lastUUID
 		s.mu.Unlock()
-		_ = s.LogRecord(map[string]any{
+		rec := map[string]any{
 			"type": "last-prompt", "sessionId": s.SessionID,
 			"leafUuid": leaf, "explicit": true,
-		})
+		}
+		if p := trunc(contentText(m.Content), 160); p != "" {
+			rec["lastPrompt"] = p
+		}
+		_ = s.LogBare(rec)
+		if s.OnUserPrompt != nil {
+			s.OnUserPrompt(leaf)
+		}
 	}
 	return err
 }
@@ -215,6 +235,19 @@ func (s *Store) logMessage(m api.Message, compact bool, modelOnlyText string) er
 	}
 	s.lastUUID = uuid
 	b, _ := json.Marshal(e)
+	_, err := s.f.Write(append(b, '\n'))
+	return err
+}
+
+// LogBare appends a record exactly as given — real's non-transcript rows
+// (last-wins state, boundary-cleared, accumulate) carry only their
+// emit-site literal: no uuid, no parentUuid, no synthesized timestamp.
+// Verified against captured 296 transcripts: ai-title, queue-operation,
+// file-history-*, fork-context-ref, cost-state, atis-latch all write bare.
+func (s *Store) LogBare(ev map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, _ := json.Marshal(ev)
 	_, err := s.f.Write(append(b, '\n'))
 	return err
 }
@@ -340,13 +373,51 @@ func InitMode(cwd, sessionID string) string {
 	return ""
 }
 
-// LogAttachment appends an attachment record
-// ({type:"attachment",attachment:{...}}) — queued commands, file mentions,
-// relevant memories, etc.
+// LogAttachment appends an attachment record — queued commands, hook
+// system messages, file mentions, memory context, etc. Real's
+// {type:"attachment"} rows are full transcript records: they carry the
+// message envelope (uuid, parentUuid, isSidechain, timestamp, sessionId +
+// session_id, cwd, version, gitBranch, userType, entrypoint) and DO join
+// the parentUuid chain — the next message's parentUuid is the attachment
+// uuid (verified on captured rows).
 func (s *Store) LogAttachment(att map[string]any) error {
-	return s.LogRecord(map[string]any{
-		"type": "attachment", "attachment": att,
-	})
+	return s.LogAttachmentMeta(att, nil)
+}
+
+// LogAttachmentMeta is LogAttachment plus top-level extras real stamps
+// beside the envelope (rendered, renderedInHumanTurn, isMeta).
+func (s *Store) LogAttachmentMeta(att, extra map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	uuid := newUUID()
+	e := map[string]any{
+		"type":        "attachment",
+		"attachment":  att,
+		"uuid":        uuid,
+		"timestamp":   ISONow(),
+		"isSidechain": s.sidechain,
+		"sessionId":   s.SessionID,
+		"session_id":  s.SessionID,
+		"userType":    "external",
+		"entrypoint":  "cli",
+		"cwd":         s.CWD,
+		"version":     "2.1.296",
+	}
+	if s.lastUUID != "" {
+		e["parentUuid"] = s.lastUUID
+	} else {
+		e["parentUuid"] = nil // real writes an explicit null
+	}
+	if b := currentGitBranch(s.CWD); b != "" {
+		e["gitBranch"] = b
+	}
+	for k, v := range extra {
+		e[k] = v
+	}
+	s.lastUUID = uuid
+	b, _ := json.Marshal(e)
+	_, err := s.f.Write(append(b, '\n'))
+	return err
 }
 
 // LogProgress appends a progress record (tool progress, heartbeat, hook
@@ -379,44 +450,143 @@ func (s *Store) LogTitle(title string) error {
 	return writeTitleFile(filepath.Dir(s.Path), s.SessionID, title)
 }
 
-// LogAITitle writes an {type:"ai-title",aiTitle} record — real
-// auto-generates one from the first turn (recordAITitle). Called when a
-// title is produced for the session.
+// LogAITitle writes real's saveAiGeneratedTitle record —
+// {type:"ai-title",aiTitle,sessionId}, bare (captured rows carry no
+// uuid/timestamp).
 func (s *Store) LogAITitle(title string) error {
-	return s.LogRecord(map[string]any{
-		"type": "ai-title", "aiTitle": title,
+	return s.LogBare(map[string]any{
+		"type": "ai-title", "aiTitle": title, "sessionId": s.SessionID,
 	})
 }
 
-// LogEndedByModel writes {type:"ended-by-model"} — real marks sessions the
-// model closed via EndConversation (I4r); the picker filters them.
+// LogEndedByModel writes {type:"ended-by-model",timestamp,sessionId} —
+// real's markSessionEndedByModel (TJr), stamped when the model closes the
+// session via EndConversation; the picker filters them.
 func (s *Store) LogEndedByModel() error {
-	return s.LogRecord(map[string]any{"type": "ended-by-model"})
-}
-
-// LogPRLink writes {type:"pr-link",prNumber,prUrl,prRepository} — real's
-// linkSessionToPR record when a session is associated with a PR.
-func (s *Store) LogPRLink(number int, url, repo string) error {
-	return s.LogRecord(map[string]any{
-		"type": "pr-link", "prNumber": number,
-		"prUrl": url, "prRepository": repo,
+	return s.LogBare(map[string]any{
+		"type": "ended-by-model", "timestamp": ISONow(),
+		"sessionId": s.SessionID,
 	})
 }
 
-// LogContinuedIn writes {type:"continued-in",continuedInSessionId} —
-// real's $8o: stamped on the source transcript when a session's work
-// continues in a different session id (bg continuation / handoff).
+// LogPRLink writes {type:"pr-link",sessionId,prNumber,prUrl,prRepository,
+// timestamp} — real's linkSessionToPR record when a session is associated
+// with a PR.
+func (s *Store) LogPRLink(number int, url, repo string) error {
+	return s.LogBare(map[string]any{
+		"type": "pr-link", "sessionId": s.SessionID,
+		"prNumber": number, "prUrl": url, "prRepository": repo,
+		"timestamp": ISONow(),
+	})
+}
+
+// LogContinuedIn writes {type:"continued-in",timestamp,sessionId,
+// continuedInSessionId} — real's Jns/TRe: stamped on the source transcript
+// when a session's work continues in a different session id (bg handoff).
 // Picker: the superseded transcript is hidden.
 func (s *Store) LogContinuedIn(newSessionID string) error {
-	return s.LogRecord(map[string]any{
-		"type": "continued-in", "continuedInSessionId": newSessionID,
+	return s.LogBare(map[string]any{
+		"type": "continued-in", "timestamp": ISONow(),
+		"sessionId": s.SessionID, "continuedInSessionId": newSessionID,
+	})
+}
+
+// LogContinuedInTo appends the continued-in marker to another session's
+// transcript (the --bg -r handoff: the resumed source continues under the
+// new bg session id). onlyIfExists — a missing source file stays missing.
+func LogContinuedInTo(cwd, srcID, dstID string) error {
+	return AppendContinuedIn(filepath.Join(dir(cwd), srcID+".jsonl"), srcID, dstID)
+}
+
+// AppendContinuedIn appends the continued-in marker to an arbitrary
+// transcript path (real's TRe writes it onto the source session file).
+func AppendContinuedIn(path, srcID, dstID string) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	b, _ := json.Marshal(map[string]any{
+		"type": "continued-in", "timestamp": ISONow(),
+		"sessionId": srcID, "continuedInSessionId": dstID,
+	})
+	_, werr := f.Write(append(b, '\n'))
+	cerr := f.Close()
+	if werr != nil {
+		return werr
+	}
+	return cerr
+}
+
+// LogWorktreeState writes {type:"worktree-state",worktreeSession,sessionId}
+// — real's saveWorktreeState (AM), stamped when the session enters a
+// worktree; ws is nil on exit (real emits worktreeSession:null).
+func (s *Store) LogWorktreeState(ws map[string]any) error {
+	return s.LogBare(map[string]any{
+		"type": "worktree-state", "worktreeSession": ws,
+		"sessionId": s.SessionID,
+	})
+}
+
+// LogForkContextRef writes {type:"fork-context-ref",agentId,
+// parentSessionId,parentLastUuid,contextLength} — real's fJr: a fork
+// subagent that references the parent's conversation instead of carrying
+// copies stamps it into its own (subagent) transcript so a resume can
+// hydrate the prefix. Captured rows carry no sessionId/uuid/timestamp.
+func (s *Store) LogForkContextRef(agentID, parentSessionID, parentLastUUID string, contextLength int) error {
+	return s.LogBare(map[string]any{
+		"type": "fork-context-ref", "agentId": agentID,
+		"parentSessionId": parentSessionID, "parentLastUuid": parentLastUUID,
+		"contextLength": contextLength,
+	})
+}
+
+// LogContentReplacement writes {type:"content-replacement",sessionId,
+// agentId?,replacements:[{kind,toolUseId,replacement}]} — real's
+// insertContentReplacement: tool-result content the wire rewrote
+// (persisted-message budget) is recorded so resume can re-apply it.
+// Route-by-agent: agentID non-empty targets the subagent transcript.
+func (s *Store) LogContentReplacement(replacements []any, agentID string) error {
+	rec := map[string]any{
+		"type": "content-replacement", "sessionId": s.SessionID,
+		"replacements": replacements,
+	}
+	if agentID != "" {
+		rec["agentId"] = agentID
+	}
+	return s.LogBare(rec)
+}
+
+// LogFileHistorySnapshot writes real's per-user-message checkpoint row:
+// {type:"file-history-snapshot",messageId:<user-msg-uuid>,snapshot:
+// {messageId,trackedFileBackups,timestamp},isSnapshotUpdate}.
+func (s *Store) LogFileHistorySnapshot(messageID string, trackedFileBackups map[string]any, isSnapshotUpdate bool) error {
+	return s.LogBare(map[string]any{
+		"type": "file-history-snapshot", "messageId": messageID,
+		"snapshot": map[string]any{
+			"messageId":          messageID,
+			"trackedFileBackups": trackedFileBackups,
+			"timestamp":          ISONow(),
+		},
+		"isSnapshotUpdate": isSnapshotUpdate,
+	})
+}
+
+// LogFileHistoryDelta writes {type:"file-history-delta",messageId,
+// snapshotMessageId,trackingPath,backup,timestamp} — real's Jes: a file
+// newly tracked mid-turn merges its pre-edit backup into the latest
+// snapshot.
+func (s *Store) LogFileHistoryDelta(messageID, snapshotMessageID, trackingPath string, backup map[string]any) error {
+	return s.LogBare(map[string]any{
+		"type": "file-history-delta", "messageId": messageID,
+		"snapshotMessageId": snapshotMessageID, "trackingPath": trackingPath,
+		"backup": backup, "timestamp": ISONow(),
 	})
 }
 
 // LogAgentMeta writes the teammate/agent identity records real persists
 // ("always" merge policy): tag, agent-name, agent-color, agent-setting.
 func (s *Store) LogAgentMeta(tag, agentName, agentColor, agentSetting string) error {
-	rec := map[string]any{}
+	rec := map[string]any{"sessionId": s.SessionID}
 	switch {
 	case tag != "":
 		rec["type"] = "tag"
@@ -433,7 +603,7 @@ func (s *Store) LogAgentMeta(tag, agentName, agentColor, agentSetting string) er
 	default:
 		return nil
 	}
-	return s.LogRecord(rec)
+	return s.LogBare(rec)
 }
 
 // ResolveArg resolves a -r/--resume argument to a session id in cwd's
@@ -742,6 +912,7 @@ func Fork(cwd, srcID string) (*Store, []api.Message, error) {
 		st.Close()
 		return nil, nil, err
 	}
+	st.replayContentReplacements(recs, srcID)
 	if p := firstPromptText(msgs); p != "" {
 		// best-effort title, matching CC's "<prompt> (Branch N)" naming —
 		// N dedups against existing branch titles of the same prompt
@@ -775,7 +946,37 @@ func (s *Store) ForkInto(srcPath, srcID, leafUUID string) ([]api.Message, error)
 	if len(branch) == 0 {
 		return nil, errors.New("session has no message chain to fork")
 	}
-	return s.forkCopy(branch, srcID)
+	msgs, err := s.forkCopy(branch, srcID)
+	if err != nil {
+		return nil, err
+	}
+	s.replayContentReplacements(recs, srcID)
+	return msgs, nil
+}
+
+// replayContentReplacements re-emits the source transcript's
+// content-replacement rows as one consolidated record on the fork —
+// real's session-copy path (mod_1044 ne) collects every {type:
+// "content-replacement",sessionId:<src>} row's replacements and appends
+// {type:"content-replacement",sessionId:<new>,replacements:[...]} after
+// the copied messages.
+func (s *Store) replayContentReplacements(recs []map[string]any, srcID string) {
+	var all []any
+	for _, r := range recs {
+		if t, _ := r["type"].(string); t != "content-replacement" {
+			continue
+		}
+		if sid, _ := r["sessionId"].(string); sid != srcID {
+			continue
+		}
+		if rs, ok := r["replacements"].([]any); ok {
+			all = append(all, rs...)
+		}
+	}
+	if len(all) == 0 {
+		return
+	}
+	_ = s.LogContentReplacement(all, "")
 }
 
 // forkCopy writes the branch records into s with forkedFrom stamps and a
