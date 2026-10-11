@@ -55,6 +55,9 @@ type Store interface {
 	// (real's savePermissionMode); the latched value rides user rows as
 	// permissionMode and re-stamps in each metadata flush.
 	StampPermMode(mode string) error
+	// LatchPermMode updates the latched value for the next metadata
+	// flush without writing a row (real's mode-cycle behavior).
+	LatchPermMode(mode string)
 	// LogRelocated stamps {type:"relocated",relocatedCwd} on cwd changes
 	// (real's relocateSessionTranscript marker).
 	LogRelocated(newCwd string) error
@@ -128,10 +131,12 @@ func RunWithStore(l *agent.Loop, store Store) {
 			}
 		}
 		l.PermMode = order[(idx+1)%len(order)]
-		// real latches permissionMode + stamps {type:"permission-mode"}
-		// on every mode cycle (mod_0416 mlr / metadata flush)
+		// real stamps NO transcript row on a mode cycle — the
+		// {type:"permission-mode"} row is written by the metadata
+		// re-append (materialize/resume/compact/exit), which picks up the
+		// mode current then — the latch still updates for the next flush
 		if currentStore != nil {
-			currentStore.StampPermMode(l.PermMode)
+			currentStore.LatchPermMode(l.PermMode)
 		}
 		compInline(fmt.Sprintf("\r\n%s⏵⏵ %s mode%s\r\n", yellow, l.PermMode, reset))
 	}
@@ -268,10 +273,11 @@ func RunWithStore(l *agent.Loop, store Store) {
 	}
 	l.ToolCtx.SetPermMode = func(mode string) {
 		l.PermMode = mode
+		// real writes no transcript row on a permission-mode change — the
+		// {type:"permission-mode"} row lands via the metadata re-append
+		// (flush at exit / resume / materialize); latch updates for it
 		if currentStore != nil {
-			// real's savePermissionMode — a bare {type:"permission-mode"}
-			// state row, not a system record
-			currentStore.StampPermMode(mode)
+			currentStore.LatchPermMode(mode)
 		}
 	}
 	// state-row writes from inside tool bodies (Artifact publish →
@@ -1775,6 +1781,13 @@ func (p *promptUI) askStructured(ks *keySource, header, question string, options
 }
 
 func fireSessionEndHook(l *agent.Loop) {
+	if !l.SessionEndFired {
+		// real's exit re-stamp (reAppendSessionMetadataAtExit, sJr): the
+		// session-metadata rows land once on the transcript tail
+		if st, ok := currentStore.(*session.Store); ok && st != nil {
+			_ = st.StampMeta("normal", l.PermMode)
+		}
+	}
 	if l.Hooks == nil {
 		return
 	}

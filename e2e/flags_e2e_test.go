@@ -786,6 +786,15 @@ func TestInheritPermissionMode(t *testing.T) {
 	p1.waitFor("· done", 30*time.Second)
 	p1.exit()
 
+	for _, f := range s.transcriptPaths(t) {
+		b, _ := os.ReadFile(f)
+		t.Log("TRANSCRIPT", f)
+		for _, ln := range strings.Split(string(b), "\n") {
+			if strings.Contains(ln, "mode") {
+				t.Log(" ", ln[:min(len(ln), 160)])
+			}
+		}
+	}
 	p2 := s.runPTY(t, nil, "--mock", "-c", "--inherit-permission-mode", "true")
 	p2.waitFor("plan mode", 30*time.Second)
 	p2.exit()

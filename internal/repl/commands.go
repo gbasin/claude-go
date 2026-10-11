@@ -3891,6 +3891,15 @@ func cdCmd(l *agent.Loop, arg string) {
 	l.CWD = p
 	l.ToolCtx.CWD = p
 	os.Chdir(p)
+	// real's relocateSessionTranscript (mod_0416 cnt): the session file
+	// follows the session — moving cwd across project dirs renames
+	// <oldslug>/<sid>.jsonl into the new slug dir and stamps a bare
+	// {type:"relocated",sessionId,relocatedCwd} row
+	if rs, ok := currentStore.(*session.Store); ok && rs != nil {
+		if err := rs.Relocate(p); err == nil {
+			l.Transcript = rs.Path // transcript_path hooks read the new home
+		}
+	}
 	if l.ToolCtx.OnCwdChanged != nil {
 		l.ToolCtx.OnCwdChanged(p)
 	}

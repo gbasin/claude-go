@@ -1072,6 +1072,11 @@ func main() {
 
 	if st2 != nil {
 		defer st2.Close()
+		// real's exit re-stamp (sJr / reAppendSessionMetadataAtExit) lands
+		// the session-metadata rows ({type:"mode"},{type:"permission-mode"})
+		// on the transcript tail — deferred so the final mode is written.
+		// RunWithStore's SessionEnd path stamps too; StampMeta dedupes.
+		defer func() { _ = st2.StampMeta("normal", loop.PermMode) }()
 		loop.Transcript = st2.Path
 		loop.OnSessionTitle = func(title string) {
 			_ = st2.LogTitle(title)
@@ -1092,6 +1097,14 @@ func main() {
 			mode = "coordinator"
 		}
 		_ = st2.StampMode(mode)
+		// --inherit-permission-mode resolves BEFORE the materialize stamp —
+		// the stamp itself writes last-wins permission-mode rows into the
+		// resumed transcript, so reading after it would return our own write
+		if os.Getenv("CLAUDE_GO_INHERIT_PERMISSION_MODE") != "" && !o.permModeSet && resumeID != "" {
+			if m := session.InitMode(cwd, resumeID); m != "" {
+				loop.PermMode = m
+			}
+		}
 		_ = st2.StampPermMode(loop.PermMode)
 		_ = st2.LogAtisLatch("")
 		if tc := loop.TeammateCtx; tc != nil {
@@ -1295,6 +1308,12 @@ func main() {
 		}
 	} else {
 		fireHook(loop, hooks.SessionStart)
+	}
+	// session file materialized — real's reAppendSessionMetadata stamps
+	// {type:"mode"} + {type:"permission-mode"} rows here (and on resume
+	// adopt); PermMode is final by now (flag > inherit > settings)
+	if st2 != nil {
+		_ = st2.StampMeta("normal", loop.PermMode)
 	}
 	if o.printMode {
 		tools.Interactive = false

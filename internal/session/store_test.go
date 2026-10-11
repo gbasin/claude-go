@@ -435,3 +435,162 @@ func TestPickerFilters(t *testing.T) {
 		t.Fatalf("listed %v", ids)
 	}
 }
+
+// Meta rows real stamps bare: no uuid/parentUuid/timestamp decoration
+// (verified against ~/.claude/projects/*.jsonl). Rows that carry a
+// timestamp do so because the emit site builds one explicitly.
+func TestMetaRowsAreBare(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+	st, _ := Open(cwd, "sess-meta")
+	st.LogMode("normal")
+	st.LogPermissionMode("acceptEdits")
+	st.LogAITitle("hello")
+	st.LogAgentMeta("v2", "", "", "")
+	st.LogEndedByModel()
+	st.Close()
+
+	recs, _ := readRecords(st.Path)
+	types := []string{}
+	for _, r := range recs {
+		types = append(types, r["type"].(string))
+		switch r["type"] {
+		case "mode", "permission-mode", "ai-title", "tag":
+			for _, k := range []string{"uuid", "parentUuid", "timestamp"} {
+				if _, ok := r[k]; ok {
+					t.Fatalf("%s row carries %s: %v", r["type"], k, r)
+				}
+			}
+		}
+	}
+	want := []string{"mode", "permission-mode", "ai-title", "tag", "ended-by-model"}
+	if len(types) != len(want) {
+		t.Fatalf("types = %v", types)
+	}
+	for i, w := range want {
+		if types[i] != w {
+			t.Fatalf("types[%d] = %q, want %q", i, types[i], w)
+		}
+	}
+	// ended-by-model carries timestamp but no uuid
+	last := recs[len(recs)-1]
+	if last["timestamp"] == nil || last["uuid"] != nil {
+		t.Fatalf("ended-by-model row = %v", last)
+	}
+	// field values
+	if recs[0]["mode"] != "normal" || recs[1]["permissionMode"] != "acceptEdits" ||
+		recs[2]["aiTitle"] != "hello" || recs[3]["tag"] != "v2" {
+		t.Fatalf("rows = %v", recs)
+	}
+}
+
+// StampMeta mirrors real's reAppendSessionMetadata: same row isn't written
+// twice while the value is unchanged (real dedupes against the tail scan).
+func TestStampMetaDedup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+	st, _ := Open(cwd, "sess-dup")
+	if err := st.StampMeta("normal", "default"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.StampMeta("normal", "default"); err != nil {
+		t.Fatal(err)
+	}
+	// mode change re-stamps only the changed row
+	if err := st.StampMeta("normal", "plan"); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	recs, _ := readRecords(st.Path)
+	var modes, perms int
+	for _, r := range recs {
+		switch r["type"] {
+		case "mode":
+			modes++
+		case "permission-mode":
+			perms++
+			if len(recs) > 0 && perms == 2 && r["permissionMode"] != "plan" {
+				t.Fatalf("second permission-mode stamp = %v", r)
+			}
+		}
+	}
+	if modes != 1 || perms != 2 {
+		t.Fatalf("modes=%d perms=%d", modes, perms)
+	}
+}
+
+// /cd across project dirs moves <oldslug>/<sid>.jsonl (and the <sid>/
+// sidecar dir) into the new slug dir and stamps {type:"relocated"}.
+func TestRelocateMovesTranscript(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+	st, _ := Open(cwd, "sess-move")
+	st.Log(api.TextMessage("user", "hi"))
+	if err := writeTitleFile(dir(cwd), "sess-move", "t"); err != nil {
+		t.Fatal(err)
+	}
+
+	other := t.TempDir()
+	if err := st.Relocate(other); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	// old path gone, new path has the transcript
+	if _, err := os.Stat(filepath.Join(dir(cwd), "sess-move.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("old transcript still present: %v", err)
+	}
+	newPath := filepath.Join(dir(other), "sess-move.jsonl")
+	if st.Path != newPath {
+		t.Fatalf("store.Path = %q, want %q", st.Path, newPath)
+	}
+	recs, err := readRecords(newPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := recs[len(recs)-1]
+	if last["type"] != "relocated" || last["relocatedCwd"] != other ||
+		last["sessionId"] != "sess-move" {
+		t.Fatalf("tail row = %v", last)
+	}
+	for _, k := range []string{"uuid", "parentUuid", "timestamp"} {
+		if _, ok := last[k]; ok {
+			t.Fatalf("relocated row carries %s: %v", k, last)
+		}
+	}
+	// sidecar dir moved too
+	if got := ReadTitle(dir(other), "sess-move"); got != "t" {
+		t.Fatalf("sidecar custom-title.json not moved: %q", got)
+	}
+}
+
+// /cd to the same project dir only stamps the row when the relocated cwd
+// changes (real's y===b branch in relocateSessionTranscript).
+func TestRelocateSameDirStampsOnce(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+	st, _ := Open(cwd, "sess-same")
+	st.Log(api.TextMessage("user", "hi"))
+	if err := st.Relocate(cwd); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Relocate(cwd); err != nil { // repeat — no second stamp
+		t.Fatal(err)
+	}
+	st.Close()
+	recs, _ := readRecords(st.Path)
+	n := 0
+	for _, r := range recs {
+		if r["type"] == "relocated" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("relocated rows = %d", n)
+	}
+}
