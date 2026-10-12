@@ -513,6 +513,17 @@ func whimsicalPlanName(seed string) string {
 	return pick(planAdjs, 0) + "-" + pick(planAdjs, 1) + "-" + pick(planAnimals, 2)
 }
 
+// planExitModes carries the permission mode chosen in the plan-exit dialog
+// to execExitPlan — PlanApprove's bool signature can't return it, and real
+// applies the picked session mode (bypass / auto / acceptEdits / default).
+var planExitModes sync.Map // session id → permission mode
+
+// NotePlanExitMode records the mode the ExitPlanMode approval row picked
+// (repl side); execExitPlan consumes it instead of the flat "default".
+func NotePlanExitMode(session, mode string) {
+	planExitModes.Store(session, mode)
+}
+
 func execEnterPlan(c *Context, raw json.RawMessage) Result {
 	if c.SetPermMode == nil {
 		return Result{Content: "plan mode requires an interactive session", IsError: true}
@@ -547,7 +558,15 @@ func execExitPlan(c *Context, raw json.RawMessage) Result {
 		// denial stays in plan mode
 		return Result{Content: "The agent proposed a plan that was rejected by the user. The user chose to stay in plan mode rather than proceed with implementation.", IsError: true}
 	}
-	c.SetPermMode("default")
+	// apply the mode the approval row picked (real: the keep-context lanes
+	// carry a session setMode update); default lane → "default"
+	exitMode := "default"
+	if v, ok := planExitModes.LoadAndDelete(c.Session); ok {
+		if s, _ := v.(string); s != "" {
+			exitMode = s
+		}
+	}
+	c.SetPermMode(exitMode)
 	// allowedPrompts (deprecated upstream) are still surfaced as
 	// permission-rule suggestions, matching the interactive prompt.
 	for _, ap := range in.AllowedPrompts {

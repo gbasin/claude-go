@@ -323,7 +323,9 @@ func RunWithStore(l *agent.Loop, store Store) {
 	}
 	defer ks.stop()
 	var printedDot bool
-	var thinkingSeen bool
+	var thinkingSeen bool  // thinking deltas arrived this stretch (drives spinner's "thought for Ns")
+	var thinkingShown bool // "✻ Thinking…" header + summary body rendered
+	var thinkingStart time.Time
 	md := newMDRenderer()
 	if mw, _ := userSetting("maxProseWidth").(float64); mw > 0 {
 		md.proseW = int(mw) // real's prose cap (default: terminal width)
@@ -366,8 +368,27 @@ func RunWithStore(l *agent.Loop, store Store) {
 		}
 	}
 	spinRef := &spinner{}
+	// endThinking lands the elapsed footer on a completed thinking
+	// stretch — real's "Thought for Ns" variant (mod_1522: `Thought` when
+	// done vs `Thinking` live, duration floored at 1s). Only emitted when
+	// the summary body actually rendered.
+	endThinking := func() {
+		if thinkingShown {
+			d := time.Since(thinkingStart)
+			if d < time.Second { // real floors the thought-for figure at 1s
+				d = time.Second
+			}
+			streamPrint(dim + "\x1b[3m✻ Thought for " + fmtDur(d) + reset)
+		}
+		thinkingShown = false
+		thinkingSeen = false
+		thinkingStart = time.Time{}
+	}
 	l.Events.OnTextDelta = func(t string) {
 		spinRef.stop()
+		if thinkingSeen {
+			endThinking()
+		}
 		if !printedDot {
 			// tracked write — a raw print here left the hardware and
 			// stream cursors disagreeing, so the first md.Write chunk
@@ -382,14 +403,24 @@ func RunWithStore(l *agent.Loop, store Store) {
 		}
 	}
 	l.Events.OnThinking = func(t string) {
-		if thinkingHidden.Load() {
-			return // meta+t collapsed (real hides thinking by default display)
-		}
 		if !thinkingSeen {
-			// real renders "✻ Thinking…" dim + italic and the summary
-			// body in dim italic (mod_1551 dimColor+italic)
-			streamPrint(dim + "\x1b[3m✻ Thinking…" + reset)
 			thinkingSeen = true
+			thinkingStart = time.Now()
+		}
+		// The body is gated on showThinkingSummaries (real's settings key —
+		// off ⇒ the wire request goes out with display:"omitted" and no
+		// summary text arrives; we still suppress the render here since
+		// our request still asks for "updates"). meta+t collapses too.
+		if thinkingHidden.Load() || userSetting("showThinkingSummaries") == false {
+			return
+		}
+		if !thinkingShown {
+			// real renders "✻ Thinking…" dim + italic and the summary
+			// body in dim italic (mod_1522 `ja`: dimColor+italic). The
+			// streamed text IS the API-side summary — thinking_delta under
+			// display:"updates" carries the update text, not raw thinking.
+			streamPrint(dim + "\x1b[3m✻ Thinking…" + reset)
+			thinkingShown = true
 		}
 		streamWrite(dim + "\x1b[3m" + t + reset)
 	}
@@ -405,8 +436,8 @@ func RunWithStore(l *agent.Loop, store Store) {
 		if msgDisp != nil {
 			msgDisp.Finalize()
 		}
+		endThinking() // a tool card ends the thinking stretch
 		printedDot = false
-		thinkingSeen = false
 		streamPrint(fmt.Sprintf("%s⏺%s %s%s%s", green, reset, bold+name+reset, summarize(name, input), ""))
 	}
 	l.Events.OnToolResult = func(name, _ string, r tools.Result) {
@@ -448,18 +479,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 		if w <= 0 {
 			w = 80
 		}
-		ew := max(w-10, 10)
-		var rows []string
-		for _, ln := range lines {
-			for _, seg := range softWrap(ln, ew) {
-				rows = append(rows, strings.TrimRight(seg, " \t"))
-			}
-		}
-		const fold = 3
-		above, rem := rows, 0
-		if len(rows) > fold+1 {
-			above, rem = rows[:fold], len(rows)-fold
-		}
+		above, rem := foldResultRows(r.Content, w)
 		// real puts ⎿ on the FIRST row only — wrapped continuations and
 		// the fold line sit at col 5 bare (verified on captured rows)
 		for i, ln := range above {
@@ -485,6 +505,11 @@ func RunWithStore(l *agent.Loop, store Store) {
 	if ar, ok := l.ToolCtx.Agent.(*agent.Runner); ok {
 		var win []string
 		var toolUses int
+		// real's task block carries the backgrounding hint while a
+		// foreground agent runs (task:background = ctrl+b)
+		hintRow := func() string {
+			return fmt.Sprintf("     %sctrl+b to run in background%s", dim, reset)
+		}
 		paint := func() {
 			if focusMode.Load() {
 				return
@@ -495,8 +520,8 @@ func RunWithStore(l *agent.Loop, store Store) {
 				rows = append(rows, fmt.Sprintf("     %s+%d more tool uses (%s to expand)%s",
 					dim, hidden, key, reset))
 			}
-			if len(win) > 0 {
-				rows = append(rows, fmt.Sprintf("     %sctrl+b to run in background%s", dim, reset))
+			if tools.ForegroundAgentRunning() {
+				rows = append(rows, hintRow())
 			}
 			compSetProgress(rows)
 		}
@@ -512,8 +537,12 @@ func RunWithStore(l *agent.Loop, store Store) {
 			if focusMode.Load() {
 				return
 			}
-			compSetProgress([]string{
-				fmt.Sprintf("  %s⎿%s  %sInitializing…%s", dim, reset, dim, reset)})
+			rows := []string{
+				fmt.Sprintf("  %s⎿%s  %sInitializing…%s", dim, reset, dim, reset)}
+			if tools.ForegroundAgentRunning() {
+				rows = append(rows, hintRow())
+			}
+			compSetProgress(rows)
 		}
 		ar.OnSubToolUse = func(name string, input json.RawMessage) {
 			toolUses++
@@ -524,8 +553,22 @@ func RunWithStore(l *agent.Loop, store Store) {
 			if briefMode.Load() {
 				return
 			}
-			line := strings.Split(strings.TrimRight(r.Content, "\n"), "\n")[0]
-			push(fmt.Sprintf("     %s%s%s", dim, trunc(line, 110), reset))
+			// inner results fold like outer ones (mod_1522 mmt→ZV) but
+			// land in the repaintable window — each folded row is a window
+			// slot, the "+N" tail counts as one
+			w := compW
+			if w <= 0 {
+				w = 80
+			}
+			above, rem := foldResultRows(r.Content, w)
+			for _, ln := range above {
+				push(fmt.Sprintf("     %s%s%s", dim, compClamp(ln, w), reset))
+			}
+			if rem > 0 {
+				key := ed.resolvedChord("Global", "app:toggleTranscript", "ctrl+o")
+				push(fmt.Sprintf("     %s… +%d %s (%s to expand)%s",
+					dim, rem, pluralize(rem, "line", "lines"), key, reset))
+			}
 		}
 	}
 	historySessionID = l.Client.SessionID
@@ -715,7 +758,8 @@ func RunWithStore(l *agent.Loop, store Store) {
 				defer msgDisp.Finalize()
 			}
 			printedDot = false
-			thinkingSeen = false
+			thinkingSeen, thinkingShown = false, false
+			thinkingStart = time.Time{}
 			spin := newSpinner()
 			spin.agents = func() int { return runningAgents(l) }
 			spin.retry = func() (int, int, int, bool) {
@@ -771,6 +815,16 @@ func RunWithStore(l *agent.Loop, store Store) {
 							// popQueuedIntoDraft: unfinished queued text returns to the editor
 							if len(queueBuf) > 0 {
 								draftBack = append(draftBack, queueBuf...)
+							}
+						} else if k.b == 2 && k.seq == "" {
+							// real's task:background chord — ctrl+b (the
+							// ctrl+x ctrl+b form lands here too: ctrl+x is
+							// consumed as a chord prefix, then this byte
+							// arrives). Converts the in-flight foreground
+							// Agent run to background; its completion
+							// arrives later via the task path.
+							if tools.RequestAgentBackground() {
+								streamPrint("     " + dim + "running in background — completion will arrive as a task" + reset)
 							}
 						} else {
 							act := ed.busyAction(k)
@@ -830,6 +884,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			wasCancelled := ctx.Err() == context.Canceled
 			compStreamEnd()
 			spin.stop()
+			endThinking() // a turn can end right after a thinking stretch
 			tools.SetPeerSessionBusy(false)
 			tools.FlushHeldPeerMessages() // release held peer msgs at the boundary
 			compSetProgress(nil)          // any live task window collapses at turn end
@@ -1535,6 +1590,9 @@ func expandMentions(l *agent.Loop, line string) string {
 func runBang(l *agent.Loop, cmd string) {
 	raw, _ := json.Marshal(map[string]any{"command": cmd, "description": "run in bash mode"})
 	res := tools.Dispatch(l.ToolCtx, "Bash", raw)
+	// real's bash-input transcript row: "! " bashBorder + cmd on
+	// bashMessageBackgroundColor (badges.go bashInputEcho)
+	dprintln(bashInputEcho(cmd))
 	dprintln("  ⎿ ", strings.TrimSpace(res.Content))
 	msg := "<bash-input>\n" + cmd + "\n</bash-input>\n\n<local-command-stdout>\n" + res.Content + "\n</local-command-stdout>"
 	if respondToBash(l) {
@@ -2066,7 +2124,9 @@ func quickMemory(l *agent.Loop, text string) {
 	}
 	defer f.Close()
 	fmt.Fprintf(f, "- %s\n", text)
-	dprintln("  saved to memory:", p)
+	// real's user-memory-input transcript row: '#' remember/memBG +
+	// " text " on memBG + a dim ack line (badges.go memoryInputEcho)
+	dprintln(memoryInputEcho(text))
 }
 
 func vimMode(l *agent.Loop) string {
@@ -2330,69 +2390,285 @@ func init() { logResync.Store(-1) }
 
 var sessionOnlyModel bool // /model "s" key — applies the pick without persisting
 
-// showAgentsPane is real's ←← agents overlay — lists background tasks
-// with live status; esc/←/q close.
+// paneRow is one selectable entry in the agents overlay — a background
+// shell/monitor task or an in-process agent (Agent-tool runs; a ctrl+b'd
+// foreground agent lands here too).
+type paneRow struct {
+	cmd     string          // display label (task command / agent name)
+	started time.Time       // for the relAgo column + detail elapsed
+	section string          // ready|input|working|completed
+	id      string          // task id / agentId for the detail header
+	status  func() string   // live status word ("running", "done", …)
+	tail    func() []string // detail body — output/transcript tail lines
+}
+
+// showAgentsPane is real's ←← agents overlay — Ready for review /
+// Needs input / Working / Completed sections (mod_0831), ↑↓ selects a
+// task, enter opens its detail view, esc/q closes.
 func showAgentsPane(l *agent.Loop, ks *keySource) {
 	dch := make(chan key, 16)
 	ks.dialog.Store(&dch)
 	defer ks.dialog.Store(nil)
-	var tasks []*tools.BgTask
-	if l.ToolCtx.BgTasks != nil {
-		tasks = l.ToolCtx.BgTasks.List()
-	}
-	// real's agents view (2.1.296): "N awaiting input · claude agents"
-	// counts, then Ready for review / Needs input / Working / Completed
-	// sections, each with a dim description line (mod_0831)
-	var running, done int
-	for _, t := range tasks {
+
+	bgDone := func(t *tools.BgTask) bool {
 		select {
 		case <-t.Done:
-			done++
+			return true
 		default:
-			running++
+			return false
 		}
 	}
-	dprintf("\n  %d awaiting input · %sclaude agents%s\n", running, bold, reset)
-	dprintf("  %sYour conversation moved to the background — enter opens it · esc returns to it · ctrl+c twice quits%s\n", dim, reset)
-	if running > 0 {
-		dprintf("\n  %sNeeds input%s\n", bold, reset)
-		dprintf("  %sSessions that have a question or need your decision land here%s\n", dim, reset)
-		for _, t := range tasks {
-			select {
-			case <-t.Done:
+	gather := func() []paneRow {
+		var rows []paneRow
+		for _, a := range tools.ListInProcessAgents() {
+			a := a
+			r := paneRow{
+				cmd:     a.Name,
+				started: a.Started,
+				id:      a.AgentID,
+				tail: func() []string {
+					// transcript tail — real's sidechain file at
+					// <sid>/subagents/<agentId>.jsonl; fall back to the
+					// final report once the run completes
+					if lines := agentTranscriptTail(l, a.AgentID, 6); len(lines) > 0 {
+						return lines
+					}
+					if a.Completed() && a.Result() != "" {
+						return tailLines(a.Result(), 6)
+					}
+					return []string{"(no transcript output yet)"}
+				},
+			}
+			if a.Completed() {
+				r.section = "ready"
+				r.status = func() string { return "done" }
+			} else {
+				r.section = "working"
+				r.status = func() string { return "running" }
+			}
+			rows = append(rows, r)
+		}
+		if l.ToolCtx.BgTasks != nil {
+			for _, t := range l.ToolCtx.BgTasks.List() {
+				t := t
+				r := paneRow{
+					cmd:     t.Command,
+					started: t.Started,
+					id:      t.ID,
+					tail: func() []string {
+						out := tailLines(t.Out.String(), 6)
+						if len(out) == 0 {
+							out = []string{"(no output yet)"}
+						}
+						if t.Err != nil {
+							out = append(out, "error: "+t.Err.Error())
+						}
+						return out
+					},
+				}
+				if bgDone(t) {
+					r.section = "completed"
+					r.status = func() string {
+						switch {
+						case t.TimedOut:
+							return "timed out"
+						case t.Err != nil:
+							return "failed"
+						default:
+							return "done"
+						}
+					}
+				} else {
+					r.section = "working"
+					r.status = func() string { return "running" }
+				}
+				rows = append(rows, r)
+			}
+		}
+		return rows
+	}
+
+	rows := gather()
+	sel := 0
+	drawn := 0
+	sections := []struct{ key, title, desc string }{
+		{"ready", "Ready for review", "Finished agents with a report to read"},
+		{"input", "Needs input", "Sessions that have a question or need your decision land here"},
+		{"working", "Working", "Sessions Claude is actively working on — they keep running even if you close the terminal"},
+		{"completed", "Completed", "Finished sessions wait here for you to review"},
+	}
+	draw := func() {
+		var sb strings.Builder
+		if drawn > 0 {
+			fmt.Fprintf(&sb, "\x1b[%dA", drawn)
+		}
+		drawn = 0
+		put := func(s string) { sb.WriteString("\r\x1b[K" + s + "\r\n"); drawn++ }
+		put(fmt.Sprintf(" %d awaiting input · %sclaude agents%s  %s(↑↓ select · enter opens · esc closes)%s",
+			runningCount(rows), bold, reset, dim, reset))
+		put(" " + dim + "Your conversation moved to the background — enter opens it · esc returns to it · ctrl+c twice quits" + reset)
+		rowIdx := 0
+		for _, sec := range sections {
+			var in []int
+			for i, r := range rows {
+				if r.section == sec.key {
+					in = append(in, i)
+				}
+			}
+			if len(in) == 0 {
 				continue
-			default:
 			}
-			dprintf("  %s✻%s %-36s %s%s%s  %s%s\n", claudeOrange, reset,
-				truncRunes(t.Command, 36), dim, "", reset, relAgo(t.Started), reset)
+			put("")
+			put("  " + bold + sec.title + reset)
+			put("  " + dim + sec.desc + reset)
+			for _, i := range in {
+				r := rows[i]
+				mark := "  "
+				if rowIdx == sel {
+					mark = cyan + "❯ " + reset
+				}
+				glyph, st := claudeOrange+"✻"+reset, r.status()
+				if r.section == "completed" || r.section == "ready" {
+					glyph = dim + "∙" + reset
+				}
+				put(fmt.Sprintf("  %s%s %-36s %s%s%s  %s%s",
+					mark, glyph, truncRunes(r.cmd, 36), dim, st, reset, relAgo(r.started), reset))
+				rowIdx++
+			}
 		}
-		dprintf("\n  %sWorking%s\n", bold, reset)
-		dprintf("  %sSessions Claude is actively working on — they keep running even if you close the terminal%s\n", dim, reset)
+		put("")
+		put("  \x1b[38;5;153m❯\x1b[39m " + dim + "describe a task for a new session" + reset)
+		put("  " + dim + "enter to return · space to reply · esc to close" + reset)
+		fmt.Print(sb.String())
 	}
-	if done > 0 {
-		dprintf("\n  %sCompleted%s\n", bold, reset)
-		dprintf("  %sFinished sessions wait here for you to review%s\n", dim, reset)
-		for _, t := range tasks {
-			select {
-			case <-t.Done:
-			default:
-				continue
-			}
-			st := "stopped"
-			if t.Err == nil && !t.TimedOut {
-				st = "done"
-			}
-			dprintf("  %s∙%s %-36s %s%s%s  %s%s\n", dim, reset,
-				truncRunes(t.Command, 36), dim, st, reset, relAgo(t.Started), reset)
+	detail := func(r paneRow) {
+		fmt.Print("\r\x1b[K")
+		fmt.Printf("  %s%s%s  %s%s%s\r\n", bold, r.cmd, reset, dim, r.id, reset)
+		fmt.Printf("    %sstatus: %s · started %s%s\r\n", dim, r.status(), relAgo(r.started), reset)
+		for _, ln := range r.tail() {
+			fmt.Printf("    %s%s%s\r\n", dim, truncRunes(ln, 100), reset)
 		}
+		fmt.Printf("    %s(esc to go back)%s\r\n", dim, reset)
+		for k2 := range dch {
+			if k2.b == 0x1b || k2.b == 'q' || k2.b == '\r' || k2.seq == "[D" {
+				break
+			}
+		}
+		drawn = 0
 	}
-	dprintf("\n  %s❯%s %sdescribe a task for a new session%s\n", "\x1b[38;5;153m", reset, dim, reset)
-	dprintf("  %senter to return · space to reply · esc to close%s\n", dim, reset)
+	fmt.Println()
+	draw()
 	for k := range dch {
-		if k.b == 0x1b || k.b == 3 || k.b == 'q' || k.seq == "[D" || k.seq == "[C" {
+		switch {
+		case k.seq == "[A" || k.b == 'k':
+			if sel > 0 {
+				sel--
+			}
+		case k.seq == "[B" || k.b == 'j':
+			if sel < len(rows)-1 {
+				sel++
+			}
+		case k.b == '\r' || k.b == '\n':
+			if sel < len(rows) {
+				detail(rows[sel])
+			}
+		case k.b == 0x1b || k.b == 3 || k.b == 'q' || k.seq == "[D" || k.seq == "[C":
+			fmt.Print("\r\x1b[K")
 			return
 		}
+		draw()
 	}
+}
+
+// runningCount counts pane rows still in flight.
+func runningCount(rows []paneRow) int {
+	n := 0
+	for _, r := range rows {
+		if r.section == "working" || r.section == "input" {
+			n++
+		}
+	}
+	return n
+}
+
+// tailLines returns the last n non-empty lines of s.
+func tailLines(s string, n int) []string {
+	var lines []string
+	for _, ln := range strings.Split(strings.TrimRight(s, "\n"), "\n") {
+		if strings.TrimSpace(ln) != "" {
+			lines = append(lines, ln)
+		}
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return lines
+}
+
+// agentTranscriptTail reads the last n meaningful rows of a subagent's
+// sidechain transcript (<sid>/subagents/<agentId>.jsonl), rendered as
+// "role: text" one-liners for the agents-pane detail view.
+func agentTranscriptTail(l *agent.Loop, agentID string, n int) []string {
+	if l.Transcript == "" {
+		return nil
+	}
+	sid := strings.TrimSuffix(filepath.Base(l.Transcript), ".jsonl")
+	p := filepath.Join(filepath.Dir(l.Transcript), sid, "subagents", agentID+".jsonl")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, ln := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+		var rec struct {
+			Message struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal([]byte(ln), &rec) != nil || rec.Message.Role == "" {
+			continue
+		}
+		text := messageText(rec.Message.Content)
+		if text == "" {
+			continue
+		}
+		if i := strings.IndexByte(text, '\n'); i >= 0 {
+			text = text[:i]
+		}
+		out = append(out, rec.Message.Role+": "+text)
+	}
+	if len(out) > n {
+		out = out[len(out)-n:]
+	}
+	return out
+}
+
+// messageText flattens a transcript message's content (string or block
+// array) to plain text.
+func messageText(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return ""
+	}
+	var parts []string
+	for _, b := range blocks {
+		switch {
+		case b.Type == "text" && b.Text != "":
+			parts = append(parts, b.Text)
+		case b.Type == "tool_use":
+			parts = append(parts, "["+b.Name+"]")
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // runningAgents counts live background tasks (real's "← N agents").

@@ -489,9 +489,11 @@ func SkillFacts(cwd string) []struct {
 // `extract` (keyed by lowercase name), chosen per entrypoint family —
 // the sdk capture differs from cli (no claude-code-guide).
 func extractedAgentsIndex(entrypoint, model string) map[string]string {
-	family := "sdk"
-	if !strings.HasPrefix(entrypoint, "sdk") {
-		family = "cli"
+	// sdk-cli (our -p/serve) emits the CLI listing — the sdk text
+	// variant only appears for the sdk-ts/sdk-py harness entrypoints
+	family := "cli"
+	if entrypoint == "sdk-ts" || entrypoint == "sdk-py" {
+		family = "sdk"
 	}
 	fn := "agents_index_" + family + "_" + modelClass(model) + ".txt"
 	t, ok := extract.Text(fn)

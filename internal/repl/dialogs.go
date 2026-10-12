@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gbasin/claude-go/internal/agent"
+	"github.com/gbasin/claude-go/internal/config"
 	"github.com/gbasin/claude-go/internal/hooks"
 	"github.com/gbasin/claude-go/internal/perms"
 	"github.com/gbasin/claude-go/internal/tools"
@@ -77,12 +78,6 @@ func dprintln(a ...any) {
 }
 
 func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, config string, input json.RawMessage) (bool, string) {
-	if p.always == nil {
-		p.always = map[string]bool{}
-	}
-	if p.always[name] {
-		return true, ""
-	}
 	// PermissionRequest hook can auto-decide without prompting (real event)
 	if l.Hooks != nil {
 		pr := hooks.Run(l.Hooks, hooks.PermissionRequest, map[string]any{
@@ -146,11 +141,13 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 	// and scrolls inline instead of fighting the footer
 	compSuspend()
 	defer compResume()
-	// real 2.1.291's dialog (captured bytes):
-	//   cyan-153 ─ rule · bold "<Tool> command" · auto-mode tip (non-auto
-	//   only) · gray-246 description · gray-239 ╌ frame around the content ·
-	//   "Do you want to proceed?" · cursor list numbered 1..N ·
-	//   "Esc to cancel · Tab to amend"
+	// real 2.1.296's dialog (mod_1596 $tt/Cnt + mod_1531 consentRows):
+	//   cyan-153 ─ rule · bold "<Tool> command" · auto-mode tip (subtitle,
+	//   only when the enable-auto-mode row is offered) · gray-246
+	//   description · gray-239 ╌ frame around the content · decision-reason
+	//   row · "Do you want to proceed?" · cursor list numbered 1..N ·
+	//   "Esc to cancel · Tab to next field" — tab moves between the input
+	//   rows (nextField), it does not amend the tool call.
 	cyan153 := "\x1b[38;5;153m"
 	gray246 := "\x1b[38;5;246m"
 	gray239 := "\x1b[38;5;239m"
@@ -182,101 +179,35 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 		question = "Do you want to make this edit to " + bold + fname + unbold + "?"
 	case "ExitPlanMode":
 		title = "Exit plan mode?" // real's plan-colored approval dialog
+		// real's plan-exit card footer (mod_1596 Got): dim status line
+		question = dim + "Claude has written up a plan and is ready to execute. Would you like to proceed?" + reset
 	}
 	desc := permDesc(name, input, summary)
 	if desc == "" && isFileTool(name) {
 		desc = permFilePath(input) // real shows the path as the gray line
 	}
 	content := permContent(name, input)
+	if name == "ExitPlanMode" {
+		// the plan-exit card has no description/content frame (real shows
+		// the plan above the card or the bare "wants to exit" line)
+		desc, content = "", ""
+	}
 
-	// the tip rides with the switch-to-auto option (captured: it shows on
-	// the Bash dialog, not the Write one)
+	// the enable-auto-mode row — and the tip subtitle riding it — are
+	// offered only when auto mode can take over: not already auto, not
+	// managed-disabled, and no ask rule/hook forced this prompt (real's
+	// `wo = canOfferAutoMode && !decisionReason` gate in $tt).
+	offerAuto := !isFileTool(name) && name != "ExitPlanMode" &&
+		l.PermMode != "auto" && reason == "" && autoModeAvailable(l)
 	tip := ""
-	if l.PermMode != "auto" && !isFileTool(name) {
+	if offerAuto {
 		tip = `Tip: auto mode handles these prompts for you — choose "switch to auto mode" below`
 	}
-	// options are per-tool-class — real 294's rows are input fields:
-	//   Yes (input row, "and tell Claude what to do next"),
-	//   "Yes, and don't ask again for <prefix> in <dir>" (editable
-	//   command prefix), "Yes, and switch to auto mode" (conditional),
-	//   No (input row, "and tell Claude what to do differently").
-	//   file tools: Yes / switch-to-acceptEdits / No
+	// the suggested rule/prefix and the outside-dir target feed both the
+	// option rows and the "always" submit path
 	alwaysSpec := ruleSuggestion(name, summary)
-	// display form of the suggested rule — strip the Tool(...) wrapper
-	ruleDisp := alwaysSpec
-	if i := strings.IndexByte(alwaysSpec, '('); i >= 0 && strings.HasSuffix(alwaysSpec, ")") {
-		ruleDisp = alwaysSpec[i+1 : len(alwaysSpec)-1]
-	}
-	type opt struct {
-		label       string
-		action      string
-		input       string // "feedback" | "prefix" — row carries an editable field
-		placeholder string
-		suffix      string // static text after the field (e.g. " in <dir>")
-	}
-	var opts []opt
-	// the project dir shown in "in <dir>" — ~-abbreviated like real's Hn()
-	dirDisp := l.ToolCtx.CWD
-	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(dirDisp, home) {
-		dirDisp = "~" + dirDisp[len(home):]
-	}
 	outside := outsideDir(name, input, l.ToolCtx.CWD)
-	if name == "ExitPlanMode" {
-		// real's plan-exit rows (mod_1596): the clear-context row plus a
-		// keep-context variant per enabled lane — bypass / resume-auto /
-		// accept-edits / default
-		opts = append(opts, opt{
-			label:  "Yes, clear context and auto-accept edits",
-			action: "yes"})
-		if l.PermMode != "acceptEdits" {
-			opts = append(opts, opt{
-				label:  "Yes, and auto-accept edits " + dim + "(keep context)" + reset,
-				action: "acceptedits"})
-		} else {
-			opts = append(opts, opt{
-				label:  "Yes " + dim + "(keep context)" + reset,
-				action: "yes"})
-		}
-		opts = append(opts, opt{label: "No, refine the plan", action: "no",
-			input: "feedback", placeholder: "and tell Claude what to change"})
-	} else {
-		opts = append(opts, opt{label: "Yes", action: "yes", input: "feedback",
-			placeholder: "and tell Claude what to do next"})
-		if isFileTool(name) && l.PermMode != "acceptEdits" {
-			// captured: "accept edits (...) commands)" + "(shift+tab)" bold
-			opts = append(opts, opt{
-				label:  "Yes, and switch to " + bold + "accept edits (auto-approve file edits and common file \n      commands)" + unbold + " for this session " + bold + "(shift+tab)" + unbold,
-				action: "acceptedits"})
-		} else if !isFileTool(name) {
-			if outside != "" {
-				opts = append(opts, opt{
-					label:  "Yes, and always allow access to " + outside + " from this project",
-					action: "always"})
-			} else if alwaysSpec != "" {
-				// real: editable-prefix input row — the seed is the suggested
-				// prefix; editing it rewrites the persisted rule
-				opts = append(opts, opt{
-					label:  "Yes, and don't ask again for ",
-					action: "always",
-					input:  "prefix",
-					// real's input placeholder
-					placeholder: "command prefix (e.g., npm run *)",
-					suffix:      bold + " in " + dirDisp + unbold})
-			}
-			if l.PermMode != "auto" {
-				opts = append(opts, opt{label: "Yes, and switch to auto mode" + gray246 + " · auto mode handles these prompts for you" + "\x1b[39m", action: "automode"})
-			}
-		}
-		opts = append(opts, opt{label: "No", action: "no", input: "feedback",
-			placeholder: "and tell Claude what to do differently"})
-	}
-	// per-option input text (feedback / edited prefix)
-	inputs := make([][]rune, len(opts))
-	for i := range opts {
-		if opts[i].input == "prefix" {
-			inputs[i] = []rune(ruleDisp)
-		}
-	}
+	opts, inputs := p.permOpts(l, name, input, summary, offerAuto)
 
 	sel := 0
 	renderRows := 0
@@ -302,11 +233,23 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 		if desc != "" && desc != content {
 			put(" " + gray246 + desc + reset)
 		}
-		put(dot)
-		for _, cl := range permContentLines(name, input, content) {
-			put(cl)
+		if name != "ExitPlanMode" {
+			put(dot)
+			for _, cl := range permContentLines(name, input, content) {
+				put(cl)
+			}
+			put(dot)
 		}
-		put(dot)
+		if reason != "" {
+			// real's decision-reason row (Kw) lands above the question —
+			// e.g. "Permission rule `X` requires confirmation for this
+			// command." + dim "/permissions to update rules"
+			ln := " " + reason
+			if config != "" {
+				ln += " " + dim + config + reset
+			}
+			put(ln)
+		}
 		put(" " + question)
 		if rem := time.Until(deadline); rem > 0 {
 			m, s := int(rem.Minutes()), int(rem.Seconds())%60
@@ -388,6 +331,11 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 					return true, fb, true
 				case "no":
 					dprintln("  ✗ No")
+					if name == "ExitPlanMode" && fb != "" {
+						// PlanApprove's bool signature drops the feedback —
+						// queue it as the next user turn like the deny path
+						queuePermFeedback(fb)
+					}
 					if fb != "" {
 						return denyWith(fb)
 					}
@@ -401,8 +349,22 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 					l.PermMode = "acceptEdits"
 					dprintln("  switched to accept edits — " + title + " approved")
 					return true, fb, true
+				case "setmode":
+					// ExitPlanMode lane rows (jot): the approval carries the
+					// session mode — stash it so execExitPlan doesn't flat-
+					// reset to "default" after PlanApprove returns
+					l.PermMode = opts[sel].mode
+					tools.NotePlanExitMode(l.Client.SessionID, opts[sel].mode)
+					dprintln("  switched to " + opts[sel].mode + " — plan approved")
+					return true, fb, true
 				case "always":
-					p.always[name] = true
+					if outside != "" {
+						// real's "always allow access to <dir>" row mints an
+						// addDirectories session update, not a tool rule
+						l.AddDirs = append(l.AddDirs, outside)
+						dprintf("  %s%s added to the workspace for this session%s\n", dim, outside, reset)
+						return true, fb, true
+					}
 					spec := alwaysSpec
 					if opts[sel].input == "prefix" {
 						// the edited prefix becomes the persisted rule —
@@ -412,13 +374,23 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 						if pfx == "" {
 							return true, "", true
 						}
-						spec = name + "(" + pfx + ")"
-						if !strings.HasSuffix(pfx, ":*") && !strings.HasSuffix(pfx, "*") {
-							spec = name + "(" + pfx + ":*)"
+						if pfx == "*" {
+							spec = name // real's "any <tool> command" rule
+						} else {
+							spec = name + "(" + pfx + ")"
+							if !strings.HasSuffix(pfx, ":*") && !strings.HasSuffix(pfx, "*") {
+								spec = name + "(" + pfx + ":*)"
+							}
 						}
 					}
-					if outside == "" && spec != "" {
+					if spec != "" {
 						addLocalPermissionRule(l.ToolCtx.CWD, spec)
+						// honor the rule for the rest of this session too —
+						// the allow list was read once at startup
+						if l.PermRules == nil {
+							l.PermRules = map[string][]string{}
+						}
+						l.PermRules["allow"] = append(l.PermRules["allow"], spec)
 						dprintf("  %s%s added to permission allowlist%s\n", dim, spec, reset)
 					}
 					return true, fb, true
@@ -485,6 +457,164 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 			}
 		}
 	}
+}
+
+// permOpt is one numbered row in the permission dialog. input marks an
+// editable row ("feedback" free text / "prefix" rule content); mode is the
+// target permission mode for "setmode" rows (ExitPlanMode lanes).
+type permOpt struct {
+	label       string
+	action      string
+	mode        string
+	input       string // "feedback" | "prefix" — row carries an editable field
+	placeholder string
+	suffix      string // static text after the field (e.g. " in <dir>")
+}
+
+// permOpts builds the dialog's option rows (mod_1596 qtt/Cnt + jot) and the
+// per-row editable-field seeds. Real's rows are input fields:
+//
+//	Yes (input row, "and tell Claude what to do next"),
+//	"Yes, and don't ask again for <rule> in <dir>" (editable command
+//	prefix, placeholder "command prefix (e.g., npm run *)"),
+//	"Yes, and switch to auto mode" (conditional),
+//	No (input row, "and tell Claude what to do differently").
+//
+// file tools: Yes / switch-to-acceptEdits (shift+tab) / No.
+// ExitPlanMode (jot): optional clear-context row, the keep-context mode
+// lanes, and the deny-with-feedback input row.
+func (p *promptUI) permOpts(l *agent.Loop, name string, input json.RawMessage, summary string, offerAuto bool) ([]permOpt, [][]rune) {
+	var opts []permOpt
+	alwaysSpec := ruleSuggestion(name, summary)
+	// display form of the suggested rule — strip the Tool(...) wrapper
+	ruleDisp := alwaysSpec
+	if i := strings.IndexByte(alwaysSpec, '('); i >= 0 && strings.HasSuffix(alwaysSpec, ")") {
+		ruleDisp = alwaysSpec[i+1 : len(alwaysSpec)-1]
+	}
+	// the project dir shown in "in <dir>" — ~-abbreviated like real's Fn()
+	dirDisp := l.ToolCtx.CWD
+	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(dirDisp, home) {
+		dirDisp = "~" + dirDisp[len(home):]
+	}
+	outside := outsideDir(name, input, l.ToolCtx.CWD)
+
+	if name == "ExitPlanMode" {
+		// jot: the clear-context row rides the
+		// settings.showClearContextOnPlanAccept flag and carries the
+		// context-usage suffix; below it the keep-context lanes pick
+		// bypass > resume-auto > accept-edits, then the default lane.
+		if sc, _ := userSetting("showClearContextOnPlanAccept").(bool); sc {
+			used := planUsedSuffix(l)
+			switch {
+			case bypassModeAvailable(l):
+				opts = append(opts, permOpt{label: "Yes, clear context" + used + " and bypass permissions",
+					action: "setmode", mode: "bypassPermissions"})
+			case autoModeAvailable(l):
+				opts = append(opts, permOpt{label: "Yes, clear context" + used + " and use auto mode",
+					action: "setmode", mode: "auto"})
+			default:
+				opts = append(opts, permOpt{label: "Yes, clear context" + used + " and auto-accept edits",
+					action: "setmode", mode: "acceptEdits"})
+			}
+		}
+		switch {
+		case bypassModeAvailable(l):
+			// Vwe("bypassPermissions") — the default-variant label
+			opts = append(opts, permOpt{label: "Yes, and switch to " + bold + "BYPASS PERMISSIONS (no further prompts)" + unbold + " for this session",
+				action: "setmode", mode: "bypassPermissions"})
+		case autoModeAvailable(l):
+			// Dln("exit-plan-resume")
+			opts = append(opts, permOpt{label: "Yes, and use auto mode",
+				action: "setmode", mode: "auto"})
+		default:
+			// Vwe("acceptEdits", labelVariant "plan-keep-context")
+			opts = append(opts, permOpt{label: "Yes, auto-accept edits",
+				action: "setmode", mode: "acceptEdits"})
+		}
+		// Vwe("default", labelVariant "plan-keep-context")
+		opts = append(opts, permOpt{label: "Yes, manually approve edits", action: "yes"})
+		opts = append(opts, permOpt{label: "No, keep planning", action: "no",
+			input: "feedback", placeholder: "Tell Claude what to change"})
+	} else {
+		opts = append(opts, permOpt{label: "Yes", action: "yes", input: "feedback",
+			placeholder: "and tell Claude what to do next"})
+		if isFileTool(name) && l.PermMode != "acceptEdits" {
+			// Cnt: the session row is the accept-edits mode switch; the
+			// "(shift+tab)" suffix is the resolved confirm:cycleMode binding
+			opts = append(opts, permOpt{
+				label:  "Yes, and switch to " + bold + "accept edits (auto-approve file edits and common file commands)" + unbold + " for this session " + bold + "(shift+tab)" + unbold,
+				action: "acceptedits"})
+		} else if !isFileTool(name) {
+			if outside != "" {
+				opts = append(opts, permOpt{
+					label:  "Yes, and always allow access to " + bold + outside + unbold + " from this project",
+					action: "always"})
+			} else if alwaysSpec != "" {
+				// real: editable-prefix input row — the seed is the
+				// suggested prefix; editing it rewrites the persisted rule
+				opts = append(opts, permOpt{
+					label:  "Yes, and don’t ask again for ",
+					action: "always",
+					input:  "prefix",
+					// real's input placeholder
+					placeholder: "command prefix (e.g., npm run *)",
+					suffix:      " in " + bold + dirDisp + unbold})
+			}
+			if offerAuto {
+				// P0r.workflow + Wtt description
+				opts = append(opts, permOpt{label: "Yes, and switch to auto mode" + "\x1b[38;5;246m" + " · auto mode handles these prompts for you" + "\x1b[39m", action: "automode"})
+			}
+		}
+		opts = append(opts, permOpt{label: "No", action: "no", input: "feedback",
+			placeholder: "and tell Claude what to do differently"})
+	}
+
+	// per-option input text (feedback / edited prefix seed)
+	inputs := make([][]rune, len(opts))
+	for i := range opts {
+		if opts[i].input == "prefix" {
+			inputs[i] = []rune(ruleDisp)
+		}
+	}
+	return opts, inputs
+}
+
+// autoModeAvailable reports whether the session may switch into auto mode —
+// managed settings can disable the lane (permissions.disableAutoMode).
+func autoModeAvailable(l *agent.Loop) bool {
+	if st := config.Load(l.ToolCtx.CWD); st != nil && st.Permissions != nil &&
+		st.Permissions.DisableAutoMode == "disable" {
+		return false
+	}
+	return true
+}
+
+// bypassModeAvailable reports whether the bypass lane can be offered —
+// real's isBypassPermissionsModeAvailable: the --dangerously-skip-permissions
+// family opted the session in and managed settings haven't disabled it.
+func bypassModeAvailable(l *agent.Loop) bool {
+	if os.Getenv("CLAUDE_GO_ALLOW_BYPASS_PERMISSIONS") == "" {
+		return false
+	}
+	if st := config.Load(l.ToolCtx.CWD); st != nil && st.Permissions != nil &&
+		st.Permissions.DisableBypassPermissionsMode == "disable" {
+		return false
+	}
+	return true
+}
+
+// planUsedSuffix renders jot's " (N% used)" context-usage suffix on the
+// clear-context row; empty when no usage has been reported yet.
+func planUsedSuffix(l *agent.Loop) string {
+	total := l.UsageTotal.InputTokens + l.UsageTotal.CacheReadInputTokens +
+		l.UsageTotal.CacheCreationInputTokens
+	if total <= 0 {
+		return ""
+	}
+	if w := l.ContextWindowSize(); w > 0 {
+		return fmt.Sprintf(" (%d%% used)", total*100/w)
+	}
+	return ""
 }
 
 // permDesc returns the dialog's gray description line — the model's
@@ -938,6 +1068,12 @@ func permContentLines(name string, input json.RawMessage, single string) []strin
 	if len(m) > 10 {
 		return guard(fmt.Sprintf("(%d parameters — too many to show — deny unless expected)", len(m)))
 	}
+	// real's per-value sentinel (fu/Fu in mod_1531): a parameter value that
+	// can't be rendered inside the display budgets — >200k rendered chars,
+	// >10k elements, ≥64 levels deep — degrades to this guard line
+	if unrenderableParam(m) {
+		return guard("(value too large or too deeply nested to render — deny unless expected)")
+	}
 	switch name {
 	case "Edit", "MultiEdit":
 		// captured: " 1 -old" fg-167/bg-52, " 1 +new" fg-77/bg-22,
@@ -979,6 +1115,57 @@ func permContentLines(name string, input json.RawMessage, single string) []strin
 		}
 	}
 	return []string{" " + single + reset}
+}
+
+// render budgets — real's Fu() bounds (mod_1531: Ke, As, Ns)
+const (
+	permValueMaxChars = 200_000 // rendered-characters units budget
+	permValueMaxElems = 10_000  // element display budget
+	permValueMaxDepth = 64      // nesting depth bound
+)
+
+// unrenderableParam reports whether any parameter value exceeds the display
+// budgets — the permission card degrades it to the deny-unless-expected
+// sentinel rather than dumping the value.
+func unrenderableParam(m map[string]any) bool {
+	var chars, elems int
+	var bad bool
+	var walk func(v any, depth int)
+	walk = func(v any, depth int) {
+		if bad {
+			return
+		}
+		if depth >= permValueMaxDepth {
+			bad = true
+			return
+		}
+		switch t := v.(type) {
+		case string:
+			chars += len(t)
+		case map[string]any:
+			elems += len(t)
+			for k, val := range t {
+				chars += len(k)
+				walk(val, depth+1)
+			}
+		case []any:
+			elems += len(t)
+			for _, val := range t {
+				walk(val, depth+1)
+			}
+		}
+		if chars > permValueMaxChars || elems > permValueMaxElems {
+			bad = true
+		}
+	}
+	for _, v := range m {
+		chars, elems = 0, 0
+		walk(v, 0)
+		if bad {
+			return true
+		}
+	}
+	return false
 }
 
 // isFileTool — the dialog class that offers "switch to accept edits".

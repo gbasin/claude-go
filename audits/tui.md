@@ -96,8 +96,8 @@ Real dialog contexts: Confirmation (enter/esc/↑↓/tab nextField/space toggle/
 
 | surface | real behavior + evidence | ours | status | e2e | severity |
 |---|---|---|---|---|---|
-| Permission prompt shape | boxed card; options: `Yes` (input row, placeholder "and tell Claude what to do next"), `Yes, and don't ask again for <rule> in <dir>` (editable-prefix input row `type:"input"`, placeholder "command prefix (e.g., npm run *)"), `Yes, and enable auto mode` (conditional), `No` (input row "and tell Claude what to do differently") (mod_1600:1172100-1173100); separate deny variant "Deny, and tell Claude what to do differently (esc)" (mod_1600:1094876); tab = nextField (moves between input rows), NOT amend | static numbered rows: `Yes` / `Yes, and switch to accept edits…` / `Yes, and always allow X from this project` / `Yes, and switch to auto mode` / `No`; `Esc to cancel · Tab to amend` (amend edits tool arg); number keys select (dialogs.go:196-336) | divergent | TestPermDialogWrite/Edit, TestPermissionPrompt/Deny ✓ | visibly wrong |
-| Perm option order | yes → don't-ask → auto-mode → no | yes → acceptedits|always+automode → no — similar order, different wording/persistence semantics | divergent | ✓ | cosmetic |
+| Permission prompt shape | boxed card; options: `Yes` (input row, placeholder "and tell Claude what to do next"), `Yes, and don't ask again for <rule> in <dir>` (editable-prefix input row `type:"input"`, placeholder "command prefix (e.g., npm run *)"), `Yes, and enable auto mode` (conditional), `No` (input row "and tell Claude what to do differently") (mod_1600:1172100-1173100); separate deny variant "Deny, and tell Claude what to do differently (esc)" (mod_1600:1094876); tab = nextField (moves between input rows), NOT amend | input rows: `Yes` (feedback input), editable-prefix `don't ask again … in <dir>` row, conditional `Yes, and switch to auto mode`, `No` (feedback input); `Esc to cancel · Tab to next field`; digits select (dialogs.go permOpts/askEx). Residual: no separate Deny-variant dialog (macOS app-perm surface unimplemented) | parity-ish | TestPermDialogWrite/Edit, TestPermissionPrompt/Deny, TestPermOpts* ✓ | cosmetic |
+| Perm option order | yes → don't-ask → auto-mode → no | yes → don't-ask|acceptedits → auto-mode → no — matches | parity | ✓ | — |
 | Perm digits | select rows are key-nav; numbers work in select lists | digits select (dialogs.go:316) | parity-ish | ✓ | — |
 | Perm hooks | PermissionRequest can rewrite options (`askUser` deny/allow + suggestions); PermissionDenied hook event | both hooks fired (dialogs.go:88-100,256) | parity-ish | hook_matrix tests ✓ | — |
 | Model picker | "Select model" + model rows + effort slider ←/→ + `s` session-only + overflow `… +N models` (ModelPicker ctx) | same shape hardcoded 5 models + `… +9 models` + effort ←/→ + s (commands.go:509-615) | parity-ish | TestModelPickerChrome, TestMetaModelPicker ✓ | cosmetic |
@@ -106,7 +106,7 @@ Real dialog contexts: Confirmation (enter/esc/↑↓/tab nextField/space toggle/
 | /mcp panel | interactive panel: per-server detail/auth/tool views, reconnect flows | static ●/○ list (commands.go:2493) | divergent | — | cosmetic |
 | /agents | Agents pane (bg-agent mgmt: ctrl+s switchView, ctrl+t pin, ctrl+f find, ctrl+r rename, group nav) — slash /agents wizard indeed removed | `/agents` prints pointer text (correct); agents pane via ← gesture exists (agentsPane result, TestAgentsPane*) — pane depth vs real's Agents ctx unclear | parity-ish | TestAgentsPane{,ListsBgTask} ✓ | cosmetic |
 | Transcript (ctrl+o) | overlay w/ Transcript ctx: ctrl+e toggle detail, esc/q/ctrl+c exit, j/k, ctrl+n/p, ctrl+u/d half-pg, ctrl+b/f + space/b full-pg, g/shift+g, home/end, ↑↓ | overlay: esc/q/ctrl+o/ctrl+c exit, j/k+ctrl+n/p+↑↓, ctrl+u/d half-pg, ctrl+b/f+pgup/dn, g/G, ctrl+e — **missing space=pgdn, home/end** (transcript.go:35-95) | parity-ish | TestTranscriptOverlay, TestTranscriptView ✓ | cosmetic |
-| Plan-mode approval | "Exit plan mode?" planMode-colored dialog, options Yes/(context variants like resume-auto-mode/keep-context)/No (mod_1600:1203941) | generic askEx "Approve the plan above?" (repl.go:188) | divergent | TestExitPlanModeApproval ✓ | visibly wrong |
+| Plan-mode approval | "Exit plan mode?" planMode-colored dialog, options Yes/(context variants like resume-auto-mode/keep-context)/No (mod_1600:1203941) | planMode card "Exit plan mode?" + "Claude wants to exit plan mode" + "ready to execute. Would you like to proceed?"; jot option set: opt-in clear-context lane, keep-context lanes (bypass → "Yes, and switch to BYPASS PERMISSIONS…" / auto → "Yes, and use auto mode" / else "Yes, auto-accept edits") + "Yes, manually approve edits" + "No, keep planning" input row (dialogs.go permOpts); picked mode applied via tools.NotePlanExitMode → execExitPlan | parity-ish | TestExitPlanModeApproval, TestPermOptsExitPlan* ✓ | cosmetic |
 | Exit flow | double-press gate "Press {resolved-key} again to exit" for ctrl+c AND ctrl+d (jz+exitMessage, mod_1470 `kC`) | ctrl+c double-tap ✓; ctrl+d exits on first press; hint text hardcodes Ctrl-C | divergent | — | visibly wrong |
 | Rewind/message selector | esc-esc → message selector w/ restore-code+conversation options | rewind via readResult.rewind (term.go:1328) | parity | TestEscEscRewindPicker, TestRewindRestoresFile ✓ | — |
 | Trust dialog | onboarding trust prompt | present (trust.go) | parity | TestTrustDialog ✓ | — |
@@ -174,11 +174,11 @@ editor/suspend.
 5. **visibly wrong** — ctrl+d exits on first press (real: double-press
    gate, "Press {key} again to exit" with resolved key name).
    term.go:1306 vs mod_0263 `It`+`jz`, mod_1470 `kC`.
-6. **visibly wrong** — permission dialog option labels/persistence differ
-   from 294's ("Yes, and don't ask again for X in dir" vs ours "always
-   allow X from this project"); real's options are editable input rows;
-   our Tab-amend doesn't exist in real (tab=nextField).
-   dialogs.go:184-336 vs mod_1600:1172100+.
+6. ~~**visibly wrong** — permission dialog option labels/persistence~~
+   FIXED (296): rows are now input fields matching qtt/Cnt/jot —
+   Yes/No feedback inputs, editable-prefix don't-ask row, conditional
+   auto-mode lane, ExitPlanMode keep-context lanes + "No, keep planning".
+   dialogs.go permOpts/askEx vs mod_1531/1596.
 7. **visibly wrong** — ctrl+y is a nonexistent `chat:yank` action that
    pops the draft stash; real ctrl+y = defaultToNewerModel (kill-ring
    yank lives in the editor layer and real ctrl+s pops the stash when

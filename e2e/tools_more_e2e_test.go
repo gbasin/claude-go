@@ -512,7 +512,18 @@ func TestQuickMemory(t *testing.T) {
 	s := newSession(t)
 	p := startREPL(t, s)
 	p.sendUntilEchoed(t, "# mem-fact-99\r", "❯ # mem-fact-99", 8)
-	p.waitFor("saved to memory", 15*time.Second)
+	// real’s ack rotates (Got it./Good to know./Noted.) — poll the file
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		matches, _ := filepath.Glob(filepath.Join(s.home, ".claude", "projects", "*", "memory", "MEMORY.md"))
+		for _, m := range matches {
+			if b, _ := os.ReadFile(m); strings.Contains(string(b), "mem-fact-99") {
+				p.exit()
+				return
+			}
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
 	p.exit()
 
 	// memory lives under ~/.claude/projects/<slug>/memory/MEMORY.md

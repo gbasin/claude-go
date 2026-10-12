@@ -584,17 +584,58 @@ func (r *Runner) runAgentRaw(c *tools.Context, description, prompt, subagentType
 				rec.Name, rec.AgentID, def.Name, rec.Name)}
 		}
 	}
-	res := r.runAgentTurn(sub, prompt, c, rec)
-	rec.Finish(res.Content)
-	recordComplete(r.Client.SessionID, res.IsError)
-	// real wraps results with usage stats
-	out := res.Content
-	if sub.UsageTotal.OutputTokens > 0 || sub.UsageTotal.InputTokens > 0 {
-		out = fmt.Sprintf("%s\n\n<usage><subagent_tokens>%d</subagent_tokens></usage>",
-			out, sub.UsageTotal.InputTokens+sub.UsageTotal.OutputTokens)
+	// foreground: the turn runs on a goroutine so the wait can take a
+	// background request — real's task:background chord (ctrl+b /
+	// ctrl+x ctrl+b mid-call, mod_1572 xNt) converts the run async:
+	// the launched result returns now and completion lands via the
+	// task_started/task_notification path like a spawned-background run
+	bgReq := tools.SetForegroundAgent(rec)
+	done := make(chan tools.Result, 1)
+	go func() { done <- r.runAgentTurn(sub, prompt, c, rec) }()
+	select {
+	case <-bgReq:
+		tools.ClearForegroundAgent(rec)
+		background = true // finish()'s bg-notification path applies now
+		runID := api.NewUUID()
+		if l2 := c.OnTaskEvent; l2 != nil {
+			l2(map[string]any{
+				"subtype": "task_started", "task_id": rec.AgentID,
+				"run_id": runID, "description": description,
+				"subagent_type":   def.Name,
+				"is_backgrounded": true,
+			})
+		}
+		go func() {
+			res := finish(<-done)
+			if l2 := c.OnTaskEvent; l2 != nil {
+				status := "completed"
+				if res.IsError {
+					status = "failed"
+				}
+				l2(map[string]any{
+					"subtype": "task_notification", "task_id": rec.AgentID,
+					"run_id": runID, "status": status,
+					"summary": firstLine(res.Content),
+				})
+			}
+		}()
+		return tools.Result{Content: fmt.Sprintf(
+			"Launched agent %q (agentId %s, type %s) in the background — "+
+				"SendMessage to:%q reaches it; its completion notice arrives automatically",
+			rec.Name, rec.AgentID, def.Name, rec.Name)}
+	case res := <-done:
+		tools.ClearForegroundAgent(rec)
+		rec.Finish(res.Content)
+		recordComplete(r.Client.SessionID, res.IsError)
+		// real wraps results with usage stats
+		out := res.Content
+		if sub.UsageTotal.OutputTokens > 0 || sub.UsageTotal.InputTokens > 0 {
+			out = fmt.Sprintf("%s\n\n<usage><subagent_tokens>%d</subagent_tokens></usage>",
+				out, sub.UsageTotal.InputTokens+sub.UsageTotal.OutputTokens)
+		}
+		res.Content = out
+		return res
 	}
-	res.Content = out
-	return res
 }
 
 func firstLine(s string) string {

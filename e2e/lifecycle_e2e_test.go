@@ -235,9 +235,10 @@ func TestExitPlanModeApproval(t *testing.T) {
 		`calls:[{"name":"ToolSearch","input":{"query":"select:ExitPlanMode"}},`+
 			`{"name":"ExitPlanMode","input":{"plan":"do the thing"}}]`+"\r",
 		`❯ calls:[{"name":"ToolSearch"`, 8)
-	// approval renders as the numbered permission dialog ("don't ask again
-	// for ExitPlanMode in <dir>") — 1 = Yes
-	p.waitFor("Do you want to proceed?", 30*time.Second)
+	// approval renders real's planMode-colored "Exit plan mode?" card —
+	// option 1 is the first keep-context lane ("Yes, and use auto mode" /
+	// "Yes, auto-accept edits")
+	p.waitFor("Exit plan mode?", 30*time.Second)
 	p.sendUntil("1", "Tool results received", 15)
 	if !strings.Contains(p.clean(), "Exited Plan Mode") {
 		t.Fatalf("approval should exit plan mode\noutput:\n%s", truncStr(p.clean(), 3000))

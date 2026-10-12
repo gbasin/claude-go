@@ -29,6 +29,7 @@ import (
 	"github.com/gbasin/claude-go/internal/bg"
 	"github.com/gbasin/claude-go/internal/bridge"
 	"github.com/gbasin/claude-go/internal/hooks"
+	"github.com/gbasin/claude-go/internal/mcp"
 	"github.com/gbasin/claude-go/internal/plugins"
 	"github.com/gbasin/claude-go/internal/session"
 	"github.com/gbasin/claude-go/internal/tools"
@@ -2788,11 +2789,12 @@ func memoryCmd(l *agent.Loop, arg string) {
 	}
 }
 
-// mcpCmd is /mcp [reconnect (<server>|all)|enable|disable [<server>|all]]
-// (mod_0416 Fco + the "mcp local" non-interactive twin). enable/disable
-// persist to enabledMcpjsonServers/disabledMcpjsonServers like real's
-// panel toggles; reconnect retries failed servers (ours reconnect on the
-// next session start — the servers record the intent).
+// mcpCmd is /mcp [(<server>|reconnect (<server>|all)|enable|disable
+// [<server>|all])] (mod_0416 Fco + the "mcp local" non-interactive twin).
+// enable/disable persist to enabledMcpjsonServers/disabledMcpjsonServers
+// like real's panel toggles; reconnect re-dials via mcp.Connect and
+// re-registers the server's tools; a bare server name shows its detail
+// (config, connect status, tool list).
 func mcpCmd(l *agent.Loop, arg string) {
 	fields := strings.Fields(arg)
 	switch fields0(fields) {
@@ -2801,14 +2803,14 @@ func mcpCmd(l *agent.Loop, arg string) {
 		if len(fields) > 1 {
 			target = fields[1]
 		}
-		if target == "all" {
-			dprintln("  reconnecting all failed MCP servers…")
-		} else {
-			dprintf("  reconnecting %s…\n", target)
-		}
+		mcpReconnectCmd(l, target)
 		return
 	case "enable", "disable":
 		mcpSetEnabled(fields[1:], fields[0] == "enable")
+		return
+	}
+	if len(fields) == 1 {
+		mcpServerDetail(l, fields[0])
 		return
 	}
 	rows := tools.MCPServerStatus()
@@ -2821,7 +2823,7 @@ func mcpCmd(l *agent.Loop, arg string) {
 	// its detail view, r reconnects, esc/q exits — non-tty falls back to
 	// the static list
 	if ks := currentKeys.Load(); ks != nil && os.Getenv("CLAUDE_GO_NO_MCP_PANEL") == "" {
-		mcpPanel(ks.(*keySource), rows)
+		mcpPanel(l, ks.(*keySource), rows)
 		return
 	}
 	dprintf("  %sMCP servers%s\n", bold, reset)
@@ -2834,18 +2836,156 @@ func mcpCmd(l *agent.Loop, arg string) {
 	}
 }
 
+// mcpReconnectCmd is /mcp reconnect (<server>|all) — re-dials servers via
+// mcp.Connect and swaps in the fresh tool surface. "all" retries the
+// failed rows (real's reconnect affordance) plus any configured server
+// with no status yet.
+func mcpReconnectCmd(l *agent.Loop, target string) {
+	var names []string
+	if target == "all" {
+		failed := map[string]bool{}
+		for _, r := range tools.MCPServerStatus() {
+			if r.Err != nil {
+				names = append(names, r.Name)
+				failed[r.Name] = true
+			}
+		}
+		for n := range mcp.LoadConfigs(l.ToolCtx.CWD) {
+			if !failed[n] {
+				seen := false
+				for _, r := range tools.MCPServerStatus() {
+					if r.Name == n {
+						seen = true
+						break
+					}
+				}
+				if !seen {
+					names = append(names, n)
+				}
+			}
+		}
+		sort.Strings(names)
+	} else {
+		names = []string{target}
+	}
+	if len(names) == 0 {
+		dprintln("  nothing to reconnect — all configured servers connected")
+		return
+	}
+	for _, n := range names {
+		if err := mcpReconnect(l, n); err != nil {
+			dprintf("  %s○ %s%s  %s%v%s\n", red, n, reset, red, err, reset)
+		} else {
+			dprintf("  %s● %s%s  reconnected\n", green, n, reset)
+		}
+	}
+}
+
+// mcpReconnect re-dials one configured server (real's per-server
+// reconnect): fresh mcp.Connect, swap the mcp__<srv>__* tool surface,
+// refresh the /mcp status row.
+func mcpReconnect(l *agent.Loop, name string) error {
+	cfg, ok := mcp.LoadConfigs(l.ToolCtx.CWD)[name]
+	if !ok {
+		return fmt.Errorf("no MCP server named %q", name)
+	}
+	c, err := mcp.Connect(name, cfg)
+	if err != nil {
+		tools.NoteMCPServerStatus(name, 0, err)
+		return err
+	}
+	prefix := mcp.NormalizeServerName(name)
+	tools.UnregisterMCPServer(prefix)
+	for _, t := range c.Tools {
+		tools.RegisterMCP(prefix, c, t.Name, t.Description, t.InputSchema)
+	}
+	tools.RegisterMCPServer(name, c)
+	tools.NoteMCPServerStatus(name, len(c.Tools), nil)
+	return nil
+}
+
+// mcpToolNames lists a connected server's tool names (registered surface
+// minus the mcp__<server>__ prefix).
+func mcpToolNames(server string) []string {
+	prefix := "mcp__" + mcp.NormalizeServerName(server) + "__"
+	var out []string
+	for _, t := range tools.All() {
+		if strings.HasPrefix(t.Def.Name, prefix) {
+			out = append(out, strings.TrimPrefix(t.Def.Name, prefix))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// mcpServerDetail prints one server's per-server detail (real's /mcp
+// <name> view): transport config, connect status, tool list, and the
+// reconnect affordance.
+func mcpServerDetail(l *agent.Loop, name string) {
+	cfg, configured := mcp.LoadConfigs(l.ToolCtx.CWD)[name]
+	var st *mcpRow
+	rows := tools.MCPServerStatus()
+	for i := range rows {
+		if rows[i].Name == name {
+			st = &rows[i]
+			break
+		}
+	}
+	if !configured && st == nil {
+		dprintf("  no MCP server named %q\n", name)
+		return
+	}
+	dprintf("  %s%s%s\n", bold, name, reset)
+	if configured {
+		typ := cfg.Type
+		if typ == "" {
+			if cfg.URL != "" {
+				typ = "http"
+			} else {
+				typ = "stdio"
+			}
+		}
+		dprintf("    %stransport:%s %s\n", dim, reset, typ)
+		if cfg.URL != "" {
+			dprintf("    %surl:%s %s\n", dim, reset, cfg.URL)
+		}
+		if cfg.Command != "" {
+			dprintf("    %scommand:%s %s %s\n", dim, reset, cfg.Command, strings.Join(cfg.Args, " "))
+		}
+	}
+	switch {
+	case st == nil:
+		dprintf("    %sstatus:%s not connected\n", dim, reset)
+	case st.Err != nil:
+		dprintf("    %sstatus:%s %sfailed%s — %v\n", dim, reset, red, reset, st.Err)
+	default:
+		dprintf("    %sstatus:%s %sconnected%s · %d tools\n", dim, reset, green, reset, st.Tools)
+	}
+	if names := mcpToolNames(name); len(names) > 0 {
+		dprintf("    %stools:%s\n", dim, reset)
+		for _, tn := range names {
+			dprintf("      %s\n", tn)
+		}
+	}
+	dprintln("    " + dim + "/mcp reconnect " + name + " to re-dial" + reset)
+}
+
 // currentKeys mirrors the REPL's live keySource so /mcp can run its
 // interactive panel on the same input channel.
 var currentKeys atomic.Value // *keySource
 
-// mcpPanel is real's interactive /mcp surface — ↑↓/jk over the server
-// list, enter → per-server detail (transport, status, tool count,
-// error), r → reconnect the selection, esc/q exits.
-func mcpPanel(ks *keySource, rows []struct {
+// mcpRow aliases MCPServerStatus's element type so the panel can pass
+// rows around by pointer.
+type mcpRow = struct {
 	Name  string
 	Tools int
 	Err   error
-}) {
+}
+
+// mcpPanel is real's interactive /mcp surface — ↑↓/jk over the server
+// list, enter → per-server detail (transport, status, tool names,
+// error), r → re-dial the selection via mcp.Connect, esc/q exits.
+func mcpPanel(l *agent.Loop, ks *keySource, rows []mcpRow) {
 	dch := make(chan key, 16)
 	ks.dialog.Store(&dch)
 	defer ks.dialog.Store(nil)
@@ -2874,6 +3014,60 @@ func mcpPanel(ks *keySource, rows []struct {
 		}
 		fmt.Print(sb.String())
 	}
+	var detail func(r *mcpRow)
+	detail = func(r *mcpRow) {
+		fmt.Print("\r\x1b[K")
+		fmt.Printf("  %s%s%s\r\n", bold, r.Name, reset)
+		if cfg, ok := mcp.LoadConfigs(l.ToolCtx.CWD)[r.Name]; ok {
+			typ := cfg.Type
+			if typ == "" {
+				if cfg.URL != "" {
+					typ = "http"
+				} else {
+					typ = "stdio"
+				}
+			}
+			fmt.Printf("    %stransport:%s %s\r\n", dim, reset, typ)
+			if cfg.URL != "" {
+				fmt.Printf("    %surl:%s %s\r\n", dim, reset, cfg.URL)
+			}
+			if cfg.Command != "" {
+				fmt.Printf("    %scommand:%s %s %s\r\n", dim, reset, cfg.Command,
+					strings.Join(cfg.Args, " "))
+			}
+		}
+		if r.Err != nil {
+			fmt.Printf("    %sstatus:%s %sfailed%s — %v\r\n", dim, reset, red, reset, r.Err)
+		} else {
+			fmt.Printf("    %sstatus:%s %sconnected%s · %d tools\r\n",
+				dim, reset, green, reset, r.Tools)
+		}
+		for _, tn := range mcpToolNames(r.Name) {
+			fmt.Printf("      %s%s%s\r\n", dim, tn, reset)
+		}
+		fmt.Printf("    %s(r reconnects · esc to go back)%s\r\n", dim, reset)
+		for k2 := range dch {
+			if k2.b == 'r' {
+				fmt.Printf("\r\x1b[K    %sreconnecting %s…%s\r\n", dim, r.Name, reset)
+				if err := mcpReconnect(l, r.Name); err != nil {
+					r.Err = err
+				} else {
+					r.Err = nil
+					for _, rr := range tools.MCPServerStatus() {
+						if rr.Name == r.Name {
+							r.Tools = rr.Tools
+						}
+					}
+				}
+				detail(r)
+				return
+			}
+			if k2.b == 0x1b || k2.b == 'q' || k2.b == '\r' {
+				break
+			}
+		}
+		drawn = 0
+	}
 	fmt.Println()
 	draw()
 	for k := range dch {
@@ -2887,24 +3081,28 @@ func mcpPanel(ks *keySource, rows []struct {
 				sel++
 			}
 		case k.b == '\r' || k.b == '\n':
-			// detail view
-			r := rows[sel]
-			fmt.Print("\r\x1b[K")
-			fmt.Printf("  %s%s%s  tools: %d\r\n", bold, r.Name, reset, r.Tools)
-			if r.Err != nil {
-				fmt.Printf("    %serror: %v%s\r\n", red, r.Err, reset)
+			if sel < len(rows) {
+				detail(&rows[sel])
 			}
-			fmt.Printf("    %s(esc to go back)%s\r\n", dim, reset)
-			for k2 := range dch {
-				if k2.b == 0x1b || k2.b == 'q' || k2.b == '\r' {
-					break
-				}
-			}
-			drawn = 0
 		case k.b == 'r':
 			// reconnect the selection — real's per-server reconnect
-			r := rows[sel]
-			fmt.Printf("\r\x1b[K  reconnecting %s…\r\n", r.Name)
+			if sel < len(rows) {
+				r := &rows[sel]
+				fmt.Printf("\r\x1b[K  %sreconnecting %s…%s\r\n", dim, r.Name, reset)
+				if err := mcpReconnect(l, r.Name); err != nil {
+					r.Err = err
+					fmt.Printf("  %s%v%s\r\n", red, err, reset)
+				} else {
+					r.Err = nil
+					for _, rr := range tools.MCPServerStatus() {
+						if rr.Name == r.Name {
+							r.Tools = rr.Tools
+						}
+					}
+					fmt.Printf("  %s● %s reconnected%s\r\n", green, r.Name, reset)
+				}
+				drawn = 0
+			}
 		case k.b == 0x1b || k.b == 'q' || k.b == 3:
 			fmt.Print("\r\x1b[K")
 			return
