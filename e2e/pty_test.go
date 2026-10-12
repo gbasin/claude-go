@@ -184,6 +184,15 @@ func stripANSI(s string) string {
 				i += 2
 				continue
 			}
+			// two-char escapes — \x1b7/\x1b8 cursor save/restore,
+			// \x1b=/\x1b> keypad modes, \x1b_/\x1bP APC/DCS openers
+			// (bodies end ST and were consumed by the caller's framing
+			// or are opaque to tests). Strip the pair so digits don't
+			// leak into clean().
+			if i+1 < len(s) && strings.IndexByte("78=>_PM", s[i+1]) >= 0 {
+				i += 2
+				continue
+			}
 			i++ // lone escape
 			continue
 		}
