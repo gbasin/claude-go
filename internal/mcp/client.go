@@ -159,6 +159,40 @@ func (c ServerConfig) credKey(name string) string {
 }
 
 // LoadConfigs merges mcpServers from ~/.claude.json and <cwd>/.mcp.json.
+// expandMCPString expands ${VAR} and ${VAR:-default} against the
+// process env plus per-source extras (CLAUDE_PLUGIN_ROOT for plugin
+// .mcp.json) — real expands env vars in mcp server configs the same way.
+func expandMCPString(s string, extra map[string]string) string {
+	return os.Expand(s, func(name string) string {
+		def := ""
+		if i := strings.Index(name, ":-"); i >= 0 {
+			name, def = name[:i], name[i+2:]
+		}
+		if v, ok := extra[name]; ok {
+			return v
+		}
+		if v := os.Getenv(name); v != "" {
+			return v
+		}
+		return def
+	})
+}
+
+func expandServerEnv(sc *ServerConfig, extra map[string]string) {
+	sc.Command = expandMCPString(sc.Command, extra)
+	for i := range sc.Args {
+		sc.Args[i] = expandMCPString(sc.Args[i], extra)
+	}
+	sc.URL = expandMCPString(sc.URL, extra)
+	sc.Authorization = expandMCPString(sc.Authorization, extra)
+	for k, v := range sc.Env {
+		sc.Env[k] = expandMCPString(v, extra)
+	}
+	for k, v := range sc.Headers {
+		sc.Headers[k] = expandMCPString(v, extra)
+	}
+}
+
 // ~/.claude.json contributes two scopes: top-level mcpServers (user) and
 // projects["<cwd>"].mcpServers (local — real's default `mcp add` target;
 // local wins on name conflicts). Project (.mcp.json) entries are gated:
@@ -170,6 +204,7 @@ func LoadConfigs(cwd string) map[string]ServerConfig {
 	st := config.Load(cwd)
 	merge := func(servers map[string]ServerConfig, gated bool) {
 		for n, c := range servers {
+			expandServerEnv(&c, nil)
 			if gated && !st.EnableAllProjectMcpServers {
 				if sliceHas(st.DisabledMcpjsonServers, n) {
 					continue
@@ -235,7 +270,9 @@ func LoadConfigs(cwd string) map[string]ServerConfig {
 		if json.Unmarshal(b, &top) != nil {
 			continue
 		}
+		extra := map[string]string{"CLAUDE_PLUGIN_ROOT": p.Path}
 		for n, sc := range top.Servers {
+			expandServerEnv(&sc, extra)
 			if _, dup := out[n]; !dup {
 				out[n] = sc
 			}
@@ -1009,6 +1046,23 @@ func (c *Client) readLoop(r io.Reader) {
 		cp := make([]byte, len(line))
 		copy(cp, line)
 		c.dispatch(cp)
+	}
+	// transport EOF — the server died (spawn failure, crash). Wake every
+	// pending call now; they would otherwise hang to the handshake
+	// timeout with an opaque "context deadline exceeded"
+	c.mu.Lock()
+	pend := c.pending
+	c.pending = map[string]chan rpcResp{}
+	c.mu.Unlock()
+	errResp := rpcResp{Error: &struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}{Code: -32000, Message: "mcp server exited"}}
+	for _, ch := range pend {
+		select {
+		case ch <- errResp:
+		default:
+		}
 	}
 }
 
