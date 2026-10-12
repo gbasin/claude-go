@@ -53,25 +53,29 @@ const (
 )
 
 var (
-	compActive    atomic.Bool
-	compSyncOut   atomic.Bool // set when the ?2026 probe answers supported // region installed; read lock-free by the spinner
-	compMu        sync.Mutex  // serializes every compositor frame
-	compW         int         // last measured width
-	compH         int         // last measured height
-	compFits      bool        // terminal tall enough to host the current zone
-	compSusp      int         // >0: modal dialog owns the screen (nests)
-	compZoneH     int         // zone height actually installed (0 = released)
-	compEdit      bool        // zone hosts the input box
-	compBox       []string    // edit-mode rows: box chrome + input lines
-	compDyn       string      // turn-mode top row (spinner)
-	compStatus    string      // persistent bottom row (all modes)
-	compPainted   []string    // last emitted row contents (post-clamp); nil = stale
-	compCur       bool        // cursor rests inside the zone (editing)
-	compCurRow    int         // 0-based row within the zone
-	compCurCol    int         // 0-based column
-	compStreamRow int         // absolute row where turn output continues
-	compStreamCol int         // column (1-based) after last streamed char
-	compStreamOn  bool        // a turn's stream owns the scroll bottom
+	compActive  atomic.Bool
+	compSyncOut atomic.Bool // set when the ?2026 probe answers supported // region installed; read lock-free by the spinner
+	compMu      sync.Mutex  // serializes every compositor frame
+	compW       int         // last measured width
+	compH       int         // last measured height
+	compFits    bool        // terminal tall enough to host the current zone
+	compSusp    int         // >0: modal dialog owns the screen (nests)
+	compZoneH   int         // zone height actually installed (0 = released)
+	compEdit    bool        // zone hosts the input box
+	compBox     []string    // edit-mode rows: box chrome + input lines
+	compProg    []string    // live progress block — repaintable rows above
+	// the spinner (task window, in-flight tool tails). Real's Ink model
+	// redraws these in place each frame; they finalize (scroll into
+	// history) only when the owning call completes — never mid-run.
+	compDyn       string   // turn-mode top row (spinner)
+	compStatus    string   // persistent bottom row (all modes)
+	compPainted   []string // last emitted row contents (post-clamp); nil = stale
+	compCur       bool     // cursor rests inside the zone (editing)
+	compCurRow    int      // 0-based row within the zone
+	compCurCol    int      // 0-based column
+	compStreamRow int      // absolute row where turn output continues
+	compStreamCol int      // column (1-based) after last streamed char
+	compStreamOn  bool     // a turn's stream owns the scroll bottom
 	compDone      chan struct{}
 
 	// injectable for tests
@@ -87,9 +91,10 @@ func compRowsLocked() []string {
 		rows = append(rows, compBox...)
 		return append(rows, compStatus)
 	}
-	// turn mode: spinner + pinned input box (real keeps the box live —
-	// queue-typing is visible) + status
-	rows := []string{compDyn}
+	// turn mode: [progress block] + spinner + pinned input box (real
+	// keeps the box live — queue-typing is visible) + status
+	rows := append([]string{}, compProg...)
+	rows = append(rows, compDyn)
 	rows = append(rows, compBox...)
 	return append(rows, compStatus)
 }
@@ -162,6 +167,28 @@ func compSetStatus(text string) {
 // compClearFooter blanks the dynamic row (turn end); the status row stays.
 func compClearFooter() {
 	compFooter("")
+}
+
+// compSetProgress replaces the live progress block (nil clears it) — the
+// repaintable region between the history watermark and the spinner where
+// real renders in-flight tool/task rows (the ≤3-item task window, live
+// output tails). The zone grows/shrinks to fit; rows finalize into
+// scrollback only when the caller streams them as history.
+func compSetProgress(rows []string) {
+	if !compActive.Load() {
+		return
+	}
+	compMu.Lock()
+	compProg = rows
+	compFrameLocked(nil)
+	compMu.Unlock()
+}
+
+// compHasProgress reports whether a progress block is currently displayed.
+func compHasProgress() bool {
+	compMu.Lock()
+	defer compMu.Unlock()
+	return len(compProg) > 0
 }
 
 // compRepaint re-emits the zone after outside code erased below the cursor
