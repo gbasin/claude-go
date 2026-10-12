@@ -25,100 +25,101 @@ import (
 
 // editor is a modal (vim-capable) multiline line editor fed by keySource.
 type editor struct {
-	history         []string
-	hIdx            int
-	buf             []rune
-	pos             int
-	stashed         []rune // ctrl+s draft stash — real's is single-slot
-	selAnchor       int    // shift+arrow selection anchor+1 (0 = none)
-	busyChord       []string
-	busyChordAt     time.Time
-	prompt          string
-	saved           []rune
-	vim             bool
-	mode            string            // "insert" | "normal"
-	pastes          map[string]string // placeholder -> pasted content
-	pasteN          int
-	lastEsc         int64
-	escArmAt        time.Time // "Esc again to clear" window (non-empty draft)
-	exitArm         bool      // "Press <key> again to exit" armed (jz shared gate)
-	exitArmKey      string    // first arming key's display name
-	exitArmAt       time.Time
-	cleared         []rune                       // held cleared draft — Up restores (real holdCleared)
-	clearedPastes   map[string]string            // held draft's placeholder map
-	clearedHist     bool                         // held draft enters history if never restored
-	histPastes      map[string]map[string]string // display -> pastes (recall)
-	killRing        []string                     // emacs kill-ring (ring[0] = newest)
-	killLast        bool                         // last key was a kill — consecutive kills coalesce
-	wasKill         bool                         // killLast captured at insertKey entry
-	yankPos         int                          // yanked span start (-1 = no live yank)
-	yankLen         int
-	yankIdx         int
-	changeKeys      []key  // vim: recorded keystrokes of the last change (.)
-	pendingKeys     []key  // vim: accumulating the in-flight op sequence
-	recIns          []rune // vim: text inserted during the current change
-	recordingIns    bool
-	lastInsText     []rune                       // vim: inserted text of the last change (.)
-	searchIdx       int                          // ctrl+r: index of current match in e.history
-	completer       func(prefix string) []string // slash command completion
-	bash            bool                         // bash mode: '!' split out of the buffer into the prompt glyph (real's input-mode)
-	kbMtime         time.Time                    // live-watcher: last-seen keybindings.json mtime
-	setMtime        time.Time                    // same for settings.json
-	kbLastCheck     time.Time                    // throttle for the stat
-	acOpen          bool                         // autocomplete menu visible
-	abovePrompt     bool                         // ctrl+x ctrl+a — the collapsed-activity band
-	abovePromptSel  bool                         // ctrl+x tab — navigation focus lives in the band
-	abovePromptIdx  int                          // selected row when focused
-	acDesc          func(name string) string     // per-item description
-	acItems         []string                     // filtered matches
-	acSel           int                          // selected index
-	leftArm         bool                         // ← pressed once on empty input
-	acAt            string                       // @-mention token being completed
-	cycleMode       func()                       // shift+tab -> permission mode cycle
-	keys            *keySource
-	pendingX        bool
-	chordAt         time.Time
-	actions         map[byte]func(*editor) *readResult
-	histSearch      bool
-	searchBuf       []rune
-	onToggleExpand  func()
-	onToggleTodos   func()
-	onKillAgents    func()
-	onFastMode      func()
-	runningAgents   func() int // ← agents-pane gate (real needs running tasks)
-	insertRemaps    []string   // vimInsertModeRemaps: 2-char sequences -> <Esc>
-	lastInsAt       time.Time  // when lastIns was typed — real's 1s remap window
-	lastIns         rune
-	insGroup        bool // mid insert-group — push undo once per burst
-	vimOp           rune
-	vimFind         rune
-	vimPendingG     rune
-	vimObj          byte // i/a text-object prefix awaiting the object char
-	repCnt          int  // r<count> pending replace count
-	vimCount        int
-	vimCountRaw     int
-	vimVisual       int
-	vimReplace      bool
-	lastFindCh      rune
-	lastFindDir     rune
-	lastDel         string
-	undoStack       [][]rune
-	undoPos         []int
-	kb              map[string]string // canonical chord -> action (keybindings.go)
-	kbResolve       map[string]string // ctx+action -> display chord for hints
-	kbPrefix        map[string]bool   // canonical chord prefixes awaiting more keys
-	kbUnbound       map[string]bool   // chords explicitly unbound via keybindings.json
-	pendingChord    []string          // matched chord-prefix strokes
-	imgDir          string            // scratchpad dir for pasted images
-	imgN            int               // pasted-image counter
-	zoneEdit        bool              // input box lives in the compositor live zone
-	boxAll          []string          // last-rendered full box (for the scrollback echo)
-	voice           *voiceUI          // voice session glue (internal/voice)
-	voiceBase       string            // api.BaseURL for the voice_stream ws
-	voiceCreds      *auth.Credentials // OAuth creds for Bearer auth
-	voiceCWD        string            // cwd for settings + keyterms
-	deferredActions []string          // bound actions resolved mid-turn — fire at idle
-	footer          string            // status row rendered under the box
+	history          []string
+	hIdx             int
+	buf              []rune
+	pos              int
+	stashed          []rune // ctrl+s draft stash — real's is single-slot
+	selAnchor        int    // shift+arrow selection anchor+1 (0 = none)
+	busyChord        []string
+	busyChordAt      time.Time
+	prompt           string
+	saved            []rune
+	vim              bool
+	mode             string            // "insert" | "normal"
+	pastes           map[string]string // placeholder -> pasted content
+	pasteN           int
+	lastEsc          int64
+	escArmAt         time.Time // "Esc again to clear" window (non-empty draft)
+	exitArm          bool      // "Press <key> again to exit" armed (jz shared gate)
+	exitArmKey       string    // first arming key's display name
+	exitArmAt        time.Time
+	cleared          []rune                       // held cleared draft — Up restores (real holdCleared)
+	clearedPastes    map[string]string            // held draft's placeholder map
+	clearedHist      bool                         // held draft enters history if never restored
+	histPastes       map[string]map[string]string // display -> pastes (recall)
+	killRing         []string                     // emacs kill-ring (ring[0] = newest)
+	killLast         bool                         // last key was a kill — consecutive kills coalesce
+	wasKill          bool                         // killLast captured at insertKey entry
+	yankPos          int                          // yanked span start (-1 = no live yank)
+	yankLen          int
+	yankIdx          int
+	changeKeys       []key  // vim: recorded keystrokes of the last change (.)
+	pendingKeys      []key  // vim: accumulating the in-flight op sequence
+	recIns           []rune // vim: text inserted during the current change
+	recordingIns     bool
+	lastInsText      []rune                       // vim: inserted text of the last change (.)
+	searchIdx        int                          // ctrl+r: index of current match in e.history
+	completer        func(prefix string) []string // slash command completion
+	bash             bool                         // bash mode: '!' split out of the buffer into the prompt glyph (real's input-mode)
+	kbMtime          time.Time                    // live-watcher: last-seen keybindings.json mtime
+	setMtime         time.Time                    // same for settings.json
+	kbLastCheck      time.Time                    // throttle for the stat
+	acOpen           bool                         // autocomplete menu visible
+	abovePrompt      bool                         // ctrl+x ctrl+a — the collapsed-activity band
+	abovePromptSel   bool                         // ctrl+x tab — navigation focus lives in the band
+	abovePromptIdx   int                          // selected row when focused
+	transcriptAnchor int                          // msg index the transcript overlay anchors at; -1 = latest                         // msg index the transcript overlay anchors at; -1 = latest
+	acDesc           func(name string) string     // per-item description
+	acItems          []string                     // filtered matches
+	acSel            int                          // selected index
+	leftArm          bool                         // ← pressed once on empty input
+	acAt             string                       // @-mention token being completed
+	cycleMode        func()                       // shift+tab -> permission mode cycle
+	keys             *keySource
+	pendingX         bool
+	chordAt          time.Time
+	actions          map[byte]func(*editor) *readResult
+	histSearch       bool
+	searchBuf        []rune
+	onToggleExpand   func()
+	onToggleTodos    func()
+	onKillAgents     func()
+	onFastMode       func()
+	runningAgents    func() int // ← agents-pane gate (real needs running tasks)
+	insertRemaps     []string   // vimInsertModeRemaps: 2-char sequences -> <Esc>
+	lastInsAt        time.Time  // when lastIns was typed — real's 1s remap window
+	lastIns          rune
+	insGroup         bool // mid insert-group — push undo once per burst
+	vimOp            rune
+	vimFind          rune
+	vimPendingG      rune
+	vimObj           byte // i/a text-object prefix awaiting the object char
+	repCnt           int  // r<count> pending replace count
+	vimCount         int
+	vimCountRaw      int
+	vimVisual        int
+	vimReplace       bool
+	lastFindCh       rune
+	lastFindDir      rune
+	lastDel          string
+	undoStack        [][]rune
+	undoPos          []int
+	kb               map[string]string // canonical chord -> action (keybindings.go)
+	kbResolve        map[string]string // ctx+action -> display chord for hints
+	kbPrefix         map[string]bool   // canonical chord prefixes awaiting more keys
+	kbUnbound        map[string]bool   // chords explicitly unbound via keybindings.json
+	pendingChord     []string          // matched chord-prefix strokes
+	imgDir           string            // scratchpad dir for pasted images
+	imgN             int               // pasted-image counter
+	zoneEdit         bool              // input box lives in the compositor live zone
+	boxAll           []string          // last-rendered full box (for the scrollback echo)
+	voice            *voiceUI          // voice session glue (internal/voice)
+	voiceBase        string            // api.BaseURL for the voice_stream ws
+	voiceCreds       *auth.Credentials // OAuth creds for Bearer auth
+	voiceCWD         string            // cwd for settings + keyterms
+	deferredActions  []string          // bound actions resolved mid-turn — fire at idle
+	footer           string            // status row rendered under the box
 }
 
 func newEditor() *editor {
@@ -2120,6 +2121,7 @@ func (e *editor) toggleExpand() {
 	if e.onToggleExpand != nil {
 		e.onToggleExpand()
 	}
+	e.transcriptAnchor = -1
 }
 
 func (e *editor) toggleTodos() {
@@ -3525,15 +3527,26 @@ func writeOSC52(s string) {
 // abovePrompt feed — the loop pushes recent activity lines in; the band
 // renders the last few when expanded, a count row when collapsed.
 var (
-	abovePromptRows     []string
+	abovePromptRows     []apEntry
 	abovePromptExpanded bool
 )
 
+// apEntry is one recent-activity row + the message index it was pushed
+// at — press opens the transcript anchored there (real's item-open).
+type apEntry struct {
+	text   string
+	msgIdx int
+}
+
 func abovePromptPush(line string) {
+	abovePromptPushAt(line, 0)
+}
+
+func abovePromptPushAt(line string, msgIdx int) {
 	if len(abovePromptRows) >= 50 {
 		abovePromptRows = abovePromptRows[1:]
 	}
-	abovePromptRows = append(abovePromptRows, line)
+	abovePromptRows = append(abovePromptRows, apEntry{text: line, msgIdx: msgIdx})
 }
 
 func abovePromptCount() int { return len(abovePromptRows) }
@@ -3543,7 +3556,10 @@ func abovePromptLines() []string {
 	if n > 6 {
 		n = 6
 	}
-	out := abovePromptRows[len(abovePromptRows)-n:]
+	out := make([]string, 0, n)
+	for _, e := range abovePromptRows[len(abovePromptRows)-n:] {
+		out = append(out, e.text)
+	}
 	return out
 }
 
@@ -3660,8 +3676,15 @@ func (e *editor) abovePromptKey(k key) (*readResult, bool) {
 		return nil, true
 	case "abovePrompt:press":
 		// open the selected activity item — real replays it in the
-		// transcript overlay
+		// transcript overlay anchored at that row
 		e.abovePromptSel = false
+		lines := abovePromptLines()
+		if idx := e.abovePromptIdx; idx >= 0 && idx < len(lines) {
+			feed := len(abovePromptRows) - len(lines) + idx
+			if feed >= 0 && feed < len(abovePromptRows) {
+				e.transcriptAnchor = abovePromptRows[feed].msgIdx
+			}
+		}
 		e.toggleExpand()
 		e.redraw()
 		return nil, true
