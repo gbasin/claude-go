@@ -397,6 +397,63 @@ func (p *promptUI) askEx(l *agent.Loop, ks *keySource, name, summary, reason, co
 				}
 				return false, "", true
 			}
+			// keybinding dispatch: the Confirmation context's resolved
+			// action wins — user remaps apply (sessionKB carries the
+			// defaults). Digits/input-row typing fall through below.
+			switch dialogAction("Confirmation", k) {
+			case "confirm:yes":
+				if a, fb, done := submit(); done {
+					return a, fb
+				}
+				continue
+			case "confirm:toggle":
+				// real's space=toggle — on editable input rows a space is
+				// text, not a toggle; only submit on non-input rows
+				if opts[sel].input == "" {
+					if a, fb, done := submit(); done {
+						return a, fb
+					}
+					continue
+				}
+			case "confirm:no":
+				dprintln("  Esc — denied")
+				if a, fb, done := deny(); done {
+					return a, fb
+				}
+				continue
+			case "confirm:previous":
+				if sel > 0 {
+					sel--
+					draw()
+				}
+				continue
+			case "confirm:next":
+				if sel < len(opts)-1 {
+					sel++
+					draw()
+				}
+				continue
+			case "confirm:nextField":
+				if sel < len(opts)-1 {
+					sel++
+				} else {
+					sel = 0
+				}
+				draw()
+				continue
+			case "confirm:cycleMode":
+				if sel > 0 {
+					sel--
+				} else {
+					sel = len(opts) - 1
+				}
+				draw()
+				continue
+			case "":
+				// not bound — fall through to digits/input typing
+			default:
+				continue // bound to an action with no dialog meaning
+			}
 			_ = submit
 			switch {
 			case k.seq == "[A":

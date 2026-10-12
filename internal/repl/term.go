@@ -61,6 +61,7 @@ type editor struct {
 	lastInsText     []rune                       // vim: inserted text of the last change (.)
 	searchIdx       int                          // ctrl+r: index of current match in e.history
 	completer       func(prefix string) []string // slash command completion
+	bash            bool                         // bash mode: '!' split out of the buffer into the prompt glyph (real's input-mode)
 	acOpen          bool                         // autocomplete menu visible
 	abovePrompt     bool                         // ctrl+x ctrl+a — the collapsed-activity band
 	abovePromptSel  bool                         // ctrl+x tab — navigation focus lives in the band
@@ -151,7 +152,8 @@ func (e *editor) boxFrame() (box []string, curRow, curCol int) {
 		return e.boxAll, 1, visWidth(ln)
 	}
 	lines := strings.Split(e.renderedBuf(), "\n")
-	pw := visWidth(e.prompt)
+	prompt := e.promptGlyph()
+	pw := visWidth(prompt)
 	// usable text width per box row: screen minus the left border and the
 	// prompt indent — long input soft-wraps onto extra rows (real CC
 	// behavior) instead of being clamped off the right edge, which hid
@@ -170,7 +172,13 @@ func (e *editor) boxFrame() (box []string, curRow, curCol int) {
 	curCells := visWidth(before[strings.LastIndex(before, "\n")+1:])
 	// lay out: top border, soft-wrapped input rows, voice hint, bottom
 	// border — tracking which box row each logical line starts on
-	rule := "\x1b[38;5;244m" + strings.Repeat("─", w) + "\x1b[39m"
+	ruleColor := "\x1b[38;5;244m"
+	if e.bash { // real: composer border takes bashBorder in bash mode
+		if bc := token("bashBorder"); bc != "" {
+			ruleColor = bc
+		}
+	}
+	rule := ruleColor + strings.Repeat("─", w) + "\x1b[39m"
 	all := make([]string, 0, len(lines)+8)
 	all = append(all, e.abovePromptRows()...)
 	// real renders the effort pill right-aligned on the row above the
@@ -188,7 +196,7 @@ func (e *editor) boxFrame() (box []string, curRow, curCol int) {
 		lineRow[i] = len(all) - 1 // 0-based row among box content rows
 		for j, sg := range softWrap(ln, textW) {
 			if i == 0 && j == 0 {
-				all = append(all, e.prompt+sg)
+				all = append(all, prompt+sg)
 			} else {
 				all = append(all, strings.Repeat(" ", pw)+sg)
 			}
@@ -230,6 +238,19 @@ func (e *editor) boxFrame() (box []string, curRow, curCol int) {
 	return box, 1 + curRow - start, curCol
 }
 
+// promptGlyph renders the composer prompt — '❯' normally; in bash mode
+// real paints '!' in bashBorder (the mode glyph replaces the prompt).
+func (e *editor) promptGlyph() string {
+	if e.bash {
+		fg := token("bashBorder")
+		if fg == "" {
+			fg = "\x1b[95m"
+		}
+		return " " + fg + "!" + reset + "\u00a0"
+	}
+	return e.prompt
+}
+
 // redraw reprints the whole input area — into the compositor live zone
 // while editing there (the Ink model), else inline (multiline-safe).
 func (e *editor) redraw() {
@@ -244,7 +265,7 @@ func (e *editor) redraw() {
 		b.WriteString(row + "\r\n")
 	}
 	hint := e.voiceHint()
-	b.WriteString(e.prompt + e.renderedBuf())
+	b.WriteString(e.promptGlyph() + e.renderedBuf())
 	extra := 0 // rows drawn below the input line
 	if hint != "" {
 		b.WriteString("\r\n  " + hint)
@@ -296,6 +317,19 @@ func (e *editor) redraw() {
 func (e *editor) insert(rs ...rune) {
 	if _, _, ok := e.selSpan(); ok {
 		e.replaceSelection()
+	}
+	// real's input-mode split: a leading '!' never lands in the buffer —
+	// it flips the composer to bash mode ('!' prompt glyph + border in
+	// bashBorder). Applies to typed AND pasted leading '!'.
+	if !e.bash && len(e.buf) == 0 {
+		for len(rs) > 0 && rs[0] == '!' {
+			rs = rs[1:]
+			e.bash = true
+		}
+		if len(rs) == 0 {
+			e.redraw()
+			return
+		}
 	}
 	e.yankPos = -1
 	e.escArmAt = time.Time{} // typing disarms "Esc again to clear"
@@ -365,6 +399,10 @@ func (e *editor) del(back bool) {
 		if e.pos > 0 {
 			e.buf = append(e.buf[:e.pos-1], e.buf[e.pos:]...)
 			e.pos--
+		} else if e.bash {
+			// backspace on an empty bash-mode buffer exits the mode
+			// (real's mode-pop), not a dead key
+			e.bash = false
 		}
 	} else if e.pos < len(e.buf) {
 		e.buf = append(e.buf[:e.pos], e.buf[e.pos+1:]...)
@@ -381,6 +419,11 @@ func (e *editor) submitLine() string {
 	e.flushCleared() // a held cleared draft precedes this line in history
 	disp := string(e.buf)
 	l := disp
+	if e.bash {
+		e.bash = false
+		disp = "!" + disp
+		l = "!" + l
+	}
 	for ph, content := range e.pastes {
 		l = strings.ReplaceAll(l, ph, content)
 	}

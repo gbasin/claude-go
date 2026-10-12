@@ -86,6 +86,10 @@ type Context struct {
 	// NotifyNeedsInput fires real's Notification{agent_needs_input} when
 	// a question dialog opens (the host binds it to the hooks lane)
 	NotifyNeedsInput func(toolName, message string)
+	// OnOutput streams a running tool's output tail (Bash) — the TUI
+	// paints it in the repaintable progress zone. Called on ~80ms ticks
+	// while the command runs; final empty push on exit.
+	OnOutput func(lines []string)
 	// OnTaskEvent emits real's task_started/task_notification system
 	// records for background agents (stream-json prints them)
 	OnTaskEvent func(rec map[string]any)

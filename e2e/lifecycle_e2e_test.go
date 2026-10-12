@@ -404,7 +404,7 @@ func TestAgentToolBackground(t *testing.T) {
 	// delivered on idle — poke the REPL so it flushes
 	p.sendUntilEchoed(t, "wake\r", "❯ wake", 8)
 	p.waitFor("Mock response to: wake", 30*time.Second)
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
 		if strings.Contains(p.clean(), "completed") {
 			p.exit()

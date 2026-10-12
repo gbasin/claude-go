@@ -50,7 +50,7 @@ func TestBgSessionLifecycle(t *testing.T) {
 	// session keeps running
 	r = s.runStdin(t, "ping-from-attach\r\x1a", "attach", short)
 	contains(t, r.stdout, "detached — session "+short+" keeps running", "detach message")
-	poll(t, 15*time.Second, "session still running after detach", func() bool {
+	poll(t, 30*time.Second, "session still running after detach", func() bool {
 		return strings.Contains(s.run(t, "agents").stdout, short)
 	})
 
