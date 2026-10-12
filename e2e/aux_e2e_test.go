@@ -1801,15 +1801,16 @@ func TestAbovePromptBand(t *testing.T) {
 	p.sendAtPrompt(1, "say hi\r")
 	p.waitCount("❯", 2, 30*time.Second)
 	// after the turn the band exists — expand then collapse it
-	p.send("\x18\x01") // ctrl+x ctrl+a → expand
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(400 * time.Millisecond) // let readLine re-own input
+	p.send("\x18\x01")                 // ctrl+x ctrl+a → expand
+	time.Sleep(500 * time.Millisecond)
 	out := p.clean()
 	if !strings.Contains(out, "no recent activity") &&
 		!strings.Contains(out, "⏵") {
 		t.Fatalf("expanded band missing:\n%s", truncStr(out, 3000))
 	}
 	p.send("\x18\x01") // toggle again → collapse
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
 	if !strings.Contains(p.clean(), "collapsed") {
 		t.Fatalf("collapsed band missing:\n%s", truncStr(p.clean(), 3000))
 	}

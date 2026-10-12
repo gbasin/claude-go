@@ -63,6 +63,7 @@ type editor struct {
 	completer       func(prefix string) []string // slash command completion
 	bash            bool                         // bash mode: '!' split out of the buffer into the prompt glyph (real's input-mode)
 	kbMtime         time.Time                    // live-watcher: last-seen keybindings.json mtime
+	setMtime        time.Time                    // same for settings.json
 	kbLastCheck     time.Time                    // throttle for the stat
 	acOpen          bool                         // autocomplete menu visible
 	abovePrompt     bool                         // ctrl+x ctrl+a — the collapsed-activity band
