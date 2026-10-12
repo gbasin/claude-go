@@ -366,3 +366,56 @@ func artifactEnabled() bool {
 	}
 	return true
 }
+
+// ---------- foreground-agent backgrounding ----------
+
+// fgAgents maps in-flight foreground Agent records to a request channel —
+// the TUI's ctrl+b / ctrl+x ctrl+b chord (real's task:background, mod_1572
+// xNt) sends on it; the runner's wait select then converts the run to the
+// background path (launched result now, completion via task notification).
+var fgAgents = struct {
+	mu sync.Mutex
+	m  map[*AgentRecord]chan struct{}
+}{m: map[*AgentRecord]chan struct{}{}}
+
+// SetForegroundAgent marks rec as an in-flight foreground run and returns
+// its background-request channel. Call ClearForegroundAgent when the run
+// resolves on either path.
+func SetForegroundAgent(rec *AgentRecord) chan struct{} {
+	ch := make(chan struct{}, 1)
+	fgAgents.mu.Lock()
+	fgAgents.m[rec] = ch
+	fgAgents.mu.Unlock()
+	return ch
+}
+
+// ClearForegroundAgent drops rec from the foreground set.
+func ClearForegroundAgent(rec *AgentRecord) {
+	fgAgents.mu.Lock()
+	delete(fgAgents.m, rec)
+	fgAgents.mu.Unlock()
+}
+
+// ForegroundAgentRunning reports whether a foreground Agent run is
+// waiting — the TUI shows "ctrl+b to run in background" under its row
+// while true (real prints the hint in the task block).
+func ForegroundAgentRunning() bool {
+	fgAgents.mu.Lock()
+	defer fgAgents.mu.Unlock()
+	return len(fgAgents.m) > 0
+}
+
+// RequestAgentBackground signals the waiting foreground agent to finish
+// asynchronously. Returns false when no foreground run is in-flight.
+func RequestAgentBackground() bool {
+	fgAgents.mu.Lock()
+	defer fgAgents.mu.Unlock()
+	for _, ch := range fgAgents.m {
+		select {
+		case ch <- struct{}{}:
+			return true
+		default:
+		}
+	}
+	return false
+}
