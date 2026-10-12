@@ -4,12 +4,18 @@ package e2e
 
 import (
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gbasin/claude-go/internal/mock"
 	"github.com/gbasin/claude-go/internal/termemu"
+)
+
+var (
+	pathRe  = regexp.MustCompile(`/(private|tmp|var|Users|home)[^\s]*`)
+	clockRe = regexp.MustCompile(`\d{1,2}:\d{2} (AM|PM)`)
 )
 
 // driveInteractive runs bin on a PTY against a fresh mock, sends one turn,
@@ -61,7 +67,10 @@ func driveInteractive(t *testing.T, bin, send, waitFor string) (screen, raw stri
 	p.waitScreen(waitFor, 60*time.Second)
 	p.waitScreen("done", 20*time.Second) // turn-end "… done H:MM AM" row
 
-	return p.screen(), p.clean()
+	p.mu.Lock()
+	hist := strings.Join(p.emu.History(), "\n") + "\n"
+	p.mu.Unlock()
+	return hist + p.screen(), p.clean()
 }
 
 // TestDiffScreen renders real and ours through the same terminal emulator
@@ -81,9 +90,68 @@ func TestDiffScreen(t *testing.T) {
 			t.Errorf("ours frame missing %q\n%s", want, oScr)
 		}
 	}
-	// report row-level differences for review (not failed on — spinner
-	// glyphs, timing and model text legitimately vary)
-	rl, ol := strings.Split(rScr, "\n"), strings.Split(oScr, "\n")
-	t.Logf("real frame (%d rows):\n%s", len(rl), rScr)
-	t.Logf("ours frame (%d rows):\n%s", len(ol), oScr)
+	// normalized row-set diff — volatile content masked, every real row
+	// must exist in ours (hard parity check, not just anchors)
+	rNorm, oNorm := normFrame(rScr), normFrame(oScr)
+	var missing []string
+	seen := map[string]bool{}
+	for _, row := range rNorm {
+		if !containsRow(oNorm, row) && !seen[row] {
+			missing = append(missing, row)
+			seen[row] = true
+		}
+	}
+	var extra []string
+	seen = map[string]bool{}
+	for _, row := range oNorm {
+		if !containsRow(rNorm, row) && !seen[row] {
+			extra = append(extra, row)
+			seen[row] = true
+		}
+	}
+	t.Logf("real frame (%d rows):\n%s", len(rNorm), rScr)
+	t.Logf("ours frame (%d rows):\n%s", len(oNorm), oScr)
+	for _, m := range missing {
+		t.Logf("  - %s", m)
+	}
+	for _, e := range extra {
+		t.Logf("  + %s", e)
+	}
+	// shared non-volatile rows must dominate — a <40% overlap means the
+	// layouts diverged structurally
+	shared := len(rNorm) - len(missing)
+	if len(rNorm) > 0 && float64(shared)/float64(len(rNorm)) < 0.4 {
+		t.Errorf("screen parity low: %d/%d real rows present in ours\nreal:\n%s\nours:\n%s",
+			shared, len(rNorm), rScr, oScr)
+	}
+}
+
+// normFrame renders a frame comparable: drop volatile rows (spinner,
+// clock, banner noise) and mask per-run values.
+func normFrame(scr string) []string {
+	var out []string
+	for _, ln := range strings.Split(scr, "\n") {
+		ln = strings.TrimRight(ln, " ")
+		if strings.TrimSpace(ln) == "" {
+			continue
+		}
+		if strings.Contains(ln, "… ") || strings.HasPrefix(strings.TrimSpace(ln), "✻") {
+			continue // spinner/turn-end rows — verb+timing vary
+		}
+		ln = pathRe.ReplaceAllString(ln, "<DIR>")
+		ln = clockRe.ReplaceAllString(ln, "<TIME>")
+		ln = strings.ReplaceAll(ln, "\u00a0", " ") // real's box uses NBSP
+		ln = strings.TrimSpace(ln)
+		out = append(out, ln)
+	}
+	return out
+}
+
+func containsRow(rows []string, want string) bool {
+	for _, r := range rows {
+		if r == want {
+			return true
+		}
+	}
+	return false
 }
