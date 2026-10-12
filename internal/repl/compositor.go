@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -199,7 +200,7 @@ func compRepaint() {
 		return
 	}
 	compMu.Lock()
-	compPainted = nil
+	compInvalidatePaint()
 	compFrameLocked(nil)
 	compMu.Unlock()
 }
@@ -303,7 +304,7 @@ func compInline(s string) {
 	b.WriteString(compBSU())
 	fmt.Fprintf(&b, "\x1b[%d;1H", compH-compZoneH) // last scroll-region row
 	b.WriteString(s)
-	compPaintRowsLocked(&b, compRowsLocked()) // heal any clobbered zone row
+	compPaintCellsLocked(&b, compRowsLocked()) // heal any clobbered zone row
 	if compCur {
 		fmt.Fprintf(&b, "\x1b[%d;%dH", compH-compZoneH+1+compCurRow, compCursorColLocked())
 	} else {
@@ -334,7 +335,8 @@ func compSuspend() {
 		b.WriteString("\x1b8")
 		b.WriteString(compESU())
 		io.WriteString(compOut, b.String())
-		compZoneH, compPainted = 0, nil
+		compZoneH, compPaintedCells = 0, nil
+		compPainted = nil
 	}
 	compMu.Unlock()
 }
@@ -403,7 +405,8 @@ func compResize() {
 		compH >= len(compRowsLocked())+compMinScroll {
 		// zone moved with the screen height: force a reinstall at the new
 		// geometry (scroll fresh rows in, re-pin, repaint everything)
-		compZoneH, compPainted = 0, nil
+		compZoneH, compPaintedCells = 0, nil
+		compPainted = nil
 	}
 	compFrameLocked(nil)
 	compMu.Unlock()
@@ -446,7 +449,8 @@ func compFrameLocked(echo []string) {
 	if !compFits {
 		if compZoneH > 0 {
 			io.WriteString(compOut, compBSU()+"\x1b7\x1b[r\x1b8"+compESU())
-			compZoneH, compPainted = 0, nil
+			compZoneH, compPaintedCells = 0, nil
+			compPainted = nil
 		}
 		return
 	}
@@ -463,8 +467,9 @@ func compFrameLocked(echo []string) {
 		b.WriteString("\x1b[r")
 		fmt.Fprintf(&b, "\x1b[%d;1H\x1b[%dS", compH, n)
 		fmt.Fprintf(&b, "\x1b[1;%dr", compH-n)
-		compZoneH, compPainted = n, nil
-		compPaintRowsLocked(&b, rows)
+		compZoneH, compPaintedCells = n, nil
+		compPainted = nil
+		compPaintCellsLocked(&b, rows)
 	case compZoneH != n:
 		echoed = compResizeRowsLocked(&b, rows, echo)
 	default:
@@ -479,7 +484,7 @@ func compFrameLocked(echo []string) {
 			}
 			echoed = true
 		}
-		compPaintRowsLocked(&b, rows)
+		compPaintCellsLocked(&b, rows)
 	}
 	if compStreamOn {
 		// the stream bottom is always the last scroll-region row —
@@ -521,7 +526,8 @@ func compResizeRowsLocked(b *strings.Builder, rows []string, echo []string) bool
 		b.WriteString("\x1b[r")
 		fmt.Fprintf(b, "\x1b[%d;1H\x1b[%dS", compH, n-compZoneH)
 		fmt.Fprintf(b, "\x1b[1;%dr", compH-n)
-		compZoneH, compPainted = n, nil
+		compZoneH, compPaintedCells = n, nil
+		compPainted = nil
 		// a zone GROW can still carry an echo (edit→turn keeps the box
 		// pinned but the submitted box still belongs in scrollback)
 		if len(echo) > 0 {
@@ -531,7 +537,7 @@ func compResizeRowsLocked(b *strings.Builder, rows []string, echo []string) bool
 				b.WriteString("\r\n")
 			}
 		}
-		compPaintRowsLocked(b, rows)
+		compPaintCellsLocked(b, rows)
 		return len(echo) > 0
 	}
 	// shrink: the released rows (old zone top) go back to the transcript —
@@ -540,7 +546,8 @@ func compResizeRowsLocked(b *strings.Builder, rows []string, echo []string) bool
 		fmt.Fprintf(b, "\x1b[%d;1H\x1b[2K", r)
 	}
 	fmt.Fprintf(b, "\x1b[1;%dr", compH-n)
-	compZoneH, compPainted = n, nil
+	compZoneH, compPaintedCells = n, nil
+	compPainted = nil
 	echoed := false
 	if len(echo) > 0 {
 		fmt.Fprintf(b, "\x1b[%d;1H", compH-n)
@@ -550,7 +557,7 @@ func compResizeRowsLocked(b *strings.Builder, rows []string, echo []string) bool
 		}
 		echoed = true
 	}
-	compPaintRowsLocked(b, rows)
+	compPaintCellsLocked(b, rows)
 	return echoed
 }
 
@@ -573,6 +580,13 @@ func compPaintRowsLocked(b *strings.Builder, rows []string) {
 		painted[i] = want
 	}
 	compPainted = painted
+}
+
+// compInvalidatePaint drops both repaint caches — the row-level fallback
+// and the cell-diff buffer — so the next frame repaints everything.
+func compInvalidatePaint() {
+	compPainted = nil
+	compPaintedCells = nil
 }
 
 // compClearZoneLocked appends row-clearing sequences for the installed zone.
@@ -979,7 +993,7 @@ func compStreamWrite(s string) {
 			i += sz
 		}
 	}
-	compPaintRowsLocked(&b, compRowsLocked())
+	compPaintCellsLocked(&b, compRowsLocked())
 	if compCur {
 		fmt.Fprintf(&b, "\x1b[%d;%dH", compH-compZoneH+1+compCurRow, compCursorColLocked())
 	} else {
@@ -1029,4 +1043,207 @@ func compESU() string {
 		return compESUEnc
 	}
 	return ""
+}
+
+// --- cell-level frame diff (real Ink's model) --------------------------
+//
+// compPaintedCells holds the previous frame's styled cells; each repaint
+// diffs the zone cell-by-cell and emits only positioned runs — cursor
+// move + SGR + text for contiguous changed cells sharing a style. Rows
+// carrying OSC sequences fall back to the row-level painter.
+
+type compCell struct {
+	r     rune
+	style compStyle
+	wide  bool // continuation cell of a double-width glyph
+}
+
+// compStyle is a cell's canonical attribute state — SGR params as raw
+// strings for fg/bg ("38;5;246", "38;2;r;g;b") + a bitmask for attrs.
+type compStyle struct {
+	fg, bg string
+	attr   uint16
+}
+
+func (s compStyle) sgr() string {
+	if s == (compStyle{}) {
+		return ""
+	}
+	var params []string
+	for p := 1; p <= 22; p++ {
+		if s.attr&(1<<p) != 0 {
+			params = append(params, strconv.Itoa(p))
+		}
+	}
+	if s.fg != "" {
+		params = append(params, s.fg)
+	}
+	if s.bg != "" {
+		params = append(params, s.bg)
+	}
+	return "\x1b[" + strings.Join(params, ";") + "m"
+}
+
+// sgrApply folds one SGR sequence's params into the style state.
+func (s compStyle) sgrApply(csi string) compStyle {
+	body := strings.TrimSuffix(strings.TrimPrefix(csi, "\x1b["), "m")
+	if body == "" {
+		return compStyle{}
+	}
+	parts := strings.Split(body, ";")
+	num := func(i *int) int {
+		if *i >= len(parts) {
+			return 0
+		}
+		n, _ := strconv.Atoi(parts[*i])
+		*i++
+		return n
+	}
+	for i := 0; i < len(parts); {
+		p := num(&i)
+		switch {
+		case p == 0:
+			return compStyle{}
+		case p == 38 || p == 48:
+			dst := &s.fg
+			if p == 48 {
+				dst = &s.bg
+			}
+			if i < len(parts) && parts[i] == "5" {
+				i++
+				*dst = fmt.Sprintf("%d;5;%d", p, num(&i))
+			} else if i < len(parts) && parts[i] == "2" {
+				i++
+				*dst = fmt.Sprintf("%d;2;%d;%d;%d", p, num(&i), num(&i), num(&i))
+			}
+		case p == 39:
+			s.fg = ""
+		case p == 49:
+			s.bg = ""
+		case p == 1, p == 2, p == 3, p == 4, p == 7, p == 9:
+			s.attr |= 1 << p
+		case p == 21 || p == 22:
+			s.attr &^= (1 << 1) | (1 << 2)
+		case p == 23:
+			s.attr &^= 1 << 3
+		case p == 24:
+			s.attr &^= 1 << 4
+		case p == 27:
+			s.attr &^= 1 << 7
+		case p >= 30 && p <= 37, p >= 90 && p <= 97:
+			s.fg = strconv.Itoa(p)
+		case p >= 40 && p <= 47, p >= 100 && p <= 107:
+			s.bg = strconv.Itoa(p)
+		}
+	}
+	return s
+}
+
+// compRowCells renders one zone row into styled cells — SGR state folded
+// in per cell; OSC content marks the row for row-level fallback.
+func compRowCells(row string) []compCell {
+	cells := make([]compCell, 0, compW)
+	var st compStyle
+	for i := 0; i < len(row) && len(cells) < compW; {
+		c := row[i]
+		if c == 0x1b && i+1 < len(row) && row[i+1] == '[' {
+			j := i + 2
+			for j < len(row) && !(row[j] >= 0x40 && row[j] <= 0x7e) {
+				j++
+			}
+			if j < len(row) && row[j] == 'm' {
+				st = st.sgrApply(row[i : j+1])
+			}
+			i = j + 1
+			continue
+		}
+		if c == 0x1b && i+1 < len(row) && row[i+1] == ']' {
+			return nil // OSC — row-level fallback paints this frame
+		}
+		r, w := utf8.DecodeRuneInString(row[i:])
+		if w == 0 {
+			w = 1
+		}
+		cells = append(cells, compCell{r: r, style: st})
+		for k := cellW(r) - 1; k > 0 && len(cells) < compW; k-- {
+			cells = append(cells, compCell{r: 0, style: st, wide: true})
+		}
+		i += w
+	}
+	for len(cells) < compW {
+		cells = append(cells, compCell{r: ' '})
+	}
+	return cells
+}
+
+// cellW returns a rune's terminal width (1 or 2) per the doubleWidth
+// table above — grapheme clusters approximate to their base width.
+func cellW(r rune) int {
+	for _, w := range doubleWidth {
+		if r >= w[0] && r <= w[1] {
+			return 2
+		}
+	}
+	return 1
+}
+
+// compPaintedCells is the cell-diff frame cache — parallel to compPainted
+// (the row-level cache used when a row can't be cell-rendered).
+var compPaintedCells [][]compCell
+
+// compPaintCellsLocked emits the cell-level diff for the zone — real's
+// Ink patch shape: contiguous changed cells with equal style become one
+// positioned write; unchanged cells emit nothing.
+func compPaintCellsLocked(b *strings.Builder, rows []string) {
+	cur := make([][]compCell, len(rows))
+	for i, text := range rows {
+		cells := compRowCells(compClamp(text, compW))
+		if cells == nil {
+			// OSC in a row — repaint the frame row-level and snapshot
+			compInvalidatePaint()
+			compPaintRowsLocked(b, rows)
+			compPaintedCells = make([][]compCell, len(rows))
+			for j, t := range rows {
+				compPaintedCells[j] = compRowCells(compClamp(t, compW))
+			}
+			return
+		}
+		cur[i] = cells
+	}
+	if len(compPaintedCells) != len(cur) {
+		compPaintedCells = nil // zone height changed — all cells dirty
+	}
+	for i, cells := range cur {
+		row := compH - compZoneH + 1 + i
+		for j := 0; j < compW; {
+			prev := compCell{}
+			if compPaintedCells != nil && j < len(compPaintedCells[i]) {
+				prev = compPaintedCells[i][j]
+			}
+			if cells[j] == prev || cells[j].wide {
+				j++
+				continue
+			}
+			st := cells[j].style
+			start := j
+			var run strings.Builder
+			for j < compW {
+				var p compCell
+				if compPaintedCells != nil && j < len(compPaintedCells[i]) {
+					p = compPaintedCells[i][j]
+				}
+				if cells[j].wide || cells[j] == p || cells[j].style != st {
+					break
+				}
+				run.WriteRune(cells[j].r)
+				j++
+			}
+			if run.Len() == 0 {
+				continue // wide-cell boundary — nothing to write
+			}
+			fmt.Fprintf(b, "\x1b[%d;%dH\x1b[0m%s%s\x1b[0m",
+				row, start+1, st.sgr(), run.String())
+		}
+	}
+	compPaintedCells = cur
 }

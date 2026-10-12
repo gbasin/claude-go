@@ -373,8 +373,8 @@ func TestGhostTextAccept(t *testing.T) {
 	// → at EOL accepts
 	p.send("\x1b[C")
 	time.Sleep(300 * time.Millisecond)
-	if !strings.Contains(p.output(), "refactor src/main.go") {
-		t.Fatal("ghost suggestion not accepted")
+	if !strings.Contains(p.screen(), "refactor src/main.go") {
+		t.Fatalf("ghost suggestion not accepted\nscreen:\n%s", p.screen())
 	}
 	p.exit()
 }

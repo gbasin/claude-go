@@ -121,12 +121,9 @@ func TestCompFooterPaintsBothRows(t *testing.T) {
 	compInit()
 	f.buf.Reset()
 	compSetFooter([]string{"spin-line", "status-line"})
-	out := f.buf.String()
-	if !strings.Contains(out, "\x1b[39;1H\x1b[2Kspin-line") {
-		t.Fatalf("dynamic row not painted at row 39: %q", out)
-	}
-	if !strings.Contains(out, "\x1b[40;1H\x1b[2Kstatus-line") {
-		t.Fatalf("status row not painted at row 40: %q", out)
+	scr := compScreen(t, f, 80, 40)
+	if got := scr.Lines(); len(got) < 40 || got[38] != "spin-line" || got[39] != "status-line" {
+		t.Fatalf("zone rows not rendered: %q", got)
 	}
 }
 
@@ -134,11 +131,17 @@ func TestCompSetStatusKeepsDynamic(t *testing.T) {
 	f := newFakeTerm(t, 80, 40)
 	compInit()
 	compSetFooter([]string{"spin", "old-status"})
-	f.buf.Reset()
+	before := f.buf.Len()
 	compSetStatus("new-status")
-	out := f.buf.String()
-	if !strings.Contains(out, "new-status") {
+	out := f.buf.String()[before:]
+	// cell-diff: "new-status" vs "old-status" share the "-status" tail —
+	// only the "new" run is emitted
+	if !strings.Contains(out, "new") {
 		t.Fatalf("status row not repainted: %q", out)
+	}
+	scr := compScreen(t, f, 80, 40)
+	if got := scr.Lines(); got[39] != "new-status" {
+		t.Fatalf("screen row 40 = %q", got[39])
 	}
 	// differential repaint: the unchanged dynamic row is not re-emitted
 	if strings.Contains(out, "spin") {
@@ -350,14 +353,19 @@ func TestCompDiffRepaint(t *testing.T) {
 	defer compSyncOut.Store(false)
 	compInit()
 	compSetFooter([]string{"spin", "status"})
-	f.buf.Reset()
+	before := f.buf.Len()
 	compFooter("spin2") // only the dynamic row changed
-	out := f.buf.String()
-	if !strings.Contains(out, "\x1b[39;1H\x1b[2Kspin2") {
-		t.Fatalf("changed row not repainted: %q", out)
+	out := f.buf.String()[before:]
+	// cell-diff: only the changed suffix cell emits, not the row
+	if !strings.Contains(out, "2") {
+		t.Fatalf("changed cell not repainted: %q", out)
 	}
 	if strings.Contains(out, "\x1b[40;1H") {
 		t.Fatalf("unchanged status row re-emitted: %q", out)
+	}
+	scr := compScreen(t, f, 80, 40)
+	if got := scr.Lines(); got[38] != "spin2" {
+		t.Fatalf("screen row 39 = %q", got[38])
 	}
 	// BSU/ESU wraps every frame when the terminal reports ?2026
 	if !strings.Contains(out, compBSUEnc) || !strings.Contains(out, compESUEnc) {
@@ -426,9 +434,13 @@ func TestCompExitEditEchoesBox(t *testing.T) {
 	if !strings.Contains(out, "│ > hi\r\n") || !strings.Contains(out, "╰─╯\r\n") {
 		t.Fatalf("box not echoed to scrollback: %q", out)
 	}
-	// the released box rows were cleared (row 37 = old zone top)
-	if !strings.Contains(out, "\x1b[37;1H\x1b[2K") {
-		t.Fatalf("released zone rows not cleared: %q", out)
+	// the released box rows were cleared — cell-diff writes blanks where
+	// the released zone top was, not a [2K full-row clear
+	scr := compScreen(t, f, 80, 40)
+	for i, ln := range scr.Lines() {
+		if strings.Contains(ln, "│ > hi") && i > 36 {
+			t.Fatalf("stale box row at %d: %q", i, scr.Lines())
+		}
 	}
 }
 
@@ -535,5 +547,34 @@ func TestCompProgressRepaintRenders(t *testing.T) {
 	full = scr.String()
 	if strings.Contains(full, "Bash(one)") {
 		t.Fatalf("progress residue after collapse\n%s", full)
+	}
+}
+
+// TestCompCellDiff verifies the cell-level painter: a single-cell change
+// emits a positioned write for just that cell, not the whole row.
+func TestCompCellDiff(t *testing.T) {
+	f := newFakeTerm(t, 80, 40)
+	compSyncOut.Store(true)
+	defer compSyncOut.Store(false)
+	compInit()
+	compSetProgress([]string{"hello world"})
+	compFooter("spin")
+	compSetStatus("status")
+	before := f.buf.Len()
+	// change one cell mid-row
+	compSetProgress([]string{"hello World"})
+	out := f.buf.String()[before:]
+	// the write should be tiny — a row repaint would be ≥12 cells
+	if len(out) > 140 {
+		t.Fatalf("paint too large for single-cell diff: %d bytes %q", len(out), out)
+	}
+	if !strings.Contains(out, "W") {
+		t.Fatalf("changed cell not emitted: %q", out)
+	}
+	// rendered screen must be correct through the emulator
+	scr := compScreen(t, f, 80, 40)
+	full := scr.String()
+	if !strings.Contains(full, "hello World") {
+		t.Fatalf("screen wrong after cell diff:\n%s", full)
 	}
 }
