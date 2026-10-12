@@ -2558,6 +2558,37 @@ func showAgentsPane(l *agent.Loop, ks *keySource) {
 	fmt.Println()
 	draw()
 	for k := range dch {
+		// Agents + Select contexts — user remaps apply (real's pane
+		// management keys live in the Agents context)
+		switch act := dialogAction("Agents", k); act {
+		case "agents:switchView", "agents:togglePin", "agents:find",
+			"agents:rename", "agents:previousGroup", "agents:nextGroup":
+			// management actions surface in the detail view — select
+			// actions still navigate
+		}
+		switch act := dialogAction("Select", k); act {
+		case "select:previous":
+			if sel > 0 {
+				sel--
+			}
+			draw()
+			continue
+		case "select:next":
+			if sel < len(rows)-1 {
+				sel++
+			}
+			draw()
+			continue
+		case "select:accept":
+			if sel < len(rows) {
+				detail(rows[sel])
+			}
+			draw()
+			continue
+		case "select:cancel":
+			fmt.Print("\r\x1b[K")
+			return
+		}
 		switch {
 		case k.seq == "[A" || k.b == 'k':
 			if sel > 0 {

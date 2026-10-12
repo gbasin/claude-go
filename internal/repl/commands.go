@@ -735,6 +735,73 @@ func handleSlash(l *agent.Loop, line string, ed *editor, ks *keySource) (exit bo
 				return sh[sel]
 			}
 			for k := range dch {
+				// ModelPicker + Select contexts — user remaps apply
+				switch act := dialogAction("ModelPicker", k); act {
+				case "modelPicker:decreaseEffort":
+					if ci := cur(); ci >= 0 {
+						for i, e := range efforts {
+							if e == l.Effort && i > 0 {
+								l.Effort = efforts[i-1]
+								draw()
+								break
+							}
+						}
+					}
+					continue
+				case "modelPicker:increaseEffort":
+					if ci := cur(); ci >= 0 {
+						for i, e := range efforts {
+							if e == l.Effort && i < len(efforts)-1 {
+								l.Effort = efforts[i+1]
+								draw()
+								break
+							}
+						}
+					}
+					continue
+				case "modelPicker:thisSessionOnly":
+					if ci := cur(); ci >= 0 {
+						l.Model = models[ci].id
+						sessionOnlyModel = true
+						dprintln()
+						dprintln("  model →", l.Model, "(this session only)")
+					}
+					return false
+				}
+				switch act := dialogAction("Select", k); act {
+				case "select:previous":
+					if sel > 0 {
+						sel--
+						draw()
+					}
+					continue
+				case "select:next":
+					if sel < len(shown())-1 {
+						sel++
+						draw()
+					}
+					continue
+				case "select:first":
+					sel = 0
+					draw()
+					continue
+				case "select:last":
+					if n := len(shown()); n > 0 {
+						sel = n - 1
+						draw()
+					}
+					continue
+				case "select:accept":
+					k.b, k.r = '\r', '\r' // fall to the enter branch
+				case "select:cancel":
+					if len(filter) > 0 {
+						filter = filter[:0]
+						draw()
+						continue
+					}
+					dprintln()
+					return false
+				}
 				switch {
 				case k.seq == "[A" || k.b == 'k':
 					if sel > 0 {
@@ -3062,7 +3129,8 @@ func mcpPanel(l *agent.Loop, ks *keySource, rows []mcpRow) {
 				detail(r)
 				return
 			}
-			if k2.b == 0x1b || k2.b == 'q' || k2.b == '\r' {
+			if dialogAction("Confirmation", k2) == "confirm:no" ||
+				k2.b == 0x1b || k2.b == 'q' || k2.b == '\r' {
 				break
 			}
 		}
@@ -3071,6 +3139,38 @@ func mcpPanel(l *agent.Loop, ks *keySource, rows []mcpRow) {
 	fmt.Println()
 	draw()
 	for k := range dch {
+		// Select context — user remaps apply
+		switch act := dialogAction("Select", k); act {
+		case "select:previous":
+			if sel > 0 {
+				sel--
+				draw()
+			}
+			continue
+		case "select:next":
+			if sel < len(rows)-1 {
+				sel++
+				draw()
+			}
+			continue
+		case "select:first":
+			sel = 0
+			draw()
+			continue
+		case "select:last":
+			sel = len(rows) - 1
+			draw()
+			continue
+		case "select:accept":
+			if sel < len(rows) {
+				detail(&rows[sel])
+				drawn = 0
+			}
+			continue
+		case "select:cancel":
+			fmt.Print("\r\x1b[J")
+			return
+		}
 		switch {
 		case k.seq == "[A" || k.b == 'k':
 			if sel > 0 {
@@ -3308,6 +3408,23 @@ func diffCmdKS(l *agent.Loop, ks *keySource) {
 	}
 	show()
 	for k := range dch {
+		// DiffDialog context — user remaps apply
+		switch dialogAction("DiffDialog", k) {
+		case "diff:previousFile":
+			if sel > 0 {
+				sel--
+				show()
+			}
+			continue
+		case "diff:nextFile":
+			if sel < len(files)-1 {
+				sel++
+				show()
+			}
+			continue
+		case "diff:dismiss":
+			return
+		}
 		switch {
 		case k.seq == "[A" && sel > 0:
 			sel--
@@ -4426,9 +4543,43 @@ func statusOverlayAt(l *agent.Loop, ks *keySource, tab int) {
 		return
 	}
 	for k := range dch {
+		// Tabs context — user remaps apply (tabs:next/previous)
+		switch dialogAction("Tabs", k) {
+		case "tabs:next":
+			if tab < len(tabs)-1 {
+				tab++
+				draw()
+			}
+			continue
+		case "tabs:previous":
+			if tab > 0 {
+				tab--
+				draw()
+			}
+			continue
+		}
 		if tab == 2 {
 			// Config tab: ↑/↓ select, typing filters, ←/→ still tab-switch,
-			// Enter toggles the selected entry
+			// Enter toggles the selected entry. Settings-context remaps
+			// take precedence.
+			switch dialogAction("Settings", k) {
+			case "select:previous":
+				if cfgSel > 0 {
+					cfgSel--
+					draw()
+				}
+				continue
+			case "select:next":
+				if cfgSel < len(filteredConfigEntries(string(cfgQuery)))-1 {
+					cfgSel++
+					draw()
+				}
+				continue
+			case "select:accept":
+				toggleConfigEntry(filteredConfigEntries(string(cfgQuery))[cfgSel], l)
+				draw()
+				continue
+			}
 			switch {
 			case k.seq == "[A":
 				if cfgSel > 0 {
@@ -4579,6 +4730,26 @@ func exportDialog(l *agent.Loop, ks *keySource) {
 	}
 	draw()
 	for k := range dch {
+		// Select context — user remaps apply
+		switch dialogAction("Select", k) {
+		case "select:previous":
+			if sel > 0 {
+				sel--
+				draw()
+			}
+			continue
+		case "select:next":
+			if sel < len(opts)-1 {
+				sel++
+				draw()
+			}
+			continue
+		case "select:cancel":
+			dprintln()
+			return
+		case "select:accept":
+			k.b = '\r' // fall to the accept branch
+		}
 		switch {
 		case k.seq == "[A" && sel > 0:
 			sel--

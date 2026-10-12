@@ -921,15 +921,25 @@ func dialogAction(ctx string, k key) string {
 }
 
 // maybeReloadKB is the live watcher — real watches keybindings.json and
-// hot-reloads; we stat it on the key path (throttled ~1s) and rebuild the
-// binding map on mtime change. sessionKB gets the fresh map through the
-// same loadKeybindings path, so dialogs see the remap immediately.
+// settings.json and hot-reloads; we stat both on the key path (throttled
+// ~1s) and rebuild on mtime change. sessionKB gets the fresh map through
+// the same loadKeybindings path, so dialogs see the remap immediately;
+// InvalidateUserSettings makes the next UserSetting() read live too.
 func (e *editor) maybeReloadKB() {
 	if time.Since(e.kbLastCheck) < time.Second {
 		return
 	}
 	e.kbLastCheck = time.Now()
-	fi, err := os.Stat(filepath.Join(config.ClaudeDir(), "keybindings.json"))
+	dir := config.ClaudeDir()
+	if fi, err := os.Stat(filepath.Join(dir, "settings.json")); err == nil {
+		if e.setMtime.IsZero() {
+			e.setMtime = fi.ModTime()
+		} else if fi.ModTime().After(e.setMtime) {
+			e.setMtime = fi.ModTime()
+			config.InvalidateUserSettings()
+		}
+	}
+	fi, err := os.Stat(filepath.Join(dir, "keybindings.json"))
 	if err != nil {
 		return
 	}
