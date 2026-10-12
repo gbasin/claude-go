@@ -13,9 +13,10 @@ import (
 type Screen struct {
 	Cols, Rows int
 	grid       [][]rune
-	cx, cy     int // cursor
-	sx, sy     int // saved cursor
-	top, bot   int // scroll region [top,bot) rows, 0-based
+	sb         [][]rune // scrollback — rows that scrolled off the region top
+	cx, cy     int      // cursor
+	sx, sy     int      // saved cursor
+	top, bot   int      // scroll region [top,bot) rows, 0-based
 	wrap       bool
 }
 
@@ -81,6 +82,51 @@ func (s *Screen) Feed(b []byte) {
 	}
 }
 
+// cellCont marks the second cell of a double-width glyph.
+const cellCont = '\x00'
+
+// cellWidth: 2 for East Asian Wide/Fullwidth + common emoji (TR11 ranges,
+// mirroring repl's doubleWidth table — the source of truth); 0 for
+// combining/zero-width marks (they merge into the previous cell).
+func cellWidth(r rune) int {
+	switch {
+	case r == 0:
+		return 0
+	case r >= 0x300 && r <= 0x36F, r == 0x200B, r >= 0xFE00 && r <= 0xFE0F,
+		r >= 0xFE20 && r <= 0xFE2F, r >= 0x20D0 && r <= 0x20F0:
+		return 0
+	case r >= 0x1100 && r <= 0x115F, r == 0x231A || r == 0x231B,
+		r == 0x2329 || r == 0x232A, r >= 0x23E9 && r <= 0x23EC,
+		r == 0x23F0 || r == 0x23F3, r >= 0x25FD && r <= 0x25FE,
+		r >= 0x2614 && r <= 0x2615, r >= 0x2648 && r <= 0x2653,
+		r == 0x267F, r == 0x2693, r == 0x26A1, r == 0x26AA || r == 0x26AB,
+		r >= 0x26BD && r <= 0x26BE, r == 0x26C4 || r == 0x26C5,
+		r == 0x26CE, r == 0x26D4, r == 0x26EA, r >= 0x26F2 && r <= 0x26F3,
+		r == 0x26F5, r == 0x26FA, r == 0x26FD || r == 0x26FE,
+		r == 0x2705, r >= 0x270A && r <= 0x270B, r == 0x2728, r == 0x274C,
+		r == 0x274E, r >= 0x2753 && r <= 0x2755, r == 0x2757,
+		r >= 0x2795 && r <= 0x2797, r == 0x27B0, r == 0x27BF,
+		r == 0x2B1B || r == 0x2B1C, r == 0x2B50, r == 0x2B55,
+		r >= 0x2E80 && r <= 0x303E, r >= 0x3041 && r <= 0x33FF,
+		r >= 0x3400 && r <= 0x4DBF, r >= 0x4E00 && r <= 0x9FFF,
+		r >= 0xA000 && r <= 0xA4CF, r >= 0xA960 && r <= 0xA97F,
+		r >= 0xAC00 && r <= 0xD7A3, r >= 0xF900 && r <= 0xFAFF,
+		r >= 0xFE10 && r <= 0xFE19, r >= 0xFE30 && r <= 0xFE52,
+		r >= 0xFE54 && r <= 0xFE66, r >= 0xFE68 && r <= 0xFE6B,
+		r >= 0xFF00 && r <= 0xFF60, r >= 0xFFE0 && r <= 0xFFE6,
+		r >= 0x16FE0 && r <= 0x16FE4, r >= 0x17000 && r <= 0x18AFF,
+		r >= 0x1B000 && r <= 0x1B152, r >= 0x1B164 && r <= 0x1B167,
+		r >= 0x1B170 && r <= 0x1B2FB, r == 0x1F004, r == 0x1F0CF,
+		r == 0x1F18E, r >= 0x1F191 && r <= 0x1F19A, r >= 0x1F200 && r <= 0x1F202,
+		r >= 0x1F210 && r <= 0x1F23B, r >= 0x1F240 && r <= 0x1F248,
+		r >= 0x1F250 && r <= 0x1F251, r >= 0x1F300 && r <= 0x1F64F,
+		r >= 0x1F900 && r <= 0x1F9FF, r >= 0x1FA70 && r <= 0x1FAFF,
+		r >= 0x20000 && r <= 0x2FFFD, r >= 0x30000 && r <= 0x3FFFD:
+		return 2
+	}
+	return 1
+}
+
 func (s *Screen) put(r rune) {
 	if s.wrap {
 		s.cx = 0
@@ -90,8 +136,32 @@ func (s *Screen) put(r rune) {
 	if s.cy < 0 || s.cy >= s.Rows || s.cx < 0 || s.cx >= s.Cols {
 		return
 	}
-	s.grid[s.cy][s.cx] = r
-	s.cx++
+	w := cellWidth(r)
+	switch {
+	case w == 0:
+		// combining/zero-width — merge into the cell at cx-1 (keep the
+		// base glyph; the emulator doesn't need cluster fidelity)
+		return
+	case w == 2:
+		if s.cx == s.Cols-1 {
+			// wide glyph can't start in the last cell — wrap first
+			s.linefeed()
+			if s.cy < 0 || s.cy >= s.Rows {
+				return
+			}
+		}
+		// overwrite of a continuation clears the pair
+		s.grid[s.cy][s.cx] = r
+		s.grid[s.cy][s.cx+1] = cellCont
+		s.cx += 2
+	default:
+		// a plain write over a wide glyph's tail clears the head too
+		if s.grid[s.cy][s.cx] == cellCont && s.cx > 0 {
+			s.grid[s.cy][s.cx-1] = ' '
+		}
+		s.grid[s.cy][s.cx] = r
+		s.cx++
+	}
 	if s.cx >= s.Cols {
 		s.wrap = true
 		s.cx = s.Cols - 1
@@ -237,8 +307,13 @@ func (s *Screen) csi(b []byte, i int) int {
 
 // scrollUp/Down rotate row storage — copy on [][]rune aliases backing
 // arrays, so the scrolled-out row is recycled instead of zeroed in place.
+// Rows leaving the region top are pushed to scrollback.
 func (s *Screen) scrollUp(top, bot int) {
 	row := s.grid[top]
+	// a copy goes to scrollback (row itself is recycled to the bottom)
+	rec := make([]rune, s.Cols)
+	copy(rec, row)
+	s.sb = append(s.sb, rec)
 	copy(s.grid[top:bot-1], s.grid[top+1:bot])
 	s.grid[bot-1] = row
 	for j := range row {
@@ -276,17 +351,44 @@ func clamp(v, hi int) int {
 	return v
 }
 
+func rowText(row []rune) string {
+	// continuation cells of wide glyphs render nothing
+	var b strings.Builder
+	for _, r := range row {
+		if r == cellCont || r == 0 {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimRight(b.String(), " ")
+}
+
 // Lines renders the grid top-down, right-trimmed; trailing blank lines
 // dropped.
 func (s *Screen) Lines() []string {
 	out := make([]string, 0, s.Rows)
 	for r := 0; r < s.Rows; r++ {
-		out = append(out, strings.TrimRight(string(s.grid[r]), " "))
+		out = append(out, rowText(s.grid[r]))
 	}
 	for len(out) > 0 && out[len(out)-1] == "" {
 		out = out[:len(out)-1]
 	}
 	return out
+}
+
+// Scrollback renders the rows that scrolled off the region top —
+// xterm-style history. Newest last.
+func (s *Screen) Scrollback() []string {
+	out := make([]string, 0, len(s.sb))
+	for _, r := range s.sb {
+		out = append(out, rowText(r))
+	}
+	return out
+}
+
+// History returns scrollback + current grid — the full visible record.
+func (s *Screen) History() []string {
+	return append(s.Scrollback(), s.Lines()...)
 }
 
 // String renders the grid as text.

@@ -1739,19 +1739,9 @@ func printStatus(l *agent.Loop, ed *editor) {
 	if out := statusLineCmd(l); out != "" {
 		status = out
 	} else {
-		// real's footer: cwd+branch left, mode pill + hints right
-		w, _ := termWidth()
-		if w <= 0 {
-			w = 80
-		}
-		cwdDisp := l.ToolCtx.CWD
-		if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(cwdDisp, home) {
-			cwdDisp = "~" + cwdDisp[len(home):] // real abbreviates $HOME
-		}
-		left := "  " + cwdDisp
-		if b := sessionGitBranch(l.ToolCtx.CWD); b != "" {
-			left += "  " + b // real shows the branch as text
-		}
+		// real's footer (296 live capture): the mode pill + hints sit
+		// LEFT-aligned under the composer box — no cwd row (cwd lives in
+		// the banner header)
 		right := strings.TrimSpace(permModeBanner(l.PermMode))
 		if n := runningAgents(l); n > 0 {
 			// real: "← N agents" when background agents are running
@@ -1768,21 +1758,7 @@ func printStatus(l *agent.Loop, ed *editor) {
 		if hints := footerHints(l, ed); len(hints) > 0 {
 			right = strings.Join(hints, " · ") + " · " + right
 		}
-		pad := w - visWidth(left) - visWidth(right)
-		if pad < 1 {
-			// narrow: shed hints before clamping mid-word
-			if i := strings.Index(right, " (shift+tab"); i > 0 {
-				right = right[:i] + "\x1b[39m"
-			}
-			if pad = w - visWidth(left) - visWidth(right); pad < 1 {
-				left = "  " + filepath.Base(cwdDisp)
-				pad = w - visWidth(left) - visWidth(right)
-			}
-		}
-		if pad < 1 {
-			pad = 1
-		}
-		status = dim + left + strings.Repeat(" ", pad) + reset + right
+		status = dim + "  " + reset + right
 	}
 	if compActive.Load() {
 		compSetStatus(status) // pinned bottom row — real keeps it in the live region

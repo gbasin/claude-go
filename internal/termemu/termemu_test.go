@@ -83,3 +83,54 @@ func TestCollapseResidue(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestScrollbackCapturesHistory(t *testing.T) {
+	s := New(40, 4)
+	s.Feed([]byte("\x1b[1;4r")) // full region
+	for i := 0; i < 7; i++ {
+		s.Feed([]byte("line" + string(rune('a'+i)) + "\r\n"))
+	}
+	hist := s.Scrollback()
+	if len(hist) == 0 {
+		t.Fatal("no scrollback captured")
+	}
+	// the earliest lines scrolled off — linea should be in scrollback
+	joined := ""
+	for _, r := range hist {
+		joined += r + "\n"
+	}
+	if !strings.Contains(joined, "linea") {
+		t.Fatalf("scrollback missing earliest rows: %q", hist)
+	}
+	full := s.History()
+	if len(full) != len(hist)+len(s.Lines()) {
+		t.Fatalf("History() = %d rows, want sb+grid", len(full))
+	}
+}
+
+func TestWideCells(t *testing.T) {
+	s := New(10, 4)
+	// 世 is double-width → occupies two cells; next char lands at col+2
+	s.Feed([]byte("世x"))
+	got := s.Lines()
+	if got[0] != "世x" {
+		t.Fatalf("got %q", got)
+	}
+	if cy, cx := s.Cursor(); cy != 0 || cx != 3 {
+		t.Fatalf("cursor = %d,%d — wide glyph must consume 2 cells", cy, cx)
+	}
+	// overwrite the continuation tail — the head clears too
+	s.Feed([]byte("\x1b[1;2H_"))
+	got = s.Lines()
+	if got[0] != " _x" {
+		t.Fatalf("tail overwrite: %q", got)
+	}
+}
+
+func TestCombiningMerges(t *testing.T) {
+	s := New(10, 4)
+	s.Feed([]byte("e\xcc\x81x")) // e + combining acute
+	if got := s.Lines(); got[0] != "ex" {
+		t.Fatalf("got %q", got)
+	}
+}

@@ -399,16 +399,15 @@ func printAutoModeNotice(permMode string) {
 	}
 	pink := "\x1b[38;5;174m"
 	gray := "\x1b[38;5;246m"
-	fmt.Printf("%s▎%s  %sAuto mode is now Claude Code's default permission mode.%s\n",
+	fmt.Printf("%s▎%s %sAuto mode is now Claude Code's default permission mode.%s\r\n",
 		pink, reset, bold, "\x1b[22m"+reset)
 	for _, ln := range []string{
-		"Auto mode lets Claude handle permission prompts automatically. Claude checks",
-		"each tool call for risky actions and prompt injection before executing, runs",
-		"the ones it assesses as lower-risk, and blocks the rest.",
+		"Auto mode lets Claude handle permission prompts automatically. Claude checks each tool call for risky actions and",
+		"prompt injection before executing, runs the ones it assesses as lower-risk, and blocks the rest.",
 	} {
-		fmt.Printf("%s▎%s  %s%s%s\n", pink, reset, gray, ln, reset)
+		fmt.Printf("%s▎%s %s%s%s\r\n", pink, reset, gray, ln, reset)
 	}
-	fmt.Printf("%s▎%s  %s\x1b]8;;https://code.claude.com/docs/en/permission-modes\x07%shttps://code.claude.com/docs/en/permission-modes%s\x1b]8;;\x07%s\n",
+	fmt.Printf("%s▎%s %s\x1b]8;;https://code.claude.com/docs/en/permission-modes\x07%shttps://code.claude.com/docs/en/permission-modes%s\x1b]8;;\x07%s\r\n",
 		pink, reset, gray, gray, reset, reset)
 	m["autoModeNoticeShown"] = true
 	if b, err := json.MarshalIndent(m, "", "  "); err == nil {
