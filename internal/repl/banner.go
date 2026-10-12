@@ -357,6 +357,15 @@ func animateMascot() {
 	fmt.Print("\x1b[1;1H\x1b[3B")
 }
 
+// rcLinkOK — real shows the /rc session link only for sessions that can
+// sync to claude.ai: default Anthropic endpoint + OAuth creds. Custom
+// base URLs / bedrock / vertex / API keys hide it (verified: real's
+// banner omits /rc under ANTHROPIC_BASE_URL).
+func rcLinkOK() bool {
+	return os.Getenv("ANTHROPIC_BASE_URL") == "" &&
+		os.Getenv("ANTHROPIC_API_KEY") == ""
+}
+
 func compactBanner(version, name, effort, plan, cwd, sessionID string) {
 	home, _ := os.UserHomeDir()
 	short := cwd
@@ -368,6 +377,9 @@ func compactBanner(version, name, effort, plan, cwd, sessionID string) {
 	}
 	link := fmt.Sprintf("\x1b]8;id=%x;https://claude.ai/code/session_%s?from=cli\x07/rc\x1b]8;;\x07",
 		uint32(time.Now().UnixNano()&0xffffffff), sessionID)
+	if !rcLinkOK() {
+		link = ""
+	}
 	// \r\n — the editor is in raw mode when the banner prints (ONLCR off,
 	// bare \n staircases). Reserve the three mascot rows, sparkle-fill,
 	// then write the header text beside them (real's start-up animation).
@@ -379,10 +391,13 @@ func compactBanner(version, name, effort, plan, cwd, sessionID string) {
 	} else {
 		fmt.Printf("%s▝▜██████▀%s  %s · %s\r\n", claudeOrange, reset, name, plan)
 	}
+	if link != "" {
+		link = " · " + link
+	}
 	if short != "" {
-		fmt.Printf(" %s▝▝   ▝▝%s   %s · %s\r\n", claudeOrange, reset, short, link)
+		fmt.Printf(" %s▝▝   ▝▝%s   %s%s\r\n", claudeOrange, reset, short, link)
 	} else {
-		fmt.Printf(" %s▝▝   ▝▝%s   %s\r\n", claudeOrange, reset, link)
+		fmt.Printf(" %s▝▝   ▝▝%s   %s\r\n", claudeOrange, reset, strings.TrimPrefix(link, " · "))
 	}
 }
 

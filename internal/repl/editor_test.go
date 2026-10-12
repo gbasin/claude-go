@@ -618,3 +618,30 @@ func TestInvalidActionBindingDropped(t *testing.T) {
 		t.Fatal("invalid action binding should be dropped, not stored")
 	}
 }
+
+// TestBashModeSplit — '!' at empty buffer flips to bash mode (prompt
+// glyph), never lands in the buffer; backspace on empty exits.
+func TestBashModeSplit(t *testing.T) {
+	e := newEditor()
+	e.zoneEdit = false
+	e.insert('!')
+	if !e.bash {
+		t.Fatal("leading '!' did not enter bash mode")
+	}
+	if len(e.buf) != 0 {
+		t.Fatalf("'!' leaked into buffer: %q", string(e.buf))
+	}
+	e.insert('e', 'c', 'h', 'o')
+	if got := e.submitLine(); got != "!echo" {
+		t.Fatalf("submit = %q", got)
+	}
+	if e.bash {
+		t.Fatal("bash mode persisted after submit")
+	}
+	// backspace on empty bash-mode buffer exits the mode
+	e.insert('!')
+	e.del(true)
+	if e.bash {
+		t.Fatal("backspace did not exit bash mode")
+	}
+}
