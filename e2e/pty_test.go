@@ -11,6 +11,7 @@ package e2e
 
 import (
 	"bytes"
+	"github.com/gbasin/claude-go/internal/termemu"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,6 +59,7 @@ type ptyProc struct {
 
 	mu  sync.Mutex
 	buf bytes.Buffer
+	emu *termemu.Screen // rendered frame — same bytes, interpreted
 }
 
 // runPTY spawns the binary attached to a fresh pty.
@@ -85,7 +87,8 @@ func (s *sess) runPTYSize(t *testing.T, extraEnv []string, cols, rows int, args 
 		t.Fatalf("start on pty: %v", err)
 	}
 	slave.Close() // child owns it now
-	p := &ptyProc{t: t, cmd: cmd, master: master, done: make(chan error, 1)}
+	p := &ptyProc{t: t, cmd: cmd, master: master, done: make(chan error, 1),
+		emu: termemu.New(cols, rows)}
 	go func() {
 		var tmp [4096]byte
 		for {
@@ -93,6 +96,7 @@ func (s *sess) runPTYSize(t *testing.T, extraEnv []string, cols, rows int, args 
 			if n > 0 {
 				p.mu.Lock()
 				p.buf.Write(tmp[:n])
+				p.emu.Feed(tmp[:n])
 				p.mu.Unlock()
 			}
 			if err != nil {
@@ -191,6 +195,38 @@ func stripANSI(s string) string {
 		i++
 	}
 	return b.String()
+}
+
+// screen returns the rendered terminal frame — ANSI interpreted, not
+// stripped. Unlike clean(), repaint/erase semantics are modeled: a row
+// that was overwritten or collapsed out does not appear.
+func (p *ptyProc) screen() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.emu.String()
+}
+
+// waitScreen polls the rendered screen for substr.
+func (p *ptyProc) waitScreen(substr string, timeout time.Duration) string {
+	p.t.Helper()
+	substr = strings.ReplaceAll(substr, "\u00a0", " ")
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if strings.Contains(p.screen(), substr) {
+			return p.screen()
+		}
+		select {
+		case err := <-p.done:
+			p.done <- err
+			p.t.Fatalf("process exited while waiting for %q: %v\nscreen:\n%s",
+				substr, err, p.screen())
+		default:
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	p.t.Fatalf("timed out (%s) waiting for %q on screen\nscreen:\n%s",
+		timeout, substr, p.screen())
+	return ""
 }
 
 // clean returns the captured output with ANSI escapes stripped.

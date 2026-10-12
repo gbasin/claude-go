@@ -3,6 +3,7 @@ package repl
 import (
 	"bytes"
 	"fmt"
+	"github.com/gbasin/claude-go/internal/termemu"
 	"strings"
 	"testing"
 )
@@ -490,5 +491,49 @@ func TestCompInputFlag(t *testing.T) {
 	t.Setenv("CLAUDE_GO_NO_COMPOSITOR_INPUT", "1")
 	if compInputActive() {
 		t.Fatal("CLAUDE_GO_NO_COMPOSITOR_INPUT must disable zone input")
+	}
+}
+
+// --- rendered-screen assertions via termemu ---
+
+// feedComp pushes the fake terminal's accumulated bytes through a termemu
+// screen — repaint/erase semantics applied — so tests assert the user's
+// actual view.
+func compScreen(t *testing.T, f *fakeTerm, w, h int) *termemu.Screen {
+	t.Helper()
+	scr := termemu.New(w, h)
+	scr.Feed(f.buf.Bytes())
+	return scr
+}
+
+func TestCompProgressRepaintRenders(t *testing.T) {
+	f := newFakeTerm(t, 80, 40)
+	compSyncOut.Store(true)
+	defer compSyncOut.Store(false)
+	compInit()
+	// simulate the task window: 3 progress rows + spinner + status
+	compSetProgress([]string{"     Bash(one)", "     Read(two)", "     +4 more tool uses (ctrl+o to expand)"})
+	compFooter("·spin·")
+	compSetStatus("status")
+	scr := compScreen(t, f, 80, 40)
+	full := scr.String()
+	for _, want := range []string{"Bash(one)", "+4 more tool uses", "·spin·", "status"} {
+		if !strings.Contains(full, want) {
+			t.Fatalf("rendered screen missing %q\n%s", want, full)
+		}
+	}
+	// shrink the window — the dropped rows must not leave residue
+	compSetProgress([]string{"     Bash(one)"})
+	scr = compScreen(t, f, 80, 40)
+	full = scr.String()
+	if strings.Contains(full, "Read(two)") || strings.Contains(full, "+4 more") {
+		t.Fatalf("stale progress rows after shrink\n%s", full)
+	}
+	// collapse entirely
+	compSetProgress(nil)
+	scr = compScreen(t, f, 80, 40)
+	full = scr.String()
+	if strings.Contains(full, "Bash(one)") {
+		t.Fatalf("progress residue after collapse\n%s", full)
 	}
 }
