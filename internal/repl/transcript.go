@@ -20,6 +20,12 @@ import (
 // esc/q/ctrl+o close. ctrl+e toggles thinking-block detail (real's
 // transcript:toggleShowAll).
 func showTranscript(l *agent.Loop, ks *keySource) {
+	showTranscriptAt(l, ks, -1)
+}
+
+// showTranscriptAt opens the transcript overlay anchored at msgIdx (the
+// message index a focused AbovePrompt item was pushed at). -1 = latest.
+func showTranscriptAt(l *agent.Loop, ks *keySource, anchor int) {
 	lines := transcriptLines(l, true)
 	_, rows, _ := compGetSize()
 	viewH := rows - 6
@@ -28,6 +34,12 @@ func showTranscript(l *agent.Loop, ks *keySource) {
 	}
 	showAll := true
 	top := max(0, len(lines)-viewH) // start at the latest
+	if anchor >= 0 {
+		top = transcriptMsgLineOffset(l, showAll, anchor)
+		if top > len(lines)-viewH {
+			top = max(0, len(lines)-viewH)
+		}
+	}
 	dch := make(chan key, 16)
 	ks.dialog.Store(&dch)
 	defer ks.dialog.Store(nil)
@@ -202,6 +214,25 @@ func transcriptLines(l *agent.Loop, showAll bool) []string {
 		})...)
 	}
 	return out
+}
+
+// transcriptMsgLineOffset maps a message index to its line offset in the
+// rendered transcript — used to anchor the overlay on an activity item.
+func transcriptMsgLineOffset(l *agent.Loop, showAll bool, msgIdx int) int {
+	var agents *agentCursor
+	off := 0
+	for i, m := range l.Messages {
+		if i >= msgIdx {
+			break
+		}
+		off += len(transcriptMessageLines(m, showAll, func(b api.ContentBlock) []string {
+			if agents == nil {
+				agents = newAgentCursor(l)
+			}
+			return agents.splice(b, showAll)
+		}))
+	}
+	return off
 }
 
 // agentCursor pairs Agent/Task tool_use calls with spawned-agent records

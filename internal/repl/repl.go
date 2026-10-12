@@ -183,16 +183,19 @@ func RunWithStore(l *agent.Loop, store Store) {
 			compInline(fmt.Sprintf("  %d background tasks stopped\r\n", n))
 		}
 		ed.onToggleExpand = func() {
-			// ctrl+o: full transcript view; second ctrl+o (or esc/q) returns
+			// ctrl+o: full transcript view; second ctrl+o (or esc/q) returns.
+			// ed.transcriptAnchor (≥0 via an AbovePrompt item press) picks
+			// the opening scroll position instead of the latest.
+			anchor := ed.transcriptAnchor
 			if ed.zoneEdit {
 				// the box lives in the zone — hand the screen to the
 				// transcript dump; compResume reinstalls box+status
 				compSuspend()
-				showTranscript(l, ks)
+				showTranscriptAt(l, ks, anchor)
 				compResume()
 				return
 			}
-			showTranscript(l, ks)
+			showTranscriptAt(l, ks, anchor)
 			os.Stdout.WriteString(boxRule() + "\n")
 			ed.redraw()
 		}
@@ -278,11 +281,11 @@ func RunWithStore(l *agent.Loop, store Store) {
 		if arg != "" {
 			line += " " + arg
 		}
-		abovePromptPush(line)
+		abovePromptPushAt(line, len(l.Messages))
 	}
 	l.Events.OnToolResult = func(name, _ string, r tools.Result) {
 		if r.IsError {
-			abovePromptPush("  ✗ " + name)
+			abovePromptPushAt("  ✗ "+name, len(l.Messages))
 		}
 	}
 	l.ToolCtx.SetPermMode = func(mode string) {
@@ -2541,23 +2544,56 @@ func showAgentsPane(l *agent.Loop, ks *keySource) {
 		fmt.Print(sb.String())
 	}
 	detail := func(r paneRow) {
-		fmt.Print("\r\x1b[K")
-		fmt.Printf("  %s%s%s  %s%s%s\r\n", bold, r.cmd, reset, dim, r.id, reset)
-		fmt.Printf("    %sstatus: %s · started %s%s\r\n", dim, r.status(), relAgo(r.started), reset)
-		for _, ln := range r.tail() {
-			fmt.Printf("    %s%s%s\r\n", dim, truncRunes(ln, 100), reset)
+		// real's detail view is live — status + transcript tail refresh
+		// while the agent runs; re-render on a tick until esc
+		detailDraw := func() {
+			fmt.Print("\r\x1b[K")
+			fmt.Printf("  %s%s%s  %s%s%s\r\n", bold, r.cmd, reset, dim, r.id, reset)
+			fmt.Printf("    %sstatus: %s · started %s%s\r\n", dim, r.status(), relAgo(r.started), reset)
+			for _, ln := range r.tail() {
+				fmt.Printf("    %s%s%s\r\n", dim, truncRunes(ln, 100), reset)
+			}
+			fmt.Printf("    %s(esc to go back)%s\r\n", dim, reset)
 		}
-		fmt.Printf("    %s(esc to go back)%s\r\n", dim, reset)
-		for k2 := range dch {
-			if k2.b == 0x1b || k2.b == 'q' || k2.b == '\r' || k2.seq == "[D" {
-				break
+		detailDraw()
+		tick := time.NewTicker(300 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-tick.C:
+				detailDraw()
+			case k2, ok := <-dch:
+				if !ok || k2.b == 0x1b || k2.b == 'q' || k2.b == '\r' || k2.seq == "[D" {
+					drawn = 0
+					return
+				}
 			}
 		}
-		drawn = 0
 	}
 	fmt.Println()
 	draw()
-	for k := range dch {
+	tick := time.NewTicker(500 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		var k key
+		select {
+		case <-tick.C:
+			// re-gather so task statuses update live (real's pane is a
+			// live view, not a snapshot)
+			if nr := gather(); len(nr) > 0 {
+				rows = nr
+				if sel >= len(rows) {
+					sel = len(rows) - 1
+				}
+				draw()
+			}
+			continue
+		case kk, ok := <-dch:
+			if !ok {
+				return
+			}
+			k = kk
+		}
 		// Agents + Select contexts — user remaps apply (real's pane
 		// management keys live in the Agents context)
 		switch act := dialogAction("Agents", k); act {
