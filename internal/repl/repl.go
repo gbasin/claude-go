@@ -940,6 +940,15 @@ func RunWithStore(l *agent.Loop, store Store) {
 				draftBack = append(draftBack, queueBuf...)
 				compQueueDraft("")
 			}
+			// a chord left pending in the busy path (ctrl+x consumed by
+			// busyAction, then the turn ended) transfers to the editor's
+			// pendingChord so the next keystroke completes it — the chord
+			// prefix must not die with the busy loop
+			if len(ed.busyChord) > 0 {
+				ed.pendingChord = ed.busyChord
+				ed.chordAt = time.Now()
+				ed.busyChord = nil
+			}
 			// drain buffered interrupt keys from the turn — a stale Esc
 			// would otherwise fire cancel() instantly on the NEXT turn's
 			// loop. Printable keys stay queued for the editor.

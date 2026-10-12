@@ -62,9 +62,12 @@ type editor struct {
 	searchIdx       int                          // ctrl+r: index of current match in e.history
 	completer       func(prefix string) []string // slash command completion
 	bash            bool                         // bash mode: '!' split out of the buffer into the prompt glyph (real's input-mode)
+	kbMtime         time.Time                    // live-watcher: last-seen keybindings.json mtime
+	kbLastCheck     time.Time                    // throttle for the stat
 	acOpen          bool                         // autocomplete menu visible
 	abovePrompt     bool                         // ctrl+x ctrl+a — the collapsed-activity band
 	abovePromptSel  bool                         // ctrl+x tab — navigation focus lives in the band
+	abovePromptIdx  int                          // selected row when focused
 	acDesc          func(name string) string     // per-item description
 	acItems         []string                     // filtered matches
 	acSel           int                          // selected index
@@ -679,6 +682,14 @@ func (e *editor) readLine(ks *keySource) readResult {
 }
 
 func (e *editor) insertKey(k key) *readResult {
+	e.maybeReloadKB()
+	// focused AbovePrompt band takes its own context first (real's
+	// context stack: a focused band wins over Chat)
+	if e.abovePromptSel {
+		if r, done := e.abovePromptKey(k); done {
+			return r
+		}
+	}
 	c := k.b
 	wasInsert := e.insGroup
 	e.insGroup = false // any non-insert key closes the previous group
@@ -3546,8 +3557,11 @@ func (e *editor) abovePromptRows() []string {
 		arrow = cyan + "❯" + reset
 	}
 	n := abovePromptCount()
+	lines2 := abovePromptLines()
+	if e.abovePromptIdx >= len(lines2) {
+		e.abovePromptIdx = len(lines2) - 1
+	}
 	if abovePromptExpanded {
-		lines2 := abovePromptLines()
 		if len(lines2) == 0 {
 			out = append(out, "   "+dim+"no recent activity"+reset)
 		} else {
@@ -3558,7 +3572,7 @@ func (e *editor) abovePromptRows() []string {
 	} else {
 		out = append(out, " "+arrow+dim+" collapsed "+
 			strconv.Itoa(n)+" recent "+plural(n, "message", "messages")+
-			" · ctrl+x ctrl+a to collapse"+reset)
+			" · ctrl+x ctrl+a to expand"+reset)
 	}
 	return out
 }
@@ -3614,4 +3628,45 @@ func isImageMagic(b []byte) bool {
 		return true // HEIC/AVIF
 	}
 	return false
+}
+
+// abovePromptKey handles keys while the AbovePrompt band has focus —
+// the band's own context actions resolved through the keymap
+// (abovePrompt:next/previous/press/leave, pane scrolls), then any
+// unbound key drops focus back to the composer (real's focus-out).
+func (e *editor) abovePromptKey(k key) (*readResult, bool) {
+	lines := abovePromptLines()
+	switch dialogAction("AbovePrompt", k) {
+	case "abovePrompt:next":
+		if e.abovePromptIdx < len(lines)-1 {
+			e.abovePromptIdx++
+		}
+		e.redraw()
+		return nil, true
+	case "abovePrompt:previous":
+		if e.abovePromptIdx > 0 {
+			e.abovePromptIdx--
+		}
+		e.redraw()
+		return nil, true
+	case "abovePrompt:press":
+		// open the selected activity item — real replays it in the
+		// transcript overlay
+		e.abovePromptSel = false
+		e.toggleExpand()
+		e.redraw()
+		return nil, true
+	case "abovePrompt:leave":
+		e.abovePromptSel = false
+		e.redraw()
+		return nil, true
+	case "pane:scrollUp", "pane:scrollDown", "pane:pageUp", "pane:pageDown":
+		e.abovePromptSel = false
+		e.redraw()
+		return nil, true // band has no scroll surface yet — leave focus
+	}
+	// unbound key → drop focus, let the composer have it
+	e.abovePromptSel = false
+	e.redraw()
+	return nil, false
 }

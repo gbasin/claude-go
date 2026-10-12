@@ -919,3 +919,26 @@ func dialogAction(ctx string, k key) string {
 	}
 	return kb["Global\x00"+s]
 }
+
+// maybeReloadKB is the live watcher — real watches keybindings.json and
+// hot-reloads; we stat it on the key path (throttled ~1s) and rebuild the
+// binding map on mtime change. sessionKB gets the fresh map through the
+// same loadKeybindings path, so dialogs see the remap immediately.
+func (e *editor) maybeReloadKB() {
+	if time.Since(e.kbLastCheck) < time.Second {
+		return
+	}
+	e.kbLastCheck = time.Now()
+	fi, err := os.Stat(filepath.Join(config.ClaudeDir(), "keybindings.json"))
+	if err != nil {
+		return
+	}
+	if e.kbMtime.IsZero() {
+		e.kbMtime = fi.ModTime()
+		return // seeded at load — no reload on the first stat
+	}
+	if fi.ModTime().After(e.kbMtime) {
+		e.kbMtime = fi.ModTime()
+		e.loadKeybindings()
+	}
+}
