@@ -46,11 +46,10 @@ func runningTaskCount(l *agent.Loop) int {
 	return running
 }
 
-// permModeBanner renders real's footer mode pill:
-// "⏵⏵ <mode> on · ← for agents" — no "(shift+tab to cycle)" suffix in
-// 296 (verified absent in the carved source); the hint only appears in
-// the onboarding explainer. Default mode has NO pill — real renders just
-// "? for shortcuts · ← for agents" (default's symbol is "").
+// permModeBanner renders real's footer mode pill + cycle hint:
+// "⏵⏵ <mode> on (shift+tab to cycle) · ← for agents" — verified live
+// against real 2.1.296 (the carve read that dropped the hint was wrong).
+// Default mode has NO pill — "? for shortcuts · ← for agents".
 // modePillColor maps each permission mode to real's palette token —
 // auto = warning yellow (captured 38;5;220), bypass = error red,
 // plan = planMode teal, acceptEdits = autoAccept violet.
@@ -72,7 +71,7 @@ func modePillColor(mode string) string {
 func permModeBanner(mode string) string {
 	gray := "\x1b[38;5;246m"
 	pill := modePillColor(mode)
-	hint := gray + " · ← for agents" + reset
+	hint := gray + " (shift+tab to cycle) · ← for agents" + reset
 	switch mode {
 	case "", "default":
 		return gray + "? for shortcuts" + reset + hint

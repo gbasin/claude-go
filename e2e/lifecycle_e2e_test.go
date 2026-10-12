@@ -204,6 +204,20 @@ func TestAgentToolNestedDisplay(t *testing.T) {
 	// completion: real's "Done (N tool uses · Xk tokens · Ds)" row
 	p.waitFor("Done (", 60*time.Second)
 	p.waitFor("tool use", 5*time.Second)
+	p.waitFor("⏺", 5*time.Second)
+	// the progress window lives in the repaintable zone — after the Done
+	// row lands, the rendered screen must not retain the transient inner
+	// rows (no residue above the turn footer)
+	scr := p.screen()
+	if !strings.Contains(scr, "Done (") {
+		t.Fatalf("Done row not on rendered screen\nscreen:\n%s", scr)
+	}
+	// inner progress rows are zone content — they collapse on completion;
+	// a broken repaint would leave them visible below the Done row
+	doneIdx := strings.LastIndex(scr, "Done (")
+	if tail := scr[doneIdx:]; strings.Contains(tail, "Initializing") {
+		t.Fatalf("stale progress rows after completion\nscreen:\n%s", scr)
+	}
 	p.exit()
 }
 
