@@ -417,6 +417,9 @@ func RunWithStore(l *agent.Loop, store Store) {
 		// uses · Xk tokens · Ds)" + "(ctrl+o to expand)" — the reply
 		// body shows only in transcript mode
 		if r.AgentStats != nil {
+			// the progress window collapses — only the Done row is
+			// permanent (inner rows are transcript-mode-only in real)
+			compSetProgress(nil)
 			st := r.AgentStats
 			uses := "1 tool use"
 			if st.ToolUses != 1 {
@@ -472,29 +475,57 @@ func RunWithStore(l *agent.Loop, store Store) {
 				dim, rem, pluralize(rem, "line", "lines"), key, reset))
 		}
 	}
-	// subagent inner-tool display (real's renderToolUseProgressMessage):
-	// "  ⎿  Initializing…" until first progress, then inner calls at col
-	// 5 as "Name(summary)" — no ⏺ — with results dim on the same level
+	// subagent task window (real's renderToolUseProgressMessage): a
+	// repaintable block in the live zone — "  ⎿  Initializing…" until
+	// first progress, then the last ≤3 items at col 5 ("Name(summary)",
+	// no ⏺), "+N more tool uses (ctrl+o to expand)" for the hidden tail,
+	// "ctrl+b to run in background" while the fg agent runs. The block
+	// lives in the compositor zone — rows repaint in place and collapse
+	// on completion; they never land in scrollback (transcript-only).
 	if ar, ok := l.ToolCtx.Agent.(*agent.Runner); ok {
-		ar.OnSubStart = func() {
+		var win []string
+		var toolUses int
+		paint := func() {
 			if focusMode.Load() {
 				return
 			}
-			streamPrint(fmt.Sprintf("  %s⎿%s  %sInitializing…%s", dim, reset, dim, reset))
+			rows := append([]string{}, win...)
+			if hidden := toolUses - 3; hidden > 0 && len(win) >= 3 {
+				key := ed.resolvedChord("Global", "app:toggleTranscript", "ctrl+o")
+				rows = append(rows, fmt.Sprintf("     %s+%d more tool uses (%s to expand)%s",
+					dim, hidden, key, reset))
+			}
+			if len(win) > 0 {
+				rows = append(rows, fmt.Sprintf("     %sctrl+b to run in background%s", dim, reset))
+			}
+			compSetProgress(rows)
+		}
+		push := func(row string) {
+			win = append(win, row)
+			if len(win) > 3 {
+				win = win[len(win)-3:]
+			}
+			paint()
+		}
+		ar.OnSubStart = func() {
+			win, toolUses = nil, 0
+			if focusMode.Load() {
+				return
+			}
+			compSetProgress([]string{
+				fmt.Sprintf("  %s⎿%s  %sInitializing…%s", dim, reset, dim, reset)})
 		}
 		ar.OnSubToolUse = func(name string, input json.RawMessage) {
-			if focusMode.Load() {
-				return
-			}
-			streamPrint(fmt.Sprintf("     %s%s%s%s%s",
+			toolUses++
+			push(fmt.Sprintf("     %s%s%s%s%s",
 				bold, name, reset, summarize(name, input), ""))
 		}
 		ar.OnSubToolResult = func(name string, r tools.Result) {
-			if focusMode.Load() || briefMode.Load() {
+			if briefMode.Load() {
 				return
 			}
 			line := strings.Split(strings.TrimRight(r.Content, "\n"), "\n")[0]
-			streamPrint(fmt.Sprintf("     %s%s%s", dim, trunc(line, 110), reset))
+			push(fmt.Sprintf("     %s%s%s", dim, trunc(line, 110), reset))
 		}
 	}
 	historySessionID = l.Client.SessionID
@@ -801,6 +832,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			spin.stop()
 			tools.SetPeerSessionBusy(false)
 			tools.FlushHeldPeerMessages() // release held peer msgs at the boundary
+			compSetProgress(nil)          // any live task window collapses at turn end
 			compClearFooter()
 			if !compActive.Load() {
 				// zone mode leaves the cursor at the response row — the raw
