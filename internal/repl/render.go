@@ -388,3 +388,24 @@ func streamFresh(s string) {
 // compStreamWrite appends \r\n at the current stream position. If the
 // streamed text ended mid-row, a newline lands the card at col 0 first.
 func streamPrint(s string) { streamFresh(s + "\n") }
+
+// foldResultRows applies real's tool-result fold (mod_0397): each result
+// line soft-wraps at w-10, the first 3 WRAPPED rows sit above the fold
+// (all 4 in the grace case — a 4-row result never folds), and rem counts
+// the hidden remainder for the "… +N lines" row. Shared by the top-level
+// result path and subagent inner results.
+func foldResultRows(content string, w int) (above []string, rem int) {
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	ew := max(w-10, 10)
+	var rows []string
+	for _, ln := range lines {
+		for _, seg := range softWrap(ln, ew) {
+			rows = append(rows, strings.TrimRight(seg, " \t"))
+		}
+	}
+	const fold = 3
+	if len(rows) > fold+1 {
+		return rows[:fold], len(rows) - fold
+	}
+	return rows, 0
+}

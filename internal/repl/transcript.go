@@ -4,11 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/gbasin/claude-go/internal/agent"
 	"github.com/gbasin/claude-go/internal/api"
+	"github.com/gbasin/claude-go/internal/session"
+	"github.com/gbasin/claude-go/internal/tools"
 )
 
 // showTranscript is real's ctrl+o — a scrollable overlay listing the whole
@@ -16,7 +20,7 @@ import (
 // esc/q/ctrl+o close. ctrl+e toggles thinking-block detail (real's
 // transcript:toggleShowAll).
 func showTranscript(l *agent.Loop, ks *keySource) {
-	lines := transcriptLines(l.Messages, true)
+	lines := transcriptLines(l, true)
 	_, rows, _ := compGetSize()
 	viewH := rows - 6
 	if viewH < 4 {
@@ -57,7 +61,7 @@ func showTranscript(l *agent.Loop, ks *keySource) {
 				return
 			case "transcript:toggleShowAll":
 				showAll = !showAll
-				lines = transcriptLines(l.Messages, showAll)
+				lines = transcriptLines(l, showAll)
 				if top+viewH > len(lines) {
 					top = max(0, len(lines)-viewH)
 				}
@@ -172,7 +176,7 @@ func showTranscript(l *agent.Loop, ks *keySource) {
 			draw()
 		case k.b == 5: // ctrl+e — transcript:toggleShowAll
 			showAll = !showAll
-			lines = transcriptLines(l.Messages, showAll)
+			lines = transcriptLines(l, showAll)
 			if top+viewH > len(lines) {
 				top = max(0, len(lines)-viewH)
 			}
@@ -182,16 +186,127 @@ func showTranscript(l *agent.Loop, ks *keySource) {
 }
 
 // transcriptLines flattens messages into styled display rows. showAll=false
-// hides thinking blocks (real's default transcript detail toggle).
-func transcriptLines(msgs []api.Message, showAll bool) []string {
+// hides thinking blocks (real's default transcript detail toggle). When
+// showAll is on, Agent/Task calls also replay the spawned agent's inner
+// transcript — real's VerboseAgentTranscript (mod_1522 mmt renders every
+// progress message under the agent row in transcript mode).
+func transcriptLines(l *agent.Loop, showAll bool) []string {
 	var out []string
-	for _, m := range msgs {
-		out = append(out, transcriptMessageLines(m, showAll)...)
+	var agents *agentCursor
+	for _, m := range l.Messages {
+		out = append(out, transcriptMessageLines(m, showAll, func(b api.ContentBlock) []string {
+			if agents == nil {
+				agents = newAgentCursor(l)
+			}
+			return agents.splice(b, showAll)
+		})...)
 	}
 	return out
 }
 
-func transcriptMessageLines(m api.Message, showAll bool) []string {
+// agentCursor pairs Agent/Task tool_use calls with spawned-agent records
+// in call order, then reads the sidechain transcript file
+// (<sid>/subagents/<agentID>.jsonl — session.OpenSubagent's layout).
+type agentCursor struct {
+	dir      string               // <transcript-dir>/<sid>/subagents
+	recs     []*tools.AgentRecord // in-process agents, started-order
+	claimed  map[string]bool      // agentIDs already spliced
+	fallback []string             // *.jsonl paths by mtime (resume case)
+}
+
+func newAgentCursor(l *agent.Loop) *agentCursor {
+	c := &agentCursor{claimed: map[string]bool{}}
+	if l.Transcript == "" {
+		return c
+	}
+	sid := strings.TrimSuffix(filepath.Base(l.Transcript), ".jsonl")
+	c.dir = filepath.Join(filepath.Dir(l.Transcript), sid, "subagents")
+	c.recs = tools.ListInProcessAgents()
+	ents, err := os.ReadDir(c.dir)
+	if err == nil {
+		type fe struct {
+			path string
+			mt   int64
+		}
+		var files []fe
+		for _, e := range ents {
+			if !strings.HasSuffix(e.Name(), ".jsonl") {
+				continue
+			}
+			p := filepath.Join(c.dir, e.Name())
+			var mt int64
+			if fi, err := e.Info(); err == nil {
+				mt = fi.ModTime().UnixNano()
+			}
+			files = append(files, fe{p, mt})
+		}
+		sort.Slice(files, func(i, j int) bool { return files[i].mt < files[j].mt })
+		for _, f := range files {
+			c.fallback = append(c.fallback, f.path)
+		}
+	}
+	return c
+}
+
+// splice resolves the subagent transcript for one Agent/Task tool_use and
+// returns its rendered rows, indented one level under the ⏺ Agent row.
+func (c *agentCursor) splice(b api.ContentBlock, showAll bool) []string {
+	if c.dir == "" {
+		return nil
+	}
+	var path string
+	// prefer a record whose name/type matches the call; else positional
+	// pairing (call order ≈ start order)
+	var in struct {
+		Description string `json:"description"`
+		Subagent    string `json:"subagent_type"`
+	}
+	json.Unmarshal(b.Input, &in)
+	pick := func(a *tools.AgentRecord) {
+		c.claimed[a.AgentID] = true
+		path = filepath.Join(c.dir, a.AgentID+".jsonl")
+		for i, f := range c.fallback {
+			if f == path {
+				c.fallback = append(c.fallback[:i], c.fallback[i+1:]...)
+				break
+			}
+		}
+	}
+	for _, a := range c.recs {
+		if !c.claimed[a.AgentID] &&
+			(a.Name == in.Description || (in.Subagent != "" && a.Type == in.Subagent)) {
+			pick(a)
+			break
+		}
+	}
+	if path == "" {
+		for _, a := range c.recs {
+			if !c.claimed[a.AgentID] {
+				pick(a)
+				break
+			}
+		}
+	}
+	if path == "" && len(c.fallback) > 0 {
+		path, c.fallback = c.fallback[0], c.fallback[1:]
+	}
+	if path == "" {
+		return nil
+	}
+	msgs, err := session.LoadPath(path)
+	if err != nil || len(msgs) == 0 {
+		return nil
+	}
+	var out []string
+	for _, sm := range msgs {
+		for _, ln := range transcriptMessageLines(sm, showAll, nil) {
+			out = append(out, "  "+ln)
+		}
+	}
+	return out
+}
+
+func transcriptMessageLines(m api.Message, showAll bool, agentRows func(api.ContentBlock) []string) []string {
 	var out []string
 	var blocks []api.ContentBlock
 	if json.Unmarshal(m.Content, &blocks) != nil {
@@ -214,6 +329,11 @@ func transcriptMessageLines(m api.Message, showAll bool) []string {
 			}
 		case "tool_use":
 			out = append(out, fmt.Sprintf("  %s⏺%s %s%s", green, reset, bold+b.Name+reset, summarize(b.Name, b.Input)))
+			// expanded view replays the spawned agent's inner transcript
+			// under its row (real's VerboseAgentTranscript)
+			if showAll && agentRows != nil && (b.Name == "Agent" || b.Name == "Task") {
+				out = append(out, agentRows(b)...)
+			}
 		case "tool_result":
 			out = append(out, transcriptResultLines(b)...)
 		case "image":

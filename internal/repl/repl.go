@@ -323,7 +323,9 @@ func RunWithStore(l *agent.Loop, store Store) {
 	}
 	defer ks.stop()
 	var printedDot bool
-	var thinkingSeen bool
+	var thinkingSeen bool  // thinking deltas arrived this stretch (drives spinner's "thought for Ns")
+	var thinkingShown bool // "✻ Thinking…" header + summary body rendered
+	var thinkingStart time.Time
 	md := newMDRenderer()
 	if mw, _ := userSetting("maxProseWidth").(float64); mw > 0 {
 		md.proseW = int(mw) // real's prose cap (default: terminal width)
@@ -366,8 +368,27 @@ func RunWithStore(l *agent.Loop, store Store) {
 		}
 	}
 	spinRef := &spinner{}
+	// endThinking lands the elapsed footer on a completed thinking
+	// stretch — real's "Thought for Ns" variant (mod_1522: `Thought` when
+	// done vs `Thinking` live, duration floored at 1s). Only emitted when
+	// the summary body actually rendered.
+	endThinking := func() {
+		if thinkingShown {
+			d := time.Since(thinkingStart)
+			if d < time.Second { // real floors the thought-for figure at 1s
+				d = time.Second
+			}
+			streamPrint(dim + "\x1b[3m✻ Thought for " + fmtDur(d) + reset)
+		}
+		thinkingShown = false
+		thinkingSeen = false
+		thinkingStart = time.Time{}
+	}
 	l.Events.OnTextDelta = func(t string) {
 		spinRef.stop()
+		if thinkingSeen {
+			endThinking()
+		}
 		if !printedDot {
 			// tracked write — a raw print here left the hardware and
 			// stream cursors disagreeing, so the first md.Write chunk
@@ -382,14 +403,24 @@ func RunWithStore(l *agent.Loop, store Store) {
 		}
 	}
 	l.Events.OnThinking = func(t string) {
-		if thinkingHidden.Load() {
-			return // meta+t collapsed (real hides thinking by default display)
-		}
 		if !thinkingSeen {
-			// real renders "✻ Thinking…" dim + italic and the summary
-			// body in dim italic (mod_1551 dimColor+italic)
-			streamPrint(dim + "\x1b[3m✻ Thinking…" + reset)
 			thinkingSeen = true
+			thinkingStart = time.Now()
+		}
+		// The body is gated on showThinkingSummaries (real's settings key —
+		// off ⇒ the wire request goes out with display:"omitted" and no
+		// summary text arrives; we still suppress the render here since
+		// our request still asks for "updates"). meta+t collapses too.
+		if thinkingHidden.Load() || userSetting("showThinkingSummaries") == false {
+			return
+		}
+		if !thinkingShown {
+			// real renders "✻ Thinking…" dim + italic and the summary
+			// body in dim italic (mod_1522 `ja`: dimColor+italic). The
+			// streamed text IS the API-side summary — thinking_delta under
+			// display:"updates" carries the update text, not raw thinking.
+			streamPrint(dim + "\x1b[3m✻ Thinking…" + reset)
+			thinkingShown = true
 		}
 		streamWrite(dim + "\x1b[3m" + t + reset)
 	}
@@ -405,8 +436,8 @@ func RunWithStore(l *agent.Loop, store Store) {
 		if msgDisp != nil {
 			msgDisp.Finalize()
 		}
+		endThinking() // a tool card ends the thinking stretch
 		printedDot = false
-		thinkingSeen = false
 		streamPrint(fmt.Sprintf("%s⏺%s %s%s%s", green, reset, bold+name+reset, summarize(name, input), ""))
 	}
 	l.Events.OnToolResult = func(name, _ string, r tools.Result) {
@@ -448,18 +479,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 		if w <= 0 {
 			w = 80
 		}
-		ew := max(w-10, 10)
-		var rows []string
-		for _, ln := range lines {
-			for _, seg := range softWrap(ln, ew) {
-				rows = append(rows, strings.TrimRight(seg, " \t"))
-			}
-		}
-		const fold = 3
-		above, rem := rows, 0
-		if len(rows) > fold+1 {
-			above, rem = rows[:fold], len(rows)-fold
-		}
+		above, rem := foldResultRows(r.Content, w)
 		// real puts ⎿ on the FIRST row only — wrapped continuations and
 		// the fold line sit at col 5 bare (verified on captured rows)
 		for i, ln := range above {
@@ -533,8 +553,22 @@ func RunWithStore(l *agent.Loop, store Store) {
 			if briefMode.Load() {
 				return
 			}
-			line := strings.Split(strings.TrimRight(r.Content, "\n"), "\n")[0]
-			push(fmt.Sprintf("     %s%s%s", dim, trunc(line, 110), reset))
+			// inner results fold like outer ones (mod_1522 mmt→ZV) but
+			// land in the repaintable window — each folded row is a window
+			// slot, the "+N" tail counts as one
+			w := compW
+			if w <= 0 {
+				w = 80
+			}
+			above, rem := foldResultRows(r.Content, w)
+			for _, ln := range above {
+				push(fmt.Sprintf("     %s%s%s", dim, compClamp(ln, w), reset))
+			}
+			if rem > 0 {
+				key := ed.resolvedChord("Global", "app:toggleTranscript", "ctrl+o")
+				push(fmt.Sprintf("     %s… +%d %s (%s to expand)%s",
+					dim, rem, pluralize(rem, "line", "lines"), key, reset))
+			}
 		}
 	}
 	historySessionID = l.Client.SessionID
@@ -724,7 +758,8 @@ func RunWithStore(l *agent.Loop, store Store) {
 				defer msgDisp.Finalize()
 			}
 			printedDot = false
-			thinkingSeen = false
+			thinkingSeen, thinkingShown = false, false
+			thinkingStart = time.Time{}
 			spin := newSpinner()
 			spin.agents = func() int { return runningAgents(l) }
 			spin.retry = func() (int, int, int, bool) {
@@ -849,6 +884,7 @@ func RunWithStore(l *agent.Loop, store Store) {
 			wasCancelled := ctx.Err() == context.Canceled
 			compStreamEnd()
 			spin.stop()
+			endThinking() // a turn can end right after a thinking stretch
 			tools.SetPeerSessionBusy(false)
 			tools.FlushHeldPeerMessages() // release held peer msgs at the boundary
 			compSetProgress(nil)          // any live task window collapses at turn end
