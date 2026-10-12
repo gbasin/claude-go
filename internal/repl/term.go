@@ -644,17 +644,25 @@ func (e *editor) readLine(ks *keySource) readResult {
 		var k key
 		var ev *voiceEvent
 		var ve voiceEvent
+		// drained post-turn keys are strictly older than anything still
+		// arriving — consume replay first, else a select can reorder a
+		// split chord (ctrl+x replayed, the completer already in ch)
 		select {
-		case kk := <-ks.replay: // post-turn drained keys replay first
+		case kk := <-ks.replay:
 			k = kk
-		case kk, ok := <-ks.ch:
-			if !ok {
-				return readResult{quit: true}
+		default:
+			select {
+			case kk := <-ks.replay:
+				k = kk
+			case kk, ok := <-ks.ch:
+				if !ok {
+					return readResult{quit: true}
+				}
+				k = kk
+			case v2 := <-e.voiceChan():
+				ve = v2
+				ev = &ve
 			}
-			k = kk
-		case v2 := <-e.voiceChan():
-			ve = v2
-			ev = &ve
 		}
 		if ev != nil {
 			// voice controller event (interim/final/error/state) — may

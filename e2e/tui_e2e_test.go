@@ -686,7 +686,7 @@ func TestVimBadge(t *testing.T) {
 	p.send("\x1b") // esc → normal mode
 	time.Sleep(300 * time.Millisecond)
 	p.send("\x1b[B") // arrow — nudge a repaint
-	p.waitFor("vim:normal", 15*time.Second)
+	p.waitScreen("vim:normal", 15*time.Second)
 	p.exit()
 }
 

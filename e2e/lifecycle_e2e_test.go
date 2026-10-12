@@ -639,12 +639,12 @@ func TestHistorySearch(t *testing.T) {
 	for i := 0; i < 12; i++ {
 		p.send("\x12") // ctrl+r
 		p.send("searchable")
-		if strings.Contains(p.clean(), "search prompts") {
+		if strings.Contains(p.screen(), "search prompts") {
 			break
 		}
 		time.Sleep(600 * time.Millisecond)
 	}
-	p.waitFor("search prompts `searchable`", 10*time.Second)
+	p.waitScreen("search prompts `searchable`", 10*time.Second)
 	p.waitFor("searchable-marker-99", 10*time.Second)
 	p.exit()
 }

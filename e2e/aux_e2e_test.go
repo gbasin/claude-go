@@ -1800,19 +1800,27 @@ func TestAbovePromptBand(t *testing.T) {
 	p := startREPL(t, s)
 	p.sendAtPrompt(1, "say hi\r")
 	p.waitCount("❯", 2, 30*time.Second)
-	// after the turn the band exists — expand then collapse it
-	time.Sleep(400 * time.Millisecond) // let readLine re-own input
-	p.send("\x18\x01")                 // ctrl+x ctrl+a → expand
-	time.Sleep(500 * time.Millisecond)
-	out := p.clean()
-	if !strings.Contains(out, "no recent activity") &&
-		!strings.Contains(out, "⏵") {
-		t.Fatalf("expanded band missing:\n%s", truncStr(out, 3000))
-	}
+	p.waitScreen("done", 30*time.Second) // turn actually complete
+	time.Sleep(500 * time.Millisecond)   // let readLine re-own input
+	p.send("\x18\x01")                   // ctrl+x ctrl+a → expand
+	waitScreenAny(t, p, 5*time.Second, "no recent activity", "⏵")
 	p.send("\x18\x01") // toggle again → collapse
-	time.Sleep(500 * time.Millisecond)
-	if !strings.Contains(p.clean(), "collapsed") {
-		t.Fatalf("collapsed band missing:\n%s", truncStr(p.clean(), 3000))
-	}
+	p.waitScreen("collapsed", 5*time.Second)
 	p.exit()
+}
+
+// waitScreenAny waits for any of the substrings on the rendered screen.
+func waitScreenAny(t *testing.T, p *ptyProc, timeout time.Duration, subs ...string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		scr := strings.ReplaceAll(p.screen(), "\u00a0", " ")
+		for _, sub := range subs {
+			if strings.Contains(scr, sub) {
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %v on screen\nscreen:\n%s", subs, p.screen())
 }
