@@ -255,7 +255,31 @@ func (c *Context) runForeground(command string, timeoutMs int, disableSandbox bo
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
+	var tail *tailBuf
+	var stopTail chan struct{}
+	if c.OnOutput != nil && !c.Subagent {
+		tail = newTailBuf(3)
+		cmd.Stdout = io.MultiWriter(&out, tail)
+		cmd.Stderr = io.MultiWriter(&out, tail)
+		stopTail = make(chan struct{})
+		go func() {
+			tk := time.NewTicker(80 * time.Millisecond)
+			defer tk.Stop()
+			for {
+				select {
+				case <-tk.C:
+					c.OnOutput(tail.lines())
+				case <-stopTail:
+					return
+				}
+			}
+		}()
+	}
 	err = cmd.Run()
+	if stopTail != nil {
+		close(stopTail)
+		c.OnOutput(nil) // collapse the tail — the result row follows
+	}
 	res := c.finishBash(&out, command, err, ctx.Err() == context.DeadlineExceeded, timeoutMs)
 	// proxy-recorded network denies tagged to this command (real appends
 	// the same <sandbox_violations> block to the tool output)
@@ -560,4 +584,46 @@ func taskOutputFile(c *Context, id string) (*os.File, error) {
 		return nil, err
 	}
 	return os.Create(filepath.Join(dir, id+".output"))
+}
+
+// tailBuf keeps the last N output lines of a running command for the
+// TUI's live-output tail.
+type tailBuf struct {
+	mu   sync.Mutex
+	ring []string
+	part strings.Builder
+	max  int
+}
+
+func newTailBuf(max int) *tailBuf { return &tailBuf{max: max} }
+
+func (t *tailBuf) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, r := range string(p) {
+		if r == '\n' {
+			t.ring = append(t.ring, t.part.String())
+			t.part.Reset()
+			if len(t.ring) > t.max {
+				t.ring = t.ring[len(t.ring)-t.max:]
+			}
+		} else {
+			t.part.WriteRune(r)
+		}
+	}
+	return len(p), nil
+}
+
+func (t *tailBuf) lines() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]string, len(t.ring))
+	copy(out, t.ring)
+	if t.part.Len() > 0 {
+		out = append(out, t.part.String())
+		if len(out) > t.max {
+			out = out[len(out)-t.max:]
+		}
+	}
+	return out
 }

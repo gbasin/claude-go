@@ -269,7 +269,7 @@ func TestPlanModeBlocksWrite(t *testing.T) {
 func TestBangCommand(t *testing.T) {
 	s := newSession(t)
 	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
-	p.sendUntilEchoed(t, "!echo bang-marker-42\r", "❯ !echo", 8)
+	p.sendUntilEchoed(t, "!echo bang-marker-42\r", " ! echo", 8)
 	p.waitFor("bang-marker-42", 15*time.Second)
 	p.exit()
 }

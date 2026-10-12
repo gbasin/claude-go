@@ -246,6 +246,20 @@ func RunWithStore(l *agent.Loop, store Store) {
 		}, l.ToolCtx.CWD)
 	}
 	// AbovePrompt band: tool calls feed the collapsed activity rows
+	l.ToolCtx.OnOutput = func(lines []string) {
+		// live Bash output tail — real paints it beneath the tool row
+		// (mod_1522's live frame); ours lives in the repaintable
+		// progress zone, cleared on result
+		if len(lines) == 0 {
+			compSetProgress(nil)
+			return
+		}
+		rows := make([]string, len(lines))
+		for i, ln := range lines {
+			rows[i] = dim + "     " + ln + reset
+		}
+		compSetProgress(rows)
+	}
 	l.Events.OnToolUse = func(name string, input json.RawMessage) {
 		// one-line summary: the tool's primary arg (command/file_path/pattern)
 		var m map[string]any
