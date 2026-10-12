@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -43,12 +44,14 @@ type editor struct {
 	exitArm         bool      // "Press <key> again to exit" armed (jz shared gate)
 	exitArmKey      string    // first arming key's display name
 	exitArmAt       time.Time
-	cleared         []rune   // held cleared draft — Up restores (real holdCleared)
-	clearedHist     bool     // held draft enters history if never restored
-	killRing        []string // emacs kill-ring (ring[0] = newest)
-	killLast        bool     // last key was a kill — consecutive kills coalesce
-	wasKill         bool     // killLast captured at insertKey entry
-	yankPos         int      // yanked span start (-1 = no live yank)
+	cleared         []rune                       // held cleared draft — Up restores (real holdCleared)
+	clearedPastes   map[string]string            // held draft's placeholder map
+	clearedHist     bool                         // held draft enters history if never restored
+	histPastes      map[string]map[string]string // display -> pastes (recall)
+	killRing        []string                     // emacs kill-ring (ring[0] = newest)
+	killLast        bool                         // last key was a kill — consecutive kills coalesce
+	wasKill         bool                         // killLast captured at insertKey entry
+	yankPos         int                          // yanked span start (-1 = no live yank)
 	yankLen         int
 	yankIdx         int
 	changeKeys      []key  // vim: recorded keystrokes of the last change (.)
@@ -116,7 +119,7 @@ type editor struct {
 func newEditor() *editor {
 	// real's prompt glyph is ❯ followed by a non-breaking space
 	e := &editor{prompt: " ❯\u00a0", hIdx: -1, mode: "insert", pastes: map[string]string{}}
-	e.history = loadHistoryFile()
+	e.history, e.histPastes = loadHistoryFile()
 	e.loadKeybindings()
 	// --prefill <text> / --prefill-b64: real seeds the input buffer
 	// without submitting (deep-link launch paths)
@@ -303,8 +306,56 @@ func (e *editor) insert(rs ...rune) {
 		e.buf[e.pos] = r
 		e.pos++
 	}
+	e.truncOverflow()
 	e.acRefresh()
 	e.redraw()
+}
+
+// truncOverflow is real's Tzt/q1e (mod_1596): once the input tops 10k
+// chars the draft collapses to head + [...Truncated text #N +M lines...]
+// + tail — the first/last 500 runes stay editable, the removed middle is
+// stored as a paste entry (M = its newline count). Paste placeholders
+// wholly inside the cut region expand into the stored content; entries
+// whose match text survives outside stay live.
+func (e *editor) truncOverflow() {
+	const maxLen, keep = 10000, 500
+	if len(e.buf) <= maxLen {
+		return
+	}
+	head := append([]rune(nil), e.buf[:keep]...)
+	tail := append([]rune(nil), e.buf[len(e.buf)-keep:]...)
+	midStr := string(e.buf[keep : len(e.buf)-keep])
+	for ph, content := range e.pastes {
+		if strings.HasPrefix(content, "\x00IMAGE\x00") {
+			continue // image match text stays literal inside the cut
+		}
+		if strings.Contains(midStr, ph) {
+			midStr = strings.ReplaceAll(midStr, ph, content)
+		}
+	}
+	out := string(head) + string(tail)
+	for ph := range e.pastes {
+		if !strings.Contains(out, ph) {
+			delete(e.pastes, ph)
+		}
+	}
+	id := e.mintPasteID()
+	ph := fmt.Sprintf("[...Truncated text #%d +%d lines...]",
+		id, strings.Count(midStr, "\n"))
+	e.pastes[ph] = midStr
+	oldLen := len(e.buf)
+	e.buf = append(append(head, []rune(ph)...), tail...)
+	switch {
+	case e.pos <= keep:
+		// cursor in the head — unmoved
+	case e.pos >= oldLen-keep:
+		e.pos = keep + len([]rune(ph)) + (e.pos - (oldLen - keep))
+	default:
+		e.pos = keep + len([]rune(ph)) // inside the cut — land after it
+	}
+	if e.pos > len(e.buf) {
+		e.pos = len(e.buf)
+	}
 }
 
 func (e *editor) del(back bool) {
@@ -323,15 +374,20 @@ func (e *editor) del(back bool) {
 }
 
 // submitLine returns the final text with paste placeholders expanded.
+// History stores the DISPLAY text (placeholders intact, like real's
+// `display` field) plus a pastedContents record — recall restores the
+// paste map so re-submitting an old entry still expands.
 func (e *editor) submitLine() string {
 	e.flushCleared() // a held cleared draft precedes this line in history
-	l := string(e.buf)
+	disp := string(e.buf)
+	l := disp
 	for ph, content := range e.pastes {
 		l = strings.ReplaceAll(l, ph, content)
 	}
-	if strings.TrimSpace(l) != "" {
-		e.history = append(e.history, l)
-		appendHistoryFile(l)
+	if strings.TrimSpace(disp) != "" {
+		e.history = append(e.history, disp)
+		e.rememberPastes(disp)
+		appendHistoryFile(disp, e.pasteRecords(disp))
 	}
 	e.buf = e.buf[:0]
 	e.pos = 0
@@ -341,16 +397,110 @@ func (e *editor) submitLine() string {
 	return l
 }
 
+// rememberPastes associates a history display string with its
+// placeholder→content map so Up-recall re-expands on submit (real's
+// historyEntry.pastedContents round-trip).
+func (e *editor) rememberPastes(disp string) {
+	if len(e.pastes) == 0 {
+		return
+	}
+	if e.histPastes == nil {
+		e.histPastes = map[string]map[string]string{}
+	}
+	cp := map[string]string{}
+	for ph, c := range e.pastes {
+		cp[ph] = c
+	}
+	e.histPastes[disp] = cp
+}
+
+// recallPastes merges a history entry's stored pastes back into the live
+// map when the entry is paged into the buffer.
+func (e *editor) recallPastes(disp string) {
+	for ph, c := range e.histPastes[disp] {
+		e.pastes[ph] = c
+	}
+}
+
+// pastePHRe matches placeholder tokens inside a display string —
+// "[Pasted text #3]", "[Pasted text #3 +4 lines]", "[Image #2]",
+// "[...Truncated text #3 +4 lines...]" (real's AE regex, minus the
+// team-setup-guide row).
+var pastePHRe = regexp.MustCompile(
+	`\[(?:Pasted text|Image|\.\.\.Truncated text) #\d+(?: \+\d+ lines)?\.*\]`)
+
+// pasteID pulls the N out of a "[… #N …]" placeholder.
+func pasteID(ph string) int {
+	i := strings.IndexByte(ph, '#')
+	if i < 0 {
+		return 0
+	}
+	j := i + 1
+	for j < len(ph) && ph[j] >= '0' && ph[j] <= '9' {
+		j++
+	}
+	n, _ := strconv.Atoi(ph[i+1 : j])
+	return n
+}
+
+// pasteRecords converts the placeholders live in disp into real's
+// history pastedContents shape: {<id>: {id, type, content|filename}}.
+// Records whose placeholder no longer appears in disp are dropped
+// (stale entries can't ride along into another entry's record).
+func pasteRecordsFrom(pastes map[string]string, disp string) map[string]any {
+	if len(pastes) == 0 {
+		return nil
+	}
+	var recs map[string]any
+	for ph, content := range pastes {
+		if !strings.Contains(disp, ph) {
+			continue
+		}
+		id := pasteID(ph)
+		if id <= 0 {
+			continue
+		}
+		if recs == nil {
+			recs = map[string]any{}
+		}
+		if strings.HasPrefix(content, "\x00IMAGE\x00") {
+			rest := strings.TrimPrefix(content, "\x00IMAGE\x00")
+			p, _, _ := strings.Cut(rest, "\x00")
+			recs[strconv.Itoa(id)] = map[string]any{
+				"id": id, "type": "image", "filename": p}
+			continue
+		}
+		recs[strconv.Itoa(id)] = map[string]any{
+			"id": id, "type": "text", "content": content}
+	}
+	return recs
+}
+
+func (e *editor) pasteRecords(disp string) map[string]any {
+	return pasteRecordsFrom(e.pastes, disp)
+}
+
+// pasteNlMax is real's newline threshold: Math.max(0, Math.min(rows-10, 2))
+// where rows is the terminal height (mod_1596 `j7`). With no measured
+// geometry, terminals are tall enough that the clamp settles at 2.
+func pasteNlMax() int {
+	if compH <= 0 {
+		return 2
+	}
+	return max(0, min(compH-10, 2))
+}
+
 // expandPaste replaces a big paste with a CC-style placeholder — real
-// wraps when len > 800 OR newlines > min(rows-10,2) (~2); "+N lines" is
-// the NEWLINE count and is omitted for a single-line paste (mod_0304 zee).
+// wraps when len > 800 ($q) OR newlines > min(rows-10,2); "+N lines" is
+// the NEWLINE count and is omitted for a single-line paste (mod_0304 tJ).
 func (e *editor) expandPaste(pasted string) string {
 	pasted = strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(pasted)
 	pasted = strings.ReplaceAll(pasted, "\t", "    ")
 	nl := strings.Count(pasted, "\n")
-	// dragged file path: a single-line paste naming an existing image
-	// file collapses to [Image #N] (real's R() sniff path, mod_0263)
-	if nl == 0 {
+	// dragged file path: with an empty draft, a single-line paste naming
+	// an existing image file collapses to [Image #N] — real sniffs magic
+	// bytes, not the extension (mod_0263 R(), mod_1596 x_)
+	if nl == 0 && len(e.buf) == 0 {
 		if p := sniffImagePath(pasted); p != "" {
 			e.imgN++
 			b, _ := os.ReadFile(p)
@@ -359,17 +509,36 @@ func (e *editor) expandPaste(pasted string) string {
 			return ph
 		}
 	}
-	if len(pasted) <= 800 && nl <= 2 {
+	if len(pasted) <= 800 && nl <= pasteNlMax() {
 		return pasted
 	}
-	e.pasteN++
-	ph := fmt.Sprintf("[Pasted text #%d]", e.pasteN)
+	id := e.mintPasteID()
+	ph := fmt.Sprintf("[Pasted text #%d]", id)
 	if nl > 0 {
-		ph = fmt.Sprintf("[Pasted text #%d +%d lines]", e.pasteN, nl)
+		ph = fmt.Sprintf("[Pasted text #%d +%d lines]", id, nl)
 	}
 	// the content the model actually receives, wrapped like CC does
-	e.pastes[ph] = fmt.Sprintf("<pasted_content id=\"%d\">\n%s\n</pasted_content>", e.pasteN, pasted)
+	e.pastes[ph] = fmt.Sprintf("<pasted_content id=\"%d\">\n%s\n</pasted_content>", id, pasted)
 	return ph
+}
+
+// mintPasteID returns the next paste id not already live in the buffer —
+// real's hA/Mct advance past ids still present in the input (a recalled
+// history entry can carry "[Pasted text #2]" again).
+func (e *editor) mintPasteID() int {
+	for {
+		e.pasteN++
+		busy := false
+		for ph := range e.pastes {
+			if pasteID(ph) == e.pasteN {
+				busy = true
+				break
+			}
+		}
+		if !busy {
+			return e.pasteN
+		}
+	}
 }
 
 type readResult struct {
@@ -501,7 +670,7 @@ func (e *editor) insertKey(k key) *readResult {
 	// voice:pushToTalk bound to a printable char (default: space) — real
 	// fires only with input empty (tap) or while a session is live
 	if k.b == ' ' && k.mod == 0 && k.seq == "" &&
-		e.kb["space"] == "voice:pushToTalk" {
+		e.kb["Chat\x00space"] == "voice:pushToTalk" {
 		st := voice.StateIdle
 		if e.voice != nil && e.voice.ctl != nil {
 			st = e.voice.ctl.CurrentState()
@@ -522,7 +691,7 @@ func (e *editor) insertKey(k key) *readResult {
 	// ctrl+x chord prefix (3s window like real CC)
 	if e.pendingX {
 		e.pendingX = false
-		if c == 'k' && time.Since(e.chordAt) < 3*time.Second && !e.kbUnbound["ctrl+x ctrl+k"] {
+		if c == 'k' && time.Since(e.chordAt) < 3*time.Second && !e.kbUnbound["Chat\x00ctrl+x ctrl+k"] {
 			if e.actions != nil {
 				if a := e.actions[24]; a != nil { // ctrl+x ctrl+k -> killAgents
 					return a(e)
@@ -1633,6 +1802,7 @@ func (e *editor) histPrev() {
 		e.hIdx--
 	}
 	e.buf = []rune(e.history[e.hIdx])
+	e.recallPastes(e.history[e.hIdx])
 	e.pos = len(e.buf)
 	e.redraw()
 	// real shows a dim "History i/total" badge above the composer
@@ -1649,6 +1819,7 @@ func (e *editor) histNext() {
 	if e.hIdx < len(e.history)-1 {
 		e.hIdx++
 		e.buf = []rune(e.history[e.hIdx])
+		e.recallPastes(e.history[e.hIdx])
 	} else {
 		e.hIdx = -1
 		e.buf = append([]rune(nil), e.saved...)
@@ -1768,12 +1939,14 @@ func (e *editor) cancelKey() *readResult {
 	}
 	if !e.escArmAt.IsZero() && time.Since(e.escArmAt) < exitArmWindow {
 		e.escArmAt = time.Time{}
-		// real: the esc-esc clear saves the draft to history directly
+		// real: the esc-esc clear saves the draft to history directly,
+		// pastedContents included (aae(ee,Qe,{submitMode}))
 		l := string(e.buf)
 		if strings.TrimSpace(l) != "" {
 			e.pushUndo()
 			e.history = append(e.history, l)
-			appendHistoryFile(l)
+			e.rememberPastes(l)
+			appendHistoryFile(l, e.pasteRecords(l))
 		}
 		e.buf = e.buf[:0]
 		e.pos = 0
@@ -1796,6 +1969,10 @@ func (e *editor) holdCleared(intoHistory bool) {
 	e.flushCleared() // an earlier unrestored draft commits to history now
 	e.pushUndo()
 	e.cleared = append([]rune(nil), e.buf...)
+	e.clearedPastes = map[string]string{}
+	for ph, c := range e.pastes {
+		e.clearedPastes[ph] = c
+	}
 	e.clearedHist = intoHistory
 	e.buf = e.buf[:0]
 	e.pos = 0
@@ -1808,6 +1985,10 @@ func (e *editor) restoreCleared() bool {
 		return false
 	}
 	e.buf = e.cleared
+	for ph, c := range e.clearedPastes {
+		e.pastes[ph] = c
+	}
+	e.clearedPastes = nil
 	e.pos = len(e.buf)
 	e.cleared = nil
 	e.redraw()
@@ -1824,10 +2005,18 @@ func (e *editor) flushCleared() {
 		l := string(e.cleared)
 		if strings.TrimSpace(l) != "" {
 			e.history = append(e.history, l)
-			appendHistoryFile(l)
+			recs := pasteRecordsFrom(e.clearedPastes, l)
+			appendHistoryFile(l, recs)
+			if len(recs) > 0 {
+				if e.histPastes == nil {
+					e.histPastes = map[string]map[string]string{}
+				}
+				e.histPastes[l] = e.clearedPastes
+			}
 		}
 	}
 	e.cleared = nil
+	e.clearedPastes = nil
 }
 
 // submitKey is enter / chat:submit (with \-continuation -> newline).
@@ -1976,25 +2165,62 @@ func validPNG(path string) bool {
 }
 
 // loadHistoryFile seeds the editor history from ~/.claude/history.jsonl so
-// ctrl-r search covers past sessions. Dedupes, newest last.
-func loadHistoryFile() []string {
+// ctrl-r search covers past sessions. Dedupes, newest last. Also returns
+// the display→pastes map harvested from each record's pastedContents so a
+// recalled entry's placeholders still expand on submit (real's
+// toHistoryEntry resolution).
+func loadHistoryFile() ([]string, map[string]map[string]string) {
 	b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "history.jsonl"))
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	var disp []string
+	pastes := map[string]map[string]string{}
 	for _, ln := range strings.Split(string(b), "\n") {
 		ln = strings.TrimSpace(ln)
 		if ln == "" {
 			continue
 		}
 		var rec struct {
-			Display string `json:"display"`
+			Display        string                     `json:"display"`
+			PastedContents map[string]json.RawMessage `json:"pastedContents"`
 		}
 		if json.Unmarshal([]byte(ln), &rec) != nil || rec.Display == "" {
 			continue
 		}
 		disp = append(disp, rec.Display)
+		for _, m := range pastePHRe.FindAllString(rec.Display, -1) {
+			id := strconv.Itoa(pasteID(m))
+			raw, ok := rec.PastedContents[id]
+			if !ok {
+				continue
+			}
+			var pr struct {
+				Type     string `json:"type"`
+				Content  string `json:"content"`
+				Filename string `json:"filename"`
+			}
+			if json.Unmarshal(raw, &pr) != nil {
+				continue
+			}
+			var content string
+			switch pr.Type {
+			case "image":
+				if pr.Filename == "" {
+					continue
+				}
+				content = "\x00IMAGE\x00" + pr.Filename + "\x00" + "0"
+			default:
+				if pr.Content == "" {
+					continue
+				}
+				content = pr.Content
+			}
+			if pastes[rec.Display] == nil {
+				pastes[rec.Display] = map[string]string{}
+			}
+			pastes[rec.Display][m] = content
+		}
 	}
 	// dedupe keeping the newest occurrence, restore chronological order
 	seen := map[string]bool{}
@@ -2012,7 +2238,7 @@ func loadHistoryFile() []string {
 	if len(out) > 10000 {
 		out = out[len(out)-10000:]
 	}
-	return out
+	return out, pastes
 }
 
 // externalEditor opens $VISUAL/$EDITOR with the buffer and imports the result.
@@ -2059,6 +2285,7 @@ func (e *editor) searchKey(k key) *readResult {
 		e.histSearch = false
 		if m := e.searchMatch(); m != "" {
 			e.buf = []rune(m)
+			e.recallPastes(m)
 			e.pos = len(e.buf)
 		}
 		e.searchBuf = e.searchBuf[:0]
@@ -2083,6 +2310,7 @@ func (e *editor) searchKey(k key) *readResult {
 		e.histSearch = false
 		if m := e.searchMatch(); m != "" {
 			e.buf = []rune(m)
+			e.recallPastes(m)
 			e.pos = len(e.buf)
 		}
 		e.searchBuf = e.searchBuf[:0]
@@ -2732,7 +2960,9 @@ func (e *editor) visualKey(k key) *readResult {
 var historySessionID string // stamped on history records (real field)
 
 // appendHistoryFile persists prompts to ~/.claude/history.jsonl (real file).
-func appendHistoryFile(line string) {
+// pc is the pastedContents record map ({<id>:{id,type,…}}) — real's wW
+// schema. nil writes {}.
+func appendHistoryFile(line string, pc map[string]any) {
 	dir := filepath.Join(config.ClaudeDir())
 	os.MkdirAll(dir, 0o755)
 	f, err := os.OpenFile(filepath.Join(dir, "history.jsonl"),
@@ -2742,9 +2972,12 @@ func appendHistoryFile(line string) {
 	}
 	defer f.Close()
 	cwd, _ := os.Getwd()
+	if pc == nil {
+		pc = map[string]any{}
+	}
 	rec := map[string]any{
 		"display": line, "timestamp": time.Now().UnixMilli(),
-		"project": cwd, "pastedContents": map[string]any{}, // real schema
+		"project": cwd, "pastedContents": pc, // real schema
 	}
 	if historySessionID != "" {
 		rec["sessionId"] = historySessionID
@@ -2753,7 +2986,9 @@ func appendHistoryFile(line string) {
 	f.Write(append(b, '\n'))
 }
 
-// vimInsertRemaps reads vimInsertModeRemaps from settings (["jj","jk"]…).
+// vimInsertRemaps reads vimInsertModeRemaps from settings — real's oi():
+// an object map {"jk":"<Esc>"} where only 2-char non-space keys mapped to
+// "<esc>" (any case) are honored; other entries are dropped.
 func vimInsertRemaps() []string {
 	for _, p := range []string{
 		filepath.Join(config.ClaudeDir(), "settings.json"),
@@ -2764,10 +2999,24 @@ func vimInsertRemaps() []string {
 			continue
 		}
 		var st struct {
-			VimInsertModeRemaps []string `json:"vimInsertModeRemaps"`
+			VimInsertModeRemaps map[string]string `json:"vimInsertModeRemaps"`
 		}
-		if json.Unmarshal(b, &st) == nil && len(st.VimInsertModeRemaps) > 0 {
-			return st.VimInsertModeRemaps
+		if json.Unmarshal(b, &st) != nil || len(st.VimInsertModeRemaps) == 0 {
+			continue
+		}
+		var out []string
+		for pair, target := range st.VimInsertModeRemaps {
+			rs := []rune(pair)
+			if len(rs) != 2 || rs[0] <= ' ' || rs[1] <= ' ' {
+				continue
+			}
+			if !strings.EqualFold(strings.TrimSpace(target), "<esc>") {
+				continue
+			}
+			out = append(out, pair)
+		}
+		if len(out) > 0 {
+			return out
 		}
 	}
 	return nil
@@ -3272,8 +3521,8 @@ func (e *editor) abovePromptRows() []string {
 }
 
 // sniffImagePath — a pasted path that names an existing image file
-// returns its absolute path (else ""). Real sniffs a handful of image
-// extensions on the dropped-path paste.
+// returns its absolute path (else ""). Real sniffs the file's magic
+// bytes on the dropped-path paste (mod_0263 R()), not the extension.
 func sniffImagePath(pasted string) string {
 	p := strings.TrimSpace(pasted)
 	p = strings.Trim(p, "'\"")            // drag drops arrive quoted
@@ -3286,13 +3535,40 @@ func sniffImagePath(pasted string) string {
 	if !filepath.IsAbs(p) {
 		return ""
 	}
-	switch strings.ToLower(filepath.Ext(p)) {
-	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".bmp", ".tiff", ".tif":
-	default:
+	f, err := os.Open(p)
+	if err != nil {
 		return ""
 	}
-	if fi, err := os.Stat(p); err != nil || fi.IsDir() {
-		return ""
+	defer f.Close()
+	var hdr [512]byte
+	n, _ := f.Read(hdr[:])
+	if isImageMagic(hdr[:n]) {
+		return p
 	}
-	return p
+	return ""
+}
+
+// isImageMagic recognizes the common raster/HEIC signatures real's
+// image sniff accepts.
+func isImageMagic(b []byte) bool {
+	switch {
+	case len(b) >= 8 && bytes.Equal(b[:8], []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}):
+		return true // PNG
+	case len(b) >= 3 && b[0] == 0xff && b[1] == 0xd8 && b[2] == 0xff:
+		return true // JPEG
+	case len(b) >= 6 && (string(b[:6]) == "GIF87a" || string(b[:6]) == "GIF89a"):
+		return true // GIF
+	case len(b) >= 12 && string(b[:4]) == "RIFF" && string(b[8:12]) == "WEBP":
+		return true // WebP
+	case len(b) >= 2 && string(b[:2]) == "BM":
+		return true // BMP
+	case len(b) >= 4 && (bytes.Equal(b[:4], []byte{'I', 'I', '*', 0}) || bytes.Equal(b[:4], []byte{'M', 'M', 0, '*'})):
+		return true // TIFF
+	case len(b) >= 12 && string(b[4:8]) == "ftyp" &&
+		(string(b[8:12]) == "heic" || string(b[8:12]) == "heix" ||
+			string(b[8:12]) == "hevc" || string(b[8:12]) == "mif1" ||
+			string(b[8:12]) == "avif"):
+		return true // HEIC/AVIF
+	}
+	return false
 }
