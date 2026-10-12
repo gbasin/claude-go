@@ -47,8 +47,9 @@ var kbSpecialKeys = map[string]bool{
 	"wheelup": true, "wheeldown": true, "capslock": true, "clear": true,
 }
 
-// kbContexts — real's 27 valid context names (mod_0245). Bindings in
-// contexts we don't render are stored but never fire at the prompt.
+// kbContexts — real's 29 valid context names (mod_0266 v9t for 296).
+// Bindings in contexts we don't render are stored but never fire at
+// the prompt; dialogs resolve them through dialogAction/sessionKB.
 var kbContexts = map[string]bool{
 	"Global": true, "Chat": true, "Autocomplete": true,
 	"Confirmation": true, "Help": true, "Transcript": true,
@@ -57,8 +58,8 @@ var kbContexts = map[string]bool{
 	"Footer": true, "AbovePrompt": true, "AbovePromptInput": true,
 	"AbovePromptSelect": true, "Pane": true, "PaneField": true,
 	"MessageSelector": true, "DiffDialog": true, "DiffPanel": true,
-	"ModelPicker": true, "EffortSlider": true, "Select": true,
-	"Plugin": true, "Scroll": true, "Agents": true,
+	"FeedbackSurvey": true, "ModelPicker": true, "EffortSlider": true,
+	"Select": true, "Plugin": true, "Scroll": true, "Agents": true,
 	"ProactivityMenu": true,
 }
 
@@ -155,6 +156,92 @@ var kbActions = map[string]func(*editor) *readResult{
 	"abovePrompt:focus":  func(e *editor) *readResult { e.abovePromptFocus(); return nil },
 }
 
+// kbValidActions — real's full valid-action registry (mod_0266 ZDe,
+// 296). Validation checks the ACTION NAME against this set, not against
+// kbActions (which is only the prompt editor's handler table): a known
+// action with no handler on a surface is still a legal binding — it
+// resolves through dialogAction wherever that context is dispatched.
+var kbValidActions = func() map[string]bool {
+	names := []string{
+		"app:interrupt", "app:exit", "app:toggleTodos", "app:toggleTranscript",
+		"app:toggleBrief", "app:toggleReplTab", "app:toggleDiffNoiseFilter",
+		"app:diffFileListUp", "app:diffFileListDown", "app:toggleDiffPreSession",
+		"app:cycleDiffBase", "app:toggleTerminal", "app:redraw", "app:openArtifact",
+		"strip:jump1", "strip:jump2", "strip:jump3", "strip:jump4", "strip:jump5",
+		"strip:jump6", "strip:jump7", "strip:jump8", "strip:jump9",
+		"strip:next", "strip:previous", "strip:tabNext", "strip:tabPrevious",
+		"strip:viewAll", "strip:toggle", "strip:new",
+		"history:search", "history:previous", "history:next",
+		"chat:cancel", "chat:killAgents", "chat:cycleMode", "chat:cycleProactivity",
+		"chat:attentionUp", "chat:attentionDown", "chat:modelPicker",
+		"chat:increaseEffort", "chat:decreaseEffort", "chat:fastMode",
+		"chat:defaultToNewerModel", "chat:thinkingToggle", "chat:workflowKeywordToggle",
+		"chat:submit", "chat:queueSubmit", "chat:sendNow", "chat:newline",
+		"chat:undo", "chat:externalEditor", "chat:stash", "chat:imagePaste",
+		"chat:clearInput", "chat:clearScreen",
+		"autocomplete:accept", "autocomplete:dismiss", "autocomplete:previous", "autocomplete:next",
+		"confirm:yes", "confirm:no", "confirm:previous", "confirm:next",
+		"confirm:nextField", "confirm:previousField", "confirm:cycleMode", "confirm:toggle",
+		"tabs:next", "tabs:previous",
+		"transcript:toggleShowAll", "transcript:exit",
+		"historySearch:next", "historySearch:accept", "historySearch:cancel",
+		"historySearch:execute", "historySearch:cycleScope",
+		"task:background",
+		"theme:toggleSyntaxHighlighting", "theme:editCustom",
+		"help:dismiss",
+		"proactivityMenu:previousMode", "proactivityMenu:nextMode",
+		"attachments:next", "attachments:previous", "attachments:remove", "attachments:exit",
+		"footer:up", "footer:down", "footer:next", "footer:previous",
+		"footer:openSelected", "footer:clearSelection", "footer:close", "footer:dismiss",
+		"abovePrompt:toggle", "abovePrompt:focus", "abovePrompt:next", "abovePrompt:previous",
+		"abovePrompt:press", "abovePrompt:leave", "abovePrompt:highlightNext", "abovePrompt:highlightPrevious",
+		"pane:scrollUp", "pane:scrollDown", "pane:pageUp", "pane:pageDown",
+		"pane:top", "pane:bottom", "pane:grow", "pane:shrink", "pane:close",
+		"pane:next", "pane:previous",
+		"diff:dismiss", "diff:previousSource", "diff:nextSource", "diff:back",
+		"diff:previousFile", "diff:nextFile",
+		"feedbackSurvey:bad", "feedbackSurvey:fine", "feedbackSurvey:good",
+		"modelPicker:decreaseEffort", "modelPicker:increaseEffort", "modelPicker:thisSessionOnly",
+		"effortSlider:decreaseEffort", "effortSlider:increaseEffort",
+		"effortSlider:toggleUltracode", "effortSlider:thisSessionOnly",
+		"select:next", "select:previous", "select:pageUp", "select:pageDown",
+		"select:first", "select:last", "select:accept", "select:cancel",
+		"plugin:toggle", "plugin:install", "plugin:favorite", "plugin:cycleMarketplace",
+		"permission:toggleDebug",
+		"settings:search", "settings:retry", "settings:periodDay",
+		"settings:periodWeek", "settings:sortByTokens",
+		"voice:pushToTalk",
+		"scroll:pageUp", "scroll:pageDown", "scroll:lineUp", "scroll:lineDown",
+		"scroll:top", "scroll:bottom", "scroll:halfPageUp", "scroll:halfPageDown",
+		"scroll:fullPageUp", "scroll:fullPageDown",
+		"selection:copy", "selection:clear", "selection:extendLeft", "selection:extendRight",
+		"selection:extendUp", "selection:extendDown", "selection:extendLineStart", "selection:extendLineEnd",
+		"agents:switchView", "agents:togglePin", "agents:find",
+		"agents:nextGroup", "agents:previousGroup", "agents:rename", "agents:setGroup",
+	}
+	m := make(map[string]bool, len(names)+8)
+	for _, n := range names {
+		m[n] = true
+	}
+	// plus the legacy names real still accepts (mod_0266 Re/Z)
+	for n := range kbLegacyActions {
+		m[n] = true
+	}
+	return m
+}()
+
+// kbLegacyActions — real's renamed-action aliases (mod_0266 Re):
+// keybindings.json written for an older version still resolves — the
+// legacy name maps to its current action at load time.
+var kbLegacyActions = map[string]string{
+	"messageSelector:up":     "select:previous",
+	"messageSelector:down":   "select:next",
+	"messageSelector:top":    "select:first",
+	"messageSelector:bottom": "select:last",
+	"messageSelector:select": "select:accept",
+	"diff:viewDetails":       "select:accept",
+}
+
 // defaultKeybindings mirrors the relevant rows of the CC binding table.
 var defaultKeybindings = []struct {
 	context string
@@ -234,6 +321,168 @@ var defaultKeybindings = []struct {
 	{"Global", "ctrl+down", "app:diffFileListDown"}, // bound, inert for us
 	{"Global", "meta+up", "app:diffFileListUp"},
 	{"Global", "meta+down", "app:diffFileListDown"},
+	// Remaining real defaults (mod_0266 w1). These never fire at the
+	// prompt — kbActiveCtxs is [Chat Global] — but sessionKB mirrors
+	// them so each dialog's dialogAction(ctx, k) resolves real's own
+	// keys plus any user remap on top. Editor-agent + dialog owners
+	// wire the dialogAction call into each surface's key loop.
+	{"Chat", "ctrl+shift+-", "chat:undo"},
+	{"Chat", "ctrl+shift+_", "chat:undo"},
+	{"DiffPanel", "ctrl+x b", "app:cycleDiffBase"},
+	{"FeedbackSurvey", "ctrl+x 1", "feedbackSurvey:bad"},
+	{"FeedbackSurvey", "ctrl+x 2", "feedbackSurvey:fine"},
+	{"FeedbackSurvey", "ctrl+x 3", "feedbackSurvey:good"},
+	{"Autocomplete", "tab", "autocomplete:accept"},
+	{"Autocomplete", "escape", "autocomplete:dismiss"},
+	{"Autocomplete", "up", "autocomplete:previous"},
+	{"Autocomplete", "down", "autocomplete:next"},
+	{"Settings", "escape", "confirm:no"},
+	{"Settings", "up", "select:previous"},
+	{"Settings", "down", "select:next"},
+	{"Settings", "k", "select:previous"},
+	{"Settings", "j", "select:next"},
+	{"Settings", "ctrl+p", "select:previous"},
+	{"Settings", "ctrl+n", "select:next"},
+	{"Settings", "home", "select:first"},
+	{"Settings", "end", "select:last"},
+	{"Settings", "pageup", "select:pageUp"},
+	{"Settings", "pagedown", "select:pageDown"},
+	{"Settings", "space", "select:accept"},
+	{"Settings", "enter", "select:accept"},
+	{"Settings", "/", "settings:search"},
+	{"Settings", "r", "settings:retry"},
+	{"Settings", "d", "settings:periodDay"},
+	{"Settings", "w", "settings:periodWeek"},
+	{"Settings", "t", "settings:sortByTokens"},
+	{"Settings", "ctrl+u", "scroll:halfPageUp"},
+	{"Settings", "ctrl+d", "scroll:halfPageDown"},
+	{"Confirmation", "enter", "confirm:yes"},
+	{"Confirmation", "escape", "confirm:no"},
+	{"Confirmation", "up", "confirm:previous"},
+	{"Confirmation", "down", "confirm:next"},
+	{"Confirmation", "tab", "confirm:nextField"},
+	{"Confirmation", "space", "confirm:toggle"},
+	{"Confirmation", "shift+tab", "confirm:cycleMode"},
+	{"Tabs", "tab", "tabs:next"},
+	{"Tabs", "shift+tab", "tabs:previous"},
+	{"Tabs", "right", "tabs:next"},
+	{"Tabs", "left", "tabs:previous"},
+	{"HistorySearch", "ctrl+r", "historySearch:next"},
+	{"HistorySearch", "escape", "historySearch:accept"},
+	{"HistorySearch", "tab", "historySearch:accept"},
+	{"HistorySearch", "ctrl+c", "historySearch:cancel"},
+	{"HistorySearch", "enter", "historySearch:execute"},
+	{"HistorySearch", "ctrl+s", "historySearch:cycleScope"},
+	{"Task", "ctrl+x ctrl+b", "task:background"},
+	{"Task", "ctrl+b", "task:background"},
+	{"ThemePicker", "ctrl+t", "theme:toggleSyntaxHighlighting"},
+	{"ThemePicker", "ctrl+e", "theme:editCustom"},
+	{"Scroll", "pageup", "scroll:pageUp"},
+	{"Scroll", "pagedown", "scroll:pageDown"},
+	{"Scroll", "wheelup", "scroll:lineUp"},
+	{"Scroll", "wheeldown", "scroll:lineDown"},
+	{"Scroll", "ctrl+home", "scroll:top"},
+	{"Scroll", "ctrl+end", "scroll:bottom"},
+	{"Scroll", "ctrl+shift+c", "selection:copy"},
+	{"Scroll", "cmd+c", "selection:copy"},
+	{"Scroll", "shift+left", "selection:extendLeft"},
+	{"Scroll", "shift+right", "selection:extendRight"},
+	{"Scroll", "shift+up", "selection:extendUp"},
+	{"Scroll", "shift+down", "selection:extendDown"},
+	{"Scroll", "shift+home", "selection:extendLineStart"},
+	{"Scroll", "shift+end", "selection:extendLineEnd"},
+	{"Help", "escape", "help:dismiss"},
+	{"Attachments", "right", "attachments:next"},
+	{"Attachments", "left", "attachments:previous"},
+	{"Attachments", "backspace", "attachments:remove"},
+	{"Attachments", "delete", "attachments:remove"},
+	{"Attachments", "down", "attachments:exit"},
+	{"Attachments", "escape", "attachments:exit"},
+	{"Footer", "up", "footer:up"},
+	{"Footer", "ctrl+p", "footer:up"},
+	{"Footer", "down", "footer:down"},
+	{"Footer", "ctrl+n", "footer:down"},
+	{"Footer", "right", "footer:next"},
+	{"Footer", "left", "footer:previous"},
+	{"Footer", "enter", "footer:openSelected"},
+	{"Footer", "escape", "footer:clearSelection"},
+	{"Footer", "x", "footer:close"},
+	{"AbovePrompt", "tab", "abovePrompt:next"},
+	{"AbovePrompt", "right", "abovePrompt:next"},
+	{"AbovePrompt", "shift+tab", "abovePrompt:previous"},
+	{"AbovePrompt", "left", "abovePrompt:previous"},
+	{"AbovePrompt", "enter", "abovePrompt:press"},
+	{"AbovePrompt", "space", "abovePrompt:press"},
+	{"AbovePrompt", "escape", "abovePrompt:leave"},
+	{"AbovePrompt", "up", "pane:scrollUp"},
+	{"AbovePrompt", "down", "pane:scrollDown"},
+	{"AbovePrompt", "pageup", "pane:pageUp"},
+	{"AbovePrompt", "pagedown", "pane:pageDown"},
+	{"AbovePrompt", "home", "pane:top"},
+	{"AbovePrompt", "end", "pane:bottom"},
+	{"AbovePromptInput", "tab", "abovePrompt:next"},
+	{"AbovePromptInput", "down", "abovePrompt:next"},
+	{"AbovePromptInput", "shift+tab", "abovePrompt:previous"},
+	{"AbovePromptInput", "up", "abovePrompt:previous"},
+	{"AbovePromptInput", "enter", "abovePrompt:press"},
+	{"AbovePromptInput", "escape", "abovePrompt:leave"},
+	{"AbovePromptSelect", "tab", "abovePrompt:next"},
+	{"AbovePromptSelect", "shift+tab", "abovePrompt:previous"},
+	{"AbovePromptSelect", "down", "abovePrompt:highlightNext"},
+	{"AbovePromptSelect", "up", "abovePrompt:highlightPrevious"},
+	{"AbovePromptSelect", "enter", "abovePrompt:press"},
+	{"AbovePromptSelect", "escape", "abovePrompt:leave"},
+	{"Pane", "tab", "abovePrompt:next"},
+	{"Pane", "shift+tab", "abovePrompt:previous"},
+	{"Pane", "enter", "abovePrompt:press"},
+	{"Pane", "escape", "abovePrompt:leave"},
+	{"Pane", "up", "pane:scrollUp"},
+	{"Pane", "down", "pane:scrollDown"},
+	{"Pane", "pageup", "pane:pageUp"},
+	{"Pane", "pagedown", "pane:pageDown"},
+	{"Pane", "home", "pane:top"},
+	{"Pane", "end", "pane:bottom"},
+	{"Pane", "ctrl+x left", "pane:grow"},
+	{"Pane", "ctrl+x up", "pane:grow"},
+	{"Pane", "ctrl+x right", "pane:shrink"},
+	{"Pane", "ctrl+x down", "pane:shrink"},
+	{"Pane", "ctrl+x x", "pane:close"},
+	{"PaneField", "ctrl+x x", "pane:close"},
+	{"DiffDialog", "escape", "diff:dismiss"},
+	{"DiffDialog", "left", "diff:previousSource"},
+	{"DiffDialog", "right", "diff:nextSource"},
+	{"DiffDialog", "up", "diff:previousFile"},
+	{"DiffDialog", "down", "diff:nextFile"},
+	{"DiffDialog", "j", "diff:nextFile"},
+	{"DiffDialog", "k", "diff:previousFile"},
+	{"DiffDialog", "pageup", "scroll:pageUp"},
+	{"DiffDialog", "pagedown", "scroll:pageDown"},
+	{"DiffDialog", "space", "scroll:fullPageDown"},
+	{"DiffDialog", "shift+space", "scroll:fullPageUp"},
+	{"DiffDialog", "b", "scroll:fullPageUp"},
+	{"DiffDialog", "g", "scroll:top"},
+	{"DiffDialog", "shift+g", "scroll:bottom"},
+	{"DiffDialog", "home", "scroll:top"},
+	{"DiffDialog", "end", "scroll:bottom"},
+	{"ModelPicker", "left", "modelPicker:decreaseEffort"},
+	{"ModelPicker", "right", "modelPicker:increaseEffort"},
+	{"ModelPicker", "s", "modelPicker:thisSessionOnly"},
+	{"EffortSlider", "left", "effortSlider:decreaseEffort"},
+	{"EffortSlider", "right", "effortSlider:increaseEffort"},
+	{"EffortSlider", "tab", "effortSlider:toggleUltracode"},
+	{"EffortSlider", "s", "effortSlider:thisSessionOnly"},
+	{"Plugin", "space", "plugin:toggle"},
+	{"Plugin", "i", "plugin:install"},
+	{"Plugin", "f", "plugin:favorite"},
+	{"Plugin", "ctrl+s", "plugin:cycleMarketplace"},
+	{"Agents", "ctrl+s", "agents:switchView"},
+	{"Agents", "ctrl+t", "agents:togglePin"},
+	{"Agents", "ctrl+f", "agents:find"},
+	{"Agents", "ctrl+r", "agents:rename"},
+	{"Agents", "ctrl+up", "agents:previousGroup"},
+	{"Agents", "meta+up", "agents:previousGroup"},
+	{"Agents", "ctrl+down", "agents:nextGroup"},
+	{"Agents", "meta+down", "agents:nextGroup"},
 }
 
 // keystroke renders a decoded key into canonical stroke form, or "" if the
@@ -508,13 +757,21 @@ func (e *editor) applyKeybindingFile(b []byte) []string {
 			}
 			// real rejects unknown action names with invalid_action and
 			// DROPS the binding — the default key behavior survives
-			// (a typo doesn't kill the key). command:<name> executes a
-			// slash command and is always accepted.
+			// (a typo doesn't kill the key). Validation is against the
+			// action-name registry (kbValidActions), not the handler
+			// table — a known action with no handler in a surface is
+			// still legal. command:<name> executes a slash command and
+			// is always accepted.
 			a := *act
-			if !strings.HasPrefix(a, "command:") && kbActions[a] == nil {
-				warns = append(warns,
-					fmt.Sprintf("%s: invalid_action %q — this binding is ignored", kstr, a))
-				continue
+			if !strings.HasPrefix(a, "command:") {
+				if cur, ok := kbLegacyActions[a]; ok {
+					a = cur // real remaps renamed actions at load (mod_0266 Re)
+				}
+				if !kbValidActions[a] {
+					warns = append(warns,
+						fmt.Sprintf("%s: invalid_action %q — this binding is ignored", kstr, a))
+					continue
+				}
 			}
 			delete(e.kbUnbound, ck)
 			e.kb[ck] = a

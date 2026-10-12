@@ -1503,6 +1503,9 @@ func expandMentions(l *agent.Loop, line string) string {
 func runBang(l *agent.Loop, cmd string) {
 	raw, _ := json.Marshal(map[string]any{"command": cmd, "description": "run in bash mode"})
 	res := tools.Dispatch(l.ToolCtx, "Bash", raw)
+	// real's bash-input transcript row: "! " bashBorder + cmd on
+	// bashMessageBackgroundColor (badges.go bashInputEcho)
+	dprintln(bashInputEcho(cmd))
 	dprintln("  ⎿ ", strings.TrimSpace(res.Content))
 	msg := "<bash-input>\n" + cmd + "\n</bash-input>\n\n<local-command-stdout>\n" + res.Content + "\n</local-command-stdout>"
 	if respondToBash(l) {
@@ -2034,7 +2037,9 @@ func quickMemory(l *agent.Loop, text string) {
 	}
 	defer f.Close()
 	fmt.Fprintf(f, "- %s\n", text)
-	dprintln("  saved to memory:", p)
+	// real's user-memory-input transcript row: '#' remember/memBG +
+	// " text " on memBG + a dim ack line (badges.go memoryInputEcho)
+	dprintln(memoryInputEcho(text))
 }
 
 func vimMode(l *agent.Loop) string {

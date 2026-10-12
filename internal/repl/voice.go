@@ -336,12 +336,10 @@ func (e *editor) renderedBuf() string {
 			return ghostText()
 		}
 		// mode badges: a leading # or ! renders with real's badge colors —
-		// # = "remember" on the memory background, ! = bash mode
-		if len(e.buf) > 0 && e.buf[0] == '#' {
-			return "[38;2;255;153;51m#" + reset + string(e.buf[1:])
-		}
-		if len(e.buf) > 0 && e.buf[0] == '!' {
-			return "[38;2;255;85;85m" + bold + "!" + unbold + reset + string(e.buf[1:])
+		// # = "remember" on memoryBackgroundColor, ! = bashBorder
+		// (badges.go modeBadgeRender; audits/tui.md §66)
+		if len(e.buf) > 0 && (e.buf[0] == '#' || e.buf[0] == '!') {
+			return modeBadgeRender(string(e.buf))
 		}
 		// inlineGhostText — history autosuggestion: a history entry whose
 		// text starts with the buffer renders its tail dimmed after the
