@@ -46,16 +46,19 @@ func showTranscriptAt(l *agent.Loop, ks *keySource, anchor int) {
 	compSuspend()
 	defer compResume()
 	draw := func() {
+		// positioned rows — streaming newlines scrolls the screen and
+		// pushes the header into scrollback (real's overlay is bounded)
+		// the header into scrollback (real's overlay is a bounded repaint)
 		var sb strings.Builder
 		sb.WriteString("\x1b[H\x1b[2J") // home + clear — overlay owns the screen
-		sb.WriteString(fmt.Sprintf("%s── transcript · %d messages · ↑↓ scroll · esc close%s\r\n",
-			dim, len(l.Messages), reset))
 		end := top + viewH
 		if end > len(lines) {
 			end = len(lines)
 		}
-		for _, ln := range lines[top:end] {
-			sb.WriteString(ln + "\r\n")
+		fmt.Fprintf(&sb, "%s── transcript · %d messages · ↑↓ scroll · esc close%s",
+			dim, len(l.Messages), reset)
+		for i, ln := range lines[top:end] {
+			fmt.Fprintf(&sb, "\x1b[%d;1H%s", i+2, ln)
 		}
 		fmt.Print(sb.String())
 	}
@@ -330,7 +333,10 @@ func (c *agentCursor) splice(b api.ContentBlock, showAll bool) []string {
 	}
 	var out []string
 	for _, sm := range msgs {
-		for _, ln := range transcriptMessageLines(sm, showAll, nil) {
+		// nested agents splice recursively — real replays the whole
+		// inner thread, agents-of-agents included
+		for _, ln := range transcriptMessageLines(sm, showAll,
+			func(b2 api.ContentBlock) []string { return c.splice(b2, showAll) }) {
 			out = append(out, "  "+ln)
 		}
 	}

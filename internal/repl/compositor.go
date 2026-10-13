@@ -944,9 +944,16 @@ func compStreamWrite(s string) {
 	// bytes (the intermittent invalid-utf8 the e2e caught at 50 cols).
 	compMu.Lock()
 	defer compMu.Unlock()
-	if !compActive.Load() || compZoneH == 0 || compSusp > 0 || !compStreamOn {
+	if !compActive.Load() || compZoneH == 0 || compSusp > 0 {
 		io.WriteString(compOut, s)
 		return
+	}
+	if !compStreamOn {
+		// a notice outside a turn (startup toast, queued announce) must
+		// still land at the scroll bottom — a bare write at the cursor
+		// would scribble into the composer row and linger (the cell diff
+		// never sees it, so it survives into scrollback)
+		compStreamRow, compStreamCol = compH-compZoneH, 1
 	}
 	var b strings.Builder
 	b.WriteString(compBSU())

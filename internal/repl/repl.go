@@ -755,8 +755,13 @@ func RunWithStore(l *agent.Loop, store Store) {
 			}
 		}
 		// one-time "Fast mode is now available · /fast to turn on"
-		// announcement (captured in real's 2.1.292 startup)
-		if m, _ := config.ReadClaudeJSON(); m["fastModeNoticeShown"] != true {
+		// announcement (captured in real's 2.1.292 startup) — gated on
+		// fast-mode availability: first-party only, kill-switch aware
+		fastAvail := (l.Client == nil || l.Client.Provider == "" ||
+			l.Client.Provider == api.ProviderFirstParty) &&
+			api.IsFirstPartyBaseURL() &&
+			!envOn("CLAUDE_CODE_DISABLE_FAST_MODE")
+		if m, _ := config.ReadClaudeJSON(); fastAvail && m["fastModeNoticeShown"] != true {
 			m["fastModeNoticeShown"] = true
 			if b, e := json.MarshalIndent(m, "", "  "); e == nil {
 				os.WriteFile(filepath.Join(config.Home(), ".claude.json"), b, 0o644)

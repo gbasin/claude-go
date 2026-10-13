@@ -578,3 +578,25 @@ func TestCompCellDiff(t *testing.T) {
 		t.Fatalf("screen wrong after cell diff:\n%s", full)
 	}
 }
+
+// TestCompZoneOverStreamRow: content streamed through the scroll region
+// then overlapped by zone repaint must not leave residue — the cell diff
+// clears every cell the new row doesn't own.
+func TestCompZoneOverStreamRow(t *testing.T) {
+	f := newFakeTerm(t, 80, 40)
+	compSyncOut.Store(true)
+	defer compSyncOut.Store(false)
+	compInit()
+	// stream a long line that lands where a zone row will repaint
+	compInline("Fast mode is now available · /fast to turn on")
+	// now repaint the editor box row shorter than the stream text
+	compEditor([]string{"────────────────────", " ❯ Try it", "────────────────────"}, 1, 2)
+	scr := compScreen(t, f, 80, 40)
+	for i, ln := range scr.Lines() {
+		// the toast belongs in scrollback — the bug was its tail
+		// surviving inside a zone-owned composer row
+		if strings.Contains(ln, "❯") && strings.Contains(ln, "available") {
+			t.Fatalf("toast residue inside composer row %d: %q", i, ln)
+		}
+	}
+}
