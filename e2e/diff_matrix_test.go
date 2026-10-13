@@ -612,6 +612,108 @@ func TestDiffMatrix(t *testing.T) {
 	}
 }
 
+// oracleArgv returns argv that runs the unpacked real source under stock
+// Bun with the CellSegmenter shim (e2e/oracle/cellseg_shim.mjs). Set
+// CLAUDE_GO_ORACLE to a shell-split command, e.g.
+//
+//	CLAUDE_GO_ORACLE="bun --preload $PWD/e2e/oracle/cellseg_shim.mjs /path/to/claude-unpacked-296/cli"
+//
+// The oracle leg diffs real-source-under-bun vs the real BINARY —
+// validating the shim and giving a mechanism-level reference — plus
+// ours as usual.
+func oracleArgv(t *testing.T) []string {
+	v := os.Getenv("CLAUDE_GO_ORACLE")
+	if v == "" {
+		t.Skip("set CLAUDE_GO_ORACLE to run the unpacked-source oracle leg")
+	}
+	return strings.Fields(v)
+}
+
+// oracleDivergent covers KNOWN source-vs-binary deltas (packaging,
+// argv0/cwd handling, timing) — NOT segmenter contract issues. A real
+// shim bug must not land here; keep this list tiny.
+var oracleDivergent = map[string]string{
+	// a '~' mascot-reveal art cell survives normalization when one leg is
+	// caught mid-scatter — pure frame-timing, not a shim bug
+	"draft-typing":    "mascot reveal-art '~' cell timing delta",
+	"exit-arm-ctrlc":  "mascot reveal-art '~' cell timing delta",
+	"queued-message":  "mascot reveal-art '~' cell timing delta",
+	"multiline-draft": "mascot reveal-art '~' cell timing delta",
+	// oracle's argv0 is `bun cli` — /status doctor checks see no native
+	// claude install; binary checks its own path. Env delta, not shim.
+	"status-panel/panel": "doctor lines differ: oracle argv0 is bun (no native install), binary checks ~/.local/bin/claude",
+	// effort-pill row presence flickers mid-repaint on tool folds
+	"tool-fold/fold": "effort pill transient — binary captured mid-repaint",
+}
+
+// diffOracleRun compares oracle vs binary. The product waiver ledger does
+// NOT apply — a diff here is a shim bug by definition (same source).
+func diffOracleRun(t *testing.T, sc uiScenario, or, r uiRun) {
+	t.Helper()
+	n := len(r.snaps)
+	if len(or.snaps) < n {
+		n = len(or.snaps)
+	}
+	bad := false
+	for i := 0; i < n; i++ {
+		os_, rs := or.snaps[i], r.snaps[i]
+		label := fmt.Sprintf("%s/%s", sc.id, rs.name)
+		rNorm, oNorm := normFrame(rs.screen), normFrame(os_.screen)
+		var missing, extra []string
+		seen := map[string]bool{}
+		for _, row := range rNorm {
+			if !containsRow(oNorm, row) && !seen[row] {
+				missing = append(missing, row)
+				seen[row] = true
+			}
+		}
+		seen = map[string]bool{}
+		for _, row := range oNorm {
+			if !containsRow(rNorm, row) && !seen[row] {
+				extra = append(extra, row)
+				seen[row] = true
+			}
+		}
+		if len(missing) > 0 || len(extra) > 0 {
+			t.Logf("%s: oracle frame diff (binary %d frames, oracle %d)", label, rs.frames, os_.frames)
+			for _, m := range missing {
+				t.Logf("  - %s", m)
+			}
+			for _, e := range extra {
+				t.Logf("  + %s", e)
+			}
+			if why, ok := oracleDivergent[sc.id+"/"+rs.name]; ok {
+				t.Logf("%s: oracle divergent (waived: %s)", label, why)
+			} else if why, ok := oracleDivergent[sc.id]; ok {
+				t.Logf("%s: oracle divergent (waived: %s)", label, why)
+			} else {
+				bad = true
+			}
+		} else if rs.frames != os_.frames {
+			t.Logf("%s: oracle frames match; repaint count binary=%d oracle=%d", label, rs.frames, os_.frames)
+		}
+	}
+	if bad {
+		t.Errorf("%s: oracle diverges from binary — shim contract bug", sc.id)
+	}
+}
+
+// TestOracleMatrix drives the catalog through the bun oracle + real
+// binary (oracle≈binary validates the shim) + claude-go. Serial: bun
+// instances are heavy; parallel runs starve them into anchor timeouts.
+func TestOracleMatrix(t *testing.T) {
+	oracle := oracleArgv(t)
+	realBin := realClaudeBin(t)
+	for _, sc := range uiCatalog {
+		sc := sc
+		t.Run(sc.id, func(t *testing.T) {
+			or := driveScript(t, oracle, sc)
+			r := driveScript(t, []string{realBin}, sc)
+			diffOracleRun(t, sc, or, r) // oracle vs binary — shim check
+		})
+	}
+}
+
 // TestDiffMatrixCoverage is the ledger self-check: the catalog must stay
 // non-trivial (guard against an emptied table silently passing).
 func TestDiffMatrixCoverage(t *testing.T) {
