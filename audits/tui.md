@@ -202,3 +202,58 @@ editor/suspend.
     XTVERSION/`Gi=`/cell-px/OSC11); kitty detection by env substring;
     no `?2026` sync output; no mouse tiering. input.go vs
     mod_0463/0465/0452.
+
+## TestDiffMatrix — interactive differential harness (2.1.296)
+
+`e2e/diff_matrix_test.go` drives a scripted scenario catalog through the
+real binary and claude-go under PTYs (`CLAUDE_REAL_BIN`), snapshotting
+normalized frames per step plus a distinct-frame sequence per step.
+`CLAUDE_GO_MATRIX_DUMP=<dir>` writes per-step frames + raw streams for
+eyeballing. Waivers live in `knownDivergent` keyed by `<scenario>` or
+`<scenario>/<step>`; unwaived diffs fail and stale waivers fail.
+
+Run: `CLAUDE_REAL_BIN=<path> go test -tags e2e -run 'TestDiffMatrix' ./e2e/ -v`
+
+First-run findings (all confirmed against real 2.1.296 frames):
+
+- Footer `· ← for agents` hides while the composer holds a draft; the
+  echoed submitted box shows the un-stripped footer (real recomputes it
+  post-submit). Both FIXED.
+- The right-aligned status slot above the composer is shared: transient
+  toasts ("Esc again to clear", "Press ← again to open agents"),
+  `ctrl+g to edit in <Editor>` while the draft is multiline, else the
+  `◐ medium · /effort` pill. FIXED.
+- `Press <key> again to exit` replaces the footer row while armed and
+  auto-expires (~jz window) with a repaint. FIXED (was a left-aligned
+  compInline write that persisted).
+- Composer `❯` is flush at col 0 (ours indented one cell). FIXED.
+- vim badge is `-- INSERT --` / `-- VISUAL --` inline in the footer;
+  normal mode is unmarked (was `vim:<mode>`). FIXED. Real reads
+  `editorMode` from settings.json first, `.claude.json` as legacy
+  fallback (was .claude.json only). FIXED.
+- Real's `/` menu renders ABOVE the input line: `  ❯ /name` + padded
+  name column + description, ~5-item window, alphabetically filtered
+  subset (agents/bug absent from top). Ours draws `·`-joined rows
+  inside the box with a stale command table. OPEN (waived).
+- Real's `?` overlay is a 3-column card with different content
+  ("! for shell mode", "ctrl + s to stash prompt", …). OPEN (waived).
+- History search is a boxed overlay with a relative-age column
+  (`1y ago`) and `ctrl+s to scope`. OPEN (waived).
+- Real shows a "Detected a custom API key … Yes / No (recommended)"
+  gate when ANTHROPIC_API_KEY is set on a fresh install. Ours lacks it.
+  OPEN (waived) — matrix runs oauth-only by default; apikey-gate
+  scenario covers the gate.
+- Real shows a "Make auto mode your default permission mode?" opt-in
+  when defaultMode=default + auto-mode banner; auto mode executes
+  low-risk tools without prompting. OPEN (waived).
+- Real's exit leaves the last frame painted (arm hint + teardown bytes
+  like "BB"); ours repaints a clean footer. OPEN (step-waived).
+- Zone growth on multiline input scrolls ours' transcript ~2 rows too
+  far (banner top falls off). OPEN (waived).
+- Perm-dialog repaint leaves residue in ours ("Bash commandxo
+  proceed?") — dialog writes don't erase cells. OPEN (waived).
+
+Known harness caveats: snapshots race transient toasts (~800ms jz
+window) — steps that probe armed hints wait on the hint text with a
+short settle; frame counts are logged-only signal (repaint counts
+legitimately differ).

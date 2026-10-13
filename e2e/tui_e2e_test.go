@@ -682,11 +682,14 @@ func TestVimBadge(t *testing.T) {
 		`{"hasCompletedOnboarding":true,"editorMode":"vim",`+
 			`"projects":{%q:{"hasTrustDialogAccepted":true}}}`, s.cwd))
 	p := s.runPTY(t, nil, "--mock")
-	p.waitFor("vim:insert", 30*time.Second)
-	p.send("\x1b") // esc → normal mode
+	p.waitFor("-- INSERT --", 30*time.Second)
+	p.send("\x1b") // esc → normal mode — real unmarks normal (no badge)
 	time.Sleep(300 * time.Millisecond)
 	p.send("\x1b[B") // arrow — nudge a repaint
-	p.waitScreen("vim:normal", 15*time.Second)
+	time.Sleep(500 * time.Millisecond)
+	if strings.Contains(p.screen(), "-- INSERT --") || strings.Contains(p.screen(), "-- NORMAL --") {
+		t.Fatalf("vim badge should be hidden in normal mode:\n%s", p.screen())
+	}
 	p.exit()
 }
 

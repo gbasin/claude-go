@@ -88,9 +88,10 @@ var (
 // compRowsLocked composes the desired zone rows top-down (compMu held).
 func compRowsLocked() []string {
 	if compEdit {
-		rows := make([]string, 0, len(compBox)+1)
-		rows = append(rows, compBox...)
-		return append(rows, compStatus)
+		// the box's last row is the live-computed footer (editor's
+		// footerText/statusFn) — compStatus is the turn-mode status row
+		// and would duplicate it
+		return append([]string{}, compBox...)
 	}
 	// turn mode: [progress block] + spinner + pinned input box (real
 	// keeps the box live — queue-typing is visible) + status

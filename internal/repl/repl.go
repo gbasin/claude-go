@@ -1715,11 +1715,20 @@ func fireStopHook(l *agent.Loop) {
 }
 
 func vimEnabled() bool {
+	// real: settings.json "editorMode" wins, .claude.json is the legacy
+	// fallback (s.editorMode ?? K(n,"editorMode") — mod chunk-nybcbd9t)
+	var st map[string]any
+	if b, err := os.ReadFile(filepath.Join(config.ClaudeDir(), "settings.json")); err == nil {
+		if json.Unmarshal(b, &st) == nil {
+			if v, ok := st["editorMode"]; ok {
+				return v == "vim"
+			}
+		}
+	}
 	b, err := os.ReadFile(filepath.Join(config.Home(), ".claude.json"))
 	if err != nil {
 		return false
 	}
-	var st map[string]any
 	if json.Unmarshal(b, &st) != nil {
 		return false
 	}
@@ -1766,6 +1775,21 @@ func effortLabel() string {
 }
 
 func printStatus(l *agent.Loop, ed *editor) {
+	// keep the per-frame producer fresh too — real re-renders the footer
+	// component every frame; ours needs it live for draft-gated hints
+	ed.statusFn = func() string { return statusLine(l, ed) }
+	status := statusLine(l, ed)
+	if compActive.Load() {
+		compSetStatus(status) // pinned bottom row — real keeps it in the live region
+	} else {
+		ed.footer = status // rendered inside the box frame (below the rules)
+		ed.redraw()
+	}
+}
+
+// statusLine composes the persistent status row (mode pill + hints, or
+// the user's statusLine command output).
+func statusLine(l *agent.Loop, ed *editor) string {
 	var status string
 	if out := statusLineCmd(l); out != "" {
 		status = out
@@ -1791,12 +1815,7 @@ func printStatus(l *agent.Loop, ed *editor) {
 		}
 		status = dim + "  " + reset + right
 	}
-	if compActive.Load() {
-		compSetStatus(status) // pinned bottom row — real keeps it in the live region
-	} else {
-		ed.footer = status // rendered inside the box frame (below the rules)
-		ed.redraw()
-	}
+	return status
 }
 
 var slashCommands = []string{
