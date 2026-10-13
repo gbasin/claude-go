@@ -257,3 +257,33 @@ Known harness caveats: snapshots race transient toasts (~800ms jz
 window) — steps that probe armed hints wait on the hint text with a
 short settle; frame counts are logged-only signal (repaint counts
 legitimately differ).
+
+## Bun source oracle (third leg)
+
+`e2e/oracle/cellseg_shim.mjs` is a clean-room JS implementation of
+`Bun.ant.CellSegmenter` (the only render-blocking internal API). Run the
+unpacked 2.1.296 source interactively under stock bun:
+
+    CLAUDE_GO_ORACLE="bun --preload e2e/oracle/cellseg_shim.mjs <unpacked>/cli" \
+    CLAUDE_REAL_BIN=<ver> go test -tags e2e -run TestOracleMatrix ./e2e/ -v
+
+Contract reproduced: segment(text, cells, runs, reorder) → packed
+(graphemeIdx, runIdx<<10|flags|width) pairs + (sgrKey,uriIdx) runs;
+paint()/setCell() write screen cells as styleId<<17|linkIdx<<2|width2
+(0 narrow,1 wide,2 spacerTail,3 spacerHead); graphemes/sgrKeys/
+sgrCloseKeys/uris interned tables; sgrKeys are \x00-joined single-param
+SGR sequences. Result: 28/30 catalog scenarios produce identical
+normalized frames vs the packaged binary (remaining diffs are
+argv0-dependent /status lines + one transient pill — environmental,
+waived in oracleDivergent).
+
+Caveats: serial runs only (bun instances are heavy); oracle needs the
+unpack + bun locally (env-gated, skips otherwise). Boot stall seen in
+non-harness PTY drivers is environmental — under driveScript it boots
+reliably.
+
+Frame instrumentation: the unpack is patched to call
+globalThis.__CC_FRAME__(frame, stylePool) per commit (installed by the
+shim when CC_FRAME_DUMP is set). With CLAUDE_GO_MATRIX_DUMP=<dir>,
+driveScript writes <sc>-frames-bun.jsonl — per-commit styled cell rows,
+cursor, viewport — real's render output in inspectable form.

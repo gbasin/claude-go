@@ -125,6 +125,12 @@ func driveScript(t *testing.T, argv []string, sc uiScenario) uiRun {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = cwd
 	cmd.Env = diffEnv(home, srv.Addr, !sc.apiKey)
+	if dir := os.Getenv("CLAUDE_GO_MATRIX_DUMP"); dir != "" {
+		os.MkdirAll(dir, 0o755)
+		// structured frame dump — read by the oracle's __CC_FRAME__ hook
+		cmd.Env = append(cmd.Env, fmt.Sprintf("CC_FRAME_DUMP=%s", filepath.Join(
+			dir, fmt.Sprintf("%s-frames-%s.jsonl", sc.id, filepath.Base(argv[0])))))
+	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
 	cmd.SysProcAttr = ptyProcAttr()
 	if err := cmd.Start(); err != nil {

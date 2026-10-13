@@ -19,6 +19,8 @@
 //   sgrCloseKeys[r] = parallel "\x00"-joined close sequences
 //   graphemes[0] must be " " (emptyCharIndex) and [1] "" (spacerCharIndex)
 
+import { openSync, writeSync } from "node:fs";
+
 const SEG = new Intl.Segmenter("en", { granularity: "grapheme" });
 
 // --- width table: TR11 Wide/Fullwidth + terminal-2-cell emoji blocks ---
@@ -356,6 +358,53 @@ function applySgr(active, paramStr) {
 	}
 	return active;
 }
+
+// --- instrumentation: structured frame dumps -------------------------
+// The patched chunk-06azbynj.js calls globalThis.__CC_FRAME__(screen,
+// stylePool) right after each frame commit. screen = {width, height,
+// cells:Int32Array[2 per cell], charPool, hyperlinkPool, softWrap}.
+// Decodes each row into {text, runs:[{x, w, s:[ansi..], link}]} JSONL —
+// one line per frame — appended to $CC_FRAME_DUMP.
+(function () {
+	const file = typeof process !== "undefined" && process.env.CC_FRAME_DUMP;
+	if (!file || typeof Bun === "undefined") return;
+	const fd = openSync(file, "a");
+	globalThis.__CC_FRAME__ = (frame, stylePool) => {
+		const screen = frame.screen || frame;
+		const { width: w, height: h, cells, charPool, hyperlinkPool } = screen;
+		const rows = [];
+		for (let y = 0; y < h; y++) {
+			let text = "";
+			const runs = [];
+			let cur = null;
+			for (let x = 0; x < w; x++) {
+				const i = (y * w + x) << 1;
+				const ch = charPool.get(cells[i]);
+				const word = cells[i + 1];
+				const sid = word >>> 17;
+				const lid = (word >>> 2) & 32767;
+				const wdt = word & 3;
+				if (wdt === 2 || wdt === 3) continue; // spacer cells
+				const key = sid + "/" + lid;
+				if (cur && cur.key !== key) {
+					cur.w = x - cur.x;
+					runs.push(cur);
+					cur = null;
+				}
+				if (!cur) {
+					const codes = stylePool.get(sid).map(e => e.code);
+					cur = { x, key, s: codes, link: lid ? hyperlinkPool.get(lid) : undefined };
+				}
+				text += ch;
+			}
+			if (cur) { cur.w = w - cur.x; runs.push(cur); }
+			for (const r of runs) delete r.key;
+			const trimmed = text.replace(/\s+$/, "");
+			if (trimmed || runs.length) rows.push({ y, text: trimmed, runs: runs.filter(r => r.s.length || r.link) });
+		}
+		writeSync(fd, JSON.stringify({ t: Date.now(), w, h, cursor: frame.cursor, viewport: frame.viewport, rows }) + "\n");
+	};
+})();
 
 // install
 if (typeof Bun !== "undefined") {
