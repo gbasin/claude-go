@@ -384,23 +384,22 @@ func TestCompEditorZone(t *testing.T) {
 	if !compInputActive() {
 		t.Fatal("compInputActive false on a healthy fake term")
 	}
-	compSetStatus("st")
-	f.buf.Reset()
 	box := []string{"╭─╮", "│ > hi", "╰─╯"}
 	compEditor(box, 1, 5)
 	out := f.buf.String()
-	// zone grew to 4 rows: DECSTBM covers 1..36
-	if !strings.Contains(out, "\x1b[1;36r") {
-		t.Fatalf("zone did not grow to 4 rows: %q", out)
+	// zone is exactly the box (3 rows): DECSTBM covers 1..37 — the
+	// status/footer row is the box's last row, not a separate append
+	if !strings.Contains(out, "\x1b[1;37r") {
+		t.Fatalf("zone did not grow to 3 rows: %q", out)
 	}
 	if !strings.Contains(out, "│ > hi") || !strings.Contains(out, "╭─╮") {
 		t.Fatalf("box not painted in zone: %q", out)
 	}
-	if compZoneH != 4 {
-		t.Fatalf("compZoneH = %d, want 4", compZoneH)
+	if compZoneH != 3 {
+		t.Fatalf("compZoneH = %d, want 3", compZoneH)
 	}
-	// cursor left inside the zone on the input row (row 40-4+1+1 = 38)
-	if !strings.Contains(out, "\x1b[38;6H") {
+	// cursor left inside the zone on the input row (row 40-3+1+1 = 39)
+	if !strings.Contains(out, "\x1b[39;6H") {
 		t.Fatalf("cursor not placed in the box: %q", out)
 	}
 
@@ -411,7 +410,7 @@ func TestCompEditorZone(t *testing.T) {
 	if strings.Contains(out, "│ > hi") {
 		t.Fatalf("unchanged box rows re-emitted: %q", out)
 	}
-	if !strings.Contains(out, "\x1b[38;8H") {
+	if !strings.Contains(out, "\x1b[39;8H") {
 		t.Fatalf("cursor not updated: %q", out)
 	}
 }
@@ -451,8 +450,8 @@ func TestCompEditorSuspendKeepsBox(t *testing.T) {
 	f.buf.Reset()
 	compSuspend()
 	out := f.buf.String()
-	// all 4 zone rows cleared (37-40), region released
-	for r := 37; r <= 40; r++ {
+	// all 3 zone rows cleared (38-40), region released
+	for r := 38; r <= 40; r++ {
 		seq := fmt.Sprintf("\x1b[%d;1H\x1b[2K", r)
 		if !strings.Contains(out, seq) {
 			t.Fatalf("suspend did not clear zone row %d: %q", r, out)
@@ -472,11 +471,11 @@ func TestCompEditorSuspendKeepsBox(t *testing.T) {
 	if !strings.Contains(out, "│ > xy") {
 		t.Fatalf("resume did not repaint the box: %q", out)
 	}
-	if !strings.Contains(out, "\x1b[1;36r") {
-		t.Fatalf("resume did not re-pin the 4-row zone: %q", out)
+	if !strings.Contains(out, "\x1b[1;37r") {
+		t.Fatalf("resume did not re-pin the 3-row zone: %q", out)
 	}
-	if compZoneH != 4 {
-		t.Fatalf("compZoneH = %d after resume, want 4", compZoneH)
+	if compZoneH != 3 {
+		t.Fatalf("compZoneH = %d after resume, want 3", compZoneH)
 	}
 }
 
@@ -487,12 +486,12 @@ func TestCompInline(t *testing.T) {
 	f.buf.Reset()
 	compInline("a note\r\n")
 	out := f.buf.String()
-	// printed at the scroll-region bottom (row 40-4 = 36)
-	if !strings.Contains(out, "\x1b[36;1H"+"a note") {
+	// printed at the scroll-region bottom (row 40-3 = 37)
+	if !strings.Contains(out, "\x1b[37;1H"+"a note") {
 		t.Fatalf("note not printed at region bottom: %q", out)
 	}
 	// cursor restored into the box
-	if !strings.Contains(out, "\x1b[38;6H") {
+	if !strings.Contains(out, "\x1b[39;6H") {
 		t.Fatalf("cursor not restored into the zone: %q", out)
 	}
 }

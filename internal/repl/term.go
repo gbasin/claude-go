@@ -47,6 +47,7 @@ type editor struct {
 	cleared          []rune                       // held cleared draft — Up restores (real holdCleared)
 	clearedPastes    map[string]string            // held draft's placeholder map
 	clearedHist      bool                         // held draft enters history if never restored
+	statusFn         func() string                // live status-row producer (zone mode recomputes per frame)
 	histPastes       map[string]map[string]string // display -> pastes (recall)
 	killRing         []string                     // emacs kill-ring (ring[0] = newest)
 	killLast         bool                         // last key was a kill — consecutive kills coalesce
@@ -124,7 +125,7 @@ type editor struct {
 
 func newEditor() *editor {
 	// real's prompt glyph is ❯ followed by a non-breaking space
-	e := &editor{prompt: " ❯\u00a0", hIdx: -1, mode: "insert", pastes: map[string]string{}}
+	e := &editor{prompt: "❯\u00a0", hIdx: -1, mode: "insert", pastes: map[string]string{}}
 	e.history, e.histPastes = loadHistoryFile()
 	e.loadKeybindings()
 	// --prefill <text> / --prefill-b64: real seeds the input buffer
@@ -186,14 +187,15 @@ func (e *editor) boxFrame() (box []string, curRow, curCol int) {
 	rule := ruleColor + strings.Repeat("─", w) + "\x1b[39m"
 	all := make([]string, 0, len(lines)+8)
 	all = append(all, e.abovePromptRows()...)
-	// real renders the effort pill right-aligned on the row above the
-	// top rule: "◐ medium · /effort"
-	if eff := effortLabel(); eff != "" {
-		pad := w - visWidth(eff)
+	// status row above the top rule — a single right-aligned slot:
+	// transient toasts ("Esc again to clear") occupy it while armed,
+	// otherwise the effort pill "◐ medium · /effort" (real 296 layout)
+	if status := e.statusSlot(); status != "" {
+		pad := w - visWidth(status)
 		if pad < 0 {
 			pad = 0
 		}
-		all = append(all, strings.Repeat(" ", pad)+eff)
+		all = append(all, strings.Repeat(" ", pad)+status)
 	}
 	all = append(all, rule)
 	lineRow := make([]int, len(lines))
@@ -620,15 +622,16 @@ func (e *editor) readLine(ks *keySource) readResult {
 		e.redraw()
 		defer func() {
 			e.zoneEdit = false
+			e.refreshEchoFooter()
 			compExitEdit(e.boxAll)
 		}()
 	} else {
-		if eff := effortLabel(); eff != "" {
+		if slot := e.statusSlot(); slot != "" {
 			w := compW
 			if w <= 0 {
 				w = 80
 			}
-			os.Stdout.WriteString("\r\x1b[K" + strings.Repeat(" ", max(0, w-visWidth(eff))) + eff + "\n")
+			os.Stdout.WriteString("\r\x1b[K" + strings.Repeat(" ", max(0, w-visWidth(slot))) + slot + "\n")
 		}
 		os.Stdout.WriteString(boxRule() + "\n" + e.prompt + "\n" + boxRule())
 		if f := e.footerText(); f != "" {
@@ -708,6 +711,7 @@ func (e *editor) insertKey(k key) *readResult {
 	if e.exitArm && k.b != 4 && k.b != 3 {
 		e.exitArm = false // an unrelated key press disarms the exit gate
 		e.exitArmKey = ""
+		e.redraw()
 	}
 	if os.Getenv("CLAUDE_GO_DEBUG_KEYS") != "" {
 		fmt.Fprintf(os.Stderr, "[dbgkey b=%d seq=%q] ", c, k.seq)
@@ -856,7 +860,8 @@ func (e *editor) insertKey(k key) *readResult {
 			if len(e.history) > 0 {
 				e.histPrev()
 			} else {
-				os.Stdout.WriteString("\r\x1b[K  " + dim + "Press ← again to open agents" + reset)
+				// "Press ← again to open agents" — painted via statusSlot
+				e.redraw()
 			}
 			return nil
 		}
@@ -1953,7 +1958,15 @@ func (e *editor) armExit(name string) *readResult {
 	}
 	e.exitArm = true
 	e.exitArmAt = time.Now()
-	compInline("\r\x1b[K  " + dim + "Press " + e.exitArmKey + " again to exit" + reset)
+	armedAt := e.exitArmAt
+	time.AfterFunc(exitArmWindow, func() {
+		// real's jz timeout repaints the hint away on expiry
+		if e.exitArm && e.exitArmAt == armedAt {
+			e.exitArm = false
+			e.exitArmKey = ""
+			e.redraw()
+		}
+	})
 	e.redraw()
 	return nil
 }
@@ -2018,7 +2031,6 @@ func (e *editor) cancelKey() *readResult {
 		return nil
 	}
 	e.escArmAt = time.Now()
-	compInline("\r\x1b[K  " + dim + "Esc again to clear" + reset)
 	e.redraw()
 	return nil
 }
@@ -3431,18 +3443,94 @@ func boxRule() string {
 	return "\x1b[38;5;244m" + strings.Repeat("─", w) + "\x1b[39m"
 }
 
+// agentsHintRe strips the trailing agents hint from the footer while the
+// composer holds a draft — real drops "· ← for agents" during editing
+var agentsHintRe = regexp.MustCompile(`\s*·\s*←\s*(\d+\s+agents|for\s+agents)`)
+
 // footerText returns the status footer with the live vim badge prepended —
 // the badge must re-evaluate at draw time because esc flips modes between
 // printStatus calls.
 func (e *editor) footerText() string {
+	if e.exitArm {
+		return dim + "  Press " + e.exitArmKey + " again to exit" + reset
+	}
+	f := e.footer
+	if e.statusFn != nil {
+		f = e.statusFn()
+	}
+	if len(e.buf) > 0 {
+		f = agentsHintRe.ReplaceAllString(f, "")
+		f = strings.TrimRight(strings.TrimSpace(f), " ·")
+	}
 	if !e.vim {
-		return e.footer
+		return f
 	}
 	mode := e.mode
 	if mode == "" {
 		mode = "insert"
 	}
-	return "vim:" + mode + " · " + e.footer
+	// real's badge is "-- INSERT --" / "-- VISUAL --" inline in the
+	// footer row — normal mode is unmarked (vim convention)
+	if mode == "normal" {
+		return f
+	}
+	badge := "-- " + strings.ToUpper(mode) + " -- "
+	if p := dim + "  " + reset; strings.HasPrefix(f, p) {
+		return p + badge + f[len(p):]
+	}
+	return badge + f
+}
+
+// refreshEchoFooter rewrites the footer row of the submitted-box echo —
+// real recomputes it at submit time (draft already cleared → the agents
+// hint is back), not the last live frame's stripped variant.
+func (e *editor) refreshEchoFooter() {
+	if len(e.boxAll) == 0 {
+		return
+	}
+	f := e.footer
+	if e.statusFn != nil {
+		f = e.statusFn()
+	}
+	if f == "" {
+		return
+	}
+	// only patch when the last row is the footer — a trailing rule means
+	// the last render had no footer to replace
+	if strings.HasPrefix(e.boxAll[len(e.boxAll)-1], "\x1b[38;5;244m") {
+		return
+	}
+	e.boxAll[len(e.boxAll)-1] = f
+}
+
+// statusSlot is the right-aligned cell on the row above the composer —
+// real's shared slot for transient toasts ("Esc again to clear",
+// "Press ← again to open agents"), the external-editor hint shown while
+// the draft is multiline, and the effort pill.
+func (e *editor) statusSlot() string {
+	switch {
+	case !e.escArmAt.IsZero():
+		return dim + "Esc again to clear" + reset
+	case e.leftArm:
+		return dim + "Press ← again to open agents" + reset
+	case strings.Contains(string(e.buf), "\n"):
+		return dim + "ctrl+g to edit in " + editorDisplayName() + reset
+	}
+	return effortLabel()
+}
+
+// editorDisplayName resolves the external-editor label real shows in
+// "ctrl+g to edit in Vim" — $EDITOR's basename, title-cased.
+func editorDisplayName() string {
+	ed := os.Getenv("EDITOR")
+	if ed == "" {
+		ed = "vim"
+	}
+	base := filepath.Base(ed)
+	if base == "" {
+		base = "vim"
+	}
+	return strings.ToUpper(base[:1]) + base[1:]
 }
 
 // ---- selection model (real's shift+arrows + copy) ----

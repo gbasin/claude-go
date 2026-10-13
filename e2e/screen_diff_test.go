@@ -14,8 +14,10 @@ import (
 )
 
 var (
-	pathRe  = regexp.MustCompile(`/(private|tmp|var|Users|home)[^\s]*`)
-	clockRe = regexp.MustCompile(`\d{1,2}:\d{2} (AM|PM)`)
+	pathRe   = regexp.MustCompile(`/(private|tmp|var|Users|home)[^\s]*`)
+	clockRe  = regexp.MustCompile(`\d{1,2}:\d{2} (AM|PM)`)
+	portRe   = regexp.MustCompile(`127\.0\.0\.1:\d+`)
+	tmpIdxRe = regexp.MustCompile(`\b\d{6,}/\d{3}\b`) // bare tmpdir suffix after pathRe strips the head
 )
 
 // driveInteractive runs bin on a PTY against a fresh mock, sends one turn,
@@ -149,6 +151,9 @@ func normFrame(scr string) []string {
 			continue // bare prompt captured mid-repaint
 		}
 		ln = pathRe.ReplaceAllString(ln, "<DIR>")
+		ln = uuidRe.ReplaceAllString(ln, "<uuid>")
+		ln = portRe.ReplaceAllString(ln, "<ADDR>")
+		ln = tmpIdxRe.ReplaceAllString(ln, "<TMPIDX>")
 		ln = clockRe.ReplaceAllString(ln, "<TIME>")
 		ln = strings.ReplaceAll(ln, "\u00a0", " ") // real's box uses NBSP
 		out = append(out, ln)
