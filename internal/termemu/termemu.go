@@ -14,6 +14,7 @@ type Screen struct {
 	Cols, Rows int
 	grid       [][]rune
 	sb         [][]rune // scrollback — rows that scrolled off the region top
+	pending    []byte   // split escape/rune tail held for the next Feed
 	cx, cy     int      // cursor
 	sx, sy     int      // saved cursor
 	top, bot   int      // scroll region [top,bot) rows, 0-based
@@ -33,27 +34,51 @@ func New(cols, rows int) *Screen {
 	return &Screen{Cols: cols, Rows: rows, grid: g, bot: rows}
 }
 
-// Feed consumes a byte stream, applying it to the grid.
+// Feed consumes a byte stream, applying it to the grid. A sequence split
+// across calls (partial escape or truncated UTF-8 tail — the pty reads in
+// 4KB chunks) is held in pending and prepended to the next call.
 func (s *Screen) Feed(b []byte) {
+	if len(s.pending) > 0 {
+		b = append(append([]byte{}, s.pending...), b...)
+		s.pending = nil
+	}
 	i := 0
 	for i < len(b) {
 		c := b[i]
 		switch {
 		case c == 0x1b && i+1 < len(b) && b[i+1] == '[':
+			// hold a CSI that ran out of bytes mid-sequence
+			j := i + 2
+			for j < len(b) && !(b[j] >= 0x40 && b[j] <= 0x7e) {
+				j++
+			}
+			if j >= len(b) {
+				s.pending = append(s.pending, b[i:]...)
+				return
+			}
 			i = s.csi(b, i)
 		case c == 0x1b && i+1 < len(b) && b[i+1] == ']':
-			// OSC — skip to BEL or ST
+			// OSC — skip to BEL or ST; an unterminated OSC is held
 			i += 2
 			for i < len(b) && b[i] != 0x07 && !(b[i] == 0x1b && i+1 < len(b) && b[i+1] == '\\') {
 				i++
+			}
+			if i >= len(b) {
+				s.pending = append(s.pending, b[max(0, len(b)-200):]...)
+				return
 			}
 			if i < len(b) && b[i] == 0x07 {
 				i++
 			} else if i+1 < len(b) {
 				i += 2
 			}
-		case c == 0x1b && i+1 < len(b):
-			// two-char escapes: 7/8 save/restore, others ignored
+		case c == 0x1b:
+			// two-char escapes: 7/8 save/restore, others ignored — a lone
+			// ESC at buffer end is held for the next call
+			if i+1 >= len(b) {
+				s.pending = append(s.pending, b[i:]...)
+				return
+			}
 			switch b[i+1] {
 			case '7':
 				s.sx, s.sy = s.cx, s.cy
@@ -75,6 +100,13 @@ func (s *Screen) Feed(b []byte) {
 		case c < 0x20:
 			i++
 		default:
+			// incomplete UTF-8 tail — hold for the next call rather
+			// than decoding junk (a split '─' rendered as 'b' via the
+			// ASCII-mask fallback)
+			if b[i] >= 0xC0 && !utf8.FullRune(b[i:]) {
+				s.pending = append(s.pending, b[i:]...)
+				return
+			}
 			r, w := utf8Rune(b[i:])
 			s.put(r)
 			i += w

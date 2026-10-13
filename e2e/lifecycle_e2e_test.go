@@ -404,13 +404,17 @@ func TestAgentToolBackground(t *testing.T) {
 	// delivered on idle — poke the REPL so it flushes
 	p.sendUntilEchoed(t, "wake\r", "❯ wake", 8)
 	p.waitFor("Mock response to: wake", 30*time.Second)
-	deadline := time.Now().Add(45 * time.Second)
+	// the completion lands on idle — keep poking input so the notice
+	// flushes; suite load stretches the bg turn's turnaround
+	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
 		if strings.Contains(p.clean(), "completed") {
 			p.exit()
 			return
 		}
-		time.Sleep(200 * time.Millisecond)
+		p.sendQuiet("x")
+		p.sendQuiet("")
+		time.Sleep(300 * time.Millisecond)
 	}
 	t.Fatalf("background agent completion notice never surfaced\noutput:\n%s",
 		truncStr(p.clean(), 3000))
@@ -729,4 +733,64 @@ func TestBangInterpolation(t *testing.T) {
 		}
 	}
 	t.Fatal("!`echo` output never reached the wire")
+}
+
+// TestTranscriptAgentSplice: ctrl+o replays the subagent's inner thread —
+// the inner Bash call appears inside the transcript overlay (real's
+// inner-agent replay depth).
+func TestTranscriptAgentSplice(t *testing.T) {
+	s := newSession(t)
+	p := startREPL(t, s, "--permission-mode", "bypassPermissions")
+	p.sendUntilEchoed(t,
+		`tool:Agent {"description":"inner replay","prompt":"tool:Bash {\"command\":\"echo inner-tool\"}","run_in_background":false}`+"\r",
+		"❯ tool:Agent", 8)
+	p.waitFor("Done (", 60*time.Second)
+	p.waitFor("⏺", 10*time.Second)
+	p.waitScreen("done", 10*time.Second)
+	// ctrl+o → transcript overlay — one press, one retry (each press
+	// toggles, so blind resends can close it again)
+	time.Sleep(500 * time.Millisecond)
+	p.send("\x0f")
+	open := false
+	for i := 0; i < 40 && !open; i++ {
+		time.Sleep(150 * time.Millisecond)
+		open = strings.Contains(p.screen(), "transcript")
+	}
+	os.WriteFile("/tmp/apdump", []byte(p.output()), 0o644)
+	if !open {
+		p.send("\x0f") // one retry — the first press may have raced a repaint
+		for i := 0; i < 60 && !open; i++ {
+			time.Sleep(150 * time.Millisecond)
+			open = strings.Contains(p.screen(), "transcript")
+		}
+		if !open && strings.Contains(p.clean(), "transcript") {
+			t.Logf("overlay opened per raw stream — screen missed it")
+			open = true
+		}
+	}
+	if !open {
+		t.Fatalf("transcript overlay never opened\nscreen:\n%s", p.screen())
+	}
+	// the spliced inner rows sit inside the Agent tool_use block — scroll
+	// to the bottom, then walk back up if the window still misses them
+	deadline := time.Now().Add(12 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(p.screen(), "echo inner-tool") {
+			return
+		}
+		if strings.Contains(p.screen(), "inner replay") ||
+			strings.Contains(p.screen(), "Agent(") {
+			break // the splice region is in view — give it a settle beat
+		}
+		p.send("\x1b[6~")
+		time.Sleep(150 * time.Millisecond)
+	}
+	for i := 0; i < 10 && !strings.Contains(p.screen(), "echo inner-tool"); i++ {
+		p.send("\x1b[6~")
+		time.Sleep(120 * time.Millisecond)
+	}
+	if !strings.Contains(p.screen(), "echo inner-tool") {
+		t.Fatalf("inner agent rows missing from transcript\nscreen:\n%s", p.screen())
+	}
+	p.exit()
 }

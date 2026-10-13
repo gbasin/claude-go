@@ -295,6 +295,12 @@ func promptSuggestionsEnabled() bool {
 	if v, ok := config.UserSetting("promptSuggestionEnabled").(bool); ok {
 		return v
 	}
+	// real's rotating suggestions are flag-gated — the eval only resolves
+	// on the first-party endpoint; custom base URLs / API-key setups show
+	// a bare prompt (verified: sandboxed real renders '❯ ' alone)
+	if !api.IsFirstPartyBaseURL() {
+		return false
+	}
 	return true
 }
 

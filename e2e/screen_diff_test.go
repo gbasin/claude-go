@@ -117,12 +117,14 @@ func TestDiffScreen(t *testing.T) {
 	for _, e := range extra {
 		t.Logf("  + %s", e)
 	}
-	// shared non-volatile rows must dominate — a <40% overlap means the
-	// layouts diverged structurally
-	shared := len(rNorm) - len(missing)
-	if len(rNorm) > 0 && float64(shared)/float64(len(rNorm)) < 0.4 {
-		t.Errorf("screen parity low: %d/%d real rows present in ours\nreal:\n%s\nours:\n%s",
-			shared, len(rNorm), rScr, oScr)
+	// strict gate: every settled non-volatile row must match both ways —
+	// transient/animation rows are masked above, anything left is a real
+	// parity break, not noise
+	if len(missing) > 0 {
+		t.Errorf("real rows missing from ours: %v", missing)
+	}
+	if len(extra) > 0 {
+		t.Errorf("ours has rows real doesn't: %v", extra)
 	}
 }
 
@@ -138,13 +140,47 @@ func normFrame(scr string) []string {
 		if strings.Contains(ln, "… ") || strings.HasPrefix(strings.TrimSpace(ln), "✻") {
 			continue // spinner/turn-end rows — verb+timing vary
 		}
+		ln = strings.TrimSpace(ln)
+		// strip mascot art cells per-row — both sides animate a scatter
+		// reveal, so a frame's art columns differ run-to-run; the text on
+		// art rows (version, model, cwd) still compares
+		ln = stripArtGlyphs(ln)
+		if ln == "" || ln == "❯" {
+			continue // bare prompt captured mid-repaint
+		}
 		ln = pathRe.ReplaceAllString(ln, "<DIR>")
 		ln = clockRe.ReplaceAllString(ln, "<TIME>")
 		ln = strings.ReplaceAll(ln, "\u00a0", " ") // real's box uses NBSP
-		ln = strings.TrimSpace(ln)
 		out = append(out, ln)
 	}
 	return out
+}
+
+// stripArtGlyphs removes block-element/quadrant glyphs — the mascot
+// reveal paints them in random order, so frames disagree on which art
+// cells are lit; the text on those rows is stable.
+func stripArtGlyphs(ln string) string {
+	// '~' (ASCII, wave-dash U+301C, tilde op U+223C) is real's reveal-phase
+	// glyph on art rows — strip leading runs only (a '~' inside text is a
+	// real tilde, e.g. ~/home)
+	if i := strings.IndexFunc(ln, func(r rune) bool {
+		return r != '~' && r != '〜' && r != '∼' && r != ' '
+	}); i > 0 {
+		lead := strings.TrimSpace(ln[:i])
+		if lead != "" && strings.IndexFunc(lead, func(r rune) bool {
+			return r != '~' && r != '〜' && r != '∼'
+		}) < 0 {
+			ln = ln[i:]
+		}
+	}
+	var b strings.Builder
+	for _, r := range ln {
+		if r >= 0x2580 && r <= 0x259F || r == 0x2590 || r >= 0x2596 && r <= 0x259F {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func containsRow(rows []string, want string) bool {
